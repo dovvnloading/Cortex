@@ -167,3 +167,32 @@ This application is powered by exceptional open-source technologies, including:
 *   [Python](https://www.python.org/)
 
 Icon credits: Anthony Bossard
+
+---
+---
+
+
+### 🚧 A Note on the New "Permanent Memory" Feature 🚧
+
+We're excited to introduce a new experimental feature: **Permanent Memory**. This system is designed to allow the AI to remember key facts you share over time, leading to more personalized and context-aware conversations.
+
+#### **Current Status: Experimental**
+
+As this is a new and complex addition, you may encounter some instances where the AI's memory behaves unstably. For example, it might recall a fact at an irrelevant time or misinterpret the context of your conversation. We are actively working on refining its reasoning capabilities to make this feature more reliable and intelligent.
+
+#### **How to Disable the Feature**
+
+If you find this feature to be disruptive or problematic for your use case, you can easily disable it at any time:
+
+1.  Navigate to **Settings** (click the gear icon ⚙️ in the title bar).
+2.  Under the **Permanent Memory** section, uncheck the box labeled *"Enable the AI to remember key facts"*.
+
+This will prevent the AI from accessing or saving any long-term memories.
+
+#### **We Need Your Help!**
+
+Your feedback is crucial for improving this feature! If you experience any odd behavior, bugs, or have suggestions, please help us by **[opening an issue](https://github.com/your-username/your-repo/issues)** on this repository.
+
+When reporting an issue, please provide as much detail as possible, including conversation context, so we can effectively diagnose and resolve the problem.
+
+Thank you for your understanding and for helping us build a smarter, more capable assistant
