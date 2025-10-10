@@ -13,6 +13,9 @@ Cortex is a private, secure, and highly responsive desktop AI assistant designed
 <img width="800" height="500" alt="2" src="https://github.com/user-attachments/assets/a030bdd0-46c9-470d-8daf-276b8e167fc0" />
 <img width="800" height="500" alt="1" src="https://github.com/user-attachments/assets/bff256df-d8f7-484e-afd2-c7c4b63befa4" />
 
+---
+Download the exe: https://drive.google.com/file/d/1BF4O7Hy1o5H9nkPzUjmsVsdi1Pt-VEYa/view?usp=sharing
+---
 
 ## Core Philosophy
 
@@ -155,3 +158,5 @@ This application is powered by exceptional open-source technologies, including:
 *   [Ollama](https://ollama.com/)
 *   [PySide6 (Qt for Python)](https://www.qt.io/qt-for-python)
 *   [Python](https://www.python.org/)
+
+Icon credits: Anthony Bossard
