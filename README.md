@@ -17,6 +17,10 @@ Cortex is a private, secure, and highly responsive desktop AI assistant designed
 ---
 [Download Cortex.exe (65 MB)](https://drive.google.com/file/d/1BF4O7Hy1o5H9nkPzUjmsVsdi1Pt-VEYa/view)
 
+& 
+
+[Quick Setup Walk-through](https://github.com/dovvnloading/Cortex/blob/main/Desktop-Quick-Setup-Guide.md)
+
 ---
 ---
 
