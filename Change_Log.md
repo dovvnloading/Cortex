@@ -32,3 +32,22 @@ You now have the ability to permanently delete your entire chat history from the
 This new option is accessible by **right-clicking the "+ New Chat" button** in the history panel.
 
 To prevent accidental data loss, a confirmation prompt will appear, clearly warning that this action is irreversible. This feature is designed to give you ultimate control over your personal data within the application.
+
+
+10/12/2025
+---
+---
+
+Flint
+
+### **Version Update: Automated Installer**
+
+Previously, getting started required users to manually locate, download, and install Ollama, followed by using command-line tools to pull AI models. This process could be a significant barrier for many.
+
+The new **Corted Startup** utility completely transforms this experience into a simple, guided workflow:
+
+*   **Guided Ollama Installation:** The utility immediately presents you with direct download links for Windows and macOS and a one-click copy command for Linux. There's no more need to search for installation instructions; we bring them directly to you.
+*   **Integrated Model Manager:** Forget the command line. You can now browse a curated list of available AI models directly within the application. Select the model you want, click "Pull," and monitor the download and installation progress in real-time.
+*   **A Polished, All-in-One Interface:** This entire process is wrapped in a clean, modern interface featuring a draggable window and a light/dark theme toggle to match your workspace. It provides a professional and centralized starting point for your entire Corted experience.
+
+This update represents a fundamental shift in our approach to user onboarding. Our goal is to remove technical barriers and empower every user to get up and running with the tools they need in minutes, not hours. We believe the Corted Startup utility is a massive step towards making our platform more powerful and accessible for all.
