@@ -1,5 +1,3 @@
----
-
 ### **Version Update - 10/12/2025: Architectural Overhaul & Major New Features**
 
 This is a landmark update that touches nearly every part of the application. I've focused on rebuilding core systems for performance and reliability, while also introducing powerful new features and quality-of-life improvements based on how I see the app evolving.
@@ -37,7 +35,19 @@ This feature was engineered with extreme care. The underlying AI prompt has been
 
 *   **Set a Persistent Persona:** Accessed via the Settings menu, the new System Instructions dialog allows you to provide high-level directives that apply to every conversation.
 *   **Precision Control Over AI Behavior:** Your custom instructions are given the highest priority, giving you unprecedented influence over the tone, style, and structure of the AI's responses.
-*   **Robust & Unambiguous Prompting:** The AI's core prompt has been meticulously re-architected to ensure your instructions are integrated without conflicting with its primary system functions, leading to more predictable and reliable output.
+*   **Robust & Unambiguous Prompting:** The AI's core prompt has been meticulously re-architected to ensure your instructions are integrated without conflicting with its primary system functions, leading to a more predictable and reliable output.
+
+---
+
+### **Amethyst: Keyboard Shortcuts - Command at the Speed of Thought**
+
+A truly powerful tool should feel like an extension of your own thoughts, minimizing the friction between intent and action. This update introduces a comprehensive suite of keyboard shortcuts, designed to keep your hands on the keyboard and your mind focused on the conversation. My goal is to elevate the application from a simple point-and-click interface to a high-velocity command center for power users.
+
+*   **New Conversation (`Ctrl+N`):** Instantly start a fresh chat without reaching for the mouse, keeping your workflow seamless.
+*   **Access Settings (`Ctrl+,`):** Quickly open the settings dialog with a standard, universal shortcut to tweak the AI's model or appearance on the fly.
+*   **Focus Input (`Ctrl+L`):** Immediately jump to the chat input field from anywhere in the application. This is a massive time-saver for rapid-fire questioning.
+*   **Close Window (`Ctrl+W`):** A standard, convenient way to close the application window when your session is complete.
+*   **Cross-Platform Native Feel:** These shortcuts are intelligently mapped, automatically translating to `Cmd` on macOS to ensure a native and intuitive experience on any operating system.
 
 ---
 
