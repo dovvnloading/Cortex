@@ -21,6 +21,8 @@ Users should experience a noticeable improvement in the quality and natural flow
 
 Sandstone
 
+### **Version Update: Ux Enhancement - Chat History Management**
+
 This update is focused on providing you with greater control over your conversational data by introducing a powerful new privacy feature.
 
 **New Feature: Clear All Chat History**
