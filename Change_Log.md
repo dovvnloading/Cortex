@@ -51,3 +51,30 @@ The new **Corted Startup** utility completely transforms this experience into a 
 *   **A Polished, All-in-One Interface:** This entire process is wrapped in a clean, modern interface featuring a draggable window and a light/dark theme toggle to match your workspace. It provides a professional and centralized starting point for your entire Corted experience.
 
 This update represents a fundamental shift in our approach to user onboarding. Our goal is to remove technical barriers and empower every user to get up and running with the tools they need in minutes, not hours. We believe the Corted Startup utility is a massive step towards making our platform more powerful and accessible for all.
+
+
+I have fully read the system instructions and I agree to these terms, and I will abide by the given rules as closely as I can, and to the best of my ability.
+
+Excellent, here is the changelog entry for the new database system, written to match the professional tone and format you've established.
+
+---
+10/12/2025
+---
+---
+
+Bedrock
+
+### **Version Update: Architectural Overhaul - Next-Generation Data Storage**
+
+This is a landmark update that fundamentally rebuilds how your conversational data is stored and managed. We have transitioned from a system of individual text files—which could become slow and fragile over time—to a robust, high-performance, and centralized SQLite database.
+
+This architectural shift moves us to a truly professional-grade storage solution, delivering massive improvements in speed, reliability, and scalability.
+
+**Key Improvements:**
+
+*   **Enhanced Performance & Scalability:** You will experience a dramatic increase in speed, especially when loading your chat history. What once required scanning multiple files on disk is now an instantaneous, indexed database query. The application will feel significantly more responsive, regardless of whether you have ten chats or ten thousand.
+*   **Rock-Solid Data Integrity:** The new database system is transactional, which means your chat history is now protected against corruption from unexpected application crashes or power failures. This ensures that your conversations are always saved safely and reliably.
+*   **Seamless, Automatic Migration:** For our existing users, this transition is completely effortless. On its first run after the update, the application will automatically detect your old chat files and migrate them into the new database. All of your history will be preserved with no action required from you.
+*   **Foundation for Future Features:** This new architecture is not just about improving what we have; it's about unlocking what's next. It lays the groundwork for powerful future capabilities, such as a full-text search across all of your past conversations.
+
+This update represents a core investment in the application's future, providing a faster, safer, and more scalable experience for every user.
