@@ -9,7 +9,15 @@
 **Cortex** is a private, secure, and highly responsive desktop AI assistant designed for seamless interaction with **local Large Language Models (LLMs)** through the **Ollama** framework.
 All models and data stay on your device — no cloud, no third parties. Cortex keeps everything local for maximum privacy and speed. Its built-in **permanent memory system** lets the AI learn and retain context over time, creating a more personal and consistent experience.
 
-![Demo Video](https://github.com/user-attachments/assets/f4ae7753-ead0-4601-8664-17fa0629f236) <img width="800" height="500" alt="Screenshot 1" src="https://github.com/user-attachments/assets/f21d2478-b27e-47fa-8ff2-c0ddc9afa264" /> <img width="800" height="500" alt="Screenshot 2" src="https://github.com/user-attachments/assets/a030bdd0-46c9-470d-8daf-276b8e167fc0" /> <img width="800" height="500" alt="Screenshot 3" src="https://github.com/user-attachments/assets/bff256df-d8f7-484e-afd2-c7c4b63befa4" />
+![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8)
+![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c)
+
+<img width="800" height="500" alt="Screenshot 1" src="https://github.com/user-attachments/assets/f21d2478-b27e-47fa-8ff2-c0ddc9afa264" /> 
+<img width="800" height="500" alt="Screenshot 2025-10-13 112650" src="https://github.com/user-attachments/assets/178080b2-d90c-43f3-ae8f-7440a5d33fd1" />
+<img width="800" height="500" alt="3" src="https://github.com/user-attachments/assets/7d8b6d7f-abcf-47bc-9b12-bb5d5bab8401" />
+<img width="800" height="500" alt="2" src="https://github.com/user-attachments/assets/7a807f3f-93f0-4316-a9dd-ddef06d5d491" />
+<img width="800" height="500" alt="1" src="https://github.com/user-attachments/assets/64f55549-602c-4e79-9707-0bfcca527b75" />
+
 
 ---
 
