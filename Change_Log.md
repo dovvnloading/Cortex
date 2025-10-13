@@ -1,3 +1,46 @@
+### **Update Log: Critical Hotfix for AI Reasoning (Chain-of-Thought) Display**
+
+**Date:** 2024-10-14
+**Version:** Hotfix 0.94.3
+
+#### **Summary (TL;DR)**
+
+A critical hotfix has been deployed to address a bug where the AI's step-by-step reasoning was not being displayed in the chat interface. The "View Reasoning" button, which reveals the model's thought process, is now fully functional again for all compatible models. 
+
+#### Expected .exe push update soon
+
+---
+
+#### **The Issue: Missing "View Reasoning" Button**
+
+We identified a critical issue reported by our users where the "View Reasoning" button was consistently absent from the AI assistant's chat bubbles. This feature provides transparency into the model's Chain-of-Thought (CoT) process, allowing users to understand how an answer was formulated. Its absence was a significant regression in functionality and user experience.
+
+#### **Root Cause Analysis**
+
+After a thorough investigation, we determined the root cause was an upstream change in the Ollama API's response structure (specifically in versions 0.12.5 and newer).
+
+In a welcome move to improve clarity, the Ollama API now separates the model's reasoning process into a dedicated `thinking` field within the response. Previously, this reasoning block was embedded directly inside the main `content` field.
+
+Our application's data parsing logic was still programmed to look for the reasoning in the old, embedded location. When the new API structure was encountered, our system failed to find the `thinking` data, and as a result, the UI correctly determined there was no reasoning to display.
+
+#### **The Solution: A Robust and Backward-Compatible Fix**
+
+The `SynthesisAgent`, responsible for handling communication with the LLM, has been updated with smarter response-handling logic:
+
+1.  **Primary Parsing Path:** The system now correctly looks for and extracts the reasoning from the new, dedicated `thinking` field provided by modern Ollama versions.
+2.  **Fallback Mechanism:** To ensure full compatibility, we have retained the old parsing logic as a fallback. If the `thinking` field is not present in a response, the system will then scan the main content for the inline reasoning block.
+
+This dual approach ensures that the "View Reasoning" feature works seamlessly for users running any version of the Ollama service, providing both forward compatibility with the latest updates and backward compatibility for those on older installations.
+
+#### **Impact on Users**
+
+With this fix deployed, the "View Reasoning" functionality is fully restored. You can once again gain valuable insight into the AI's problem-solving process. No action is required on your part.
+
+We extend our sincere thanks to the community member who provided the detailed logs and API outputs that allowed for a swift diagnosis and resolution of this issue. Your feedback is invaluable in helping us maintain the quality and reliability of the application.
+
+---
+---
+---
 ### **Version Update - 10/12/2025: Architectural Overhaul & Major New Features**
 
 This is a landmark update that touches nearly every part of the application. I've focused on rebuilding core systems for performance and reliability, while also introducing powerful new features and quality-of-life improvements based on how I see the app evolving.
