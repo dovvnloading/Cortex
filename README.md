@@ -12,11 +12,13 @@ All models and data stay on your device — no cloud, no third parties. Cortex k
 ![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8)
 ![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c)
 
-<img width="800" height="500" alt="Screenshot 1" src="https://github.com/user-attachments/assets/f21d2478-b27e-47fa-8ff2-c0ddc9afa264" /> 
-<img width="800" height="500" alt="Screenshot 2025-10-13 112650" src="https://github.com/user-attachments/assets/178080b2-d90c-43f3-ae8f-7440a5d33fd1" />
-<img width="800" height="500" alt="3" src="https://github.com/user-attachments/assets/7d8b6d7f-abcf-47bc-9b12-bb5d5bab8401" />
-<img width="800" height="500" alt="2" src="https://github.com/user-attachments/assets/7a807f3f-93f0-4316-a9dd-ddef06d5d491" />
-<img width="800" height="500" alt="1" src="https://github.com/user-attachments/assets/64f55549-602c-4e79-9707-0bfcca527b75" />
+<img width="1920" height="1032" alt="Screenshot 2025-10-14 170142" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" />
+<img width="1920" height="1032" alt="Screenshot 2025-10-14 170155" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" />
+<img width="1919" height="1032" alt="Screenshot 2025-10-14 170524" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" />
+<img width="1919" height="1032" alt="Screenshot 2025-10-14 170559" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" />
+<img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" />
+<img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" />
+
 
 
 ---
