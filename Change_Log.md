@@ -1,3 +1,27 @@
+### **Version Update: 0.95.5 - 10/14/2025: Advanced Conversational Control**
+
+This update is centered on a single, powerful philosophy: a conversation should be a fluid, dynamic process that you, the user, can direct and refine at will. I've engineered two major new features—**Regenerate** and **Fork**—that transform the chat from a linear timeline into a branching tree of possibilities. These tools give you unprecedented control over the AI's output and the direction of your inquiry.
+
+#### **Pumice: AI Response Regeneration**
+
+You are no longer limited to the first answer the AI provides. With the new **Regenerate** feature, you can now prompt the model to rethink its last response, offering a new perspective, a different creative take, or a more refined solution. This is an essential tool for iterative creative work, technical problem-solving, and exploring the full potential of the model.
+
+*   **One-Click Reroll:** A subtle "Regenerate" icon now appears below the most recent AI message. A single click will discard the previous response and generate a new one from your original prompt, keeping your workflow fast and intuitive.
+*   **Intelligent State Management:** This feature is engineered with precision. The "Regenerate" button is only ever visible on the *single, most recent* AI response, preventing confusion and ensuring a clean, predictable user experience. The moment you send a new message, the option on the previous response disappears.
+*   **Seamless Integration:** The regeneration process uses the same asynchronous, non-blocking architecture as a standard query, providing you with real-time status updates ("Analyzing," "Thinking...") while it formulates the new answer.
+
+#### **Geode: Conversational Forking**
+
+A single question can lead to a dozen interesting avenues of thought. The new **Fork** feature empowers you to explore them all without losing your place. You can now split any point in a conversation into a brand new, independent chat thread, preserving the context up to that moment.
+
+*   **Branch Your Conversation:** A new "Fork" icon now appears below every AI-generated message. Clicking this button instantly creates a new chat, copying the entire history up to that point. This allows you to pursue a tangent or explore an alternative line of questioning in a clean, separate workspace.
+*   **Intelligent & Automatic Titling:** Forked chats are named with clarity and precision. The system automatically takes the original chat's title and appends a "Thread" counter (e.g., "Python Scripting" becomes "Python Scripting Thread:2"). If you fork from a thread that is already a fork, it intelligently increments the number ("Python Scripting Thread:2" becomes "Python Scripting Thread:3"), maintaining a clear and logical hierarchy.
+*   **Atomic & Instantaneous Creation:** The underlying database logic has been engineered for performance and reliability. The creation of a forked chat is an atomic transaction, meaning the new thread and all its copied messages are saved to the database in a single, instantaneous, and failure-proof operation.
+
+
+---
+---
+---
 ### **Version Update: 0.95.0 - 10/14/2025: Code Rendering & UI Polish**
 
 This update introduces a completely re-architected system for displaying code within conversations. My philosophy is that the tools you use should be as well-crafted as the work you create with them, and this feature elevates code from a simple text element to a rich, interactive, and professional component of the UI.
