@@ -1,3 +1,34 @@
+### **Granite: Critical UI Interaction Fix**
+
+**Date:** 2025-10-14
+**Version:** Hotfix 0.94.4
+
+This hotfix addresses a critical bug that made the "Copy" and "Copy All" actions for chat messages non-functional.
+
+#### **The Issue**
+
+The "Copy" (for selected text) and "Copy All" actions in the context menu were failing, either doing nothing or copying a blank string to the clipboard. This broke a fundamental user interaction.
+
+#### **Root Cause**
+
+The investigation revealed two underlying problems:
+1.  **State Loss on Focus Change:** When the context menu appeared, it took focus from the message text. This caused the operating system to clear any active text selection *before* the copy action could read it.
+2.  **Incorrect Data Handling:** The widget was not reliably storing the original, plain-text version of the message, causing "Copy All" to fail.
+
+#### **The Solution**
+
+The event-handling logic has been re-engineered for stability:
+*   **Proactive Text Capture:** The application now captures any selected text the instant a right-click occurs, *before* the selection is cleared by the menu appearing.
+*   **Robust Data Management:** The logic has been corrected to ensure the full, unformatted message is always available for the "Copy All" command.
+
+#### **Impact on Users**
+
+All clipboard functions within the chat view are now fully restored and reliable. You can copy selected text snippets and full messages without issue.
+
+
+---
+---
+---
 ### **Version Update - 10/13/2025: Update Notification System & Stability Fixes**
 
 This update introduces a new, non-intrusive update notification system to keep you informed of the latest features and fixes, alongside a crucial stability enhancement for the update-checking process itself.
