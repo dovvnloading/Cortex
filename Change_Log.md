@@ -1,3 +1,18 @@
+### **Version Update: 0.95.0 - 10/14/2025: Code Rendering & UI Polish**
+
+This update introduces a completely re-architected system for displaying code within conversations. My philosophy is that the tools you use should be as well-crafted as the work you create with them, and this feature elevates code from a simple text element to a rich, interactive, and professional component of the UI.
+
+#### **Onyx: Professional Code Rendering & Syntax Highlighting**
+
+*   **Dedicated Code Container:** Code blocks now live in a dedicated, professionally styled container that is visually distinct from conversational text. This container features a clean header that displays the detected programming language, providing immediate context.
+*   **One-Click Copy Functionality:** Each code block features a "Copy" button in its header, allowing you to extract snippets with a single click. The button provides subtle "Copied!" feedback, streamlining your workflow and eliminating the need for manual selection.
+*   **Native, Theme-Aware Highlighting:** The rendering pipeline uses a high-performance, Qt-native `QSyntaxHighlighter`. This ensures that syntax highlighting is not only fast and accurate but also seamlessly adapts to both light and dark themes for perfect readability.
+*   **Intelligent Scrolling & Flawless Geometry:** The container is independently scrollable for longer code blocks, preserving a clean chat layout. The widget has been meticulously engineered to display flawless, rounded corners that are pixel-perfect in all themes.
+
+
+---
+---
+---
 ### **Granite: Critical UI Interaction Fix**
 
 **Date:** 2025-10-14
