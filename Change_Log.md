@@ -1,6 +1,20 @@
+### **Version Update - 10/13/2025: Update Notification System & Stability Fixes**
+
+This update introduces a new, non-intrusive update notification system to keep you informed of the latest features and fixes, alongside a crucial stability enhancement for the update-checking process itself.
+
+#### **Alabaster: Smart Update Notifications**
+
+Staying up-to-date should be effortless. This release introduces a new, intelligent update notification system designed to be informative without being disruptive. My philosophy is that you should be in control of your workspace, and this feature reflects that.
+
+*   **Automatic & Asynchronous Checking:** When the application starts, it now performs a silent, one-time check in the background to see if a new version is available. This process is fully asynchronous, meaning it will never freeze or slow down your startup experience.
+*   **Non-Intrusive Notification:** You won't be interrupted by pop-ups. Instead, if a new version is detected, a clean and clear notification will be waiting for you within the Settings dialog. This allows you to check for updates on your own terms.
+*   **Clear Status, Always:** The Settings dialog now provides transparent feedback on the update check's status. You will always know if the application is up-to-date, if an update is available, or if the check encountered a network error.
+*   **Robust Cache-Busting:** The web request has been engineered to be highly robust. It sends specific headers that instruct servers and proxies to bypass their caches, ensuring the check always fetches the latest, live version information and never gives a false negative due to stale, cached data.
+---
+---
 ### **Update Log: Critical Hotfix for AI Reasoning (Chain-of-Thought) Display**
 
-**Date:** 2024-10-14
+**Date:** 2025-10-13
 **Version:** Hotfix 0.94.3
 
 #### **Summary (TL;DR)**
