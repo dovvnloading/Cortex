@@ -25,7 +25,7 @@ All models and data stay on your device — no cloud, no third parties. Cortex k
 
 ## **Download**
 
-* **Cortex v0.95.5 App**: [Download Cortex.exe (66.9 MB)](https://drive.google.com/file/d/1gog73F-zPlUhI6mi2szdq04Y7ZyoL3x7/view?usp=sharing)
+* **Cortex v0.95.5 App**: [Download Cortex.exe (66.9 MB)](https://drive.google.com/file/d/1OxtiULAx0RNsss_Wkbhn61V8moS-i5kJ/view?usp=sharing)
 * **Ollama & Model Installer**: [Download Cortex Setup.exe (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
   <img width="844" height="598" alt="Screenshot 2025-10-12 152015" src="https://github.com/user-attachments/assets/769d7a0b-d3f7-4ed6-a0e2-f2ecf3e58119" />
 
