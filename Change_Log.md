@@ -1,3 +1,19 @@
+### **Obsidian & Pumice: AI Memory Architecture**
+
+**Date:** 2025-10-16
+**Version:** Critical Patch 0.95.7
+
+This update addresses a series of critical, cascading failures in the AI's permanent memory system. The iterative process of teaching an AI nuanced rules is a philosophical and technical challenge. Previous attempts resulted in a system that oscillated between over-eagerly saving irrelevant data and being too paralyzed to save critical facts. This patch represents a stable, architectural solution, finally achieving the reliability and intelligence this feature was designed for.
+
+#### **The Overhaul: Achieving Reliable Memory**
+
+*   **Fixed Critical Logic Failure:** The most severe issue, where the AI could respond with a blank message and only a memory tag, has been eliminated. The system prompt was fundamentally re-architected to establish an unbreakable rule: a conversational response is **always** the primary goal, and memory functions are a silent, secondary task.
+*   **Intelligent Fact-Checking Heuristic:** The AI is now equipped with a "Litmus Test" (`Does this describe WHO the user is or just WHAT the user asked about?`). This simple, powerful heuristic guides the model to correctly distinguish between a valuable user fact (like a name, profession, or stated interest) and a trivial conversational topic, resolving the root cause of irrelevant memories.
+*   **Balanced & Nuanced Instruction:** The prompt has been carefully re-calibrated to be less punitive and more descriptive. This fixes the "prompt paralysis" that prevented the AI from saving legitimate user-stated facts, such as their name or personal interests, and ensures the system is neither over-eager nor over-cautious.
+*   **Robust & Consistent Behavior:** By addressing these core architectural flaws in the prompt, the memory system is now significantly more robust, predictable, and useful. It can be trusted to build an accurate user profile over time without polluting the memory bank or failing its primary conversational duty.
+
+---
+
 ### **Basalt & Slate: EULA Refinement & Architectural Decoupling**
 
 **Date:** 2025-10-16
