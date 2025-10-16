@@ -6,8 +6,9 @@
 ![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![Status](https://img.shields.io/badge/status-active-success)
 
-**Cortex** is a private, secure, and highly responsive desktop AI assistant designed for seamless interaction with **local Large Language Models (LLMs)** through the **Ollama** framework.
-All models and data stay on your device — no cloud, no third parties. Cortex keeps everything local for maximum privacy and speed. Its built-in **permanent memory system** lets the AI learn and retain context over time, creating a more personal and consistent experience.
+**Cortex** is a private, secure, and highly responsive desktop AI assistant designed for seamless interaction with **local Large Language Models (LLMs)** through the **Ollama** framework. All models and data stay on your device—no cloud, no third parties. Cortex keeps everything local for maximum privacy and speed.
+
+Its rich feature set includes a robust **permanent memory system**, advanced conversational controls like **response regeneration** and **chat forking**, and deep customization options to tailor the AI's core behavior to your exact needs.
 
 ![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8)
 ![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c)
@@ -19,64 +20,66 @@ All models and data stay on your device — no cloud, no third parties. Cortex k
 <img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" />
 <img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" />
 
-
-
 ---
 
 ## **Download**
 
-* **Cortex v0.95.7 App**: [Download Cortex.exe (66.9 MB)](https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing)
-* **Ollama & Model Installer**: [Download Cortex Setup.exe (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
-  <img width="844" height="598" alt="Screenshot 2025-10-12 152015" src="https://github.com/user-attachments/assets/769d7a0b-d3f7-4ed6-a0e2-f2ecf3e58119" />
+*   **Cortex v0.95.7 App**: [Download Cortex.exe (66.9 MB)](https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing)
+*   **Ollama & Model Installer**: [Download Cortex Setup.exe (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
+    <img width="844" height="598" alt="Screenshot 2025-10-12 152015" src="https://github.com/user-attachments/assets/769d7a0b-d3f7-4ed6-a0e2-f2ecf3e58119" />
 
-* **Manual Setup Guide**: [Desktop Quick Setup Walkthrough](https://github.com/dovvnloading/Cortex/blob/main/Desktop-Quick-Setup-Guide.md)
+*   **Manual Setup Guide**: [Desktop Quick Setup Walkthrough](https://github.com/dovvnloading/Cortex/blob/main/Desktop-Quick-Setup-Guide.md)
 
-> Use either the automated setup tool to install Ollama and pull models, or follow the manual guide linked above.
+> Use the automated setup tool to install Ollama and pull the required models, or follow the manual guide linked above for more control.
 
 ---
 
 ## **Overview**
 
-Cortex is built for people who want full control over their AI tools.
-It runs entirely on your local machine, connecting directly to your Ollama models for fast, private, and reliable conversations. No cloud processing — just your hardware, your data, your control.
+Cortex is built for users who demand full control and privacy from their AI tools. It runs entirely on your local machine, connecting directly to your Ollama models for fast, private, and reliable conversations. No cloud processing—just your hardware, your data, your control.
 
 ---
 
 ## **Key Features**
 
-* **Local-First AI Interaction** – All processing happens locally through your Ollama instance. Nothing leaves your system.
-* **Persistent Chat History** – Conversations are stored locally and can be reloaded anytime, keeping full context intact.
-* **Permanent Memory System** – Teach Cortex to remember details, facts, or project info using simple chat tags:
+### Core Principles
+*   **100% Local & Private**: All processing happens on your machine via your Ollama instance. Nothing ever leaves your system.
+*   **Powered by Ollama**: Seamlessly integrates with any model served by Ollama, giving you the freedom to choose the right tool for the job.
+*   **High-Performance Database**: Chat history is stored in a robust SQLite database for instantaneous loading and rock-solid data integrity.
 
-  * Add memory: `<memo>My project 'Apollo' is written in Go.</memo>`
-  * Clear memory: `<clear_memory />`
-* **Responsive UI** – Built with PySide6 (Qt) for a clean, modern, and fast interface.
-* **Theming Support** – Choose between light or dark modes.
-* **Model Switching** – Instantly change which Ollama model you’re using from the settings panel.
-* **Asynchronous Processing** – The UI remains smooth and responsive while AI tasks run in the background.
+### Advanced Conversational Tools
+*   **Response Regeneration**: Not satisfied with an answer? A single click prompts the AI to rethink its last response, offering a new perspective or a more refined solution.
+*   **Conversational Forking**: Explore different lines of thought without losing your place. Split a conversation at any point to create a new, independent chat thread that preserves the context up to that moment.
+*   **Rich Code Rendering**: Code blocks are displayed in a professional, dedicated container with syntax highlighting, a one-click copy button, and full theme support.
+
+### Deep AI Customization
+*   **Permanent Memory System**: Teach the AI key facts about you, your projects, or your preferences. It will subtly use this information to personalize future responses.
+*   **Custom System Instructions**: Set a persistent persona or define global behavioral rules for the AI through a dedicated settings dialog. Your instructions are given the highest priority.
+*   **Advanced Model Controls**: Fine-tune the AI's core behavior by adjusting **Temperature**, **Context Window Size**, and **Seed** for reproducible outputs.
+*   **Externalized AI Persona**: The AI's core instructions are located in external `.txt` files (`system_prompt.txt`, `memory_prompt.txt`), allowing advanced users to directly edit its personality and operational rules.
+
+### Professional User Experience
+*   **Light & Dark Themes**: Choose a look that fits your workspace. The entire UI updates instantly.
+*   **Keyboard Shortcuts**: A full suite of shortcuts (`Ctrl+N` for New Chat, `Ctrl+L` to focus input, etc.) for a high-velocity workflow.
+*   **Asynchronous Processing**: The UI remains perfectly smooth and responsive while the AI is thinking, thanks to a multi-threaded architecture.
+*   **Non-Intrusive Updates**: The app checks for new versions in the background and notifies you discreetly within the Settings panel.
+*   **First-Run User Agreement**: A one-time EULA screen on first launch ensures transparency and clarifies user liability when interacting with local models.
 
 ---
 
 ## **Architecture**
 
-Cortex follows a modular, layered design that keeps the system maintainable and scalable.
+Cortex is built on a modern, modular architecture that separates concerns for maintainability and performance.
 
-```
-+--------------------------------+
-|         UI Layer (View)        |  (PySide6 Widgets, Dialogs, Styles)
-|  Handles presentation & input. |
-+--------------------------------+
-               ^
-               | (Signals & Slots)
-               v
-+--------------------------------+
-|  Orchestration Layer (Control) |  (Orchestrator, Workers in Chat_LLM.py)
-|   Manages state & async tasks. |
-+--------------------------------+
-```
+*   **Presentation Layer (UI)**: A responsive and themeable interface built with **PySide6 (Qt)**. Custom widgets ensure a consistent and polished user experience.
+*   **Orchestration Layer (Control)**: The `Orchestrator` manages application state, coordinates UI events, and dispatches long-running tasks to asynchronous workers to prevent the UI from freezing.
+*   **Data & Agent Layer (Model)**:
+    *   **SQLite Database**: All chat history is stored in a local `cortex_db.sqlite` file, providing fast, reliable, and scalable data persistence.
+    *   **Synthesis Agent**: Interfaces with the Ollama client, builds complex prompts incorporating memory and user instructions, and parses the AI's response.
+    *   **Externalized Prompts**: The AI's core identity and rules are loaded from external `.txt` files, decoupling the AI's "personality" from the application's code.
 
 ---
 
 ### **Summary**
 
-Cortex is a locally-run, privacy-focused AI assistant that integrates tightly with Ollama to deliver fast, context-aware, and persistent interactions — all without ever sending your data to the cloud.
+Cortex is a locally-run, privacy-focused AI assistant that integrates tightly with Ollama to deliver fast, context-aware, and persistent interactions. With advanced tools for conversational control and deep customization, it empowers you to create a personalized AI assistant that operates entirely on your terms—all without ever sending your data to the cloud.
