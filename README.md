@@ -1,3 +1,4 @@
+<div align="center">
 <img width="890" height="419" alt="cortex_Banner_001" src="https://github.com/user-attachments/assets/d4225beb-ccae-4b96-bdcb-473cf004ae51" />
 
 
@@ -8,6 +9,8 @@
 ![Framework](https://img.shields.io/badge/Framework-PySide6-2496ED)
 ![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![Status](https://img.shields.io/badge/status-active-success)
+
+</div> 
 
 **Cortex** is a private, secure, and highly responsive desktop AI assistant designed for seamless interaction with **local Large Language Models (LLMs)** through the **Ollama** framework. All models and data stay on your device—no cloud, no third parties. Cortex keeps everything local for maximum privacy and speed.
 
