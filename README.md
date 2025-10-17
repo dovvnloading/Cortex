@@ -1,3 +1,6 @@
+<img width="890" height="419" alt="cortex_Banner_001" src="https://github.com/user-attachments/assets/d4225beb-ccae-4b96-bdcb-473cf004ae51" />
+
+
 # **Cortex**
 
 ![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)
@@ -13,12 +16,6 @@ Its rich feature set includes a robust **permanent memory system**, advanced con
 ![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8)
 ![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c)
 
-<img width="1920" height="1032" alt="Screenshot 2025-10-14 170142" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" />
-<img width="1920" height="1032" alt="Screenshot 2025-10-14 170155" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" />
-<img width="1919" height="1032" alt="Screenshot 2025-10-14 170524" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" />
-<img width="1919" height="1032" alt="Screenshot 2025-10-14 170559" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" />
-<img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" />
-<img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" />
 
 ---
 
@@ -64,6 +61,18 @@ Cortex is built for users who demand full control and privacy from their AI tool
 *   **Asynchronous Processing**: The UI remains perfectly smooth and responsive while the AI is thinking, thanks to a multi-threaded architecture.
 *   **Non-Intrusive Updates**: The app checks for new versions in the background and notifies you discreetly within the Settings panel.
 *   **First-Run User Agreement**: A one-time EULA screen on first launch ensures transparency and clarifies user liability when interacting with local models.
+
+
+
+---
+
+<img width="1920" height="1032" alt="Screenshot 2025-10-14 170142" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" />
+<img width="1920" height="1032" alt="Screenshot 2025-10-14 170155" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" />
+<img width="1919" height="1032" alt="Screenshot 2025-10-14 170524" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" />
+<img width="1919" height="1032" alt="Screenshot 2025-10-14 170559" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" />
+<img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" />
+<img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" />
+
 
 ---
 
