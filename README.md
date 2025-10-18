@@ -23,11 +23,20 @@ Its rich feature set includes a robust **permanent memory system**, advanced con
 
 ---
 
-## **Download**
+## Download
 
-*   **Cortex v0.95.7 App**: [Download Cortex.exe (66.9 MB)](https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing)
-*   **Ollama & Model Installer**: [Download Cortex Setup.exe (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
-    <img width="844" height="598" alt="Screenshot 2025-10-12 152015" src="https://github.com/user-attachments/assets/769d7a0b-d3f7-4ed6-a0e2-f2ecf3e58119" />
+### Official GitHub Release (Recommended)
+For the most up-to-date files, source code, and release notes, please visit the official release page.
+*   **[Download from GitHub Releases (v0.95.7)](https://github.com/dovvnloading/Cortex/releases/tag/v0.95.7)**
+
+### Direct Downloads
+*   **Cortex Application**: [Download `Cortex.exe` (66.9 MB)](https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing)
+*   **Ollama & Model Installer**: [Download `Cortex Setup.exe` (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
+
+---    
+
+<img width="844" height="598" alt="Screenshot 2025-10-12 152015" src="https://github.com/user-attachments/assets/769d7a0b-d3f7-4ed6-a0e2-f2ecf3e58119" />
+
 
 *   **Manual Setup Guide**: [Desktop Quick Setup Walkthrough](https://github.com/dovvnloading/Cortex/blob/main/Desktop-Quick-Setup-Guide.md)
 
