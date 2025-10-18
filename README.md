@@ -68,15 +68,11 @@ Cortex is built for users who demand full control and privacy from their AI tool
 
 
 ---
-
-<img width="1920" height="1032" alt="Screenshot 2025-10-14 170142" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" />
-<img width="1920" height="1032" alt="Screenshot 2025-10-14 170155" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" />
-<img width="1919" height="1032" alt="Screenshot 2025-10-14 170524" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" />
-<img width="1919" height="1032" alt="Screenshot 2025-10-14 170559" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" />
-<img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" />
-<img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" />
-
-
+| | |
+|:-------------------------:|:-------------------------:|
+| <img width="1920" height="1032" alt="Screenshot 2025-10-14 170142" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" /> | <img width="1920" height="1032" alt="Screenshot 2025-10-14 170155" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" /> |
+| <img width="1919" height="1032" alt="Screenshot 2025-10-14 170524" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" /> | <img width="1919" height="1032" alt="Screenshot 2025-10-14 170559" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" /> |
+| <img width="1919" height="1030" alt="Screenshot 2025-10-14 170549" src="https://github.com/user-attachments/assets/a18386b0-bae1-4a2a-a50b-023ebb9f2a6e" /> | <img width="1919" height="1030" alt="Screenshot 2025-10-14 170535" src="https://github.com/user-attachments/assets/be24d21a-5641-4929-a6c0-7c0445cea291" /> |
 ---
 
 ## **Architecture**
