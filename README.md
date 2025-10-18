@@ -16,8 +16,9 @@
 
 Its rich feature set includes a robust **permanent memory system**, advanced conversational controls like **response regeneration** and **chat forking**, and deep customization options to tailor the AI's core behavior to your exact needs.
 
-![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8)
-![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c)
+| | |
+|:---:|:---:|
+| ![Untitled video - Made with Clipchamp (17)](https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8) | ![Untitled video - Made with Clipchamp (18)](https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c) |
 
 
 ---
