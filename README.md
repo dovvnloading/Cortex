@@ -31,7 +31,7 @@ For the most up-to-date files, source code, and release notes, please visit the 
 
 ### Direct Downloads
 *   **Cortex Application**: [Download `Cortex.exe` (66.9 MB)](https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing)
-*   **Ollama & Model Installer**: [Download `Cortex Setup.exe` (65 MB)](https://drive.google.com/file/d/19mtempOGZKk1v7muxCsdcFLC1uZ5Dv3u/view?usp=sharing)
+*   **Ollama & Model Installer**: [Download `Cortex Setup.exe` (65 MB)](https://drive.google.com/file/d/1ZUtiE2GDhdXDrDqorKhdzQshMnCB27WJ/view?usp=sharing)
 
 ---    
 
