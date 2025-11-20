@@ -1,8 +1,15 @@
-<div align="center">
-<img width="890" height="419" alt="cortex_Banner_001" src="https://github.com/user-attachments/assets/d4225beb-ccae-4b96-bdcb-473cf004ae51" />
-
-
 # **Cortex**
+
+<p>
+<a href="https://dovvnloading.github.io/Cortex/">
+    <strong>Website</strong>
+</p>
+
+---
+
+<div align="center">
+
+
 
 ![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/github/license/dovvnloading/Cortex?color=blue)
