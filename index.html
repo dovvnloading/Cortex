@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cortex | Private Local AI Assistant</title>
-    <meta name="description" content="Private, secure, and highly responsive desktop AI assistant for local LLMs.">
+    <meta name="description" content="Private, secure, and highly responsive desktop AI assistant for local LLMs. Now with Vector Memory and Auto-Translation.">
     
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,7 +16,7 @@
 
     <style>
         :root {
-            /* Provided Palette */
+            /* Palette */
             --bg-dark: #1F1F1F;       /* Main Background */
             --bg-card: #262525;       /* Card Background */
             --bg-secondary: #2C2D2C;  /* Secondary Elements */
@@ -143,15 +143,6 @@
             text-align: center;
             position: relative;
         }
-        .hero-banner {
-            max-width: 100%;
-            border-radius: var(--radius-lg);
-            box-shadow: var(--shadow-glow);
-            margin-bottom: 30px;
-            border: 1px solid var(--border-color);
-            transition: transform 0.5s ease;
-        }
-        .hero-banner:hover { transform: scale(1.01); }
         
         .hero h1 {
             font-size: 4rem;
@@ -309,7 +300,6 @@
     <section class="hero">
         <div class="container">
             
-            
             <h1>Local Intelligence. <span class="gradient-text">Unleashed.</span></h1>
             
             <div class="badge-container">
@@ -317,20 +307,21 @@
                 <img src="https://img.shields.io/badge/Framework-PySide6-2496ED?style=flat-square&color=2C2D2C" alt="PySide6">
                 <img src="https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-lightgrey?style=flat-square&color=4F504F" alt="Platform">
                 <img src="https://img.shields.io/badge/status-active-success?style=flat-square&color=C9561E" alt="Status">
+                <img src="https://img.shields.io/badge/version-1.0.0-c75a28?style=flat-square" alt="Version 1.0.0">
             </div>
 
             <p>
                 A private, secure, and highly responsive desktop AI assistant. 
-                Connect directly to <strong>Ollama</strong> with no cloud dependency. 
+                Now featuring <strong>Vector Memory</strong>, <strong>Real-Time Translation</strong>, and <strong>Context-Aware Suggestions</strong>.
                 Your data, your hardware, your rules.
             </p>
 
             <div style="margin-top: 30px; display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
                 <a href="#download" class="btn btn-primary">
-                    <i class="fa-solid fa-download"></i> Download v0.95.7
+                    <i class="fa-solid fa-download"></i> Download v1.0.0
                 </a>
-                <a href="https://github.com/dovvnloading/Cortex/blob/main/Desktop-Quick-Setup-Guide.md" class="btn btn-secondary">
-                    <i class="fa-solid fa-book"></i> Setup Guide
+                <a href="https://github.com/dovvnloading/Cortex/blob/main/README.md" class="btn btn-secondary">
+                    <i class="fa-solid fa-book"></i> Documentation
                 </a>
             </div>
         </div>
@@ -342,11 +333,11 @@
         <div class="media-comparison">
             <div class="media-item">
                 <div class="media-caption text-purple">Dark Mode</div>
-                <img src="https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8" alt="Dark Mode Video">
+                <img src="https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8" alt="Dark Mode Interface">
             </div>
             <div class="media-item">
                 <div class="media-caption text-orange">Light Mode</div>
-                <img src="https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c" alt="Light Mode Video">
+                <img src="https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c" alt="Light Mode Interface">
             </div>
         </div>
     </section>
@@ -354,40 +345,46 @@
     <!-- Features Bento Grid -->
     <section class="container">
         <div class="bento-grid">
+            <!-- Large Card 1 -->
             <div class="bento-card bento-large">
                 <i class="fa-solid fa-shield-halved bento-icon"></i>
                 <h3>100% Local & Private</h3>
                 <p>All processing happens on your machine via your Ollama instance. Nothing leaves your system. Zero telemetry, maximum privacy.</p>
             </div>
             
+            <!-- Card 2 -->
             <div class="bento-card">
-                <i class="fa-solid fa-bolt bento-icon text-orange"></i>
-                <h3>Ollama Power</h3>
-                <p>Seamlessly integrates with any model served by Ollama (Llama 3, Mistral, Gemma) with instant switching.</p>
+                <i class="fa-solid fa-language bento-icon text-orange"></i>
+                <h3>Auto-Translation</h3>
+                <p>Instantly translate AI responses into your preferred language using a dedicated local neural network.</p>
             </div>
 
+            <!-- Card 3 -->
+            <div class="bento-card">
+                <i class="fa-solid fa-network-wired bento-icon"></i>
+                <h3>Vector Memory</h3>
+                <p>Semantic search embeddings allow Cortex to recall relevant context from far deeper in your history.</p>
+            </div>
+
+            <!-- Card 4 -->
+            <div class="bento-card">
+                <i class="fa-regular fa-comment-dots bento-icon text-orange"></i>
+                <h3>Suggestions</h3>
+                <p>Intelligent, context-aware conversation bubbles help keep the dialogue flowing smoothly.</p>
+            </div>
+
+            <!-- Large Card 5 -->
+            <div class="bento-card bento-large">
+                <i class="fa-solid fa-sliders bento-icon"></i>
+                <h3>Deep Customization</h3>
+                <p>Edit system instructions, fine-tune temperature/seed, and fork conversations directly from the new v1.0.0 UI.</p>
+            </div>
+
+            <!-- Card 6 -->
             <div class="bento-card">
                 <i class="fa-solid fa-database bento-icon"></i>
-                <h3>SQLite Core</h3>
-                <p>Chat history stored in a robust local database for instantaneous loading and data integrity.</p>
-            </div>
-
-            <div class="bento-card">
-                <i class="fa-solid fa-code-branch bento-icon text-orange"></i>
-                <h3>Chat Forking</h3>
-                <p>Split a conversation at any point to explore new lines of thought without losing context.</p>
-            </div>
-
-            <div class="bento-card bento-large">
-                <i class="fa-solid fa-brain bento-icon"></i>
-                <h3>Permanent Memory System</h3>
-                <p>Teach Cortex about you. It persistently remembers your projects, preferences, and facts to personalize future responses.</p>
-            </div>
-
-            <div class="bento-card">
-                <i class="fa-solid fa-sliders bento-icon"></i>
-                <h3>Full Control</h3>
-                <p>Adjust Temperature, Context Window, and System Prompts via a dedicated GUI.</p>
+                <h3>Robust Data</h3>
+                <p>Dual-layer storage with SQLite for chats and Vector Embeddings for long-term semantic recall.</p>
             </div>
         </div>
     </section>
@@ -395,37 +392,37 @@
     <!-- Download Section -->
     <section id="download" class="download-section">
         <div class="container">
-            <h2 style="text-align: center;">Get Cortex</h2>
+            <h2 style="text-align: center;">Get Cortex v1.0.0</h2>
             <p style="text-align: center; color: var(--text-main); margin-top: 10px;">Choose the installation method that suits you.</p>
             
             <div class="download-grid">
                 <!-- Card 1 -->
                 <div class="dl-card">
                     <h3 class="text-purple">Official Release</h3>
-                    <small>Recommended • v0.95.7</small>
-                    <p style="margin-bottom: 20px; font-size: 0.9rem;">The complete package including source code and latest patch notes.</p>
-                    <a href="https://github.com/dovvnloading/Cortex/releases/tag/v0.95.7" class="btn btn-primary" style="width: 100%; justify-content: center;">
-                        GitHub Release
+                    <small>Recommended • v1.0.0</small>
+                    <p style="margin-bottom: 20px; font-size: 0.9rem;">The complete package including source code and latest features.</p>
+                    <a href="https://github.com/dovvnloading/Cortex/releases" class="btn btn-primary" style="width: 100%; justify-content: center;">
+                        GitHub Releases
                     </a>
                 </div>
 
                 <!-- Card 2 -->
                 <div class="dl-card">
-                    <h3 class="text-orange">Direct App</h3>
-                    <small>Standalone Executable</small>
-                    <p style="margin-bottom: 20px; font-size: 0.9rem;">Just the application. Requires existing Ollama setup.</p>
-                    <a href="https://drive.google.com/file/d/1q9iFi04WmF6pvw5HGR_sTX8RTOx2PDcF/view?usp=sharing" class="btn btn-secondary" style="width: 100%; justify-content: center;">
-                        Download EXE (67MB)
+                    <h3 class="text-orange">Manual Setup</h3>
+                    <small>For Developers</small>
+                    <p style="margin-bottom: 20px; font-size: 0.9rem;">Clone the repo and install dependencies manually via Python.</p>
+                    <a href="https://github.com/dovvnloading/Cortex" class="btn btn-secondary" style="width: 100%; justify-content: center;">
+                        View Source
                     </a>
                 </div>
 
                 <!-- Card 3 -->
                 <div class="dl-card">
-                    <h3>Full Setup</h3>
-                    <small>App + Ollama Installer</small>
-                    <p style="margin-bottom: 20px; font-size: 0.9rem;">Includes tools to pull models and install Ollama.</p>
-                    <a href="https://drive.google.com/file/d/1ZUtiE2GDhdXDrDqorKhdzQshMnCB27WJ/view?usp=sharing" class="btn btn-secondary" style="width: 100%; justify-content: center;">
-                        Setup Tool (65MB)
+                    <h3>Binaries</h3>
+                    <small>Windows (.exe)</small>
+                    <p style="margin-bottom: 20px; font-size: 0.9rem;">Compiled executables for v1.0.0 are available in the Releases tab.</p>
+                    <a href="https://github.com/dovvnloading/Cortex/releases" class="btn btn-secondary" style="width: 100%; justify-content: center;">
+                        View Downloads
                     </a>
                 </div>
             </div>
@@ -434,25 +431,25 @@
 
     <!-- Architecture -->
     <section class="container" style="margin-bottom: 100px;">
-        <h2 style="text-align: center; margin-bottom: 40px;">System Architecture</h2>
+        <h2 style="text-align: center; margin-bottom: 40px;">System Architecture v1.0</h2>
         <div class="arch-flow">
             <div class="arch-box">
                 <h4><i class="fa-solid fa-desktop"></i> Presentation (UI)</h4>
-                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">Built with PySide6 (Qt). Handles theming, rendering code blocks, and user input.</p>
+                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">Built with PySide6 (Qt). Handles theming, chat bubbles, and the new Suggestion UI.</p>
             </div>
             
             <i class="fa-solid fa-arrow-right fa-xl arch-arrow text-purple"></i>
             
             <div class="arch-box center">
                 <h4><i class="fa-solid fa-gears"></i> Orchestrator</h4>
-                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">Manages state, coordinates async threads, and dispatches tasks to prevent UI freezing.</p>
+                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">Coordinates the Synthesis Agent, Title Worker, and new Translation/Suggestion pipelines.</p>
             </div>
             
             <i class="fa-solid fa-arrow-right fa-xl arch-arrow text-purple"></i>
             
             <div class="arch-box">
-                <h4><i class="fa-solid fa-server"></i> Data & Agent</h4>
-                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">SQLite persistence layer combined with a Synthesis Agent that interfaces with Ollama API.</p>
+                <h4><i class="fa-solid fa-server"></i> Data & Models</h4>
+                <p style="font-size: 0.9rem; margin-top: 10px; color: #aaa;">Interfaces with Ollama for Chat, Embedding, and Translation models. Stores data in SQLite + Vectors.</p>
             </div>
         </div>
 
@@ -468,11 +465,11 @@
     <!-- Footer -->
     <footer>
         <div class="container">
-            <p>&copy; 2025 Matthew Robert Wesney. All rights reserved.</p>
+            <p>&copy; 2026 Matthew Robert Wesney. All rights reserved.</p>
             <p style="margin-top: 10px;">
                 <a href="https://github.com/dovvnloading/Cortex" style="margin: 0 10px;">GitHub</a>
                 <a href="#" style="margin: 0 10px;">License</a>
-                <a href="#" style="margin: 0 10px;">Issues</a>
+                <a href="https://github.com/dovvnloading/Cortex/issues" style="margin: 0 10px;">Issues</a>
             </p>
         </div>
     </footer>
