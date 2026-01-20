@@ -1,1 +1,1 @@
-version-0.95.7
+version-1.0.0
