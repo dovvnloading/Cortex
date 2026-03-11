@@ -46,6 +46,7 @@
             font-family: 'Inter', sans-serif;
             line-height: 1.6;
             overflow-x: hidden;
+            background-image: radial-gradient(circle at 20% -10%, rgba(113, 84, 230, 0.14), transparent 40%), radial-gradient(circle at 90% 10%, rgba(201, 86, 30, 0.12), transparent 35%);
         }
 
         h1, h2, h3, h4 {
@@ -143,6 +144,15 @@
             text-align: center;
             position: relative;
         }
+        .hero::before {
+            content: "";
+            position: absolute;
+            inset: 80px 18% -5px;
+            background: linear-gradient(140deg, rgba(113, 84, 230, 0.22), rgba(201, 86, 30, 0.1));
+            filter: blur(90px);
+            pointer-events: none;
+            z-index: -1;
+        }
         
         .hero h1 {
             font-size: 4rem;
@@ -225,7 +235,19 @@
             gap: 20px;
             margin-top: 40px;
         }
-        .media-item { flex: 1; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border-color); }
+        .media-item {
+            flex: 1;
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            background: linear-gradient(to bottom, rgba(255,255,255,0.02), transparent);
+            transition: transform 0.35s ease, box-shadow 0.35s ease, border-color 0.35s ease;
+        }
+        .media-item:hover {
+            transform: translateY(-5px);
+            border-color: var(--accent-purple);
+            box-shadow: var(--card-shadow);
+        }
         .media-item img { width: 100%; display: block; }
         .media-caption { text-align: center; padding: 10px; background: var(--bg-secondary); font-weight: 600; }
 
@@ -260,7 +282,102 @@
             border: 1px solid var(--border-color);
             transition: 0.4s;
         }
-        .screenshot-grid img:hover { opacity: 0.8; }
+
+        .zoomable {
+            position: relative;
+            cursor: zoom-in;
+        }
+        .zoomable::after {
+            content: "\f00e";
+            font-family: "Font Awesome 6 Free";
+            font-weight: 900;
+            position: absolute;
+            bottom: 14px;
+            right: 14px;
+            width: 34px;
+            height: 34px;
+            border-radius: 999px;
+            display: grid;
+            place-items: center;
+            background: rgba(31, 31, 31, 0.85);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.12);
+            opacity: 0;
+            transform: translateY(8px);
+            transition: 0.25s ease;
+        }
+
+        .zoomable:hover {
+            transform: translateY(-3px);
+            border-color: var(--accent-purple);
+            box-shadow: 0 14px 34px rgba(0,0,0,0.4);
+        }
+        .zoomable:hover::after,
+        .zoomable:focus-visible::after {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .img-modal {
+            position: fixed;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            background: rgba(0,0,0,0.86);
+            backdrop-filter: blur(6px);
+            padding: 30px;
+            z-index: 999;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+        .img-modal.open {
+            opacity: 1;
+            pointer-events: all;
+        }
+        .img-modal figure {
+            width: min(1200px, 95vw);
+            margin: 0;
+        }
+        .img-modal img {
+            width: 100%;
+            max-height: 80vh;
+            object-fit: contain;
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(255,255,255,0.25);
+            box-shadow: 0 30px 50px rgba(0,0,0,0.5);
+            background: #181818;
+        }
+        .img-modal figcaption {
+            margin-top: 14px;
+            text-align: center;
+            color: #e8e8e8;
+        }
+        .img-modal-close {
+            position: absolute;
+            top: 18px;
+            right: 18px;
+            width: 44px;
+            height: 44px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.24);
+            background: rgba(255,255,255,0.08);
+            color: white;
+            font-size: 1.1rem;
+            cursor: pointer;
+        }
+
+        .section-title {
+            text-align: center;
+            margin-bottom: 30px;
+            letter-spacing: 0.2px;
+        }
+        .section-title small {
+            display: block;
+            color: #9ea39b;
+            font-weight: 500;
+            margin-top: 8px;
+        }
 
         /* Footer */
         footer {
@@ -279,6 +396,7 @@
             .screenshot-grid { grid-template-columns: 1fr; }
             .arch-flow { flex-direction: column; }
             .arch-arrow { transform: rotate(90deg); margin: 10px 0; }
+            .img-modal { padding: 14px; }
         }
     </style>
 </head>
@@ -329,15 +447,15 @@
 
     <!-- Theme Showcase -->
     <section class="container">
-        <h2 style="text-align: center; margin-bottom: 30px;">Seamless in Light or Dark</h2>
+        <h2 class="section-title">Seamless in Light or Dark<small>Click any image to inspect the UI in full detail.</small></h2>
         <div class="media-comparison">
             <div class="media-item">
                 <div class="media-caption text-purple">Dark Mode</div>
-                <img src="https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8" alt="Dark Mode Interface">
+                <img class="zoomable" src="https://github.com/user-attachments/assets/96d509e9-d15b-4b41-ac0b-bd03459c6cc8" alt="Dark Mode Interface" loading="lazy">
             </div>
             <div class="media-item">
                 <div class="media-caption text-orange">Light Mode</div>
-                <img src="https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c" alt="Light Mode Interface">
+                <img class="zoomable" src="https://github.com/user-attachments/assets/1a3e25a4-aaa2-4bb0-b49f-9970d6697a8c" alt="Light Mode Interface" loading="lazy">
             </div>
         </div>
     </section>
@@ -455,12 +573,22 @@
 
         <!-- Screenshot Grid -->
         <div class="screenshot-grid">
-            <img src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" alt="Cortex Screenshot 1">
-            <img src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" alt="Cortex Screenshot 2">
-            <img src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" alt="Cortex Screenshot 3">
-            <img src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" alt="Cortex Screenshot 4">
+            <img class="zoomable" src="https://github.com/user-attachments/assets/d5817af5-db5d-4f4b-96c0-7a455e234b49" alt="Cortex Screenshot 1" loading="lazy">
+            <img class="zoomable" src="https://github.com/user-attachments/assets/3321e3c7-7f11-4f10-a337-a7c487bbc0fc" alt="Cortex Screenshot 2" loading="lazy">
+            <img class="zoomable" src="https://github.com/user-attachments/assets/2f311cc4-1c70-44bf-9a43-51ba0468c514" alt="Cortex Screenshot 3" loading="lazy">
+            <img class="zoomable" src="https://github.com/user-attachments/assets/cdb0a1bd-70dd-49cf-bcea-103cdf66fdc2" alt="Cortex Screenshot 4" loading="lazy">
         </div>
     </section>
+
+    <div class="img-modal" id="imgModal" aria-hidden="true" role="dialog" aria-label="Expanded screenshot viewer">
+        <button class="img-modal-close" id="imgModalClose" aria-label="Close expanded image">
+            <i class="fa-solid fa-xmark"></i>
+        </button>
+        <figure>
+            <img id="imgModalPreview" src="" alt="">
+            <figcaption id="imgModalCaption"></figcaption>
+        </figure>
+    </div>
 
     <!-- Footer -->
     <footer>
@@ -473,6 +601,56 @@
             </p>
         </div>
     </footer>
+
+    <script>
+        const modal = document.getElementById('imgModal');
+        const modalImage = document.getElementById('imgModalPreview');
+        const modalCaption = document.getElementById('imgModalCaption');
+        const modalClose = document.getElementById('imgModalClose');
+        const zoomableImages = document.querySelectorAll('.zoomable');
+
+        const openModal = (image) => {
+            modalImage.src = image.src;
+            modalImage.alt = image.alt;
+            modalCaption.textContent = image.alt;
+            modal.classList.add('open');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+            modalClose.focus();
+        };
+
+        const closeModal = () => {
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
+            modalImage.src = '';
+            document.body.style.overflow = '';
+        };
+
+        zoomableImages.forEach((image) => {
+            image.setAttribute('tabindex', '0');
+            image.setAttribute('role', 'button');
+            image.setAttribute('aria-label', `Expand image: ${image.alt}`);
+
+            image.addEventListener('click', () => openModal(image));
+            image.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    openModal(image);
+                }
+            });
+        });
+
+        modalClose.addEventListener('click', closeModal);
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) closeModal();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && modal.classList.contains('open')) {
+                closeModal();
+            }
+        });
+    </script>
 
 </body>
 </html>
