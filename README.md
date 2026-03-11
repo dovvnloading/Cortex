@@ -1,106 +1,185 @@
+# Cortex
 
+Cortex is a desktop AI assistant for running local large language models through Ollama, with a native PySide6 interface and persistent local data storage.
 
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/github/license/dovvnloading/Cortex?color=blue)](LICENSE)
-[![Framework](https://img.shields.io/badge/Framework-PySide6-2496ED)](https://doc.qt.io/qtforpython-6/)
-[![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)]()
-[![Status](https://img.shields.io/badge/status-active-success)]()
-[![Version](https://img.shields.io/badge/version-1.0.0-c75a28)]()
+The project is focused on local-first operation: conversation processing, memory, translation, and chat state all run on your machine.
 
-**Cortex** is a private, secure, and highly responsive desktop AI assistant designed for seamless interaction with **local Large Language Models (LLMs)** through the **Ollama** framework. All models and data stay on your device—no cloud, no third parties. Cortex keeps everything local for maximum privacy and speed.
+## Table of Contents
+- [Overview](#overview)
+- [Core Capabilities](#core-capabilities)
+- [System Architecture](#system-architecture)
+- [Repository Layout](#repository-layout)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Configuration and Runtime Behavior](#configuration-and-runtime-behavior)
+- [Data and Persistence](#data-and-persistence)
+- [Troubleshooting](#troubleshooting)
+- [Security and Privacy Notes](#security-and-privacy-notes)
+- [Development](#development)
+- [License](#license)
 
-Its rich feature set includes a robust **permanent memory system**, **auto-translation**, **response suggestions**, and deep customization options to tailor the AI's core behavior to your exact needs.
+## Overview
 
----
+Cortex combines:
+- A Qt-based desktop application (`PySide6`) for a native UI.
+- Ollama-backed model orchestration for chat, title generation, translation, and embeddings.
+- Persistent conversation and memory systems (SQLite + vector and memo layers).
+- Multi-threaded workers to keep the UI responsive during long-running model operations.
 
-## **New in v1.0.0**
+## Core Capabilities
 
-Cortex 1.0.0 introduces a major architecture overhaul with new cognitive capabilities:
+- **Local chat with Ollama models**: configurable generation model, host, and generation parameters.
+- **Threaded conversation management**: new chat creation, title generation, and chat history handling.
+- **Translation pipeline**: optional post-generation translation using a dedicated model.
+- **Suggestion generation**: optional context-aware follow-up suggestions.
+- **Vector memory retrieval**: semantic context lookup with embedding support.
+- **Permanent memo memory**: persistent user/project memory used to improve response relevance.
+- **Theme and UX controls**: light/dark theme support and UI state persisted via `QSettings`.
 
-*   **Real-Time Auto-Translation**: Instantly translate AI responses into your preferred language using a dedicated local translation model.
-*   **Conversation Suggestions**: Intelligent, context-aware follow-up bubbles to help keep the conversation flowing.
-*   **Vector Memory System**: A new embedding-based memory layer that helps the AI retrieve relevant context from past conversations more effectively.
-*   **Integrated Persona Editor**: Edit the AI's system instructions and personality directly from the UI, with no need to touch configuration files.
-*   **Automated Update Checks**: Cortex now discreetly checks for updates to ensure you are running the latest version.
+## System Architecture
 
----
+Cortex is organized around three layers:
 
-## **Key Features**
+1. **Presentation Layer**
+   - Built with PySide6 widgets and custom UI components.
+   - Main window and dialogs manage chat, settings, memory controls, and translation/suggestion toggles.
 
-### Core Principles
-*   **100% Local & Private**: All processing happens on your machine via your Ollama instance. Nothing ever leaves your system.
-*   **Powered by Ollama**: Seamlessly integrates with any model served by Ollama (DeepSeek R1, Qwen 3, Mistral, Llama 3, etc.).
-*   **High-Performance Database**: Chat history is stored in a robust SQLite database for instantaneous loading and rock-solid data integrity.
+2. **Orchestration Layer**
+   - The `Orchestrator` in `Chat_LLM.py` coordinates model calls, thread lifecycle, and feature toggles.
+   - Worker objects and `QThread` usage isolate blocking operations (query execution, title generation, update checks, model connection checks).
 
-### Advanced Conversational Tools
-*   **Response Regeneration**: Not satisfied with an answer? A single click prompts the AI to rethink its last response, optionally with new instructions.
-*   **Conversational Forking**: Explore different lines of thought. Split a conversation at any point to create a new, independent chat thread.
-*   **Rich Code Rendering**: Code blocks are displayed in a professional container with syntax highlighting, a one-click copy button, and theme support.
-*   **Conversation Suggestions**: Dynamic, clickable bubbles that suggest what you might want to say next.
+3. **Data + Model Layer**
+   - Ollama client interaction for inference and embeddings.
+   - Persistent storage for chat records and memory data.
+   - Prompt-building and synthesis logic in the synthesis agent.
 
-### Deep AI Customization
-*   **Permanent Memory**: Teach the AI key facts about you, your projects, or your preferences. It will subtly use this information to personalize future responses.
-*   **Model Behavior Control**: Fine-tune the AI by adjusting **Temperature**, **Context Window Size**, and **Seed** for reproducible outputs.
-*   **System Instructions UI**: Define a global persona or ruleset (e.g., "You are a Python expert") that the AI will follow in every chat.
+## Repository Layout
 
-### Professional User Experience
-*   **Light & Dark Themes**: Choose a look that fits your workspace. The entire UI updates instantly.
-*   **Keyboard Shortcuts**: High-velocity workflow with shortcuts like `Ctrl+N` (New Chat) and `Ctrl+L` (Focus Input).
-*   **Asynchronous Processing**: The UI remains perfectly smooth and responsive while the AI is thinking.
+```text
+.
+├── Chat_LLM/
+│   ├── assets/                  # Icons and prompt assets
+│   └── Chat_LLM/
+│       ├── Chat_LLM.py          # Main application entry point + orchestrator
+│       ├── main_window.py       # Primary UI window
+│       ├── synthesis_agent.py   # Prompting + generation/translation/suggestions
+│       ├── memory.py            # Memory/database managers
+│       ├── ui_*.py              # UI components/styles/dialogs
+│       └── ...
+├── Cortex_Startup.py            # Startup utility for Ollama setup/model pulling
+├── requirements.txt             # Root Python dependencies
+├── index.html                   # Landing page
+└── README.md
+```
 
----
+## Requirements
 
-## **Manual Setup & Requirements**
+### Runtime
+- Python 3.10+
+- Ollama installed and running (default host: `http://127.0.0.1:11434`)
 
-If you prefer to set up Cortex manually (without the installer), ensure you have the following models pulled in Ollama. Cortex v1.0.0 utilizes a multi-model architecture for specialized tasks.
+### Python Dependencies
+Install from the repository root:
 
-### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Pull Required Models
-Run the following commands in your terminal to prepare the local AI engine:
+Root dependencies currently include:
+- `PySide6`
+- `markdown`
+- `ollama`
 
-**Primary Chat Model (Default):**
+## Quick Start
+
+### 1) Install Ollama
+Install Ollama for your platform from the official site:
+- <https://ollama.com/download>
+
+### 2) Pull at least one chat model
+Example:
+
 ```bash
 ollama pull qwen3:8b
 ```
-*(Note: You can swap this for deepseek-r1, mistral, etc., inside the app settings)*
 
-**Utility Models (Required for full functionality):**
+Optional models used by advanced features:
+
 ```bash
-# For generating smart chat titles
+# Chat title generation
 ollama pull granite4:tiny-h
 
-# For the auto-translation feature
+# Translation
 ollama pull translategemma:4b
 
-# For vector memory embeddings
+# Embeddings for vector memory
 ollama pull nomic-embed-text
 ```
 
-### 3. Run Cortex
+### 3) Launch Cortex
+From repository root:
+
 ```bash
-python Chat_LLM.py
+python Chat_LLM/Chat_LLM/Chat_LLM.py
 ```
 
----
+### 4) Optional: run the setup utility
+The startup utility can help install/pull models with a GUI workflow:
 
-## **Architecture**
+```bash
+python Cortex_Startup.py
+```
 
-Cortex is built on a modern, modular architecture:
+## Configuration and Runtime Behavior
 
-*   **Presentation Layer (UI)**: Built with **PySide6 (Qt)** for a native, high-performance look and feel.
-*   **Orchestration Layer**: Manages state, threading, and the interaction between the database and the AI agents.
-*   **Synthesis Agent**: A specialized agent that constructs complex prompts, handles memory retrieval, and manages the translation pipeline.
-*   **Data Layer**:
-    *   **SQLite**: Stores chat history and vector embeddings.
-    *   **JSON**: Stores lightweight permanent memory "memos".
+Default runtime configuration is defined in `Chat_LLM/Chat_LLM/Chat_LLM.py` (`CONFIG` dictionary), including:
+- Ollama host URL
+- default generation/title/translation/embedding models
+- generation parameters (`temperature`, `num_ctx`, `seed`)
+- available chat model list
+- update check URL
 
----
+User-specific settings (theme, feature toggles, selected models, and related UI preferences) are persisted with `QSettings`.
 
-## **Summary**
+## Data and Persistence
 
-Cortex is a locally-run, privacy-focused AI assistant that integrates tightly with Ollama to deliver fast, context-aware, and persistent interactions. With v1.0.0, it evolves from a simple chat interface into a comprehensive cognitive assistant with memory, translation, and proactive suggestions.
+Cortex uses local persistence for conversation state and memory systems. In practice, this includes:
+- chat/thread records and related metadata
+- vector memory embeddings and semantic retrieval context
+- permanent memo-style memory for personalization
+- local user settings via `QSettings`
 
+## Troubleshooting
+
+### Ollama connection errors
+- Verify Ollama is installed and running.
+- Confirm the host in configuration/settings matches your local Ollama endpoint.
+
+### No response or slow response
+- Ensure your selected model exists locally (`ollama list`).
+- Reduce model size if hardware resources are limited.
+- Check RAM/CPU/GPU load while generating.
+
+### Missing model errors for optional features
+- Pull the required specialized model (translation/title/embedding) or disable that feature in settings.
+
+### UI startup issues
+- Run from a terminal to inspect logs.
+- Confirm Python dependencies are installed in the active environment.
+
+## Security and Privacy Notes
+
+Cortex is designed for local usage, but your privacy posture still depends on local environment configuration:
+- Keep Ollama bound to local interfaces unless remote access is intentionally configured.
+- Review any custom model endpoints before use.
+- Protect your local machine and account, since all data is stored locally.
+
+## Development
+
+- Contribution process: see `CONTRIBUTING.md`.
+- Security disclosures: see `SECURITY.md`.
+- Project change history: see `Change_Log.md`.
+
+## License
+
+This project is licensed under the terms in `LICENSE`.
