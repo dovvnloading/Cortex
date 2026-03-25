@@ -1,3 +1,5 @@
+More info -> https://dovvnloading.github.io/Cortex/
+
 # Cortex
 
 Cortex is a desktop AI assistant for running local large language models through Ollama, with a native PySide6 interface and persistent local data storage.
