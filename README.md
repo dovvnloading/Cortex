@@ -2,6 +2,9 @@ More info -> https://dovvnloading.github.io/Cortex/
 
 # Cortex
 
+<img width="1920" height="1032" alt="501164220-d5817af5-db5d-4f4b-96c0-7a455e234b49" src="https://github.com/user-attachments/assets/8b80241a-3842-42c4-8c38-ea0e197ab303" />
+
+
 Cortex is a desktop AI assistant for running local large language models through Ollama, with a native PySide6 interface and persistent local data storage.
 
 The project is focused on local-first operation: conversation processing, memory, translation, and chat state all run on your machine.
