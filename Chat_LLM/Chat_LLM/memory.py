@@ -13,157 +13,282 @@ This module provides classes for handling three types of memory:
 
 import logging
 from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
 import os
 import json
 import sqlite3
 import shutil
 import math
 import struct
-from datetime import datetime
+import tempfile
+from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import QStandardPaths
+
+
+def _utc_now() -> datetime:
+    """Return a naive UTC datetime for compatibility with existing ISO data."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class PersistenceError(RuntimeError):
+    """Raised when local chat or permanent-memory persistence fails."""
+
+    def __init__(self, message: str, *, operation: str | None = None, cause=None):
+        self.operation = operation
+        self.cause = cause
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    """Counts from one legacy JSON migration pass."""
+
+    migrated: int = 0
+    skipped: int = 0
+    quarantined: int = 0
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    def __init__(self):
-        """Initializes the manager, connects to the database, and ensures the schema exists."""
+    SCHEMA_VERSION = 1
+
+    def __init__(self, db_path: str | None = None, legacy_history_dir: str | None = None):
+        """Initialize the manager without retaining a cross-thread SQLite connection."""
         app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.db_path = os.path.join(app_data_path, "cortex_db.sqlite")
-        self.legacy_history_dir = os.path.join(app_data_path, "chat_history") # Path to old JSON files
+        self.db_path = db_path or os.path.join(app_data_path, "cortex_db.sqlite")
+        self.legacy_history_dir = legacy_history_dir or os.path.join(app_data_path, "chat_history")
         logging.info(f"Database path set to: {self.db_path}")
-        self._conn = None
-        self._ensure_connection()
+        self._ensure_parent_directory()
         self._create_tables()
 
-    def _ensure_connection(self):
-        """Establishes a connection to the SQLite database if not already connected."""
-        if self._conn is None:
-            try:
-                self._conn = sqlite3.connect(self.db_path)
-                self._conn.row_factory = sqlite3.Row
-                self._conn.execute("PRAGMA foreign_keys = ON;")
-                logging.info("Successfully connected to the SQLite database.")
-            except sqlite3.Error as e:
-                logging.error(f"Database connection failed: {e}")
-                raise
+    def _ensure_parent_directory(self):
+        parent = os.path.dirname(os.path.abspath(self.db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+    @contextmanager
+    def connect(self):
+        """Yield a short-lived, thread-owned SQLite connection."""
+        connection = None
+        try:
+            connection = sqlite3.connect(self.db_path, timeout=10.0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 10000")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            yield connection
+            connection.commit()
+        except sqlite3.Error as exc:
+            if connection is not None:
+                connection.rollback()
+            raise PersistenceError(
+                "SQLite operation failed.",
+                operation="sqlite",
+                cause=exc,
+            ) from exc
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
 
     def _close_connection(self):
-        """Closes the database connection if it is open."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-            logging.info("Database connection closed.")
+        """Retained for compatibility; operation connections close automatically."""
+        return None
 
     def _create_tables(self):
         """Creates the necessary tables in the database if they don't exist."""
-        try:
-            with self._conn as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS threads (
-                        id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        timestamp TEXT NOT NULL
-                    );
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        thread_id TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        sources TEXT,
-                        thoughts TEXT,
-                        timestamp TEXT NOT NULL,
-                        FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
-                    );
-                """)
-                logging.info("Database tables verified/created successfully.")
-        except sqlite3.Error as e:
-            logging.error(f"Failed to create database tables: {e}")
+        with self.connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS threads (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    timestamp TEXT NOT NULL
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sources TEXT,
+                    thoughts TEXT,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+                );
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_thread_timestamp "
+                "ON messages(thread_id, timestamp, id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_threads_timestamp "
+                "ON threads(timestamp)"
+            )
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > self.SCHEMA_VERSION:
+                raise PersistenceError(
+                    f"Unsupported database schema version {version}.",
+                    operation="schema_check",
+                )
+            if version < self.SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            logging.info("Database tables and indexes verified/created successfully.")
 
-    def migrate_from_json_if_needed(self):
-        """
-        Checks for the legacy JSON directory and migrates data to SQLite if found.
-        This is a one-time operation.
-        """
-        if not os.path.exists(self.legacy_history_dir):
-            return # No migration needed
+    @staticmethod
+    def _parse_legacy_chat(chat_data: object) -> dict:
+        if not isinstance(chat_data, dict):
+            raise ValueError("chat file must contain a JSON object")
+        thread_id = chat_data.get('id')
+        messages = chat_data.get('messages', [])
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise ValueError("chat file is missing a non-empty id")
+        if not isinstance(messages, list):
+            raise ValueError("chat messages must be a list")
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("chat message must be an object")
+            if not isinstance(message.get('role'), str) or not message.get('role'):
+                raise ValueError("chat message is missing a role")
+            if not isinstance(message.get('content'), str):
+                raise ValueError("chat message is missing text content")
+        return {
+            'id': thread_id,
+            'title': str(chat_data.get('title') or 'Untitled Chat'),
+            'timestamp': str(chat_data.get('timestamp') or _utc_now().isoformat()),
+            'messages': messages,
+        }
+
+    def _quarantine_legacy_file(self, file_path: str) -> str:
+        quarantine_dir = os.path.join(self.legacy_history_dir, 'quarantine')
+        os.makedirs(quarantine_dir, exist_ok=True)
+        destination = os.path.join(quarantine_dir, os.path.basename(file_path))
+        if os.path.exists(destination):
+            destination = os.path.join(
+                quarantine_dir,
+                f"{os.path.splitext(os.path.basename(file_path))[0]}_{int(datetime.now().timestamp())}.json",
+            )
+        return shutil.move(file_path, destination)
+
+    @staticmethod
+    def _archive_legacy_file(file_path: str, archive_dir: str) -> str:
+        os.makedirs(archive_dir, exist_ok=True)
+        return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
+
+    def migrate_from_json_if_needed(self) -> MigrationResult:
+        """Migrate valid legacy files transactionally and isolate invalid files."""
+        if not os.path.isdir(self.legacy_history_dir):
+            return MigrationResult()
 
         logging.warning("Legacy JSON chat history found. Starting migration to SQLite...")
-        migrated_count = 0
-        try:
-            for filename in os.listdir(self.legacy_history_dir):
-                if filename.endswith(".json"):
-                    file_path = os.path.join(self.legacy_history_dir, filename)
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            chat_data = json.load(f)
-                        
-                        thread_id = chat_data.get('id')
-                        title = chat_data.get('title', 'Untitled Chat')
-                        timestamp = chat_data.get('timestamp', datetime.utcnow().isoformat())
-                        messages = chat_data.get('messages', [])
+        migrated = skipped = quarantined = 0
+        archive_dir = f"{self.legacy_history_dir}_migrated_{int(datetime.now().timestamp())}"
 
-                        with self._conn as conn:
-                            # Check if thread already exists to prevent duplicates on rerun
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT id FROM threads WHERE id = ?", (thread_id,))
-                            if cursor.fetchone() is None:
-                                conn.execute("INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                                             (thread_id, title, timestamp))
-                                
-                                for i, msg in enumerate(messages):
-                                    msg_timestamp = datetime.fromisoformat(timestamp)
-                                    msg_timestamp = msg_timestamp.replace(microsecond=i).isoformat() # Ensure unique timestamp for ordering
-                                    conn.execute("""
-                                        INSERT INTO messages (thread_id, role, content, sources, thoughts, timestamp)
-                                        VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (
-                                        thread_id,
-                                        msg.get('role'),
-                                        msg.get('content'),
-                                        json.dumps(msg.get('sources')) if msg.get('sources') else None,
-                                        msg.get('thoughts'),
-                                        msg_timestamp
-                                    ))
-                                migrated_count += 1
-                    except Exception as e:
-                        logging.error(f"Failed to migrate file {filename}: {e}")
+        for filename in sorted(os.listdir(self.legacy_history_dir)):
+            if not filename.lower().endswith('.json'):
+                continue
+            file_path = os.path.join(self.legacy_history_dir, filename)
+            if not os.path.isfile(file_path):
+                continue
 
-            logging.info(f"Successfully migrated {migrated_count} chat threads to SQLite.")
-            
-            # Rename the old directory to prevent re-migration
-            backup_dir = f"{self.legacy_history_dir}_migrated_{int(datetime.now().timestamp())}"
-            shutil.move(self.legacy_history_dir, backup_dir)
-            logging.info(f"Legacy chat history directory has been backed up to: {backup_dir}")
+            try:
+                with open(file_path, 'r', encoding='utf-8') as stream:
+                    chat_data = self._parse_legacy_chat(json.load(stream))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                logging.error("Quarantining invalid legacy chat %s: %s", filename, exc)
+                try:
+                    self._quarantine_legacy_file(file_path)
+                    quarantined += 1
+                except OSError as quarantine_error:
+                    logging.error("Could not quarantine legacy chat %s: %s", filename, quarantine_error)
+                continue
 
-        except Exception as e:
-            logging.error(f"A critical error occurred during data migration: {e}")
+            try:
+                with self.connect() as conn:
+                    existing = conn.execute(
+                        "SELECT 1 FROM threads WHERE id = ?",
+                        (chat_data['id'],),
+                    ).fetchone()
+                    if existing:
+                        skipped += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
+                            (chat_data['id'], chat_data['title'], chat_data['timestamp']),
+                        )
+                        try:
+                            base_timestamp = datetime.fromisoformat(
+                                chat_data['timestamp'].replace('Z', '+00:00')
+                            )
+                        except ValueError:
+                            base_timestamp = _utc_now()
+                        for index, message in enumerate(chat_data['messages']):
+                            message_timestamp = (base_timestamp + timedelta(microseconds=index)).isoformat()
+                            conn.execute(
+                                """
+                                INSERT INTO messages
+                                    (thread_id, role, content, sources, thoughts, timestamp)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    chat_data['id'],
+                                    message['role'],
+                                    message['content'],
+                                    json.dumps(message.get('sources')) if message.get('sources') else None,
+                                    message.get('thoughts'),
+                                    message_timestamp,
+                                ),
+                            )
+                        migrated += 1
+            except PersistenceError:
+                raise
+
+            try:
+                self._archive_legacy_file(file_path, archive_dir)
+            except OSError as exc:
+                logging.error("Migrated %s but could not archive the source file: %s", filename, exc)
+
+        result = MigrationResult(migrated=migrated, skipped=skipped, quarantined=quarantined)
+        logging.info(
+            "Legacy migration complete: %s migrated, %s skipped, %s quarantined.",
+            result.migrated,
+            result.skipped,
+            result.quarantined,
+        )
+        return result
 
     def create_chat(self, thread_id: str, title: str):
         """Creates a new chat thread record in the database."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 conn.execute(
                     "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, datetime.utcnow().isoformat())
+                    (thread_id, title, _utc_now().isoformat())
                 )
-        except sqlite3.Error as e:
-            logging.error(f"Failed to create chat thread {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to create chat thread {thread_id}.",
+                operation="create_chat",
+                cause=exc,
+            ) from exc
 
     def create_chat_from_messages(self, thread_id: str, title: str, messages: list[dict]):
         """Creates a new chat thread and bulk-inserts a list of messages."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 # 1. Create the new thread entry
                 conn.execute(
                     "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, datetime.utcnow().isoformat())
+                    (thread_id, title, _utc_now().isoformat())
                 )
                 
                 # 2. Prepare and insert all messages for the new thread
                 messages_to_insert = []
                 for i, msg in enumerate(messages):
-                    msg_timestamp = datetime.utcnow().replace(microsecond=i).isoformat()
+                    msg_timestamp = _utc_now().replace(microsecond=i).isoformat()
                     messages_to_insert.append((
                         thread_id,
                         msg.get('role'),
@@ -178,14 +303,30 @@ class DatabaseManager:
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, messages_to_insert)
                 logging.info(f"Successfully created forked chat {thread_id} with {len(messages)} messages.")
-        except sqlite3.Error as e:
-            logging.error(f"Failed to create forked chat {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to create forked chat {thread_id}.",
+                operation="create_chat_from_messages",
+                cause=exc,
+            ) from exc
 
-
-    def add_message(self, thread_id: str, role: str, content: str, sources: list | None = None, thoughts: str | None = None):
+    def add_message(
+        self,
+        thread_id: str,
+        role: str,
+        content: str,
+        sources: list | None = None,
+        thoughts: str | None = None,
+        thread_title: str | None = None,
+    ):
         """Adds a new message to a specific chat thread."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
+                if thread_title is not None:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
+                        (thread_id, thread_title, _utc_now().isoformat()),
+                    )
                 conn.execute("""
                     INSERT INTO messages (thread_id, role, content, sources, thoughts, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -195,20 +336,24 @@ class DatabaseManager:
                     content,
                     json.dumps(sources) if sources else None,
                     thoughts,
-                    datetime.utcnow().isoformat()
+                    _utc_now().isoformat()
                 ))
                 # Update the thread's main timestamp to reflect recent activity
                 conn.execute(
                     "UPDATE threads SET timestamp = ? WHERE id = ?",
-                    (datetime.utcnow().isoformat(), thread_id)
+                    (_utc_now().isoformat(), thread_id)
                 )
-        except sqlite3.Error as e:
-            logging.error(f"Failed to add message to thread {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to add message to thread {thread_id}.",
+                operation="add_message",
+                cause=exc,
+            ) from exc
 
     def load_chat(self, thread_id: str) -> dict | None:
         """Loads a full chat thread (metadata and messages) from the database."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT id, title, timestamp FROM threads WHERE id = ?", (thread_id,))
                 thread_row = cursor.fetchone()
@@ -218,7 +363,8 @@ class DatabaseManager:
                 chat_data = dict(thread_row)
                 
                 cursor.execute(
-                    "SELECT role, content, sources, thoughts FROM messages WHERE thread_id = ? ORDER BY timestamp ASC",
+                    "SELECT role, content, sources, thoughts FROM messages "
+                    "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
                 messages = []
@@ -230,68 +376,94 @@ class DatabaseManager:
                 
                 chat_data['messages'] = messages
                 return chat_data
-        except sqlite3.Error as e:
-            logging.error(f"Failed to load chat {thread_id}: {e}")
-            return None
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to load chat {thread_id}.",
+                operation="load_chat",
+                cause=exc,
+            ) from exc
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise PersistenceError(
+                f"Stored data for chat {thread_id} is invalid.",
+                operation="load_chat",
+                cause=exc,
+            ) from exc
 
     def delete_chat(self, thread_id: str):
         """Deletes a chat thread and all its associated messages from the database."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
                 logging.info(f"Deleted chat thread: {thread_id}")
-        except sqlite3.Error as e:
-            logging.error(f"Failed to delete chat {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to delete chat {thread_id}.",
+                operation="delete_chat",
+                cause=exc,
+            ) from exc
 
     def delete_last_assistant_message(self, thread_id: str):
         """Deletes the most recent 'assistant' role message from a given thread."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 conn.execute("""
                     DELETE FROM messages 
                     WHERE id = (
                         SELECT id FROM messages 
                         WHERE thread_id = ? AND role = 'assistant' 
-                        ORDER BY timestamp DESC 
+                        ORDER BY timestamp DESC, id DESC
                         LIMIT 1
                     )
                 """, (thread_id,))
                 logging.info(f"Deleted the last assistant message for thread: {thread_id}")
-        except sqlite3.Error as e:
-            logging.error(f"Failed to delete last assistant message for thread {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to delete last assistant message for thread {thread_id}.",
+                operation="delete_last_assistant_message",
+                cause=exc,
+            ) from exc
 
     def update_chat_title(self, thread_id: str, new_title: str):
         """Updates the title of a specific chat thread."""
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 conn.execute("UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id))
                 logging.info(f"Renamed chat thread {thread_id} to '{new_title}'")
-        except sqlite3.Error as e:
-            logging.error(f"Failed to rename chat {thread_id}: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to rename chat {thread_id}.",
+                operation="update_chat_title",
+                cause=exc,
+            ) from exc
 
     def get_all_chats_summary(self) -> list[dict]:
         """Retrieves a summary (id, title, timestamp) of all chats, sorted by recency."""
-        summaries = []
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT id, title, timestamp FROM threads ORDER BY timestamp DESC")
-                for row in cursor.fetchall():
-                    summaries.append(dict(row))
-        except sqlite3.Error as e:
-            logging.error(f"Failed to get chat summaries: {e}")
-        return summaries
+                return [dict(row) for row in cursor.fetchall()]
+        except PersistenceError as exc:
+            raise PersistenceError(
+                "Failed to get chat summaries.",
+                operation="get_all_chats_summary",
+                cause=exc,
+            ) from exc
 
     def clear_all_data(self):
         """Deletes all data from the threads and messages tables."""
         logging.warning("Clearing all chat history from the database...")
         try:
-            with self._conn as conn:
+            with self.connect() as conn:
                 conn.execute("DELETE FROM messages")
                 conn.execute("DELETE FROM threads")
                 logging.info("Successfully cleared all chat history from the database.")
-        except sqlite3.Error as e:
-            logging.error(f"An error occurred while clearing the database: {e}")
+        except PersistenceError as exc:
+            raise PersistenceError(
+                "Failed to clear all chat history.",
+                operation="clear_all_data",
+                cause=exc,
+            ) from exc
 
 class VectorDatabaseManager:
     """
@@ -350,7 +522,7 @@ class VectorDatabaseManager:
             with self._conn as conn:
                 conn.execute(
                     "INSERT INTO vectors (text_content, vector_blob, metadata, timestamp) VALUES (?, ?, ?, ?)",
-                    (text, vector_blob, json.dumps(metadata) if metadata else None, datetime.utcnow().isoformat())
+                    (text, vector_blob, json.dumps(metadata) if metadata else None, _utc_now().isoformat())
                 )
         except Exception as e:
             logging.error(f"Failed to store embedding: {e}")
@@ -428,11 +600,20 @@ class VectorDatabaseManager:
 
 class PermanentMemoryManager:
     """Manages the persistence of long-term 'memory nuggets' for the AI."""
-    def __init__(self):
-        """Initializes the manager and loads existing memos from disk."""
+    def __init__(self, memory_file_path: str | None = None):
+        """Initialize the manager and recover from a valid backup when needed."""
         app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.memory_file_path = os.path.join(app_data_path, "memory_bank.json")
+        self.memory_file_path = memory_file_path or os.path.join(app_data_path, "memory_bank.json")
+        self.backup_file_path = f"{self.memory_file_path}.bak"
         self.memos = self._load_memos()
+
+    @staticmethod
+    def _validate_memo_data(data: object) -> list[str]:
+        if not isinstance(data, dict) or not isinstance(data.get('memos'), list):
+            raise ValueError("memory file must contain a memos list")
+        if not all(isinstance(memo, str) for memo in data['memos']):
+            raise ValueError("memory entries must be strings")
+        return list(data['memos'])
 
     def _load_memos(self) -> list[str]:
         """
@@ -441,23 +622,50 @@ class PermanentMemoryManager:
         Returns:
             A list of memo strings, or an empty list if the file doesn't exist or is corrupt.
         """
-        if not os.path.exists(self.memory_file_path):
-            return []
-        try:
-            with open(self.memory_file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get('memos', [])
-        except (json.JSONDecodeError, Exception) as e:
-            logging.error(f"Failed to load or parse permanent memory file: {e}")
-            return []
-            
+        for candidate in (self.memory_file_path, self.backup_file_path):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, 'r', encoding='utf-8') as stream:
+                    return self._validate_memo_data(json.load(stream))
+            except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+                logging.error("Failed to load permanent memory file %s: %s", candidate, exc)
+        return []
+
     def _save_memos(self):
-        """Saves the current list of memos to the JSON file."""
+        """Validate and atomically replace the memory file, retaining a backup."""
+        directory = os.path.dirname(os.path.abspath(self.memory_file_path))
+        os.makedirs(directory, exist_ok=True)
+        temporary_path = None
         try:
-            with open(self.memory_file_path, 'w', encoding='utf-8') as f:
-                json.dump({'memos': self.memos}, f, indent=2)
-        except Exception as e:
-            logging.error(f"Failed to save permanent memory file: {e}")
+            fd, temporary_path = tempfile.mkstemp(
+                prefix=f"{os.path.basename(self.memory_file_path)}.",
+                suffix='.tmp',
+                dir=directory,
+            )
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump({'memos': self._validate_memo_data({'memos': self.memos})}, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+
+            with open(temporary_path, 'r', encoding='utf-8') as stream:
+                self._validate_memo_data(json.load(stream))
+            if os.path.exists(self.memory_file_path):
+                shutil.copy2(self.memory_file_path, self.backup_file_path)
+            os.replace(temporary_path, self.memory_file_path)
+            temporary_path = None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PersistenceError(
+                "Failed to save permanent memory atomically.",
+                operation="save_permanent_memory",
+                cause=exc,
+            ) from exc
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    logging.warning("Could not remove temporary memory file %s.", temporary_path)
 
     def get_memos(self) -> list[str]:
         """
@@ -466,7 +674,7 @@ class PermanentMemoryManager:
         Returns:
             A list of memo strings.
         """
-        return self.memos
+        return list(self.memos)
 
     def add_memo(self, memo_text: str):
         """
@@ -476,8 +684,13 @@ class PermanentMemoryManager:
             memo_text (str): The fact to be remembered.
         """
         if memo_text not in self.memos:
+            previous_memos = list(self.memos)
             self.memos.append(memo_text)
-            self._save_memos()
+            try:
+                self._save_memos()
+            except PersistenceError:
+                self.memos = previous_memos
+                raise
 
     def update_memos(self, memos: list[str]):
         """
@@ -487,14 +700,24 @@ class PermanentMemoryManager:
             memos (list[str]): The new, complete list of memos.
         """
         # Filter out any empty strings that might have come from the UI.
+        previous_memos = list(self.memos)
         self.memos = [memo for memo in memos if memo]
-        self._save_memos()
+        try:
+            self._save_memos()
+        except PersistenceError:
+            self.memos = previous_memos
+            raise
         logging.info(f"Permanent memory updated with {len(self.memos)} memos.")
 
     def clear_memos(self):
         """Clears all memos from the list and saves the empty list to disk."""
+        previous_memos = list(self.memos)
         self.memos.clear()
-        self._save_memos()
+        try:
+            self._save_memos()
+        except PersistenceError:
+            self.memos = previous_memos
+            raise
 
 
 class ShortTermMemory:

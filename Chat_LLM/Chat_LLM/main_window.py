@@ -31,6 +31,7 @@ from ui_chat_elements import SuggestionBubble
 from ui_dialogs import SettingsDialog
 from generation_types import ConnectionResult, GenerationResult
 from query_worker import GenerationJobController
+from memory import PersistenceError
 
 class MainWindow(QMainWindow):
     """
@@ -561,15 +562,21 @@ class MainWindow(QMainWindow):
             
         is_new_chat = self.orchestrator.active_thread_title == "New Chat"
 
+        try:
+            self.orchestrator.commit_user_message(active_thread_id, user_input)
+        except PersistenceError as exc:
+            logging.error("Could not persist user message: %s", exc)
+            QMessageBox.warning(self, "Message not saved", "The message could not be saved. Please try again.")
+            return
+
         if is_new_chat:
             temp_title = user_input[:40] + '...' if len(user_input) > 40 else user_input
             self.add_history_item({'id': active_thread_id, 'title': temp_title}, at_top=True)
             self.update_active_chat_in_ui(active_thread_id)
             chat_history_for_title = f"User: {user_input}"
             self.orchestrator.generate_title_async(active_thread_id, chat_history_for_title, self.on_title_generated)
-        
+
         self.append_message('user', "You", user_input)
-        self.orchestrator.commit_user_message(active_thread_id, user_input)
         
         self.input_field.clear()
         
@@ -620,7 +627,12 @@ class MainWindow(QMainWindow):
         if message_index == -1:
             return
             
-        new_thread_id = self.orchestrator.fork_chat_thread(active_thread_id, message_index)
+        try:
+            new_thread_id = self.orchestrator.fork_chat_thread(active_thread_id, message_index)
+        except PersistenceError as exc:
+            logging.error("Could not fork chat %s: %s", active_thread_id, exc)
+            QMessageBox.warning(self, "Chat not forked", "The chat could not be forked. Please try again.")
+            return
 
         if new_thread_id:
             self.populate_chat_history()
@@ -644,7 +656,11 @@ class MainWindow(QMainWindow):
         return True
 
     def on_title_generated(self, new_title: str, thread_id: str):
-        self.orchestrator.rename_chat_thread(thread_id, new_title)
+        try:
+            self.orchestrator.rename_chat_thread(thread_id, new_title)
+        except PersistenceError as exc:
+            logging.error("Could not persist generated title for %s: %s", thread_id, exc)
+            return
         history_item = self.history_item_widgets.get(thread_id)
         if history_item:
             history_item.set_title(new_title)
@@ -677,7 +693,17 @@ class MainWindow(QMainWindow):
                 loading_widget.deleteLater()
 
             if result.success:
-                self.orchestrator.commit_assistant_message(thread_id, result.response, result.thoughts)
+                try:
+                    self.orchestrator.commit_assistant_message(thread_id, result.response or "", result.thoughts)
+                except PersistenceError as exc:
+                    logging.error("Could not persist assistant response: %s", exc)
+                    self.append_message(
+                        'system',
+                        "System",
+                        "The response was generated but could not be saved. Please try again.",
+                    )
+                    self.set_chat_ui_for_processing(False)
+                    return
                 self.append_message(
                     'assistant',
                     "AI Assistant",
@@ -889,7 +915,12 @@ class MainWindow(QMainWindow):
         dialog = ConfirmDeleteDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             was_active = self.orchestrator.get_active_thread_id() == thread_id
-            self.orchestrator.delete_chat_thread(thread_id)
+            try:
+                self.orchestrator.delete_chat_thread(thread_id)
+            except PersistenceError as exc:
+                logging.error("Could not delete chat %s: %s", thread_id, exc)
+                QMessageBox.warning(self, "Chat not deleted", "The chat could not be deleted. Please try again.")
+                return
             if thread_id in self.history_item_widgets:
                 self.history_item_widgets[thread_id].deleteLater()
                 del self.history_item_widgets[thread_id]
@@ -910,7 +941,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_title = dialog.get_new_title()
             if new_title and new_title != current_title:
-                self.orchestrator.rename_chat_thread(thread_id, new_title)
+                try:
+                    self.orchestrator.rename_chat_thread(thread_id, new_title)
+                except PersistenceError as exc:
+                    logging.error("Could not rename chat %s: %s", thread_id, exc)
+                    QMessageBox.warning(self, "Chat not renamed", "The chat could not be renamed. Please try again.")
+                    return
                 widget.set_title(new_title)
 
     def on_show_context_menu(self, thread_id: str, global_pos: QPoint):
@@ -939,7 +975,12 @@ class MainWindow(QMainWindow):
             self.perform_full_history_clear()
 
     def perform_full_history_clear(self):
-        self.orchestrator.clear_all_chat_history()
+        try:
+            self.orchestrator.clear_all_chat_history()
+        except PersistenceError as exc:
+            logging.error("Could not clear chat history: %s", exc)
+            QMessageBox.warning(self, "History not cleared", "Chat history could not be cleared. Please try again.")
+            return
         self.populate_chat_history()
         self.on_new_chat()
 
