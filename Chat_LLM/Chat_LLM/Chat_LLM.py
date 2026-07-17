@@ -14,16 +14,16 @@ import sys
 import logging
 import uuid
 import os
-import time
 import ctypes
 import re
 import urllib.request
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog
-from PySide6.QtCore import QThread, Signal, QObject, QSettings, QTimer
+from PySide6.QtCore import QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QIcon
 from main_window import MainWindow
 from synthesis_agent import SynthesisAgent
 from memory import MemoryManager, DatabaseManager, PermanentMemoryManager, VectorDatabaseManager
+from generation_types import ConnectionResult, GenerationSnapshot
 from utils import get_asset_path, LANGUAGES
 from splash_screen import SplashScreen
 from ui_styles import FOCUSED_LIGHT_STYLESHEET, FOCUSED_DARK_STYLESHEET
@@ -78,57 +78,6 @@ CONFIG = {
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-class QueryWorker(QObject):
-    """
-    Worker thread for processing a user query to prevent UI hanging.
-    
-    This worker simulates a multi-stage process and then calls the orchestrator
-    to get a response from the AI. It emits signals to update the UI with its
-    progress and the final result.
-
-    Attributes:
-        orchestrator (Orchestrator): Reference to the main application orchestrator.
-        user_input (str): The user query to process.
-        thread_id (str): The ID of the chat thread this query belongs to.
-    """
-    status_updated = Signal(str)
-    finished = Signal(tuple, str) # Emits result tuple AND the thread_id it was for
-
-    orchestrator: 'Orchestrator'
-    user_input: str
-    thread_id: str
-
-    def run(self):
-        """
-        Executes the long-running query processing with timed status updates.
-        
-        The process involves emitting several status updates to simulate work,
-        followed by the actual synchronous call to the orchestrator to process
-        the query. The final result or an error is emitted via the `finished` signal.
-        """
-        try:
-            # Simulate initial processing stages for better UX.
-            status_updates = [
-                "Analyzing the request...",
-                "Gathering thoughts...",
-            ]
-
-            for update_text in status_updates:
-                time.sleep(1.0)
-                self.status_updated.emit(update_text)
-
-            self.status_updated.emit("START_FINAL_ANIMATION")
-            
-            # Perform the actual synchronous generation.
-            ai_response, _, thoughts = self.orchestrator.process_query_sync(
-                self.user_input, self.thread_id, self.status_updated
-            )
-            self.finished.emit((ai_response, None, thoughts), self.thread_id)
-        except Exception as e:
-            error_message = f"An error occurred during query processing: {e}"
-            logging.error(error_message, exc_info=True)
-            self.finished.emit((error_message, None, None), self.thread_id)
 
 class TitleGenerationWorker(QObject):
     """
@@ -198,7 +147,7 @@ class ConnectionWorker(QObject):
     Attributes:
         orchestrator (Orchestrator): Reference to the main orchestrator to access its methods.
     """
-    finished = Signal(bool, str) # Emits success status and a message
+    finished = Signal(object) # Emits ConnectionResult
     orchestrator: 'Orchestrator'
 
     def run(self):
@@ -206,12 +155,16 @@ class ConnectionWorker(QObject):
         Performs the synchronous connection and model check, then emits the result.
         """
         try:
-            self.orchestrator.check_ollama_models_sync()
-            self.finished.emit(True, "Successfully connected to Ollama and verified models.")
+            result = self.orchestrator.check_ollama_models_sync()
+            self.finished.emit(result)
         except Exception as e:
-            error_message = f"Connection failed: {e}"
             logging.error(f"Failed to connect or pull Ollama models. Error: {e}", exc_info=False)
-            self.finished.emit(False, str(e))
+            self.finished.emit(
+                ConnectionResult.failed(
+                    "Could not connect to Ollama. Make sure Ollama is running and try again.",
+                    details=str(e),
+                )
+            )
 
 class UpdateCheckWorker(QObject):
     """Worker for checking for an application update without freezing the UI."""
@@ -279,6 +232,7 @@ class Orchestrator:
         self.title_worker = None
         self.suggestion_thread = None
         self.suggestion_worker = None
+        self._tracked_threads: list[QThread] = []
         self.active_thread_id = None
         self.active_thread_title = "New Chat"
         self.update_check_status = "checking" # Can be 'checking', 'available', 'up_to_date', 'error'
@@ -433,6 +387,7 @@ class Orchestrator:
             callback (callable): The function to call with the result (new_title, thread_id).
         """
         self.title_thread = QThread()
+        self._tracked_threads.append(self.title_thread)
         self.title_worker = TitleGenerationWorker()
         self.title_worker.synthesis_agent = self.synthesis_agent
         self.title_worker.chat_history = chat_history
@@ -458,6 +413,7 @@ class Orchestrator:
         self.abort_current_suggestions()
 
         self.suggestion_thread = QThread()
+        self._tracked_threads.append(self.suggestion_thread)
         self.suggestion_worker = SuggestionWorker()
         self.suggestion_worker.synthesis_agent = self.synthesis_agent
         self.suggestion_worker.chat_history = chat_history
@@ -509,31 +465,66 @@ class Orchestrator:
             self.suggestion_thread = None
             self.suggestion_worker = None
 
-    def check_ollama_models_sync(self):
-        """
-        Synchronous method to check for required models and pull them if missing.
-        This method is designed to be called from a worker thread.
-        """
-        logging.info("Attempting to connect to Ollama and verify models...")
-        local_models_response = self.ollama_client.list().get('models', [])
-        # Extract just the base model names (e.g., 'qwen3' from 'qwen3:8B').
-        local_models = [m.get('name', '').split(':')[0] for m in local_models_response]
-        
-        # Only enforce the generator and title models on startup to prevent blocking for optional translation.
-        required_map = {
-            self.config['gen_model'].split(':')[0]: self.config['gen_model'],
-            self.config['title_model'].split(':')[0]: self.config['title_model'],
-            self.config['embedding_model'].split(':')[0]: self.config['embedding_model'],
-            # The translation model is optional and should not block application startup.
-        }
+    @staticmethod
+    def _extract_model_tags(response) -> set[str]:
+        """Return exact Ollama model tags from old and current client responses."""
+        if isinstance(response, dict):
+            entries = response.get('models', [])
+        else:
+            entries = getattr(response, 'models', [])
 
-        for base_name, full_name in required_map.items():
-            if base_name not in local_models:
-                logging.warning(f"Model '{base_name}' not found locally. Attempting to pull '{full_name}'...")
-                # This is a blocking call, which is why it's in a worker.
-                self.ollama_client.pull(full_name)
-                logging.info(f"Successfully pulled '{full_name}'.")
-        logging.info("All required models are available.")
+        tags = set()
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                tag = entry.get('name') or entry.get('model')
+            else:
+                tag = getattr(entry, 'model', None) or getattr(entry, 'name', None)
+            if tag:
+                tags.add(str(tag).strip())
+        return tags
+
+    def check_ollama_models_sync(self) -> ConnectionResult:
+        """Check Ollama and pull only the exact required model tags."""
+        logging.info("Attempting to connect to Ollama and verify required models...")
+        local_models = self._extract_model_tags(self.ollama_client.list())
+
+        required_models = tuple(dict.fromkeys((
+            self.config['gen_model'],
+            self.config['title_model'],
+        )))
+        missing_models = tuple(model for model in required_models if model not in local_models)
+
+        for model in missing_models:
+            logging.info("Required model tag '%s' is not installed; pulling that exact tag.", model)
+            self.ollama_client.pull(model)
+
+        if missing_models:
+            local_models = self._extract_model_tags(self.ollama_client.list())
+        still_missing = tuple(model for model in required_models if model not in local_models)
+        if still_missing:
+            raise RuntimeError(
+                "Ollama did not report the required model tags after pulling: "
+                + ", ".join(still_missing)
+            )
+
+        optional_models = []
+        if self.translation_enabled:
+            optional_models.append(self.config['translation_model'])
+        if self.suggestions_enabled and self.suggestions_model not in required_models:
+            optional_models.append(self.suggestions_model)
+        optional_missing = tuple(dict.fromkeys(
+            model for model in optional_models if model and model not in local_models
+        ))
+
+        message = "Connected to Ollama and verified the required model tags."
+        if optional_missing:
+            message += " Optional models unavailable: " + ", ".join(optional_missing)
+        logging.info(message)
+        return ConnectionResult.connected(
+            message,
+            missing_models=missing_models,
+            optional_missing_models=optional_missing,
+        )
 
     def check_connection_async(self, finished_callback: callable):
         """
@@ -542,7 +533,15 @@ class Orchestrator:
         Args:
             finished_callback (callable): The function to call upon completion.
         """
+        try:
+            if self.connection_thread and self.connection_thread.isRunning():
+                logging.info("Connection check already in progress.")
+                return False
+        except RuntimeError:
+            self.connection_thread = None
+
         self.connection_thread = QThread()
+        self._tracked_threads.append(self.connection_thread)
         self.connection_worker = ConnectionWorker()
         self.connection_worker.orchestrator = self
         self.connection_worker.moveToThread(self.connection_thread)
@@ -554,6 +553,53 @@ class Orchestrator:
         self.connection_thread.finished.connect(self.connection_thread.deleteLater)
 
         self.connection_thread.start()
+        return True
+
+    @staticmethod
+    def _stop_thread(thread: QThread | None, name: str, timeout_ms: int = 3000) -> None:
+        """Request a worker thread to stop and wait for its event loop to exit."""
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                if not thread.wait(timeout_ms):
+                    logging.warning("%s did not stop within %sms.", name, timeout_ms)
+        except RuntimeError:
+            logging.debug("%s had already been deleted during shutdown.", name)
+
+    def shutdown(self) -> None:
+        """Stop auxiliary workers owned by the orchestrator."""
+        threads = list(getattr(self, '_tracked_threads', []))
+        threads.extend(
+            getattr(self, attribute, None)
+            for attribute in (
+                'connection_thread',
+                'title_thread',
+                'suggestion_thread',
+                'update_thread',
+            )
+        )
+        seen = set()
+        for index, thread in enumerate(threads):
+            if thread is None or id(thread) in seen:
+                continue
+            seen.add(id(thread))
+            self._stop_thread(thread, f"auxiliary worker {index}")
+
+        for attribute in (
+            'connection_thread',
+            'title_thread',
+            'suggestion_thread',
+            'update_thread',
+        ):
+            setattr(self, attribute, None)
+        self._tracked_threads.clear()
+        self.connection_worker = None
+        self.title_worker = None
+        self.suggestion_worker = None
+        self.update_worker = None
 
     def on_update_check_finished(self, status: str):
         """Slot to receive the result from the UpdateCheckWorker."""
@@ -562,6 +608,7 @@ class Orchestrator:
     def check_for_updates_async(self):
         """Initiates the application update check in a background thread."""
         self.update_thread = QThread()
+        self._tracked_threads.append(self.update_thread)
         self.update_worker = UpdateCheckWorker()
         self.update_worker.current_version = self.config['current_version']
         self.update_worker.update_url = self.config['update_url']
@@ -641,7 +688,32 @@ class Orchestrator:
         )
         logging.info(f"Saved AI response for thread {thread_id} to database.")
 
-    def process_query_sync(self, user_input: str, thread_id: str, status_signal: Signal = None) -> tuple[str, str | None, str | None]:
+    def create_generation_snapshot(self, user_input: str, thread_id: str) -> GenerationSnapshot:
+        """Capture all mutable generation inputs before starting a worker."""
+        return GenerationSnapshot(
+            job_id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            user_input=user_input,
+            model=self.config['gen_model'],
+            title_model=self.config['title_model'],
+            translation_model=self.config['translation_model'],
+            model_options={
+                'temperature': self.config['temperature'],
+                'num_ctx': self.config['num_ctx'],
+                'seed': self.config['seed'],
+            },
+            memories_enabled=self.memories_enabled,
+            translation_enabled=self.translation_enabled,
+            target_language=self.target_language,
+            user_system_instructions=self.user_system_instructions,
+        )
+
+    def process_query_sync(
+        self,
+        snapshot_or_user_input: GenerationSnapshot | str,
+        thread_id: str | None = None,
+        status_signal: Signal = None,
+    ) -> tuple[str, str | None, str | None]:
         """
         Generates an AI response for a specific thread, including optional translation.
 
@@ -649,17 +721,26 @@ class Orchestrator:
         calling the synthesis agent, and then potentially chaining through the translation layer.
 
         Args:
-            user_input (str): The user's message.
-            thread_id (str): The ID of the chat thread to process.
+            snapshot_or_user_input: Immutable generation snapshot, or the legacy user input string.
+            thread_id (str, optional): Thread ID when using the legacy string form.
             status_signal (Signal, optional): Signal to emit status updates to the UI.
 
         Returns:
             A tuple containing (response, sources, thoughts).
         """
-        logging.info(f"--- Generating response for thread {thread_id}: '{user_input}' ---")
-        
+        if isinstance(snapshot_or_user_input, GenerationSnapshot):
+            snapshot = snapshot_or_user_input
+        else:
+            if not thread_id:
+                raise ValueError("thread_id is required when processing a raw user input")
+            snapshot = self.create_generation_snapshot(snapshot_or_user_input, thread_id)
+
+        user_input = snapshot.user_input
+        thread_id = snapshot.thread_id
+        logging.info("Starting response generation for thread %s.", thread_id)
+
         is_active_thread = (thread_id == self.active_thread_id)
-        
+
         # Get the appropriate chat history.
         if is_active_thread:
             chat_history = self.memory_manager.get_formatted_history(exclude_last_user_message=True)
@@ -671,26 +752,30 @@ class Orchestrator:
                 temp_memory.load_from_history(chat_data.get('messages', []))
             chat_history = temp_memory.get_formatted_history(exclude_last_user_message=True)
         
-        permanent_memos = self.permanent_memory_manager.get_memos() if self.memories_enabled else []
-        
-        model_options = {
-            'temperature': self.config['temperature'],
-            'num_ctx': self.config['num_ctx'],
-            'seed': self.config['seed'],
-        }
+        permanent_memos = (
+            self.permanent_memory_manager.get_memos()
+            if snapshot.memories_enabled else []
+        )
+
+        generation_agent = SynthesisAgent(
+            gen_model=snapshot.model,
+            title_model=snapshot.title_model,
+            translation_model=snapshot.translation_model,
+            ollama_client=self.ollama_client,
+        )
 
         # 1. Generate the main response from the AI.
-        response, thoughts, commands = self.synthesis_agent.generate(
+        response, thoughts, commands = generation_agent.generate(
             query=user_input,
             chat_history=chat_history,
             permanent_memories=permanent_memos,
-            memories_enabled=self.memories_enabled,
-            user_system_instructions=self.user_system_instructions,
-            options=model_options
+            memories_enabled=snapshot.memories_enabled,
+            user_system_instructions=snapshot.user_system_instructions,
+            options=dict(snapshot.model_options),
         )
         
         # Process any special commands returned by the model.
-        if self.memories_enabled:
+        if snapshot.memories_enabled:
             if commands.get('clear_memory', False):
                 self.permanent_memory_manager.clear_memos()
                 logging.info("AI triggered a permanent memory wipe.")
@@ -700,14 +785,17 @@ class Orchestrator:
 
         # 2. PROMPT CHAINING: Translation Layer
         # If translation is enabled, take the main response and run it through the translation model.
-        if self.translation_enabled:
+        if snapshot.translation_enabled:
             if status_signal:
-                status_signal.emit(f"Translating to {self.target_language}...")
-            
-            # Note: We do NOT translate the 'thoughts' (reasoning), only the final output.
-            response = self.synthesis_agent.translate_text(response, self.target_language)
+                try:
+                    status_signal.emit(f"Translating to {snapshot.target_language}...", snapshot.job_id)
+                except TypeError:
+                    status_signal.emit(f"Translating to {snapshot.target_language}...")
 
-        logging.info(f"--- Response generation for thread {thread_id} finished ---")
+            # Note: We do NOT translate the 'thoughts' (reasoning), only the final output.
+            response = generation_agent.translate_text(response, snapshot.target_language)
+
+        logging.info("Response generation finished for thread %s.", thread_id)
         return response, None, thoughts
 
     def start_new_chat(self):
