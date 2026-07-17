@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QMessageBox,
     QDialog, QFrame, QScrollArea, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, QThread, QObject, QEvent, QSettings, QPoint, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QObject, QEvent, QSettings, QPoint, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import (
     QKeySequence, QShortcut
 )
@@ -29,6 +29,8 @@ from ui_widgets import (
 )
 from ui_chat_elements import SuggestionBubble
 from ui_dialogs import SettingsDialog
+from generation_types import ConnectionResult, GenerationResult
+from query_worker import GenerationJobController
 
 class MainWindow(QMainWindow):
     """
@@ -58,14 +60,17 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.current_theme = "light"
-        self.query_thread = None
-        self.query_worker = None
+        self.generation_controller = GenerationJobController(self.orchestrator)
+        self.generation_controller.status_updated.connect(self.on_status_update)
+        self.generation_controller.finished.connect(self.on_query_finished)
+        self.generation_controller.active_changed.connect(self.on_generation_activity_changed)
         self.history_item_widgets = {}  # Maps thread_id to ChatHistoryItemWidget
         self.loading_widgets = {}       # Maps thread_id to an active loading ChatMessageWidget
         self.last_ai_message_widget = None # Tracks the most recent AI message for regeneration
         
-        # Default to connected since we assume local instance is running
-        self.connection_status = ("connected", "Local Engine Ready")
+        self.connection_status = ("connecting", "Checking Ollama...")
+        self.connection_ready = False
+        self._closing = False
         
         # Stack tracks open dialogs to manage dimming correctly.
         self.dialog_stack = []
@@ -98,7 +103,7 @@ class MainWindow(QMainWindow):
         self.title_bar.sidebar_toggled.connect(self.toggle_sidebar)
         
         # Initialize the status indicator immediately
-        self.title_bar.set_connection_status("connected")
+        self.title_bar.set_connection_status("connecting")
         self.main_layout.addWidget(self.title_bar)
         
         content_layout = QHBoxLayout()
@@ -503,9 +508,32 @@ class MainWindow(QMainWindow):
         self.append_message('system', 'System', f"Permanent memory has been {status_msg}.")
 
     def start_connection_check(self):
-        self.set_connection_status("connected", "Local Engine Ready")
-        self.populate_chat_history()
-        self.on_new_chat()
+        if self._closing:
+            return
+        self.connection_ready = False
+        self.set_connection_status("connecting", "Checking Ollama...")
+        self.set_ui_enabled(False)
+        self.orchestrator.check_connection_async(self.on_connection_check_finished)
+
+    def on_connection_check_finished(self, result: ConnectionResult):
+        """Apply the typed connection result and unlock chat only on success."""
+        if self._closing:
+            return
+
+        if not isinstance(result, ConnectionResult):
+            logging.error("Ignoring malformed connection result: %r", result)
+            self.set_connection_status("error", "Unable to verify Ollama connection.")
+            self.set_ui_enabled(False)
+            return
+
+        self.set_connection_status(result.status, result.message)
+        self.connection_ready = result.success
+        if result.success:
+            self.populate_chat_history()
+            self.on_new_chat()
+            self.set_ui_enabled(True)
+        else:
+            self.set_ui_enabled(False)
 
     def start_update_check(self):
         self.orchestrator.check_for_updates_async()
@@ -515,6 +543,8 @@ class MainWindow(QMainWindow):
         self.title_bar.set_connection_status(status)
 
     def on_send(self):
+        if not self.connection_ready or self.generation_controller.is_active():
+            return
         user_input = self.input_field.text().strip()
         if not user_input: return
         
@@ -546,6 +576,8 @@ class MainWindow(QMainWindow):
         self._execute_query_worker(user_input, active_thread_id)
 
     def on_regenerate_response(self, instructions=""):
+        if not self.connection_ready or self.generation_controller.is_active():
+            return
         active_thread_id = self.orchestrator.get_active_thread_id()
         if not active_thread_id or not self.last_ai_message_widget:
             return
@@ -572,6 +604,8 @@ class MainWindow(QMainWindow):
         self._execute_query_worker(user_prompt_for_regen, active_thread_id)
 
     def on_fork_chat_requested(self, message_widget: ChatMessageWidget):
+        if not self.connection_ready or self.generation_controller.is_active():
+            return
         active_thread_id = self.orchestrator.get_active_thread_id()
         if not active_thread_id:
             return
@@ -593,26 +627,21 @@ class MainWindow(QMainWindow):
             self.on_load_chat(new_thread_id)
 
     def _execute_query_worker(self, user_input: str, thread_id: str):
+        if self.generation_controller.is_active():
+            logging.warning("Rejected interactive generation while another job is active.")
+            return False
+
+        snapshot = self.orchestrator.create_generation_snapshot(user_input, thread_id)
         loading_widget = self.append_message('loading', "AI Assistant", "Thinking...")
         self.loading_widgets[thread_id] = loading_widget
-        
-        self.set_chat_ui_for_processing(True)
 
-        from Chat_LLM import QueryWorker
-        self.query_thread = QThread()
-        self.query_worker = QueryWorker()
-        self.query_worker.orchestrator = self.orchestrator
-        self.query_worker.user_input = user_input
-        self.query_worker.thread_id = thread_id
-        self.query_worker.moveToThread(self.query_thread)
-        
-        self.query_worker.status_updated.connect(self.on_status_update)
-        self.query_thread.started.connect(self.query_worker.run)
-        self.query_worker.finished.connect(self.on_query_finished)
-        self.query_worker.finished.connect(self.query_thread.quit)
-        self.query_worker.finished.connect(self.query_worker.deleteLater)
-        self.query_thread.finished.connect(self.query_thread.deleteLater)
-        self.query_thread.start()
+        self.set_chat_ui_for_processing(True)
+        if not self.generation_controller.start(snapshot):
+            self.loading_widgets.pop(thread_id, None)
+            loading_widget.deleteLater()
+            self.set_chat_ui_for_processing(False)
+            return False
+        return True
 
     def on_title_generated(self, new_title: str, thread_id: str):
         self.orchestrator.rename_chat_thread(thread_id, new_title)
@@ -620,7 +649,9 @@ class MainWindow(QMainWindow):
         if history_item:
             history_item.set_title(new_title)
 
-    def on_status_update(self, status_text: str):
+    def on_status_update(self, status_text: str, job_id: str):
+        if job_id != self.generation_controller.active_job_id:
+            return
         active_thread_id = self.orchestrator.get_active_thread_id()
         loading_widget = self.loading_widgets.get(active_thread_id)
         
@@ -630,7 +661,12 @@ class MainWindow(QMainWindow):
             else:
                 loading_widget.update_text(status_text)
 
-    def on_query_finished(self, result, thread_id):
+    def on_query_finished(self, result: GenerationResult):
+        if not isinstance(result, GenerationResult) or not self.generation_controller.accepts(result):
+            logging.warning("Ignoring stale or malformed generation callback: %r", result)
+            return
+
+        thread_id = result.thread_id
         is_for_active_chat = (thread_id == self.orchestrator.get_active_thread_id())
         
         loading_widget = self.loading_widgets.pop(thread_id, None)
@@ -640,14 +676,24 @@ class MainWindow(QMainWindow):
                 loading_widget.stop_animation()
                 loading_widget.deleteLater()
 
-            ai_response, _, thoughts = result
-            
-            self.orchestrator.commit_assistant_message(thread_id, ai_response, thoughts)
-            
-            self.append_message('assistant', "AI Assistant", ai_response, sources=None, thoughts=thoughts)
+            if result.success:
+                self.orchestrator.commit_assistant_message(thread_id, result.response, result.thoughts)
+                self.append_message(
+                    'assistant',
+                    "AI Assistant",
+                    result.response or "",
+                    sources=None,
+                    thoughts=result.thoughts,
+                )
+            else:
+                self.append_message(
+                    'system',
+                    "System",
+                    result.error or "Generation failed. Please try again.",
+                )
             self.set_chat_ui_for_processing(False)
 
-            if self.orchestrator.suggestions_enabled:
+            if result.success and self.orchestrator.suggestions_enabled:
                 self.show_suggestion_loading_state()
                 chat_history = self.orchestrator.memory_manager.get_formatted_history()
                 self.orchestrator.generate_suggestions_async(thread_id, chat_history, self.display_suggestions)
@@ -655,8 +701,6 @@ class MainWindow(QMainWindow):
         else:
             print(f"Handled finished query for background thread: {thread_id}")
         
-        self.query_thread = None
-        self.query_worker = None
 
     def show_suggestion_loading_state(self):
         self.clear_suggestions()
@@ -702,7 +746,7 @@ class MainWindow(QMainWindow):
         self.on_send()
 
     def set_chat_ui_for_processing(self, is_processing: bool):
-        if is_processing:
+        if is_processing or not self.connection_ready or self.generation_controller.is_active():
             self.input_field.setEnabled(False)
             self.send_button.setEnabled(False)
             self.send_button.setText("...")
@@ -711,6 +755,14 @@ class MainWindow(QMainWindow):
             self.send_button.setEnabled(True)
             self.send_button.setText("Send")
             self.input_field.setFocus()
+        navigation_enabled = (
+            not is_processing
+            and self.connection_ready
+            and not self.generation_controller.is_active()
+        )
+        self.new_chat_button.setEnabled(navigation_enabled)
+        for widget in self.history_item_widgets.values():
+            widget.setEnabled(navigation_enabled)
 
     def clear_chat_messages(self):
         self.last_ai_message_widget = None
@@ -755,11 +807,20 @@ class MainWindow(QMainWindow):
         return message_widget
 
     def set_ui_enabled(self, enabled: bool):
-        self.input_field.setEnabled(enabled)
-        self.send_button.setEnabled(enabled)
-        self.new_chat_button.setEnabled(enabled)
+        is_enabled = enabled and self.connection_ready and not self.generation_controller.is_active()
+        self.input_field.setEnabled(is_enabled)
+        self.send_button.setEnabled(is_enabled)
+        self.new_chat_button.setEnabled(is_enabled)
+        for widget in self.history_item_widgets.values():
+            widget.setEnabled(is_enabled)
+
+    def on_generation_activity_changed(self, is_active: bool):
+        """Keep navigation locked until the worker thread has fully exited."""
+        self.set_chat_ui_for_processing(is_active)
 
     def on_new_chat(self):
+        if not self.connection_ready or self.generation_controller.is_active():
+            return
         # Vital: Stop any suggestion processing for previous chat to prevent conflicts.
         self.orchestrator.abort_current_suggestions()
         self.orchestrator.start_new_chat()
@@ -770,6 +831,8 @@ class MainWindow(QMainWindow):
         self.set_chat_ui_for_processing(False)
 
     def on_load_chat(self, thread_id: str):
+        if not self.connection_ready or self.generation_controller.is_active():
+            return
         if self.orchestrator.get_active_thread_id() == thread_id:
             return
             
@@ -812,6 +875,15 @@ class MainWindow(QMainWindow):
             self.set_chat_ui_for_processing(True)
         else:
             self.set_chat_ui_for_processing(False)
+
+    def closeEvent(self, event):
+        """Stop owned workers before Qt destroys the window and its signals."""
+        self._closing = True
+        self.set_ui_enabled(False)
+        self.orchestrator.abort_current_suggestions()
+        self.generation_controller.shutdown()
+        self.orchestrator.shutdown()
+        super().closeEvent(event)
 
     def on_delete_chat(self, thread_id: str):
         dialog = ConfirmDeleteDialog(self)
