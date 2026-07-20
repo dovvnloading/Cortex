@@ -57,6 +57,10 @@ Cortex is organized around three layers:
    - Persistent storage for chat records and permanent memory data.
    - Prompt-building and synthesis logic in the synthesis agent.
 
+The proposed staged migration from the PySide6 interface to a Vite/React
+frontend and local FastAPI backend is governed by the
+[Web Modernization and Qt Retirement Plan](docs/architecture/web-modernization-plan.md).
+
 ## Repository Layout
 
 ```text
