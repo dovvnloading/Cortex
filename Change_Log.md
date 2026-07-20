@@ -1,3 +1,20 @@
+### **Cortex Web Preview: System Parity & Safe Migration**
+
+**Date:** 2026-07-20
+**Version:** Staged web modernization — Stage 5
+
+* The preview web UI now exposes complete validated generation, translation,
+  suggestion, memory, and model settings.
+* Legacy QSettings can be imported once into additive SQLite settings tables;
+  migration status, invalid keys, and the verified database backup are exposed
+  through diagnostics without writing back to the legacy source.
+* Permanent-memory edits and destructive clears are explicit, validated, and
+  covered by browser and API tests.
+* Ollama connectivity, installed model tags, setup guidance, and streamed exact
+  model-pull progress are available in the preview UI.
+
+---
+
 ### **Cortex Remediation: Runtime, Storage, Safety, and Chat Reliability**
 
 **Date:** 2026-07-19

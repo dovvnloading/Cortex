@@ -16,6 +16,7 @@ The project is focused on local-first operation: conversation processing, memory
 - [Repository Layout](#repository-layout)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+- [Preview Web UI](#preview-web-ui)
 - [Configuration and Runtime Behavior](#configuration-and-runtime-behavior)
 - [Data and Persistence](#data-and-persistence)
 - [Troubleshooting](#troubleshooting)
@@ -134,6 +135,27 @@ The startup utility can help install/pull models with a GUI workflow:
 ```bash
 python Cortex_Startup.py
 ```
+
+## Preview Web UI
+
+The staged React/Vite web UI is opt-in while the native Qt launcher remains
+the default. From the repository root, build the frontend once and start the
+local preview backend:
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+python Cortex_Preview.py
+```
+
+Open the printed loopback URL and enter the one-time bootstrap token printed
+by the preview process. The preview exposes validated settings, permanent
+memory management, Ollama connectivity, installed model tags, exact model
+pull progress, diagnostics, and the streamed chat workflow. On the first
+preview settings read, legacy QSettings are imported into additive SQLite
+settings tables; the legacy QSettings source is not rewritten.
 
 ## Configuration and Runtime Behavior
 

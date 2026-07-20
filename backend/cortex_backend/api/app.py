@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -83,6 +84,7 @@ def create_app(
     allowed_hosts: Iterable[str] | None = None,
     serve_frontend: bool = False,
     frontend_dist: Path | None = None,
+    ollama_host: str | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -119,6 +121,10 @@ def create_app(
     app.state.jobs = JobRegistry()
     app.state.preview = preview
     app.state.qt_default = qt_default
+    app.state.ollama_host = ollama_host or os.environ.get(
+        "CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434"
+    )
+    app.state.ollama_setup_url = "https://ollama.com/download"
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=list(allowed),

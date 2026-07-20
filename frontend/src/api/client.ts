@@ -3,6 +3,7 @@ import type {
   ChatResponse,
   ChatSummary,
   CreateChatRequest,
+  DiagnosticsResponse,
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
@@ -10,12 +11,15 @@ import type {
   JobStatusResponse,
   HealthResponse,
   MemoryResponse,
+  ModelPullRequest,
+  ModelResponse,
   RegenerationRequest,
   RenameChatRequest,
   SessionExchangeResponse,
   SettingsResponse,
   SettingsUpdateRequest,
   SystemResponse,
+  SSEEvent,
 } from "../../../contracts/cortex-api";
 
 export class ApiError extends Error {
@@ -200,6 +204,66 @@ export class CortexApi {
     });
   }
 
+  models(): Promise<ModelResponse> {
+    return this.request<ModelResponse>("/models");
+  }
+
+  diagnostics(): Promise<DiagnosticsResponse> {
+    return this.request<DiagnosticsResponse>("/diagnostics");
+  }
+
+  checkModels(): Promise<JobAccepted> {
+    return this.request<JobAccepted>("/jobs/models", { method: "POST" });
+  }
+
+  pullModel(model: string): Promise<JobAccepted> {
+    const payload: ModelPullRequest = { model };
+    return this.request<JobAccepted>("/models/pulls", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  cancelJob(jobId: string): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(
+      `/jobs/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+  }
+
+  async streamJob(
+    jobId: string,
+    onEvent: (event: SSEEvent) => void,
+    options: { signal?: AbortSignal; afterEventId?: number } = {},
+  ): Promise<void> {
+    const headers = this.authHeaders();
+    if (options.afterEventId !== undefined) {
+      headers.set("Last-Event-ID", String(options.afterEventId));
+    }
+    const response = await this.fetcher(
+      `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/events`,
+      { headers, signal: options.signal },
+    );
+    if (!response.ok || !response.body) {
+      throw new ApiError(response.status, await this.errorDetail(response));
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const chunk = await reader.read();
+      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const data = frame.split("\n").filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim()).join("\n");
+        if (data) onEvent(JSON.parse(data) as SSEEvent);
+      }
+      if (chunk.done) break;
+    }
+  }
+
   memories(): Promise<MemoryResponse> {
     return this.request<MemoryResponse>("/memories");
   }
@@ -215,7 +279,14 @@ export class CortexApi {
   async clearMemories(): Promise<MemoryResponse> {
     return this.request<MemoryResponse>("/memories/clear", {
       method: "POST",
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, confirmation_intent: "clear_permanent_memory" }),
+    });
+  }
+
+  replaceMemories(memos: string[]): Promise<MemoryResponse> {
+    return this.request<MemoryResponse>("/memories", {
+      method: "PUT",
+      body: JSON.stringify({ memos }),
     });
   }
 

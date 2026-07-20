@@ -32,6 +32,8 @@ class SystemResponse(APIModel):
     qt_default: bool = True
     session_required: bool = True
     started_at: datetime
+    ollama_host: str = "http://127.0.0.1:11434"
+    ollama_setup_url: str = "https://ollama.com/download"
 
 
 class HealthResponse(APIModel):
@@ -79,10 +81,22 @@ class AddMessageRequest(APIModel):
     thoughts: str | None = Field(default=None, max_length=100_000)
 
 
+class SettingsMigrationReport(APIModel):
+    status: Literal["not_needed", "migrated", "already_migrated", "failed"]
+    source: str
+    migration_key: str | None = None
+    imported_keys: tuple[str, ...] = ()
+    invalid_keys: tuple[str, ...] = ()
+    backup_path: str | None = None
+    message: str | None = None
+
+
 class SettingsResponse(APIModel):
     settings: CortexSettings
     source: str
+    present_keys: tuple[str, ...] = ()
     invalid_keys: tuple[str, ...] = ()
+    migration: SettingsMigrationReport | None = None
 
 
 class SettingsUpdateRequest(APIModel):
@@ -103,6 +117,26 @@ class ReplaceMemoryRequest(APIModel):
 
 class ClearMemoryRequest(APIModel):
     confirm: bool = False
+    confirmation_intent: Literal["clear_permanent_memory"] | None = None
+
+
+class DiagnosticsResponse(APIModel):
+    api_version: Literal["v1"] = "v1"
+    settings_source: str
+    invalid_settings_keys: tuple[str, ...] = ()
+    migration: SettingsMigrationReport | None = None
+    installed_models: tuple[str, ...] = ()
+    required_models: tuple[str, ...] = ()
+    optional_models: tuple[str, ...] = ()
+    connection: ConnectionResult | None = None
+    ollama_host: str
+    ollama_setup_url: str
+
+
+class InstalledModel(APIModel):
+    name: str
+    size: int | None = None
+    modified_at: str | None = None
 
 
 class ModelResponse(APIModel):
@@ -112,6 +146,11 @@ class ModelResponse(APIModel):
     missing_models: tuple[str, ...] = ()
     optional_missing_models: tuple[str, ...] = ()
     connection: ConnectionResult | None = None
+    models: tuple[InstalledModel, ...] = ()
+
+
+class ModelPullRequest(APIModel):
+    model: str = Field(min_length=1, max_length=200)
 
 
 JobKind = Literal["generation", "models"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from cortex_backend.core.settings import CortexSettings
 
@@ -13,11 +13,25 @@ class SettingsRepositoryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class SettingsMigrationReport:
+    """Safe summary of a legacy-settings import or settings-schema read."""
+
+    status: Literal["not_needed", "migrated", "already_migrated", "failed"]
+    source: str
+    migration_key: str | None = None
+    imported_keys: tuple[str, ...] = ()
+    invalid_keys: tuple[str, ...] = ()
+    backup_path: str | None = None
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SettingsReadResult:
     settings: CortexSettings
     source: str
     present_keys: tuple[str, ...] = field(default_factory=tuple)
     invalid_keys: tuple[str, ...] = field(default_factory=tuple)
+    migration: SettingsMigrationReport | None = None
 
 
 @runtime_checkable

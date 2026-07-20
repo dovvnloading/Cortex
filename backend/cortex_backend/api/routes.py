@@ -23,6 +23,8 @@ from cortex_backend.services.chat import (
 )
 from cortex_backend.core.settings import CortexSettings
 from cortex_backend.repositories.chats import ChatRepositoryError
+from cortex_backend.repositories.settings import SettingsMigrationReport
+from cortex_backend.services.models import ModelPullProgress
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import JobConflict, JobNotFound, JobOwnershipError, JobSnapshot
@@ -33,6 +35,7 @@ from .schemas import (
     ChatSummary,
     ClearMemoryRequest,
     CreateChatRequest,
+    DiagnosticsResponse,
     ForkRequest,
     GenerationEvent,
     GenerationRequest,
@@ -41,12 +44,15 @@ from .schemas import (
     JobAccepted,
     JobStatusResponse,
     MemoryResponse,
+    ModelPullRequest,
     ModelResponse,
+    InstalledModel,
     RenameChatRequest,
     ReplaceMemoryRequest,
     SessionExchangeRequest,
     SessionExchangeResponse,
     SettingsResponse,
+    SettingsMigrationReport as SettingsMigrationReportResponse,
     SettingsUpdateRequest,
     SSEEvent,
     SystemResponse,
@@ -95,6 +101,29 @@ def build_router() -> APIRouter:
             preview=request.app.state.preview,
             qt_default=request.app.state.qt_default,
             started_at=request.app.state.started_at,
+            ollama_host=request.app.state.ollama_host,
+            ollama_setup_url=request.app.state.ollama_setup_url,
+        )
+
+    @router.get("/diagnostics", response_model=DiagnosticsResponse)
+    def diagnostics(
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> DiagnosticsResponse:
+        settings = _load_settings_result(deps)
+        required, optional = _model_sets(settings.settings)
+        installed = deps.models.list_installed()
+        return DiagnosticsResponse(
+            settings_source=settings.source,
+            invalid_settings_keys=settings.invalid_keys,
+            migration=_migration_response(settings.migration),
+            installed_models=installed,
+            required_models=required,
+            optional_models=optional,
+            connection=deps.models.probe(),
+            ollama_host=request.app.state.ollama_host,
+            ollama_setup_url=request.app.state.ollama_setup_url,
         )
 
     @router.get("/chats", response_model=list[ChatSummary])
@@ -212,7 +241,9 @@ def build_router() -> APIRouter:
         return SettingsResponse(
             settings=loaded.settings,
             source=loaded.source,
+            present_keys=loaded.present_keys,
             invalid_keys=loaded.invalid_keys,
+            migration=_migration_response(loaded.migration),
         )
 
     @router.put("/settings", response_model=SettingsResponse)
@@ -233,7 +264,9 @@ def build_router() -> APIRouter:
         return SettingsResponse(
             settings=loaded.settings,
             source=loaded.source,
+            present_keys=loaded.present_keys,
             invalid_keys=loaded.invalid_keys,
+            migration=_migration_response(loaded.migration),
         )
 
     @router.get("/memories", response_model=MemoryResponse)
@@ -279,6 +312,11 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Clearing permanent memories requires explicit confirmation.",
             )
+        if payload.confirmation_intent not in (None, "clear_permanent_memory"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A clear-memory confirmation intent is required.",
+            )
         try:
             deps.memories.clear_memos()
             return MemoryResponse(memos=deps.memories.get_memos())
@@ -293,7 +331,66 @@ def build_router() -> APIRouter:
         settings = _load_settings(deps)
         required, optional = _model_sets(settings)
         installed = deps.models.list_installed()
-        return _model_response(required, optional, installed)
+        return _model_response(
+            required,
+            optional,
+            installed,
+            models=deps.models.list_installed_details(),
+            connection=deps.models.probe(),
+        )
+
+    @router.post(
+        "/models/pulls",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def pull_model(
+        payload: ModelPullRequest,
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobAccepted:
+        model = payload.model.strip()
+
+        def runner(sink, cancel_event):
+            sink.publish_progress(
+                "model_check",
+                "Preparing the exact model tag.",
+                data={"model": model},
+            )
+
+            def publish(update: ModelPullProgress) -> None:
+                sink.publish_progress(
+                    "model_pull",
+                    update.status,
+                    data={
+                        "model": update.model,
+                        "completed": update.completed,
+                        "total": update.total,
+                        "percent": update.percent,
+                        "digest": update.digest,
+                    },
+                )
+
+            pulled = deps.models.pull_model(
+                model,
+                progress_callback=publish,
+                cancellation_event=cancel_event,
+            )
+            if not pulled:
+                return {"cancelled": True, "model": model}
+            return {"model": model, "installed_models": deps.models.list_installed()}
+
+        try:
+            snapshot = await request.app.state.jobs.start(
+                kind="models",
+                owner=principal.session_id,
+                thread_id=None,
+                runner=runner,
+            )
+        except JobConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _accepted(snapshot)
 
     @router.post(
         "/jobs/models", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
@@ -320,6 +417,18 @@ def build_router() -> APIRouter:
             connection = deps.models.check(
                 required_models=required,
                 optional_models=optional,
+                progress_callback=lambda update: sink.publish_progress(
+                    "model_pull",
+                    update.status,
+                    data={
+                        "model": update.model,
+                        "completed": update.completed,
+                        "total": update.total,
+                        "percent": update.percent,
+                        "digest": update.digest,
+                    },
+                ),
+                cancellation_event=cancel_event,
             )
             return {"connection": asdict(connection)}
 
@@ -791,11 +900,29 @@ def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str
 
 
 def _load_settings(deps: BackendDependenciesProtocol) -> CortexSettings:
+    return _load_settings_result(deps).settings
+
+
+def _load_settings_result(deps: BackendDependenciesProtocol):
     try:
-        return deps.settings.load().settings
+        return deps.settings.load()
     except Exception as exc:
         _raise_repository_error("load settings", exc)
         raise AssertionError("unreachable")
+
+
+def _migration_response(report: SettingsMigrationReport | None):
+    if report is None:
+        return None
+    return SettingsMigrationReportResponse(
+        status=report.status,
+        source=report.source,
+        migration_key=report.migration_key,
+        imported_keys=report.imported_keys,
+        invalid_keys=report.invalid_keys,
+        backup_path=report.backup_path,
+        message=report.message,
+    )
 
 
 def _model_sets(settings: CortexSettings) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -815,6 +942,7 @@ def _model_response(
     optional: tuple[str, ...],
     installed: tuple[str, ...],
     connection: ConnectionResult | None = None,
+    models=(),
 ) -> ModelResponse:
     missing = tuple(model for model in required if model not in installed)
     optional_missing = tuple(model for model in optional if model not in installed)
@@ -825,6 +953,14 @@ def _model_response(
         missing_models=missing,
         optional_missing_models=optional_missing,
         connection=connection,
+        models=tuple(
+            InstalledModel(
+                name=model.name,
+                size=model.size,
+                modified_at=model.modified_at,
+            )
+            for model in models
+        ),
     )
 
 
