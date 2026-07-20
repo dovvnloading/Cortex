@@ -3,3 +3,6 @@ markdown>=3.6,<4
 ollama>=0.4,<1
 pydantic>=2.13,<2.14
 pytest>=8,<10
+fastapi>=0.139,<0.140
+uvicorn>=0.51,<0.52
+httpx>=0.27,<1

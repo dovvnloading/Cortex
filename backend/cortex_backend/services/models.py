@@ -25,6 +25,14 @@ class ModelService:
     def __init__(self, gateway: ModelGateway):
         self._gateway = gateway
 
+    def list_installed(self) -> tuple[str, ...]:
+        """Return the exact installed model tags in stable order."""
+        try:
+            return tuple(sorted(self.extract_model_tags(self._gateway.list())))
+        except Exception as exc:
+            logging.error("Ollama model listing failed (%s).", type(exc).__name__)
+            return ()
+
     def check(
         self,
         *,
@@ -36,14 +44,21 @@ class ModelService:
         optional = tuple(dict.fromkeys(model for model in optional_models if model))
         try:
             local_models = self.extract_model_tags(self._gateway.list())
-            missing_models = tuple(model for model in required if model not in local_models)
+            missing_models = tuple(
+                model for model in required if model not in local_models
+            )
             for model in missing_models:
-                logging.info("Required model tag '%s' is not installed; pulling exact tag.", model)
+                logging.info(
+                    "Required model tag '%s' is not installed; pulling exact tag.",
+                    model,
+                )
                 self._gateway.pull(model)
 
             if missing_models:
                 local_models = self.extract_model_tags(self._gateway.list())
-            still_missing = tuple(model for model in required if model not in local_models)
+            still_missing = tuple(
+                model for model in required if model not in local_models
+            )
             if still_missing:
                 return ConnectionResult.failed(
                     "Required Ollama models are unavailable. Please install them and retry.",
@@ -51,10 +66,14 @@ class ModelService:
                     missing_models=still_missing,
                 )
 
-            optional_missing = tuple(model for model in optional if model not in local_models)
+            optional_missing = tuple(
+                model for model in optional if model not in local_models
+            )
             message = "Connected to Ollama and verified the required model tags."
             if optional_missing:
-                message += " Optional models unavailable: " + ", ".join(optional_missing)
+                message += " Optional models unavailable: " + ", ".join(
+                    optional_missing
+                )
             logging.info(message)
             return ConnectionResult.connected(
                 message,
