@@ -1,3 +1,18 @@
+### **Cortex Remediation: Runtime, Storage, Safety, and Chat Reliability**
+
+**Date:** 2026-07-19
+**Version:** Post-0.95.7 maintenance release
+
+This staged maintenance series improves the reliability and maintainability of the desktop application without changing its Windows-first scope:
+
+* Runtime startup, connection checks, generation ownership, stale callbacks, and shutdown are now coordinated safely.
+* SQLite persistence and legacy migration are thread-safe, transactional, and recoverable; permanent memory writes use atomic replacement and backups.
+* Model-controlled memory actions are validated and destructive clears require confirmation. Rendered user, assistant, reasoning, and source content is sanitized, links are controlled, and sensitive model output is not logged.
+* Chat persistence state, fork indexes, regeneration, generated titles, context sizing, and inactive vector-memory initialization now follow explicit behavior.
+* Headless tests, bounded dependencies, Windows CI, and repository development instructions are included for ongoing maintenance.
+
+---
+
 ### **Obsidian & Pumice: AI Memory Architecture**
 
 **Date:** 2025-10-16

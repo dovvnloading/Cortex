@@ -27,8 +27,8 @@ The project is focused on local-first operation: conversation processing, memory
 
 Cortex combines:
 - A Qt-based desktop application (`PySide6`) for a native UI.
-- Ollama-backed model orchestration for chat, title generation, translation, and embeddings.
-- Persistent conversation and memory systems (SQLite + vector and memo layers).
+- Ollama-backed model orchestration for chat, title generation, and translation.
+- Persistent conversation and memo memory systems backed by SQLite and atomic JSON writes.
 - Multi-threaded workers to keep the UI responsive during long-running model operations.
 
 ## Core Capabilities
@@ -37,7 +37,6 @@ Cortex combines:
 - **Threaded conversation management**: new chat creation, title generation, and chat history handling.
 - **Translation pipeline**: optional post-generation translation using a dedicated model.
 - **Suggestion generation**: optional context-aware follow-up suggestions.
-- **Vector memory retrieval**: semantic context lookup with embedding support.
 - **Permanent memo memory**: persistent user/project memory used to improve response relevance.
 - **Theme and UX controls**: light/dark theme support and UI state persisted via `QSettings`.
 
@@ -54,8 +53,8 @@ Cortex is organized around three layers:
    - Worker objects and `QThread` usage isolate blocking operations (query execution, title generation, update checks, model connection checks).
 
 3. **Data + Model Layer**
-   - Ollama client interaction for inference and embeddings.
-   - Persistent storage for chat records and memory data.
+   - Ollama client interaction for inference.
+   - Persistent storage for chat records and permanent memory data.
    - Prompt-building and synthesis logic in the synthesis agent.
 
 ## Repository Layout
@@ -77,6 +76,8 @@ Cortex is organized around three layers:
 └── README.md
 ```
 
+The runnable desktop source is under `Chat_LLM/Chat_LLM/`, tests are under `tests/`, and `pyproject.toml` contains the test configuration.
+
 ## Requirements
 
 ### Runtime
@@ -94,6 +95,7 @@ Root dependencies currently include:
 - `PySide6`
 - `markdown`
 - `ollama`
+- `pytest`
 
 ## Quick Start
 
@@ -117,8 +119,6 @@ ollama pull granite4:tiny-h
 # Translation
 ollama pull translategemma:4b
 
-# Embeddings for vector memory
-ollama pull nomic-embed-text
 ```
 
 ### 3) Launch Cortex
@@ -139,7 +139,7 @@ python Cortex_Startup.py
 
 Default runtime configuration is defined in `Chat_LLM/Chat_LLM/Chat_LLM.py` (`CONFIG` dictionary), including:
 - Ollama host URL
-- default generation/title/translation/embedding models
+- default generation/title/translation models
 - generation parameters (`temperature`, `num_ctx`, `seed`)
 - available chat model list
 - update check URL
@@ -150,9 +150,10 @@ User-specific settings (theme, feature toggles, selected models, and related UI 
 
 Cortex uses local persistence for conversation state and memory systems. In practice, this includes:
 - chat/thread records and related metadata
-- vector memory embeddings and semantic retrieval context
 - permanent memo-style memory for personalization
 - local user settings via `QSettings`
+
+Semantic vector memory is intentionally disabled until its retrieval path is integrated end to end; Cortex does not initialize or pull an embedding model at startup.
 
 ## Troubleshooting
 
@@ -166,7 +167,7 @@ Cortex uses local persistence for conversation state and memory systems. In prac
 - Check RAM/CPU/GPU load while generating.
 
 ### Missing model errors for optional features
-- Pull the required specialized model (translation/title/embedding) or disable that feature in settings.
+- Pull the required specialized model (translation/title) or disable that feature in settings.
 
 ### UI startup issues
 - Run from a terminal to inspect logs.
@@ -181,9 +182,31 @@ Cortex is designed for local usage, but your privacy posture still depends on lo
 
 ## Development
 
-- Contribution process: see `CONTRIBUTING.md`.
-- Security disclosures: see `SECURITY.md`.
-- Project change history: see `Change_Log.md`.
+From the repository root, create a virtual environment and install the bounded development dependencies:
+
+```bash
+python -m venv .venv
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+python -m pip install -r requirements.txt
+```
+
+Run the headless test suite and compile check before opening a pull request:
+
+```bash
+python -m pytest
+python -m compileall -q Chat_LLM/Chat_LLM
+```
+
+Launch the Windows desktop application with:
+
+```bash
+python Chat_LLM/Chat_LLM/Chat_LLM.py
+```
+
+Contribution process: see `CONTRIBUTING.md`. Security disclosures: see `SECURITY.md`. Project history: see `Change_Log.md`.
 
 ## License
 

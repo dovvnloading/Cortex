@@ -1,0 +1,26 @@
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and IDE files
+.venv/
+venv/
+.vs/
+.vscode/
+
+# Local application data
+*.sqlite
+*.sqlite3
+*.db
+memory_bank.json
+memory_bank.json.bak
+legacy_history_migrated_*/
+legacy_history/quarantine/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/

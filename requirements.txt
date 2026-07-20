@@ -1,3 +1,4 @@
-PySide6
-markdown
-ollama
+PySide6>=6.7,<7
+markdown>=3.6,<4
+ollama>=0.4,<1
+pytest>=8,<10

@@ -107,7 +107,13 @@ To get Cortex running locally for development, follow these steps.
 
 4.  **Run the application:**
     ```bash
-    python main.py  # Or whatever the main entry point script is named
+    python Chat_LLM/Chat_LLM/Chat_LLM.py
+    ```
+
+5. **Run the quality checks:**
+    ```bash
+    python -m pytest
+    python -m compileall -q Chat_LLM/Chat_LLM
     ```
 
 You should now have the Cortex application running from the source code.
