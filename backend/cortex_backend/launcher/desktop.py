@@ -58,7 +58,7 @@ def run_desktop_window(
         height=config.height,
         min_size=(config.min_width, config.min_height),
         resizable=True,
-        background_color="#10131a",
+        background_color="#2d2d2d",
         text_select=True,
         zoomable=True,
     )
