@@ -22,7 +22,12 @@ from PySide6.QtCore import QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QIcon
 from main_window import MainWindow
 from synthesis_agent import SynthesisAgent
-from memory import MemoryManager, DatabaseManager, PermanentMemoryManager, VectorDatabaseManager
+from memory import (
+    MemoryManager,
+    DatabaseManager,
+    PermanentMemoryManager,
+    VectorDatabaseManager,
+)
 from generation_types import ConnectionResult, GenerationSnapshot
 from utils import get_asset_path, LANGUAGES
 from splash_screen import SplashScreen
@@ -650,21 +655,15 @@ class Orchestrator:
             thread_id (str): The ID of the chat thread.
             user_input (str): The user's message content.
         """
-        # This is the "just-in-time" persistence logic.
-        # If the chat doesn't exist in the DB, create it.
-        if not self.database_manager.load_chat(thread_id):
-            self.database_manager.create_chat(thread_id, self.active_thread_title)
-            logging.info(f"First message received. Persisting new chat thread {thread_id} to database.")
-
-        if thread_id == self.active_thread_id:
-            # Update the in-memory manager as well.
-            self.memory_manager.add_user_message(user_input)
-        
+        thread_exists = self.database_manager.load_chat(thread_id) is not None
         self.database_manager.add_message(
             thread_id=thread_id,
             role='user',
-            content=user_input
+            content=user_input,
+            thread_title=None if thread_exists else self.active_thread_title,
         )
+        if thread_id == self.active_thread_id:
+            self.memory_manager.add_user_message(user_input)
         logging.info(f"Committed user message for thread {thread_id} to database.")
 
     def commit_assistant_message(self, thread_id: str, ai_response: str, thoughts: str | None):
@@ -676,16 +675,14 @@ class Orchestrator:
             ai_response (str): The AI's generated response.
             thoughts (str | None): The reasoning/thoughts from the AI, if any.
         """
-        if thread_id == self.active_thread_id:
-            # Update the active in-memory manager.
-            self.memory_manager.add_assistant_message(ai_response, sources=None, thoughts=thoughts)
-
         self.database_manager.add_message(
             thread_id=thread_id,
             role='assistant',
             content=ai_response,
             thoughts=thoughts
         )
+        if thread_id == self.active_thread_id:
+            self.memory_manager.add_assistant_message(ai_response, sources=None, thoughts=thoughts)
         logging.info(f"Saved AI response for thread {thread_id} to database.")
 
     def create_generation_snapshot(self, user_input: str, thread_id: str) -> GenerationSnapshot:
