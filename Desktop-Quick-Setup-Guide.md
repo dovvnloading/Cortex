@@ -1,78 +1,66 @@
-## Getting Started with Cortex
+# Cortex Windows Quick Setup
 
-Welcome to Cortex! While setting up a local AI application might seem intimidating at first, this guide breaks it down into simple steps. The process to install the necessary components and download a model is very straightforward and requires no technical expertise.
+Cortex runs as a local web application hosted by its Python backend. The
+browser is only the interface; chat data and model calls remain on the machine.
 
-### Overview
+## 1. Install Ollama
 
-Cortex is a desktop application that provides an interface for interacting with powerful language models. To function, it relies on a background service called Ollama, which manages and runs these models locally on your machine.
+Install Ollama from <https://ollama.com/download> and leave its local service
+running. Cortex expects `http://127.0.0.1:11434` by default.
 
-### System Requirements
+## 2. Install a small model
 
-Before you begin, please ensure your computer meets the following requirements:
+In PowerShell:
 
-*   **Operating System:** Windows, macOS, or Linux.
-*   **Storage:** At least 10 GB of free hard drive space is recommended to start. **Note:** The language models required by this program can be very large, ranging from 4 GB to over 100 GB. Please verify you have sufficient disk space before downloading a model.
-*   **Memory (RAM):** A minimum of 8 GB of RAM is required, but 16 GB or more is highly recommended for a smoother experience, especially with larger models.
+```powershell
+ollama pull nemotron-3-nano:4b
+ollama list
+```
 
----
+Larger models can be selected later from Cortex settings. Optional title and
+translation models are not required for the initial smoke test.
 
-### Installation and Setup
+## 3. Run from source
 
-Follow these three steps carefully to get Cortex running.
+```powershell
+python -m pip install -r requirements.txt
+python main.py
+```
 
-#### Step 1: Install Ollama
+Cortex builds the frontend if necessary, starts its loopback backend, opens a
+browser session, and owns shutdown of the processes it started. Use
+`python main.py --no-browser` when opening the displayed local URL manually.
 
-Cortex cannot run without Ollama. Think of Ollama as the engine that powers the application. This is a simple, one-time installation.
+## 4. Windows package
 
-1.  Visit the official Ollama website: [https://ollama.com](https://ollama.com)
-2.  Download the installer for your operating system (Windows, macOS, or Linux).
-3.  Run the installer and follow the on-screen instructions.
-4.  Once installed, Ollama will run in the background. You should see its icon in your system tray (usually at the bottom-right on Windows or top-right on macOS).
+The one-folder package can be built from a development checkout:
 
-#### Step 2: Download a Language Model
+```powershell
+python main.py --build-frontend
+powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
+```
 
-Next, you need to download a model. The model is the "brain" that Cortex interacts with. This is done with a single command.
+Launch `dist\Cortex\Cortex.exe`. The packaged application includes the web
+bundle and does not require Node.js or a global Python installation.
 
-1.  Open your computer's command line application:
-    *   **On Windows:** Search for `Command Prompt` or `PowerShell` in the Start Menu and open it.
-    *   **On macOS or Linux:** Search for `Terminal` and open it.
+## Data and recovery
 
-2.  In the command line window, type the following command and press Enter. We recommend starting with the `qwen2:7b` model, which offers a great balance of performance and size.
+Existing data stays under:
 
-    ```
-    ollama run qwen3:8b
-    ```
+```text
+%APPDATA%\ChatLLM\ChatLLM-Assistant
+```
 
-3.  Ollama will begin downloading the model. This may take some time depending on your internet speed and the model's size. You will see a progress bar.
+Before installing a new release, back up that directory. Cortex preserves
+legacy SQLite, JSON chat, permanent-memory, and Windows registry settings. A
+verified backup and the unchanged legacy settings source are the rollback path;
+do not attempt an untested in-place downgrade.
 
-4.  Once the download is complete, you can close the command line window. You can browse for other models to download on the [Ollama Model Library](https://ollama.com/library).
+## Troubleshooting
 
-**Important:** Each model you download will consume significant hard drive space. Always check the model size in the library before downloading.
-
-#### Step 3: Download and Run Cortex
-
-Now you are ready to download the main application.
-
-1.  Download the Cortex application from the following link:
-    *   **[Download Cortex.exe (65 MB)](https://drive.google.com/file/d/1BF4O7Hy1o5H9nkPzUjmsVsdi1Pt-VEYa/view)**
-
-2.  Save the `Cortex.exe` file to a convenient location, such as your Desktop or a new folder.
-
-3.  Ensure Ollama is running in the background (check for its icon in your system tray).
-
-4.  Double-click `Cortex.exe` to launch the application.
-
-You are now ready to use Cortex. The application will automatically detect the models you have downloaded via Ollama.
-
----
-
-### Common Issues
-
-*   **"Ollama is not running."**
-    *   Make sure you have installed Ollama and that it is active. Try restarting the Ollama application or your computer.
-
-*   **"No models found."**
-    *   This means you have not yet downloaded a model. Please follow the instructions in **Step 2: Download a Language Model**.
-
-*   **The application is running slowly.**
-    *   The performance of Cortex depends heavily on your computer's hardware (RAM and CPU/GPU) and the size of the model you are using. Larger models require more powerful computers to run efficiently. Consider using a smaller model for better performance.
+- If Cortex reports Ollama unavailable, verify the Ollama service and endpoint.
+- If no models appear, run `ollama list` and install a generation model.
+- If the browser does not open, run `python main.py --no-browser` and use the
+  one-time loopback URL printed in the terminal.
+- If a previous Cortex instance is already running, launching Cortex again
+  hands off to that instance rather than starting a second server.

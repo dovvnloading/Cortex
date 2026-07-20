@@ -1,18 +1,16 @@
 """Persistence, migration, and recovery tests for local Cortex data."""
 
 import json
-import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
-
-PROJECT_DIR = Path(__file__).parents[1] / "Chat_LLM" / "Chat_LLM"
-if str(PROJECT_DIR) not in sys.path:
-    sys.path.insert(0, str(PROJECT_DIR))
-
-from memory import DatabaseManager, PermanentMemoryManager, PersistenceError  # noqa: E402
+from cortex_backend.repositories.legacy_storage import (
+    DatabaseManager,
+    PermanentMemoryManager,
+    PersistenceError,
+)
 
 
 class PersistenceTests(unittest.TestCase):

@@ -81,7 +81,6 @@ def create_app(
     *,
     session_manager: SessionManager | None = None,
     preview: bool = True,
-    qt_default: bool = True,
     allowed_hosts: Iterable[str] | None = None,
     serve_frontend: bool = False,
     frontend_dist: Path | None = None,
@@ -125,7 +124,6 @@ def create_app(
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
     app.state.preview = preview
-    app.state.qt_default = qt_default
     app.state.ready = False
     app.state.shutting_down = False
     app.state.handoff_secret = handoff_secret

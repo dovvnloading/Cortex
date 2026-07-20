@@ -1313,11 +1313,6 @@
             "title": "Preview",
             "type": "boolean"
           },
-          "qt_default": {
-            "default": true,
-            "title": "Qt Default",
-            "type": "boolean"
-          },
           "session_required": {
             "default": true,
             "title": "Session Required",

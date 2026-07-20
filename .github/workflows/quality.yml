@@ -36,7 +36,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile application modules
-        run: python -m compileall -q main.py backend Chat_LLM/Chat_LLM
+        run: python -m compileall -q main.py backend
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -65,5 +65,5 @@ jobs:
       - name: Install package builder
         run: python -m pip install pyinstaller
 
-      - name: Build one-folder package prototype
+      - name: Build one-folder Windows package
         run: python -m PyInstaller --noconfirm --clean packaging/Cortex.spec

@@ -125,7 +125,6 @@ def build_router() -> APIRouter:
     ) -> SystemResponse:
         return SystemResponse(
             preview=request.app.state.preview,
-            qt_default=request.app.state.qt_default,
             started_at=request.app.state.started_at,
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,

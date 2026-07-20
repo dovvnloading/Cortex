@@ -38,7 +38,6 @@ class SystemResponse(APIModel):
     api_version: Literal["v1"] = "v1"
     status: Literal["ok"] = "ok"
     preview: bool = True
-    qt_default: bool = True
     session_required: bool = True
     started_at: datetime
     ollama_host: str = "http://127.0.0.1:11434"

@@ -1,7 +1,8 @@
-"""Qt-independent application services introduced during core extraction."""
+"""Application services for the local Cortex runtime."""
 
 from .generation import GenerationEngine, GenerationService, GenerationServiceResult
 from .models import ModelGateway, ModelService
+from .llm import PromptTemplate, SynthesisAgent
 from .progress import (
     NullProgressSink,
     ProgressEvent,
@@ -19,4 +20,6 @@ __all__ = [
     "ProgressEvent",
     "ProgressPhase",
     "ProgressSink",
+    "PromptTemplate",
+    "SynthesisAgent",
 ]
