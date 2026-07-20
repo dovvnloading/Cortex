@@ -18,7 +18,6 @@ from cortex_backend.core.generation import ConnectionResult, GenerationSnapshot
 from cortex_backend.services.chat import (
     ChatDomainError,
     chat_revision,
-    follow_up_suggestions,
     message_position,
     normalize_title,
     title_from_first_message,
@@ -932,7 +931,6 @@ async def _start_generation_job(
             "assistant_message_id": assistant_message_id,
             "chat_revision": chat_revision(updated_chat),
             "title": str(updated_chat.get("title") or title),
-            "suggestions": follow_up_suggestions(updated_chat.get("messages", [])),
             "response": result.response,
             "thoughts": result.thoughts,
             "clear_requested": result.memory_command.clear_requested,

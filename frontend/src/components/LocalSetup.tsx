@@ -1,4 +1,4 @@
-import { ArrowRight, Check, CircleAlert, Cpu, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
+import { Check, CircleAlert, Cpu, ExternalLink, RefreshCw } from "lucide-react";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { CortexSettings, ModelResponse } from "../../../contracts/cortex-api";
 import { formatModelSize, localModelNames } from "../lib/localModels";
@@ -51,13 +51,11 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
     return (
       <main className="local-setup" aria-labelledby="local-setup-title">
         <section className="local-setup-card local-setup-card-alert">
-          <img className="local-setup-mark" src="/cortex.svg" alt="" />
-          <p className="eyebrow">LOCAL RUNTIME</p>
           <div className="local-setup-heading">
             <CircleAlert aria-hidden="true" size={21} />
-            <h1 id="local-setup-title">Ollama needs attention</h1>
+            <h1 id="local-setup-title">Ollama is unavailable</h1>
           </div>
-          <p className="lede">Cortex keeps your conversations on this computer, so it needs your local Ollama service running before a model can respond.</p>
+          <p className="lede">Start Ollama, then rescan to make your installed models available.</p>
           <div className="local-setup-status local-setup-status-alert" role="status">
             <span>{models.connection?.message ?? "Cortex could not reach Ollama."}</span>
           </div>
@@ -69,7 +67,6 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
               Get Ollama <ExternalLink aria-hidden="true" size={15} />
             </a>
           </div>
-          <p className="local-setup-footnote"><ShieldCheck aria-hidden="true" size={15} /> Cortex never needs a cloud account to use local models.</p>
         </section>
       </main>
     );
@@ -79,10 +76,8 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
     return (
       <main className="local-setup" aria-labelledby="local-setup-title">
         <section className="local-setup-card">
-          <img className="local-setup-mark" src="/cortex.svg" alt="" />
-          <p className="eyebrow">LOCAL RUNTIME READY</p>
-          <h1 id="local-setup-title">Add your first local model</h1>
-          <p className="lede">Ollama is connected, but no models are installed yet. Install any model through Ollama, then Cortex will discover it automatically.</p>
+          <h1 id="local-setup-title">No local models found</h1>
+          <p className="lede">Install a model in Ollama, then rescan. Cortex will list it here.</p>
           <div className="local-setup-status" role="status"><Cpu aria-hidden="true" size={17} /> <span>Waiting for the local model inventory.</span></div>
           <div className="local-setup-actions">
             <button className="button button-secondary" type="button" onClick={() => void onRescan()} disabled={busy}>
@@ -92,7 +87,6 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
               Open Ollama <ExternalLink aria-hidden="true" size={15} />
             </a>
           </div>
-          <p className="local-setup-footnote"><ShieldCheck aria-hidden="true" size={15} /> Cortex will not download or select a chat model behind your back.</p>
         </section>
       </main>
     );
@@ -101,11 +95,9 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
   return (
     <main className="local-setup" aria-labelledby="local-setup-title">
       <section className="local-setup-card local-setup-model-card">
-        <img className="local-setup-mark" src="/cortex.svg" alt="" />
-        <p className="eyebrow">LOCAL MODEL INVENTORY</p>
-        <h1 id="local-setup-title">Choose your Cortex model</h1>
+        <h1 id="local-setup-title">Select a local model</h1>
         <p className="lede">
-          These models are already installed on this computer. Cortex uses the one you choose for chat and automatic conversation titles.
+          Choose an installed model for chat. You can change it later in Settings.
           {previousModel && !localModels.includes(previousModel) ? ` ${previousModel} is no longer available, so choose a replacement.` : ""}
         </p>
         <div className="model-choice-list" role="radiogroup" aria-label="Installed local models">
@@ -138,10 +130,9 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
             <RefreshCw aria-hidden="true" size={16} /> Rescan
           </button>
           <button className="button button-primary" type="button" onClick={() => void confirmSelection()} disabled={!selectedModel || busy || saving}>
-            {saving ? "Saving..." : <>Continue with {selectedModel || "this model"} <ArrowRight aria-hidden="true" size={16} /></>}
+            {saving ? "Saving..." : "Use selected model"}
           </button>
         </div>
-        <p className="local-setup-footnote"><ShieldCheck aria-hidden="true" size={15} /> Your choice is saved locally and can be changed any time in Settings.</p>
       </section>
     </main>
   );

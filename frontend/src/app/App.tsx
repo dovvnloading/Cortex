@@ -205,7 +205,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         settings: {
           ...settings,
           models: { ...settings.models, chat: model, title: null },
-          suggestions: { ...settings.suggestions, model: null },
         },
       });
       setSettings(response.settings);
@@ -243,8 +242,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
           <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
-          <Route path="/chat/new" element={<ChatRoute api={api} activeModel={selectedModel} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
-          <Route path="/chat/:threadId" element={<ChatRoute api={api} activeModel={selectedModel} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="/chat/new" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="/chat/:threadId" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="*" element={<Navigate to="/chat/new" replace />} />
         </Routes>
       </AppShell>
@@ -264,10 +263,10 @@ function updateModelProgress(
   setProgress({ model, status, percent });
 }
 
-function ChatRoute({ api, activeModel, runtimeReady, runtimeMessage, onChatChanged, onForked }: { api: CortexApi; activeModel: string | null; runtimeReady: boolean; runtimeMessage: string | null; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
+function ChatRoute({ api, runtimeReady, runtimeMessage, onChatChanged, onForked }: { api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
   const { threadId } = useParams();
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId ?? null} activeModel={activeModel} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
+  return <ChatPage api={api} threadId={threadId ?? null} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
 }
 
 function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
