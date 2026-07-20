@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -32,23 +32,6 @@ def title_from_first_message(content: str) -> str:
         return normalized
     words = normalized.split()
     return normalize_title(" ".join(words[:8]))
-
-
-def follow_up_suggestions(
-    messages: Sequence[Mapping[str, Any]],
-) -> list[str]:
-    """Return bounded, non-model suggestions for the first parity shell."""
-    last_user = next(
-        (str(message.get("content", "")).strip() for message in reversed(messages)
-         if message.get("role") == "user"),
-        "the topic above",
-    )
-    subject = normalize_title(last_user, fallback="the topic above")
-    return [
-        f"Can you explain {subject} in more detail?",
-        f"What are the practical next steps for {subject}?",
-        f"Can you show a concrete example of {subject}?",
-    ]
 
 
 def message_position(chat: Mapping[str, Any], message_id: str) -> int:

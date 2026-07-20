@@ -117,6 +117,7 @@ def test_new_generation_persists_model_title_and_returns_it_in_completion_event(
         completed = events[-1]
         assert completed["event"] == "generation.completed"
         assert completed["data"]["title"] == "Cortex launch planning"
+        assert "suggestions" not in completed["data"]
         chat = client.get(
             f"/api/v1/chats/{accepted['thread_id']}", headers=headers
         ).json()

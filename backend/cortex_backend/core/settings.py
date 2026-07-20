@@ -55,9 +55,10 @@ class TranslationSettings(_SettingsModel):
 
 
 class SuggestionSettings(_SettingsModel):
+    """Legacy-compatible settings retained for reading existing workspaces."""
+
     enabled: bool = True
-    # Retained only so existing settings payloads can be read. Suggestions are
-    # generated without a dedicated model selection in the web workspace.
+    # Cortex no longer generates or renders follow-up suggestion prompts.
     model: ModelTag | None = None
 
 

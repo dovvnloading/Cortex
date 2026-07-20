@@ -22,10 +22,10 @@ describe("LocalSetup", () => {
 
     render(<LocalSetup models={models} settings={settings} busy={false} setupUrl="https://ollama.com/download" onRescan={vi.fn<() => Promise<void>>().mockResolvedValue(undefined)} onSelectModel={onSelectModel} />);
 
-    expect(screen.getByRole("heading", { name: "Choose your Cortex model" })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Continue with this model/ })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "Select a local model" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Use selected model" })).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: /local-chat:7b/i }));
-    await user.click(screen.getByRole("button", { name: /Continue with local-chat:7b/ }));
+    await user.click(screen.getByRole("button", { name: "Use selected model" }));
 
     expect(onSelectModel).toHaveBeenCalledWith("local-chat:7b");
   });
@@ -50,7 +50,7 @@ describe("LocalSetup", () => {
     const { rerender } = render(<LocalSetup {...props} models={initialModels} />);
 
     await user.click(screen.getByRole("radio", { name: /local-chat:7b/i }));
-    expect(screen.getByRole("button", { name: /Continue with local-chat:7b/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Use selected model" })).toBeEnabled();
 
     rerender(
       <LocalSetup
@@ -60,7 +60,7 @@ describe("LocalSetup", () => {
     );
 
     expect(screen.queryByRole("radio", { name: /local-chat:7b/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Continue with this model/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Use selected model" })).toBeDisabled();
   });
 
   it("supports keyboard model selection", async () => {

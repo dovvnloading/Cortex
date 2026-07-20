@@ -14,8 +14,8 @@ the user's installed browser.
 - Local chat with configurable Ollama models, streaming responses, reasoning,
   sources, retry, fork, and regeneration.
 - Persistent SQLite conversations and atomic JSON permanent memory.
-- Validated settings, model inventory and pull progress, translation, and
-  follow-up suggestions.
+- Validated settings, local model inventory and pull progress, and optional
+  translation.
 - Loopback-only API authentication with one-time native-window bootstrap tokens.
 - Windows one-folder packaging with the frontend bundled and no Node.js or
   system Python required at runtime.

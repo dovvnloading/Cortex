@@ -44,6 +44,7 @@ describe("SettingsPanel", () => {
       />,
     );
 
+    expect(screen.queryByRole("checkbox", { name: /follow-up suggestions/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "AI Model" }));
 
     expect(screen.getByText(/Cortex scans the Ollama models installed on this PC/)).toBeVisible();

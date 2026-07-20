@@ -42,10 +42,12 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
 
   await page.goto("/?bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
+  await expect(page.getByText("What will you make today?")).toHaveCount(0);
+  await expect(page.getByText("LOCAL, PRIVATE, YOURS")).toHaveCount(0);
   await page.getByLabel("Message Cortex").fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Echo: hello")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toHaveCount(0);
 });
 
 test("supports retry, regenerate, and fork without losing the persisted thread", async ({ page }) => {
@@ -155,7 +157,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
 
   await page.goto("/?bootstrap=launcher-token");
   await page.getByRole("radio", { name: /local-chat:7b/i }).click();
-  await page.getByRole("button", { name: /Continue with local-chat:7b/ }).click();
+  await page.getByRole("button", { name: "Use selected model" }).click();
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();

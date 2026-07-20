@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 import re
 import sys
-import time
 
 from cortex_backend.core.generation import (
     MemoryCommand,
@@ -164,37 +163,6 @@ Here are the available facts:
             {'role': 'user', 'content': user_content}
         ]
         return messages
-
-    @staticmethod
-    def build_suggestions_prompt(chat_history: str) -> list[dict]:
-        """
-        Builds a prompt to generate follow-up response suggestions for the user.
-
-        Args:
-            chat_history (str): The conversation history.
-
-        Returns:
-            list[dict]: Formatted messages for the LLM.
-        """
-        system_content = (
-            "Read the conversation below. Provide 3 distinct, complete, and engaging follow-up messages the USER might say next.\n"
-            "CRITICAL:\n"
-            "1. Each suggestion must be a full sentence (min 4 words).\n"
-            "2. No short fragments like 'How' or 'Why'.\n"
-            "3. Format: Just 3 lines of text. No numbering. No quotes."
-        )
-        
-        user_content = (
-            f"{chat_history}\n\n"
-            f"3 Complete User Sentences:"
-        )
-        
-        messages = [
-            {'role': 'system', 'content': system_content},
-            {'role': 'user', 'content': user_content}
-        ]
-        return messages
-
 
 class SynthesisAgent:
     """
@@ -407,63 +375,6 @@ class SynthesisAgent:
                 "Translation failed. Please try again.",
                 error_details=type(e).__name__,
             )
-
-    def generate_suggestions(self, chat_history: str, model: str) -> list[str]:
-        """
-        Generates 3 short follow-up response suggestions for the user.
-
-        Args:
-            chat_history (str): The conversation context.
-            model (str): The model to use for generation.
-
-        Returns:
-            list[str]: A list of 3 suggestion strings.
-        """
-        if not chat_history or not chat_history.strip():
-            logging.warning("SUGGESTIONS: No chat history provided.")
-            return []
-
-        prompt_messages = PromptTemplate.build_suggestions_prompt(chat_history)
-        
-        for attempt in range(2):
-            try:
-                temp = 0.7 if attempt == 0 else 0.9
-                
-                logging.info(f"SUGGESTIONS: Attempt {attempt+1} using '{model}' (temp={temp})")
-                
-                response = self.ollama_client.chat(
-                    model=model,
-                    messages=prompt_messages,
-                    options={'temperature': temp, 'num_predict': 256} 
-                )
-                content = response.get('message', {}).get('content', '')
-                
-                if not content.strip():
-                    logging.warning(f"SUGGESTIONS: Empty response on attempt {attempt+1}")
-                    continue
-
-                lines = [line.strip() for line in content.split('\n') if line.strip()]
-                
-                suggestions = []
-                for line in lines:
-                    cleaned = re.sub(r'^[\d\-\*\.]+\s*', '', line).strip()
-                    cleaned = cleaned.strip('"\'')
-                    if cleaned: 
-                        suggestions.append(cleaned)
-                        if len(suggestions) >= 3:
-                            break
-                
-                if suggestions:
-                    logging.info("SUGGESTIONS: parsed %s valid suggestions.", len(suggestions))
-                    return suggestions
-                else:
-                    logging.warning(f"SUGGESTIONS: No valid lines parsed on attempt {attempt+1}")
-
-            except Exception as e:
-                logging.error("SUGGESTIONS: attempt %s failed (%s).", attempt + 1, type(e).__name__)
-                time.sleep(0.5)
-
-        return []
 
     def _parse_and_clean_response(self, response_text: str, thoughts_text: str | None) -> tuple[str, str | None, MemoryCommand]:
         """

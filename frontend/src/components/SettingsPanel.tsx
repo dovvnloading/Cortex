@@ -66,7 +66,6 @@ export function SettingsPanel({
   const modelSettings = draft.models ?? {};
   const memory = draft.memory ?? {};
   const translation = draft.translation ?? {};
-  const suggestions = draft.suggestions ?? {};
   const selectedChatModel = installedModels.includes(modelSettings.chat ?? "")
     ? modelSettings.chat ?? ""
     : "";
@@ -77,10 +76,7 @@ export function SettingsPanel({
 
   const update = (next: Partial<CortexSettings>) => setDraft((current) => ({ ...current, ...next }));
 
-  const chooseChatModel = (chat: string) => update({
-    models: { ...modelSettings, chat, title: null },
-    suggestions: { ...suggestions, model: null },
-  });
+  const chooseChatModel = (chat: string) => update({ models: { ...modelSettings, chat, title: null } });
 
   const setTranslationEnabled = (enabled: boolean) => {
     const translationModel = installedModels.includes(configuredTranslationModel)
@@ -96,7 +92,6 @@ export function SettingsPanel({
   const saveDraft = () => onSave({
     ...draft,
     models: { ...modelSettings, chat: selectedChatModel || null, title: null },
-    suggestions: { ...suggestions, model: null },
   });
 
   return (
@@ -145,10 +140,6 @@ export function SettingsPanel({
                     onChange={(theme) => update({ appearance: { ...appearance, theme: theme as "light" | "dark" | "system" } })}
                   />
                 </div>
-                <label className="toggle-row" htmlFor="suggestions-enabled">
-                  <span><strong>Follow-up suggestions</strong><small>Offer short next-step prompts after responses.</small></span>
-                  <input id="suggestions-enabled" type="checkbox" checked={suggestions.enabled ?? true} onChange={(event) => update({ suggestions: { ...suggestions, enabled: event.target.checked, model: null } })} />
-                </label>
               </div>
             </section>
           )}
