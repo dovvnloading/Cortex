@@ -370,7 +370,8 @@ class ChatMessageWidget(QWidget):
         self.msg_type = msg_type
         self.sources = sources
         self.thoughts = thoughts
-        self.plain_text = text 
+        self.plain_text = text
+        self.persisted_message_index: int | None = None
         self.theme = theme
         self.message_label = None 
         self.sources_button = None

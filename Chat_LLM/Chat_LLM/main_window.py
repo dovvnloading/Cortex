@@ -562,7 +562,7 @@ class MainWindow(QMainWindow):
             self.last_ai_message_widget.set_regenerate_visibility(False)
             self.last_ai_message_widget = None
             
-        is_new_chat = self.orchestrator.active_thread_title == "New Chat"
+        is_new_chat = not self.orchestrator.active_thread_persisted
 
         try:
             self.orchestrator.commit_user_message(active_thread_id, user_input)
@@ -578,7 +578,8 @@ class MainWindow(QMainWindow):
             chat_history_for_title = f"User: {user_input}"
             self.orchestrator.generate_title_async(active_thread_id, chat_history_for_title, self.on_title_generated)
 
-        self.append_message('user', "You", user_input)
+        user_message_index = len(self.orchestrator.memory_manager.get_full_history()) - 1
+        self.append_message('user', "You", user_input, message_index=user_message_index)
         self.last_submitted_input = user_input
         
         self.input_field.clear()
@@ -606,7 +607,12 @@ class MainWindow(QMainWindow):
         if instructions:
             user_prompt_for_regen += f"\n\n[System Note: The user wants you to retry the previous response with these specific instructions: {instructions}]"
 
-        self.orchestrator.delete_last_assistant_message(active_thread_id)
+        try:
+            self.orchestrator.delete_last_assistant_message(active_thread_id)
+        except PersistenceError as exc:
+            logging.error("Could not prepare response regeneration (%s).", type(exc).__name__)
+            QMessageBox.warning(self, "Regeneration unavailable", "The previous response could not be removed. Please try again.")
+            return
         
         self.last_ai_message_widget.deleteLater()
         self.last_ai_message_widget = None
@@ -620,14 +626,8 @@ class MainWindow(QMainWindow):
         if not active_thread_id:
             return
             
-        message_index = -1
-        for i in range(self.chat_layout.count() - 1):
-            item = self.chat_layout.itemAt(i).widget()
-            if item == message_widget:
-                message_index = i
-                break
-
-        if message_index == -1:
+        message_index = getattr(message_widget, "persisted_message_index", None)
+        if message_index is None:
             return
             
         try:
@@ -659,6 +659,7 @@ class MainWindow(QMainWindow):
         return True
 
     def on_title_generated(self, new_title: str, thread_id: str):
+        new_title = self.orchestrator.synthesis_agent.normalize_title(new_title)
         try:
             self.orchestrator.rename_chat_thread(thread_id, new_title)
         except PersistenceError as exc:
@@ -710,12 +711,14 @@ class MainWindow(QMainWindow):
                     )
                     self.set_chat_ui_for_processing(False)
                     return
+                assistant_message_index = len(self.orchestrator.memory_manager.get_full_history()) - 1
                 self.append_message(
                     'assistant',
                     "AI Assistant",
                     result.response or "",
                     sources=None,
                     thoughts=result.thoughts,
+                    message_index=assistant_message_index,
                 )
                 memory_action_error = None
                 try:
@@ -838,12 +841,13 @@ class MainWindow(QMainWindow):
             else:
                 widget.deleteLater()
 
-    def append_message(self, role, sender, message, sources=None, thoughts=None) -> ChatMessageWidget:
+    def append_message(self, role, sender, message, sources=None, thoughts=None, message_index=None) -> ChatMessageWidget:
         message_widget = ChatMessageWidget(
             role, sender, message, 
             sources=sources, thoughts=thoughts,
             theme=self.current_theme
         )
+        message_widget.persisted_message_index = message_index
         
         if role == 'assistant':
             if self.last_ai_message_widget:
@@ -896,11 +900,18 @@ class MainWindow(QMainWindow):
         self.clear_suggestions()
         chat_data = self.orchestrator.load_chat_thread(thread_id)
         if chat_data:
-            for msg in chat_data['messages']:
+            for message_index, msg in enumerate(chat_data['messages']):
                 sender = "You" if msg['role'] == 'user' else "AI Assistant"
                 sources = msg.get('sources', None)
                 thoughts = msg.get('thoughts', None)
-                self.append_message(msg['role'], sender, msg['content'], sources=sources, thoughts=thoughts)
+                self.append_message(
+                    msg['role'],
+                    sender,
+                    msg['content'],
+                    sources=sources,
+                    thoughts=thoughts,
+                    message_index=message_index,
+                )
             self.update_active_chat_in_ui(thread_id)
         
         self.last_ai_message_widget = None
@@ -914,7 +925,6 @@ class MainWindow(QMainWindow):
         
         if last_assistant_widget:
             last_assistant_widget.set_regenerate_visibility(True)
-            last_assistant_widget.regenerate_requested.connect(self.on_regenerate_response)
             self.last_ai_message_widget = last_assistant_widget
 
         if self.orchestrator.suggestions_enabled and last_assistant_widget:
