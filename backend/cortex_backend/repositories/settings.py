@@ -29,3 +29,23 @@ class SettingsRepository(Protocol):
 
     def save(self, settings: CortexSettings) -> None:
         """Durably save a complete validated settings snapshot."""
+
+
+class InMemorySettingsRepository:
+    """Deterministic settings repository for API tests and demo startup."""
+
+    def __init__(self, settings: CortexSettings | None = None):
+        self._settings = settings or CortexSettings()
+
+    def load(self, *, defaults: CortexSettings | None = None) -> SettingsReadResult:
+        return SettingsReadResult(
+            settings=self._settings,
+            source="memory",
+            present_keys=(),
+            invalid_keys=(),
+        )
+
+    def save(self, settings: CortexSettings) -> None:
+        if not isinstance(settings, CortexSettings):
+            raise TypeError("settings must be a validated CortexSettings snapshot")
+        self._settings = settings

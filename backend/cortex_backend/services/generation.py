@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from threading import Event
 from typing import Any, Protocol
 
 from cortex_backend.core.generation import (
@@ -90,9 +91,11 @@ class GenerationService:
         snapshot: GenerationSnapshot,
         *,
         progress_sink: ProgressSink | None = None,
+        cancellation_event: Event | None = None,
     ) -> GenerationServiceResult:
         """Generate from one immutable snapshot and emit owned progress."""
         sink = progress_sink or NullProgressSink()
+        self._check_cancelled(cancellation_event)
         self._publish(sink, snapshot, "analysis", "Analyzing the request...")
 
         permanent_memories = (
@@ -112,7 +115,10 @@ class GenerationService:
             self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
             engine = self._engine_factory(snapshot)
 
-        history_messages = [dict(message) for message in self._history_loader(snapshot.thread_id)]
+        self._check_cancelled(cancellation_event)
+        history_messages = [
+            dict(message) for message in self._history_loader(snapshot.thread_id)
+        ]
         if history_messages and history_messages[-1].get("role") == "user":
             history_messages.pop()
         chat_history = engine.fit_history_to_context(
@@ -125,6 +131,7 @@ class GenerationService:
         )
 
         self._publish(sink, snapshot, "final_response", "START_FINAL_ANIMATION")
+        self._check_cancelled(cancellation_event)
         response, thoughts, memory_command = engine.generate(
             query=snapshot.user_input,
             chat_history=chat_history,
@@ -142,6 +149,7 @@ class GenerationService:
             memory_command = MemoryCommand()
 
         if snapshot.translation_enabled:
+            self._check_cancelled(cancellation_event)
             self._publish(
                 sink,
                 snapshot,
@@ -164,6 +172,8 @@ class GenerationService:
                 )
             response = translation_result.text or ""
 
+        self._check_cancelled(cancellation_event)
+
         return GenerationServiceResult(
             response=response,
             thoughts=thoughts,
@@ -185,3 +195,8 @@ class GenerationService:
                 message=message,
             )
         )
+
+    @staticmethod
+    def _check_cancelled(cancellation_event: Event | None) -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise RuntimeError("generation cancelled")
