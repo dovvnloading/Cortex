@@ -213,6 +213,99 @@ class SynthesisAgent:
         self.ollama_client = ollama_client
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
 
+    @staticmethod
+    def estimate_tokens(value: str) -> int:
+        """Estimate tokens conservatively for local context budgeting."""
+        return max(1, (len(str(value or "")) + 3) // 4)
+
+    @classmethod
+    def output_token_reservation(cls, num_ctx: int) -> int:
+        """Reserve room for a useful answer inside the configured context window."""
+        context_limit = max(256, int(num_ctx))
+        return max(256, min(1024, context_limit // 4))
+
+    @classmethod
+    def fit_history_to_context(
+        cls,
+        messages: list[dict],
+        *,
+        query: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+    ) -> str:
+        """Keep the newest history that fits beside prompts, memories, and output."""
+        output_reservation = cls.output_token_reservation(num_ctx)
+        selected: list[dict] = []
+
+        for message in reversed(messages):
+            candidate = [message, *selected]
+            history = cls._format_history_messages(candidate)
+            prompt = PromptTemplate.build_synthesis_prompt(
+                query,
+                history,
+                permanent_memories,
+                memories_enabled,
+                user_system_instructions,
+            )
+            prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
+            if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
+                selected = candidate
+            elif selected:
+                break
+
+        return cls._format_history_messages(selected)
+
+    @classmethod
+    def fit_memories_to_context(
+        cls,
+        memories: list[str],
+        *,
+        query: str,
+        user_system_instructions: str | None,
+        num_ctx: int,
+    ) -> list[str]:
+        """Keep the newest permanent memories that fit before chat history."""
+        output_reservation = cls.output_token_reservation(num_ctx)
+        selected: list[str] = []
+        for memo in reversed(memories):
+            candidate = [memo, *selected]
+            prompt = PromptTemplate.build_synthesis_prompt(
+                query,
+                "No history available.",
+                candidate,
+                True,
+                user_system_instructions,
+            )
+            prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
+            if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
+                selected = candidate
+            elif selected:
+                break
+        return selected
+
+    @staticmethod
+    def _format_history_messages(messages: list[dict]) -> str:
+        if not messages:
+            return "No history available."
+        formatted: list[str] = []
+        index = 0
+        while index < len(messages):
+            item = messages[index]
+            if item.get("role") == "user":
+                user_content = str(item.get("content", ""))
+                if index + 1 < len(messages) and messages[index + 1].get("role") == "assistant":
+                    assistant_content = str(messages[index + 1].get("content", ""))
+                    formatted.append(f"User: {user_content}\nAI: {assistant_content}")
+                    index += 2
+                else:
+                    formatted.append(f"User: {user_content}")
+                    index += 1
+            else:
+                index += 1
+        return "\n\n".join(formatted).strip() or "No history available."
+
     def generate(self, query: str, chat_history: str, permanent_memories: list[str], memories_enabled: bool, user_system_instructions: str | None, options: dict | None = None) -> tuple[str, str | None, MemoryCommand]:
         """
         Generates a synthesized response and extracts thoughts and commands.
@@ -242,6 +335,8 @@ class SynthesisAgent:
             
             if api_options.get('seed') == -1:
                 del api_options['seed']
+            if 'num_ctx' in api_options:
+                api_options.setdefault('num_predict', self.output_token_reservation(api_options['num_ctx']))
 
             response = self.ollama_client.chat(
                 model=self.gen_model,
@@ -465,10 +560,9 @@ class SynthesisAgent:
                 messages=prompt_messages,
                 options={'temperature': 0.2}
             )
-            title = self._format_response(response['message']['content'])
-            title = title.strip().strip('"')
+            title = self.normalize_title(response['message']['content'])
             logging.info("Generated chat title with %s characters.", len(title))
-            return title if title else None
+            return title
         except Exception as e:
             logging.error("Chat title generation failed (%s).", type(e).__name__)
             return None
@@ -484,3 +578,12 @@ class SynthesisAgent:
             str: The text with leading/trailing whitespace removed.
         """
         return raw_text.strip()
+
+    @staticmethod
+    def normalize_title(raw_title: str | None, fallback: str = "Untitled Chat") -> str:
+        """Normalize generated titles before they enter persistence or the UI."""
+        title = re.sub(r"[\x00-\x1f\x7f]", " ", str(raw_title or ""))
+        title = re.sub(r"\s+", " ", title).strip().strip('"\'`').strip()
+        if not title:
+            return fallback
+        return title[:80].rstrip() or fallback

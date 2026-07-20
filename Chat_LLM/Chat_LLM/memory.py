@@ -925,6 +925,30 @@ class MemoryManager:
             A list of all message dictionaries in the active chat.
         """
         return self.current_thread_messages
+
+    @staticmethod
+    def format_messages(messages: list[dict]) -> str:
+        """Format a complete message list without applying a turn-count cap."""
+        if not messages:
+            return "No history available."
+
+        formatted: list[str] = []
+        index = 0
+        while index < len(messages):
+            item = messages[index]
+            if item.get('role') == 'user':
+                user_content = str(item.get('content', ''))
+                if index + 1 < len(messages) and messages[index + 1].get('role') == 'assistant':
+                    assistant_content = str(messages[index + 1].get('content', ''))
+                    formatted.append(f"User: {user_content}\nAI: {assistant_content}")
+                    index += 2
+                else:
+                    formatted.append(f"User: {user_content}")
+                    index += 1
+            else:
+                index += 1
+
+        return "\n\n".join(formatted).strip() or "No history available."
         
     def get_formatted_history(self, exclude_last_user_message: bool = False) -> str:
         """

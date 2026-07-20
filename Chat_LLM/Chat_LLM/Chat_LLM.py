@@ -26,7 +26,6 @@ from memory import (
     MemoryManager,
     DatabaseManager,
     PermanentMemoryManager,
-    VectorDatabaseManager,
 )
 from generation_types import ConnectionResult, GenerationSnapshot, MemoryCommand, ModelOperationError
 from utils import get_asset_path, LANGUAGES
@@ -44,7 +43,6 @@ CONFIG = {
     'gen_model': 'qwen3:8b', # This now serves as the default chat model
     'title_model': 'granite4:tiny-h',
     'translation_model': 'translategemma:4b', # Dedicated translation model
-    'embedding_model': 'nomic-embed-text', # Dedicated embedding model for vector memory
     'suggestions_enabled': True, 
     'suggestions_model': 'qwen3:8b', # Defaults to gen_model if not set
     'ollama_host': 'http://127.0.0.1:11434',
@@ -240,6 +238,7 @@ class Orchestrator:
         self._tracked_threads: list[QThread] = []
         self.active_thread_id = None
         self.active_thread_title = "New Chat"
+        self.active_thread_persisted = False
         self.update_check_status = "checking" # Can be 'checking', 'available', 'up_to_date', 'error'
         logging.info("Initializing Orchestrator...")
         
@@ -271,7 +270,6 @@ class Orchestrator:
         self.database_manager.migrate_from_json_if_needed() # Perform one-time migration
         self.memory_manager = MemoryManager()
         self.permanent_memory_manager = PermanentMemoryManager()
-        self.vector_db = VectorDatabaseManager()
         
         # Instantiate SynthesisAgent with the translation model config
         self.synthesis_agent = SynthesisAgent(
@@ -633,26 +631,6 @@ class Orchestrator:
 
         self.update_thread.start()
     
-    def embed_text(self, text: str) -> list[float]:
-        """
-        Generates a vector embedding for the given text using the configured model.
-
-        Args:
-            text (str): The text to embed.
-
-        Returns:
-            list[float]: The high-dimensional vector.
-        """
-        try:
-            response = self.ollama_client.embeddings(
-                model=self.config['embedding_model'],
-                prompt=text
-            )
-            return response.get('embedding', [])
-        except Exception as e:
-            logging.error("Failed to generate embedding (%s).", type(e).__name__)
-            return []
-
     def commit_user_message(self, thread_id: str, user_input: str):
         """
         Saves the user's message, creating the chat thread in the DB if it's the first message.
@@ -670,6 +648,7 @@ class Orchestrator:
         )
         if thread_id == self.active_thread_id:
             self.memory_manager.add_user_message(user_input)
+            self.active_thread_persisted = True
         logging.info(f"Committed user message for thread {thread_id} to database.")
 
     def commit_assistant_message(self, thread_id: str, ai_response: str, thoughts: str | None):
@@ -744,20 +723,35 @@ class Orchestrator:
 
         is_active_thread = (thread_id == self.active_thread_id)
 
-        # Get the appropriate chat history.
-        if is_active_thread:
-            chat_history = self.memory_manager.get_formatted_history(exclude_last_user_message=True)
-        else:
-            # For background threads, load history directly from the database.
-            chat_data = self.database_manager.load_chat(thread_id)
-            temp_memory = MemoryManager()
-            if chat_data:
-                temp_memory.load_from_history(chat_data.get('messages', []))
-            chat_history = temp_memory.get_formatted_history(exclude_last_user_message=True)
-        
         permanent_memos = (
             self.permanent_memory_manager.get_memos()
             if snapshot.memories_enabled else []
+        )
+        if snapshot.memories_enabled:
+            permanent_memos = SynthesisAgent.fit_memories_to_context(
+                permanent_memos,
+                query=snapshot.user_input,
+                user_system_instructions=snapshot.user_system_instructions,
+                num_ctx=snapshot.model_options.get('num_ctx', self.config['num_ctx']),
+            )
+
+        # Get the complete history and fit only the newest messages into the
+        # configured context window after reserving prompt, memory, and output space.
+        if is_active_thread:
+            history_messages = list(self.memory_manager.get_full_history())
+        else:
+            # For background threads, load history directly from the database.
+            chat_data = self.database_manager.load_chat(thread_id)
+            history_messages = list(chat_data.get('messages', [])) if chat_data else []
+        if history_messages and history_messages[-1].get('role') == 'user':
+            history_messages.pop()
+        chat_history = SynthesisAgent.fit_history_to_context(
+            history_messages,
+            query=user_input,
+            permanent_memories=permanent_memos,
+            memories_enabled=snapshot.memories_enabled,
+            user_system_instructions=snapshot.user_system_instructions,
+            num_ctx=snapshot.model_options.get('num_ctx', self.config['num_ctx']),
         )
 
         generation_agent = SynthesisAgent(
@@ -804,6 +798,7 @@ class Orchestrator:
         """Initializes a new, temporary in-memory chat session."""
         self.active_thread_id = str(uuid.uuid4())
         self.active_thread_title = "New Chat"
+        self.active_thread_persisted = False
         self.memory_manager.clear()
         logging.info(f"Started new in-memory chat session with ID: {self.active_thread_id}")
 
@@ -821,6 +816,7 @@ class Orchestrator:
         if chat_data:
             self.active_thread_id = chat_data['id']
             self.active_thread_title = chat_data['title']
+            self.active_thread_persisted = True
             self.memory_manager.load_from_history(chat_data['messages'])
             logging.info(f"Loaded chat thread: {thread_id}")
             return chat_data
@@ -837,6 +833,7 @@ class Orchestrator:
         if self.active_thread_id == thread_id:
             self.active_thread_id = None
             self.active_thread_title = ""
+            self.active_thread_persisted = False
             self.memory_manager.clear()
     
     def delete_last_assistant_message(self, thread_id: str):
@@ -864,6 +861,8 @@ class Orchestrator:
         source_chat = self.database_manager.load_chat(source_thread_id)
         if not source_chat or not source_chat.get('messages'):
             return None
+        if message_index < 0 or message_index >= len(source_chat['messages']):
+            return None
 
         # 1. Determine the content for the new thread
         messages_to_copy = source_chat['messages'][:message_index + 1]
@@ -885,7 +884,7 @@ class Orchestrator:
                 except (ValueError, IndexError):
                     continue
         
-        new_title = f"{base_title} Thread:{max_num + 1}"
+        new_title = SynthesisAgent.normalize_title(f"{base_title} Thread:{max_num + 1}")
         
         # 3. Create the new thread
         new_thread_id = str(uuid.uuid4())
