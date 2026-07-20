@@ -330,6 +330,16 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .dialog { width: min(100%, 420px); padding: 24px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow); }
 .dialog h2 { margin: 0 0 20px; letter-spacing: -0.035em; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.delete-dialog { width: min(100%, 470px); }
+.delete-dialog-heading { display: flex; align-items: flex-start; gap: 12px; }
+.delete-dialog-heading .eyebrow { margin-bottom: 4px; color: var(--danger); }
+.delete-dialog-heading h2 { margin-bottom: 0; }
+.delete-dialog-icon { display: grid; flex: 0 0 38px; place-items: center; width: 38px; height: 38px; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.delete-dialog-description { margin: 0 0 16px; color: var(--text-muted); font-size: 0.86rem; line-height: 1.55; }
+.delete-dialog-target { display: grid; gap: 4px; margin-bottom: 18px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 7%, var(--surface-soft)); }
+.delete-dialog-target span { color: var(--text-faint); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.delete-dialog-target strong { overflow: hidden; color: var(--text); font-size: 0.86rem; text-overflow: ellipsis; white-space: nowrap; }
+.delete-confirm-title { color: var(--text); font-family: "Cascadia Code", Consolas, monospace; font-size: 0.78rem; }
 
 @media (max-width: 760px) {
   .sidebar { position: fixed; top: 0; bottom: 0; left: 0; width: min(280px, 86vw); min-width: min(280px, 86vw); padding: 10px; box-shadow: var(--shadow); transition: transform 160ms ease; }

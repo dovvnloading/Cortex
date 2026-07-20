@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Pencil, Plus, Settings, Trash2 } from "lucide-react";
 import type { ChatSummary, ModelResponse } from "../../../contracts/cortex-api";
@@ -28,6 +28,7 @@ export function AppShell({
   const location = useLocation();
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
 
   const isSettings = location.pathname === "/settings";
   const activeTitle = isSettings
@@ -91,7 +92,7 @@ export function AppShell({
                   <button className="history-action" type="button" aria-label={`Rename ${chat.title || "chat"}`} onClick={() => setRenameTarget(chat)}>
                     <Pencil aria-hidden="true" size={13} />
                   </button>
-                  <button className="history-action history-action-danger" type="button" aria-label={`Delete ${chat.title || "chat"}`} onClick={() => void onDeleteChat(chat.id)}>
+                  <button className="history-action history-action-danger" type="button" aria-label={`Delete ${chat.title || "chat"}`} onClick={() => setDeleteTarget(chat)}>
                     <Trash2 aria-hidden="true" size={13} />
                   </button>
                 </div>
@@ -104,6 +105,7 @@ export function AppShell({
       </div>
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}
+      {deleteTarget && <DeleteChatDialog chat={deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={async () => { await onDeleteChat(deleteTarget.id); setDeleteTarget(null); }} />}
     </div>
   );
 }
@@ -125,6 +127,57 @@ function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: (
           <div className="dialog-actions">
             <button type="button" className="button button-secondary" onClick={onClose}>Cancel</button>
             <button type="submit" className="button button-primary" disabled={!title.trim()}>Save title</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const title = chat.title.trim() || "Untitled chat";
+  const confirmed = confirmation.trim() === title;
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onClose]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!confirmed || busy) return;
+    setBusy(true);
+    try {
+      await onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onClose(); }}>
+      <div className="dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-chat-title" aria-describedby="delete-chat-description">
+        <div className="delete-dialog-heading">
+          <div className="delete-dialog-icon" aria-hidden="true"><Trash2 size={18} /></div>
+          <div>
+            <p className="eyebrow">PERMANENT ACTION</p>
+            <h2 id="delete-chat-title">Delete this chat?</h2>
+          </div>
+        </div>
+        <p id="delete-chat-description" className="delete-dialog-description">This permanently removes the conversation and all of its messages. Deleted chats cannot be recovered.</p>
+        <div className="delete-dialog-target"><span>Chat to delete</span><strong>{title}</strong></div>
+        <form onSubmit={submit} className="stack-lg">
+          <label className="field-label" htmlFor="delete-chat-confirmation">Type <span className="delete-confirm-title">{title}</span> to confirm
+            <input id="delete-chat-confirmation" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoFocus autoComplete="off" spellCheck={false} placeholder={title} />
+          </label>
+          <div className="dialog-actions">
+            <button type="button" className="button button-secondary" onClick={onClose} disabled={busy}>Keep chat</button>
+            <button type="submit" className="button button-danger" disabled={!confirmed || busy}>{busy ? "Deleting…" : "Delete permanently"}</button>
           </div>
         </form>
       </div>
