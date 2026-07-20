@@ -2,6 +2,7 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #1f1f1f;
   background: #faf8f5;
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --bg: #faf8f5;
@@ -33,6 +34,7 @@
 :root[data-theme="dark"] {
   color: #e0e0e0;
   background: #2d2d2d;
+  color-scheme: dark;
   --bg: #2d2d2d;
   --sidebar: #262626;
   --input: #222222;
@@ -54,7 +56,12 @@
   --shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--surface-soft); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--surface-soft); }
+::-webkit-scrollbar-thumb { min-height: 42px; border: 3px solid var(--surface-soft); border-radius: 999px; background: var(--line-strong); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+::-webkit-scrollbar-corner { background: var(--surface-soft); }
 html, body, #root { width: 100%; min-width: 320px; height: 100%; min-height: 100%; margin: 0; }
 body { min-height: 100vh; overflow: hidden; background: var(--bg); color: var(--text); }
 button, input, select, textarea { font: inherit; }
@@ -174,7 +181,7 @@ a { color: inherit; text-decoration: none; }
 .sidebar-scrim { display: none; }
 .new-chat-button { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex: 0 0 42px; width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 12px; background: var(--surface); color: var(--text); font-size: 0.82rem; font-weight: 650; }
 .new-chat-button:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.chat-list { display: grid; align-content: start; gap: 3px; min-width: 238px; margin-top: 10px; overflow-y: auto; }
+.chat-list { display: grid; align-content: start; gap: 3px; min-width: 0; margin-top: 10px; overflow-x: hidden; overflow-y: auto; padding-right: 2px; scrollbar-gutter: stable; }
 .chat-list-item { display: flex; align-items: center; min-height: 50px; border-radius: 8px; }
 .chat-list-item:hover { background: var(--history-hover); }
 .chat-list-item-active { background: var(--history-active); }
@@ -185,7 +192,7 @@ a { color: inherit; text-decoration: none; }
 .history-action { display: grid; place-items: center; width: 27px; height: 27px; border: 0; border-radius: 6px; background: transparent; color: var(--text-faint); }
 .history-action:hover { background: var(--surface-soft); color: var(--text); }
 .history-action-danger:hover { color: var(--danger); }
-.sidebar-empty { min-width: 238px; margin: 0; padding: 14px 8px; color: var(--text-faint); font-size: 0.8rem; line-height: 1.5; }
+.sidebar-empty { min-width: 0; margin: 0; padding: 14px 8px; color: var(--text-faint); font-size: 0.8rem; line-height: 1.5; }
 
 .main-content { flex: 1 1 auto; width: auto; min-width: 0; min-height: 0; margin: 0; }
 .chat-content { overflow: hidden; padding: 0; }

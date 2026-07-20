@@ -83,6 +83,13 @@ def test_native_window_uses_private_isolated_edge_webview(
         "import_module",
         lambda name: FakeWebview if name == "webview" else None,
     )
+    dark_title_bar_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_dark_title_bar",
+        lambda **kwargs: dark_title_bar_calls.append(kwargs) or True,
+    )
     monitored: list[object] = []
     storage = tmp_path / "private-webview"
     icon = tmp_path / "cortex.ico"
@@ -103,6 +110,7 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["private_mode"] is True
     assert calls["start"]["storage_path"] == str(storage)
     assert calls["start"]["icon"] == str(icon)
+    assert dark_title_bar_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex"}]
     assert webview_settings["ALLOW_DOWNLOADS"] is False
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
 
@@ -145,6 +153,7 @@ def test_native_window_legacy_start_without_icon_option_still_launches(
         "_apply_windows_window_icon",
         lambda **kwargs: applied.append(kwargs) or True,
     )
+    monkeypatch.setattr(desktop_module, "_apply_windows_dark_title_bar", lambda **_kwargs: True)
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(

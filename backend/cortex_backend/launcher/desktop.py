@@ -91,6 +91,8 @@ def run_desktop_window(
                     "Cortex requires the Microsoft Edge WebView2 Runtime; the legacy "
                     "browser engine is intentionally disabled."
                 )
+            if sys.platform == "win32":
+                _apply_windows_dark_title_bar(pid=os.getpid(), title=config.title)
             if icon_path and not start_accepts_icon:
                 _apply_windows_window_icon(
                     pid=os.getpid(),
@@ -228,6 +230,40 @@ def _apply_windows_window_icon(*, pid: int, title: str, icon_path: Path) -> bool
     except Exception:
         # A decorative icon must never prevent Cortex from starting.
         return False
+
+
+def _apply_windows_dark_title_bar(*, pid: int, title: str) -> bool:
+    """Opt Cortex's native title bar into Windows immersive dark mode."""
+    if sys.platform != "win32":
+        return False
+
+    try:
+        hwnd = _find_process_window(pid, title, timeout=3.0)
+        if hwnd is None:
+            return False
+
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwmapi.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+        enabled = ctypes.c_int(1)
+        for attribute in (20, 19):  # Win10 2004+ / older Win10 dark-mode IDs
+            result = dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                ctypes.byref(enabled),
+                ctypes.sizeof(enabled),
+            )
+            if result == 0:
+                return True
+    except Exception:
+        # Native chrome is cosmetic; never fail the owned UI because of it.
+        return False
+    return False
 
 
 def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
