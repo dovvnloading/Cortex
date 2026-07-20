@@ -40,6 +40,7 @@
     <Content Include="README.md" />
     <Content Include="requirements.txt" />
     <Content Include="pyproject.toml" />
+    <Content Include="tools\generate_cortex_icons.cjs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="assets\" />
@@ -63,6 +64,7 @@
     <Folder Include="frontend\src\test\" />
     <Folder Include="packaging\" />
     <Folder Include="tests\" />
+    <Folder Include="tools\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <Target Name="BeforeBuild" />
