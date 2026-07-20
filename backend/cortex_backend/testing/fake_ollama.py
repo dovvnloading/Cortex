@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import time
 from typing import Any
 
@@ -34,6 +35,9 @@ class FakeOllamaState:
     fail_translation: bool = False
     generation_delay_seconds: float = 0.0
     malformed_stream: bool = False
+    generation_response: str | None = None
+    generation_thoughts: str | None = None
+    disconnect_after_chunks: int | None = None
 
 
 class FakeOllamaGateway:
@@ -135,7 +139,8 @@ class FakeGenerationEngine:
             return f"Echo: {query}", None, MemoryCommand(additions=(memo,))
         if query.strip() == "!clear-memory":
             return "Echo: clear request", None, MemoryCommand(clear_requested=True)
-        return f"Echo: {query}", None, MemoryCommand()
+        response = self.state.generation_response or f"Echo: {query}"
+        return response, self.state.generation_thoughts, MemoryCommand()
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         if self.state.fail_translation or target_language == "!fail":
@@ -185,4 +190,33 @@ def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="fake generation failure")
         return {"response": f"Echo: {prompt}", "done": "true"}
 
+    @app.post("/api/chat", response_model=None)
+    def chat(payload: dict[str, Any]) -> StreamingResponse | dict[str, Any]:
+        """Stream deterministic thinking/content chunks for browser parity tests."""
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise HTTPException(status_code=422, detail="messages required")
+        if fake_state.fail_generation:
+            raise HTTPException(status_code=500, detail="fake generation failure")
+        content = fake_state.generation_response or f"Echo: {messages[-1].get('content', '')}"
+        chunks: list[str] = []
+        if fake_state.generation_thoughts:
+            chunks.append(json.dumps({"message": {"thinking": fake_state.generation_thoughts}, "done": False}))
+        chunks.extend(
+            json.dumps({"message": {"content": part}, "done": False})
+            for part in _fake_chunks(content)
+        )
+        chunks.append(json.dumps({"message": {}, "done": True}))
+        if fake_state.disconnect_after_chunks is not None:
+            chunks = chunks[: max(0, fake_state.disconnect_after_chunks)]
+        return StreamingResponse(
+            (f"{chunk}\n" for chunk in chunks),
+            media_type="application/x-ndjson",
+        )
+
     return app
+
+
+def _fake_chunks(value: str, size: int = 12):
+    for start in range(0, len(value), size):
+        yield value[start : start + size]

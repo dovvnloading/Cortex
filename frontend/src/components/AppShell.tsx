@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { FilePlus2, LayoutDashboard, Menu, Pencil, Settings, Trash2, X } from "lucide-react";
 import type { ChatSummary, SystemResponse } from "../../../contracts/cortex-api";
 
@@ -10,7 +10,6 @@ type Props = {
   theme: "light" | "dark" | "system";
   onThemeChange: (theme: "light" | "dark" | "system") => void;
   onSelectChat: (id: string) => void;
-  onCreateChat: () => Promise<void>;
   onRenameChat: (id: string, title: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
   children: ReactNode;
@@ -23,17 +22,18 @@ export function AppShell({
   theme,
   onThemeChange,
   onSelectChat,
-  onCreateChat,
   onRenameChat,
   onDeleteChat,
   children,
 }: Props) {
+  const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
 
-  const createChat = () => void onCreateChat().then(() => setSidebarOpen(false));
+  const createChat = () => { navigate("/chat/new"); setSidebarOpen(false); };
   const selectChat = (id: string) => {
     onSelectChat(id);
+    navigate(`/chat/${id}`);
     setSidebarOpen(false);
   };
 

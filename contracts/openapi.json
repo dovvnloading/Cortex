@@ -91,6 +91,17 @@
             "title": "Content",
             "type": "string"
           },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
           "role": {
             "enum": [
               "user",
@@ -122,6 +133,17 @@
               }
             ],
             "title": "Thoughts"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
           }
         },
         "required": [
@@ -144,6 +166,11 @@
             },
             "title": "Messages",
             "type": "array"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
           },
           "timestamp": {
             "title": "Timestamp",
@@ -307,9 +334,90 @@
         "title": "CreateChatRequest",
         "type": "object"
       },
+      "ForkRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "title": "ForkRequest",
+        "type": "object"
+      },
+      "GenerationEvent": {
+        "additionalProperties": false,
+        "description": "Stable generation event envelope carried by the parity SSE stream.",
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "event": {
+            "enum": [
+              "generation.queued",
+              "generation.started",
+              "generation.status",
+              "generation.thinking_delta",
+              "generation.content_delta",
+              "generation.translation_started",
+              "generation.persisting",
+              "generation.completed",
+              "generation.failed",
+              "generation.cancelled"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "event",
+          "job_id",
+          "thread_id",
+          "timestamp"
+        ],
+        "title": "GenerationEvent",
+        "type": "object"
+      },
       "GenerationRequest": {
         "additionalProperties": false,
         "properties": {
+          "base_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Revision"
+          },
           "request_id": {
             "anyOf": [
               {
@@ -324,10 +432,17 @@
             "title": "Request Id"
           },
           "thread_id": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Thread Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
           },
           "user_input": {
             "maxLength": 100000,
@@ -337,7 +452,6 @@
           }
         },
         "required": [
-          "thread_id",
           "user_input"
         ],
         "title": "GenerationRequest",
@@ -428,6 +542,28 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "user_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Message Id"
           }
         },
         "required": [
@@ -463,6 +599,18 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
           },
           "sequence": {
             "title": "Sequence",
@@ -626,6 +774,47 @@
           }
         },
         "title": "OnboardingSettings",
+        "type": "object"
+      },
+      "RegenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "user_input": {
+            "anyOf": [
+              {
+                "maxLength": 100000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Input"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "title": "RegenerationRequest",
         "type": "object"
       },
       "RenameChatRequest": {
@@ -1105,6 +1294,55 @@
         "summary": "Rename Chat"
       }
     },
+    "/api/v1/chats/{thread_id}/forks": {
+      "post": {
+        "operationId": "fork_chat_api_v1_chats__thread_id__forks_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Fork Chat"
+      }
+    },
     "/api/v1/chats/{thread_id}/messages": {
       "post": {
         "operationId": "add_message_api_v1_chats__thread_id__messages_post",
@@ -1152,6 +1390,210 @@
           }
         },
         "summary": "Add Message"
+      }
+    },
+    "/api/v1/chats/{thread_id}/regenerations": {
+      "post": {
+        "operationId": "regenerate_chat_api_v1_chats__thread_id__regenerations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Regenerate Chat"
+      }
+    },
+    "/api/v1/generations": {
+      "post": {
+        "operationId": "create_generation_api_v1_generations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Generation"
+      }
+    },
+    "/api/v1/generations/{job_id}": {
+      "get": {
+        "operationId": "generation_status_api_v1_generations__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generation Status"
+      }
+    },
+    "/api/v1/generations/{job_id}/cancel": {
+      "post": {
+        "operationId": "cancel_generation_api_v1_generations__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Generation"
+      }
+    },
+    "/api/v1/generations/{job_id}/events": {
+      "get": {
+        "operationId": "generation_events_api_v1_generations__job_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationEvent"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generation Events"
       }
     },
     "/api/v1/health": {

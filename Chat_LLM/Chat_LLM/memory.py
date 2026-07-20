@@ -354,6 +354,7 @@ class DatabaseManager:
                     "UPDATE threads SET timestamp = ? WHERE id = ?",
                     (_utc_now().isoformat(), thread_id)
                 )
+                return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         except PersistenceError as exc:
             raise PersistenceError(
                 f"Failed to add message to thread {thread_id}.",
@@ -374,7 +375,7 @@ class DatabaseManager:
                 chat_data = dict(thread_row)
                 
                 cursor.execute(
-                    "SELECT role, content, sources, thoughts FROM messages "
+                    "SELECT id, role, content, sources, thoughts, timestamp FROM messages "
                     "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
@@ -431,6 +432,49 @@ class DatabaseManager:
             raise PersistenceError(
                 f"Failed to delete last assistant message for thread {thread_id}.",
                 operation="delete_last_assistant_message",
+                cause=exc,
+            ) from exc
+
+    def replace_message(
+        self,
+        thread_id: str,
+        message_id: int,
+        content: str,
+        *,
+        sources: list | None = None,
+        thoughts: str | None = None,
+    ) -> None:
+        """Replace one assistant response without disturbing its user turn."""
+        try:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE messages
+                    SET content = ?, sources = ?, thoughts = ?, timestamp = ?
+                    WHERE id = ? AND thread_id = ? AND role = 'assistant'
+                    """,
+                    (
+                        content,
+                        json.dumps(sources) if sources else None,
+                        thoughts,
+                        _utc_now().isoformat(),
+                        message_id,
+                        thread_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PersistenceError(
+                        f"Assistant message {message_id} was not found.",
+                        operation="replace_message",
+                    )
+                conn.execute(
+                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    (_utc_now().isoformat(), thread_id),
+                )
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to replace message {message_id}.",
+                operation="replace_message",
                 cause=exc,
             ) from exc
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict
+from datetime import datetime, timezone
 import json
 import logging
 from typing import Any
@@ -13,7 +14,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from cortex_backend.core.generation import ConnectionResult, GenerationSnapshot
+from cortex_backend.services.chat import (
+    ChatDomainError,
+    chat_revision,
+    follow_up_suggestions,
+    message_position,
+    title_from_first_message,
+)
 from cortex_backend.core.settings import CortexSettings
+from cortex_backend.repositories.chats import ChatRepositoryError
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import JobConflict, JobNotFound, JobOwnershipError, JobSnapshot
@@ -24,7 +33,10 @@ from .schemas import (
     ChatSummary,
     ClearMemoryRequest,
     CreateChatRequest,
+    ForkRequest,
+    GenerationEvent,
     GenerationRequest,
+    RegenerationRequest,
     HealthResponse,
     JobAccepted,
     JobStatusResponse,
@@ -325,6 +337,172 @@ def build_router() -> APIRouter:
         return _accepted(snapshot)
 
     @router.post(
+        "/generations",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def create_generation(
+        payload: GenerationRequest,
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobAccepted:
+        try:
+            snapshot, user_message_id = await _start_generation_job(
+                request,
+                deps,
+                principal,
+                payload,
+            )
+        except JobConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
+        except ChatDomainError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
+        return _accepted(snapshot, user_message_id=user_message_id)
+
+    @router.get("/generations/{job_id}", response_model=JobStatusResponse)
+    def generation_status(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobStatusResponse:
+        return _job_response(_job_status(request, job_id, principal))
+
+    @router.post(
+        "/generations/{job_id}/cancel", response_model=JobStatusResponse
+    )
+    def cancel_generation(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobStatusResponse:
+        try:
+            snapshot = request.app.state.jobs.cancel(job_id, owner=principal.session_id)
+        except (JobNotFound, JobOwnershipError) as exc:
+            _raise_job_error(exc)
+        return _job_response(snapshot)
+
+    @router.get("/generations/{job_id}/events", response_model=GenerationEvent)
+    async def generation_events(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> StreamingResponse:
+        cursor = _event_cursor(request)
+        try:
+            request.app.state.jobs.status(job_id, owner=principal.session_id)
+            event_stream = request.app.state.jobs.events(
+                job_id,
+                owner=principal.session_id,
+                after_sequence=cursor,
+            )
+        except (JobNotFound, JobOwnershipError) as exc:
+            _raise_job_error(exc)
+
+        async def stream():
+            async for event in event_stream:
+                event_name = _generation_event_name(event.kind, event.status, event.phase)
+                payload = GenerationEvent(
+                    event_id=event.sequence,
+                    event=event_name,
+                    job_id=event.job_id,
+                    thread_id=event.thread_id or "",
+                    timestamp=datetime.now(timezone.utc),
+                    data=dict(event.data),
+                ).model_dump(mode="json")
+                yield (
+                    f"id: {event.sequence}\n"
+                    f"event: {event_name}\n"
+                    f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                )
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post(
+        "/chats/{thread_id}/forks",
+        response_model=ChatResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def fork_chat(
+        thread_id: str,
+        payload: ForkRequest,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> ChatResponse:
+        try:
+            source = deps.chats.get_chat(thread_id)
+            if source is None:
+                raise HTTPException(status_code=404, detail="Chat not found.")
+            message_position(source, payload.message_id)
+            new_thread_id = uuid4().hex
+            deps.chats.fork_chat(thread_id, payload.message_id, new_thread_id)
+            forked = deps.chats.get_chat(new_thread_id)
+        except HTTPException:
+            raise
+        except (ChatDomainError, ChatRepositoryError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            _raise_repository_error("fork chat", exc)
+        if forked is None:
+            raise HTTPException(status_code=500, detail="Chat fork did not persist.")
+        return _chat_response(forked)
+
+    @router.post(
+        "/chats/{thread_id}/regenerations",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def regenerate_chat(
+        thread_id: str,
+        payload: RegenerationRequest,
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobAccepted:
+        try:
+            chat = deps.chats.get_chat(thread_id)
+            if chat is None:
+                raise HTTPException(status_code=404, detail="Chat not found.")
+            position = message_position(chat, payload.message_id)
+            messages = list(chat.get("messages", ()))
+            if position != len(messages) - 1 or messages[position].get("role") != "assistant":
+                raise ChatDomainError("Only the final assistant response can be regenerated.")
+            if position == 0 or messages[position - 1].get("role") != "user":
+                raise ChatDomainError("The selected response has no user turn to regenerate.")
+            user_input = (payload.user_input or messages[position - 1].get("content", "")).strip()
+            if not user_input:
+                raise ChatDomainError("A regeneration request needs user input.")
+            generation_payload = GenerationRequest(
+                request_id=payload.request_id,
+                thread_id=thread_id,
+                user_input=user_input,
+                base_revision=chat_revision(chat),
+            )
+            snapshot, _ = await _start_generation_job(
+                request,
+                deps,
+                principal,
+                generation_payload,
+                target_message_id=payload.message_id,
+                history_messages=messages[:position],
+            )
+        except HTTPException:
+            raise
+        except JobConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ChatDomainError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _accepted(snapshot)
+
+    @router.post(
         "/jobs/generation",
         response_model=JobAccepted,
         status_code=status.HTTP_202_ACCEPTED,
@@ -457,6 +635,161 @@ def build_router() -> APIRouter:
     return router
 
 
+async def _start_generation_job(
+    request: Request,
+    deps: BackendDependenciesProtocol,
+    principal: SessionPrincipal,
+    payload: GenerationRequest,
+    *,
+    target_message_id: str | None = None,
+    history_messages: list[Mapping[str, Any]] | None = None,
+) -> tuple[JobSnapshot, str | None]:
+    """Persist the user turn, then run one authoritative generation job."""
+    jobs = request.app.state.jobs
+    existing = jobs.request_snapshot(
+        kind="generation",
+        owner=principal.session_id,
+        request_id=payload.request_id,
+    )
+    if existing is not None:
+        return existing, None
+    if jobs.active_snapshot(kind="generation") is not None:
+        raise JobConflict("A generation job is already active.")
+
+    thread_id = payload.thread_id or uuid4().hex
+    chat = deps.chats.get_chat(thread_id)
+    if payload.base_revision is not None and chat is not None:
+        if chat_revision(chat) != payload.base_revision:
+            raise ChatDomainError("This chat changed. Reload it before generating again.")
+
+    user_message_id: str | None = None
+    if target_message_id is None:
+        user_message_id = deps.chats.add_message(
+            thread_id,
+            "user",
+            payload.user_input,
+            thread_title="New Chat" if chat is None else None,
+        )
+
+    settings = _load_settings(deps)
+    job_id = uuid4().hex
+    generation_payload = payload.model_copy(update={"thread_id": thread_id})
+    generation_snapshot = _generation_snapshot(job_id, generation_payload, settings)
+
+    def runner(sink, cancel_event):
+        result = deps.generation.generate(
+            generation_snapshot,
+            progress_sink=sink,
+            cancellation_event=cancel_event,
+            history_messages=history_messages,
+        )
+        if result.thoughts:
+            for delta in _chunks(result.thoughts):
+                sink.publish_progress(
+                    "thinking_delta",
+                    "Reasoning available.",
+                    data={"delta": delta},
+                )
+        for delta in _chunks(result.response):
+            sink.publish_progress(
+                "content_delta",
+                "Response content available.",
+                data={"delta": delta},
+            )
+
+        for memo in result.memory_command.additions:
+            deps.memories.add_memo(memo)
+        sink.publish_progress("persisting", "Saving the response.")
+        if target_message_id is None:
+            assistant_message_id = deps.chats.add_message(
+                thread_id,
+                "assistant",
+                result.response,
+                thoughts=result.thoughts,
+            )
+        else:
+            deps.chats.replace_message(
+                thread_id,
+                target_message_id,
+                result.response,
+                thoughts=result.thoughts,
+            )
+            assistant_message_id = target_message_id
+
+        updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
+        title = str(updated_chat.get("title") or "New Chat")
+        if target_message_id is None and title == "New Chat":
+            generated_title = title_from_first_message(payload.user_input)
+            if generated_title != title:
+                try:
+                    deps.chats.rename_chat(thread_id, generated_title)
+                    title = generated_title
+                except Exception as exc:
+                    logging.warning(
+                        "Cortex title update failed (%s).", type(exc).__name__
+                    )
+        updated_chat = deps.chats.get_chat(thread_id) or updated_chat
+        return {
+            "thread_id": thread_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "chat_revision": chat_revision(updated_chat),
+            "title": str(updated_chat.get("title") or title),
+            "suggestions": follow_up_suggestions(updated_chat.get("messages", [])),
+            "response": result.response,
+            "thoughts": result.thoughts,
+            "clear_requested": result.memory_command.clear_requested,
+        }
+
+    snapshot = await jobs.start(
+        kind="generation",
+        owner=principal.session_id,
+        thread_id=thread_id,
+        runner=runner,
+        request_id=payload.request_id,
+    )
+    return snapshot, user_message_id
+
+
+def _chunks(value: str, size: int = 80):
+    for start in range(0, len(value), size):
+        yield value[start : start + size]
+
+
+def _event_cursor(request: Request) -> int:
+    cursor_header = request.headers.get("last-event-id", "0")
+    try:
+        cursor = int(cursor_header or "0")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="Last-Event-ID must be an integer."
+        ) from exc
+    if cursor < 0:
+        raise HTTPException(
+            status_code=400, detail="Last-Event-ID must be non-negative."
+        )
+    return cursor
+
+
+def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str:
+    if kind == "completed":
+        return "generation.completed"
+    if kind == "error":
+        return "generation.failed"
+    if kind == "state" and job_status == "cancelled":
+        return "generation.cancelled"
+    if kind == "state" and job_status == "queued":
+        return "generation.queued"
+    if kind == "state":
+        return "generation.started"
+    return {
+        "thinking_delta": "generation.thinking_delta",
+        "content_delta": "generation.content_delta",
+        "translation": "generation.translation_started",
+        "persisting": "generation.persisting",
+    }.get(phase or "", "generation.status")
+
+
 def _load_settings(deps: BackendDependenciesProtocol) -> CortexSettings:
     try:
         return deps.settings.load().settings
@@ -502,7 +835,7 @@ def _generation_snapshot(
 ) -> GenerationSnapshot:
     return GenerationSnapshot(
         job_id=job_id,
-        thread_id=payload.thread_id,
+        thread_id=payload.thread_id or "",
         user_input=payload.user_input,
         model=settings.models.chat,
         title_model=settings.models.title,
@@ -521,10 +854,13 @@ def _generation_snapshot(
 
 def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
     normalized = dict(chat)
+    normalized["revision"] = chat_revision(chat)
     normalized["messages"] = [
         {
+            "id": str(message.get("id")) if message.get("id") is not None else None,
             "role": message.get("role"),
             "content": message.get("content", ""),
+            "timestamp": message.get("timestamp"),
             "sources": message.get("sources"),
             "thoughts": message.get("thoughts"),
         }
@@ -533,9 +869,17 @@ def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
     return ChatResponse.model_validate(normalized)
 
 
-def _accepted(snapshot: JobSnapshot) -> JobAccepted:
+def _accepted(
+    snapshot: JobSnapshot,
+    *,
+    user_message_id: str | None = None,
+) -> JobAccepted:
     return JobAccepted(
-        job_id=snapshot.job_id, kind=snapshot.kind, status=snapshot.status
+        job_id=snapshot.job_id,
+        kind=snapshot.kind,
+        status=snapshot.status,
+        thread_id=snapshot.thread_id,
+        user_message_id=user_message_id,
     )
 
 
@@ -547,6 +891,7 @@ def _job_response(snapshot: JobSnapshot) -> JobStatusResponse:
         status=snapshot.status,
         sequence=snapshot.sequence,
         error=snapshot.error,
+        result=dict(snapshot.result) if snapshot.result is not None else None,
     )
 
 

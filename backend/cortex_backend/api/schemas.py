@@ -42,8 +42,10 @@ ChatRole = Literal["user", "assistant", "system"]
 
 
 class ChatMessage(APIModel):
+    id: str | None = None
     role: ChatRole
     content: str
+    timestamp: str | None = None
     sources: list[Any] | None = None
     thoughts: str | None = None
 
@@ -58,6 +60,7 @@ class ChatResponse(APIModel):
     id: str
     title: str
     timestamp: str
+    revision: int = 0
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
@@ -117,14 +120,27 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 class GenerationRequest(APIModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
-    thread_id: str = Field(min_length=1, max_length=200)
+    thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_input: str = Field(min_length=1, max_length=100_000)
+    base_revision: int | None = Field(default=None, ge=0)
+
+
+class ForkRequest(APIModel):
+    message_id: str = Field(min_length=1, max_length=200)
+
+
+class RegenerationRequest(APIModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    user_input: str | None = Field(default=None, max_length=100_000)
 
 
 class JobAccepted(APIModel):
     job_id: str
     kind: JobKind
     status: JobStatus
+    thread_id: str | None = None
+    user_message_id: str | None = None
 
 
 class JobStatusResponse(APIModel):
@@ -134,6 +150,7 @@ class JobStatusResponse(APIModel):
     status: JobStatus
     sequence: int
     error: str | None = None
+    result: dict[str, Any] | None = None
 
 
 class SSEEvent(APIModel):
@@ -144,4 +161,29 @@ class SSEEvent(APIModel):
     kind: Literal["state", "progress", "completed", "error"]
     status: JobStatus
     phase: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+GenerationEventName = Literal[
+    "generation.queued",
+    "generation.started",
+    "generation.status",
+    "generation.thinking_delta",
+    "generation.content_delta",
+    "generation.translation_started",
+    "generation.persisting",
+    "generation.completed",
+    "generation.failed",
+    "generation.cancelled",
+]
+
+
+class GenerationEvent(APIModel):
+    """Stable generation event envelope carried by the parity SSE stream."""
+
+    event_id: int
+    event: GenerationEventName
+    job_id: str
+    thread_id: str
+    timestamp: datetime
     data: dict[str, Any] = Field(default_factory=dict)

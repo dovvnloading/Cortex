@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
-import type { ChatSummary, CortexSettings, MemoryResponse, SystemResponse } from "../../../contracts/cortex-api";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import type { ChatResponse, ChatSummary, CortexSettings, MemoryResponse, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
+import { ChatPage } from "../components/ChatPage";
 import { Onboarding } from "../components/Onboarding";
 import { SettingsPanel } from "../components/SettingsPanel";
-import { SystemStatusCard } from "../components/SystemStatusCard";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
@@ -93,15 +93,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     document.documentElement.dataset.theme = resolved;
   }, [theme]);
 
-  const createChat = async () => {
-    try {
-      const chat = await api.createChat();
-      setChats((current) => [chat, ...current]);
-      setActiveChatId(chat.id);
-      notify("New chat created.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not create chat."), "error"); }
-  };
-
   const renameChat = async (id: string, title: string) => {
     try {
       const chat = await api.renameChat(id, title);
@@ -160,19 +151,30 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onCreateChat={createChat} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
           <Route path="/settings" element={<SettingsPanel settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onClearMemory={clearMemory} />} />
-          <Route path="*" element={<OverviewPage chats={chats} activeChatId={activeChatId} system={system} />} />
+          <Route path="/chat/new" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="/chat/:threadId" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="*" element={<Navigate to="/chat/new" replace />} />
         </Routes>
       </AppShell>
     </BrowserRouter>
   );
 }
 
-function OverviewPage({ chats, activeChatId, system }: { chats: ChatSummary[]; activeChatId: string | null; system: SystemResponse }) {
-  const activeChat = chats.find((chat) => chat.id === activeChatId);
-  return <div className="overview-layout"><div className="page-heading"><div><p className="eyebrow">OVERVIEW</p><h2>Good to see you.</h2><p className="page-lede">Your local Cortex control surface is online and ready.</p></div><Link className="button button-secondary" to="/settings">Open settings</Link></div><div className="overview-grid"><SystemStatusCard system={system} /><section className="panel chat-preview" aria-labelledby="chat-preview-title"><p className="eyebrow">CHAT SHELL</p><h2 id="chat-preview-title">{activeChat?.title ?? "No chat selected"}</h2><p className="page-lede">The workspace shell is ready. Streamed conversation parity arrives in the next focused stage.</p><div className="placeholder-surface"><span className="placeholder-orb" /><span>Choose a saved chat or create a new one.</span></div></section></div></div>;
+function ChatRoute({ api, onChatChanged, onForked }: { api: CortexApi; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
+  const { threadId } = useParams();
+  const navigate = useNavigate();
+  return <ChatPage api={api} threadId={threadId ?? null} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
+}
+
+function updateChatSummary(setChats: Dispatch<SetStateAction<ChatSummary[]>>, chat: ChatResponse): void {
+  setChats((current) => {
+    const summary = { id: chat.id, title: chat.title, timestamp: chat.timestamp };
+    const next = current.filter((item) => item.id !== chat.id);
+    return [summary, ...next];
+  });
 }
 
 function apiMessage(error: unknown, fallback: string): string {
