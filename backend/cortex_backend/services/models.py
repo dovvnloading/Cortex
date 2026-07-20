@@ -131,7 +131,7 @@ class ModelService:
             optional_missing = tuple(
                 model for model in optional if model not in local_models
             )
-            message = "Connected to Ollama and verified the required model tags."
+            message = "Connected to Ollama and scanned the local model inventory."
             if optional_missing:
                 message += " Optional models unavailable: " + ", ".join(
                     optional_missing

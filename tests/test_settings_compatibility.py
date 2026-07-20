@@ -27,8 +27,8 @@ class TypedSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.appearance.theme, "dark")
         self.assertFalse(settings.onboarding.agreement_accepted)
-        self.assertEqual(settings.models.chat, "qwen3:8b")
-        self.assertEqual(settings.models.title, "granite4:tiny-h")
+        self.assertIsNone(settings.models.chat)
+        self.assertIsNone(settings.models.title)
         self.assertEqual(settings.models.translation, "translategemma:4b")
         self.assertEqual(settings.generation.temperature, 0.7)
         self.assertEqual(settings.generation.num_ctx, 4096)
@@ -37,7 +37,7 @@ class TypedSettingsTests(unittest.TestCase):
         self.assertFalse(settings.translation.enabled)
         self.assertEqual(settings.translation.target_language, "Spanish")
         self.assertTrue(settings.suggestions.enabled)
-        self.assertEqual(settings.suggestions.model, "qwen3:8b")
+        self.assertIsNone(settings.suggestions.model)
 
     def test_generation_limits_remain_validated(self):
         with self.assertRaises(ValidationError):
@@ -115,7 +115,7 @@ class LegacySettingsReaderTests(unittest.TestCase):
             self.assertEqual(result.settings.models.chat, "gemma3:4b")
             self.assertEqual(result.settings.translation.target_language, "German")
 
-    def test_missing_suggestion_model_follows_loaded_chat_model(self):
+    def test_missing_suggestion_model_remains_unconfigured(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.ini"
             _write_ini(path, {"chat_model": "gemma3:12b"})
@@ -123,7 +123,7 @@ class LegacySettingsReaderTests(unittest.TestCase):
             result = LegacySettingsReader(path).load()
 
             self.assertEqual(result.settings.models.chat, "gemma3:12b")
-            self.assertEqual(result.settings.suggestions.model, "gemma3:12b")
+            self.assertIsNone(result.settings.suggestions.model)
 
     def test_legacy_reader_is_read_only(self):
         with tempfile.TemporaryDirectory() as directory:

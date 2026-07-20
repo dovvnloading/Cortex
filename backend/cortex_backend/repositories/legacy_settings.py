@@ -146,15 +146,6 @@ class LegacySettingsReader(SettingsRepository):
             except (ValidationError, TypeError, ValueError):
                 invalid.append(field.key)
 
-        if "suggestions_model" not in normalized_values:
-            current = current.model_copy(
-                update={
-                    "suggestions": current.suggestions.model_copy(
-                        update={"model": current.models.chat}
-                    )
-                }
-            )
-
         return SettingsReadResult(
             settings=current,
             source=source,

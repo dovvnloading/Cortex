@@ -169,8 +169,8 @@ export interface ModelResponse {
 }
 
 export interface ModelSettings {
-  chat?: string;
-  title?: string;
+  chat?: string | null;
+  title?: string | null;
   translation?: string;
 }
 
@@ -239,7 +239,7 @@ export interface ShutdownResponse {
 
 export interface SuggestionSettings {
   enabled?: boolean;
-  model?: string;
+  model?: string | null;
 }
 
 export interface SystemResponse {

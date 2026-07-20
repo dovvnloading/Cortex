@@ -26,7 +26,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
     await route.fulfill({ json: { memos: [] } });
   });
   await page.route("**/api/v1/models", async (route) => {
-    await route.fulfill({ json: { required_models: ["qwen3:8b"], optional_models: [], installed_models: ["qwen3:8b"], missing_models: [], optional_missing_models: [], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
+    await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
   });
   await page.route("**/api/v1/generations", async (route) => {
     await route.fulfill({ status: 202, json: { job_id: jobId, kind: "generation", status: "queued", thread_id: threadId, user_message_id: "m-1" } });
@@ -86,7 +86,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ json: { memos: [] } });
   });
   await page.route("**/api/v1/models", async (route) => {
-    await route.fulfill({ json: { required_models: ["qwen3:8b"], optional_models: [], installed_models: ["qwen3:8b"], missing_models: [], optional_missing_models: [], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
+    await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
   });
   await page.route("**/api/v1/generations", async (route) => {
     generationAttempt += 1;
@@ -119,7 +119,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
 
 test("manages settings, permanent memory, and model pull progress", async ({ page }) => {
   let memos = ["Remember tea"];
-  let settings = { appearance: { theme: "dark" }, models: { chat: "qwen3:8b", title: "granite4:tiny-h", translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" }, memory: { enabled: true }, translation: { enabled: false, target_language: "Spanish" }, suggestions: { enabled: true, model: "qwen3:8b" } };
+  let settings = { appearance: { theme: "dark" }, models: { chat: null, title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" }, memory: { enabled: true }, translation: { enabled: false, target_language: "Spanish" }, suggestions: { enabled: true, model: null } };
 
   await page.route("**/api/v1/session/exchange", async (route) => {
     await route.fulfill({ json: { session_token: "session-system", expires_at: "2099-01-01T00:00:00Z" } });
@@ -147,7 +147,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
     await route.fulfill({ json: { memos } });
   });
   await page.route("**/api/v1/models", async (route) => {
-    await route.fulfill({ json: { required_models: ["qwen3:8b"], optional_models: [], installed_models: ["qwen3:8b"], missing_models: [], optional_missing_models: [], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
+    await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b", "local-chat:13b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }, { name: "local-chat:13b" }], connection: { success: true, status: "connected", message: "Connected to Ollama." } } });
   });
   await page.route("**/api/v1/models/pulls", async (route) => {
     await route.fulfill({ status: 202, json: { job_id: "job-model", kind: "models", status: "queued" } });
@@ -163,6 +163,8 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();
   await page.getByRole("button", { name: "AI Model", exact: true }).click();
+  await page.getByRole("button", { name: "Chat model" }).click();
+  await page.getByRole("option", { name: "local-chat:7b" }).click();
   await page.getByLabel("System instructions").fill("Be concise.");
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page.getByText("Settings saved.")).toBeVisible();
@@ -178,7 +180,9 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("Memory changes saved.")).toBeVisible();
   await page.getByRole("button", { name: "System", exact: true }).click();
-  await page.getByLabel("Pull an exact model tag").fill("nemotron-3-nano:4b");
-  await page.getByRole("button", { name: "Pull model" }).click();
+  await page.getByRole("button", { name: "Translation", exact: true }).click();
+  await page.getByLabel("Translate responses").check();
+  await page.getByRole("button", { name: "Install default" }).click();
+  await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByText("50%")).toBeVisible();
 });

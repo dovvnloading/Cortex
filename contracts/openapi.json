@@ -914,18 +914,30 @@
         "additionalProperties": false,
         "properties": {
           "chat": {
-            "default": "qwen3:8b",
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Chat",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat"
           },
           "title": {
-            "default": "granite4:tiny-h",
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Title",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
           },
           "translation": {
             "default": "translategemma:4b",
@@ -1279,11 +1291,17 @@
             "type": "boolean"
           },
           "model": {
-            "default": "qwen3:8b",
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Model",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           }
         },
         "title": "SuggestionSettings",

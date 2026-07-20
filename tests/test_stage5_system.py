@@ -78,7 +78,7 @@ def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_pa
     repeated = repository.load()
 
     assert set(migrated.invalid_keys) == {"temperature", "num_ctx"}
-    assert migrated.settings.suggestions.model == migrated.settings.models.chat
+    assert migrated.settings.suggestions.model is None
     assert migrated.migration is not None
     assert migrated.migration.status == "migrated"
     assert repeated.migration is not None

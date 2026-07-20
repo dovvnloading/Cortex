@@ -1,10 +1,16 @@
-import { Save, X } from "lucide-react";
-import { useState } from "react";
+import { Check, ChevronDown, Save, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { CortexSettings, ModelResponse } from "../../../contracts/cortex-api";
 import { MemoryPanel } from "./MemoryPanel";
 import { ModelsPanel } from "./ModelsPanel";
 
 type SettingsSection = "general" | "model" | "memory" | "translation" | "system";
+
+type PickerOption = {
+  value: string;
+  label: string;
+  detail?: string;
+};
 
 export type SettingsPanelProps = {
   settings: CortexSettings;
@@ -23,6 +29,8 @@ export type SettingsPanelProps = {
   onPullModel: (model: string) => Promise<void>;
   onClose: () => void;
 };
+
+const DEFAULT_TRANSLATION_MODEL = "translategemma:4b";
 
 const sections: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "General" },
@@ -51,14 +59,47 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
   const [section, setSection] = useState<SettingsSection>("general");
+  const installedModels = useMemo(
+    () => Array.from(new Set((models.models?.map((model) => model.name) ?? models.installed_models ?? []).map((model) => model.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
+    [models],
+  );
   const appearance = draft.appearance ?? {};
   const generation = draft.generation ?? {};
   const modelSettings = draft.models ?? {};
   const memory = draft.memory ?? {};
   const translation = draft.translation ?? {};
   const suggestions = draft.suggestions ?? {};
+  const selectedChatModel = installedModels.includes(modelSettings.chat ?? "")
+    ? modelSettings.chat ?? ""
+    : installedModels[0] ?? "";
+  const configuredTranslationModel = modelSettings.translation ?? DEFAULT_TRANSLATION_MODEL;
+  const selectedTranslationModel = installedModels.includes(configuredTranslationModel)
+    ? configuredTranslationModel
+    : "";
 
   const update = (next: Partial<CortexSettings>) => setDraft((current) => ({ ...current, ...next }));
+
+  const chooseChatModel = (chat: string) => update({
+    models: { ...modelSettings, chat, title: null },
+    suggestions: { ...suggestions, model: null },
+  });
+
+  const setTranslationEnabled = (enabled: boolean) => {
+    const translationModel = installedModels.includes(configuredTranslationModel)
+      ? configuredTranslationModel
+      : installedModels[0] ?? configuredTranslationModel;
+    update({
+      translation: { ...translation, enabled },
+      models: { ...modelSettings, translation: translationModel },
+    });
+  };
+
+  const modelOptions = installedModels.map((model) => ({ value: model, label: model, detail: "Installed locally" }));
+  const saveDraft = () => onSave({
+    ...draft,
+    models: { ...modelSettings, chat: selectedChatModel || null, title: null },
+    suggestions: { ...suggestions, model: null },
+  });
 
   return (
     <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -92,16 +133,23 @@ export function SettingsPanel({
                 <h3 id="general-settings-title">Appearance and responses</h3>
               </div>
               <div className="settings-form">
-                <label className="field-label" htmlFor="theme">Theme
-                  <select id="theme" value={appearance.theme ?? "dark"} onChange={(event) => update({ appearance: { ...appearance, theme: event.target.value as "light" | "dark" | "system" } })}>
-                    <option value="system">System</option>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                  </select>
-                </label>
+                <div className="field-label">
+                  <span id="theme-label">Theme</span>
+                  <RoundedPicker
+                    id="theme"
+                    labelledBy="theme-label"
+                    value={appearance.theme ?? "dark"}
+                    options={[
+                      { value: "system", label: "System" },
+                      { value: "light", label: "Light" },
+                      { value: "dark", label: "Dark" },
+                    ]}
+                    onChange={(theme) => update({ appearance: { ...appearance, theme: theme as "light" | "dark" | "system" } })}
+                  />
+                </div>
                 <label className="toggle-row" htmlFor="suggestions-enabled">
                   <span><strong>Follow-up suggestions</strong><small>Offer short next-step prompts after responses.</small></span>
-                  <input id="suggestions-enabled" type="checkbox" checked={suggestions.enabled ?? true} onChange={(event) => update({ suggestions: { ...suggestions, enabled: event.target.checked } })} />
+                  <input id="suggestions-enabled" type="checkbox" checked={suggestions.enabled ?? true} onChange={(event) => update({ suggestions: { ...suggestions, enabled: event.target.checked, model: null } })} />
                 </label>
               </div>
             </section>
@@ -111,18 +159,22 @@ export function SettingsPanel({
             <section className="settings-section" aria-labelledby="model-settings-title">
               <div className="section-heading">
                 <p className="eyebrow">AI MODEL</p>
-                <h3 id="model-settings-title">Model behavior</h3>
+                <h3 id="model-settings-title">Local model selection</h3>
               </div>
               <div className="settings-form">
-                <label className="field-label" htmlFor="chat-model">Chat model tag
-                  <input id="chat-model" value={modelSettings.chat ?? "qwen3:8b"} onChange={(event) => update({ models: { ...modelSettings, chat: event.target.value } })} maxLength={200} />
-                </label>
-                <label className="field-label" htmlFor="title-model">Title model tag
-                  <input id="title-model" value={modelSettings.title ?? "granite4:tiny-h"} onChange={(event) => update({ models: { ...modelSettings, title: event.target.value } })} maxLength={200} />
-                </label>
-                <label className="field-label" htmlFor="suggestions-model">Suggestions model tag
-                  <input id="suggestions-model" value={suggestions.model ?? modelSettings.chat ?? "qwen3:8b"} onChange={(event) => update({ suggestions: { ...suggestions, model: event.target.value } })} maxLength={200} />
-                </label>
+                <p className="model-selection-note">Cortex scans the Ollama models installed on this PC. Select the model to use for chat; automatic chat titles use the same local model.</p>
+                {installedModels.length > 0 ? (
+                  <div className="field-label">
+                    <span id="chat-model-label">Chat model</span>
+                    <RoundedPicker id="chat-model" labelledBy="chat-model-label" value={selectedChatModel} options={modelOptions} onChange={chooseChatModel} />
+                  </div>
+                ) : (
+                  <div className="model-selection-empty" role="status">
+                    <strong>No local models found</strong>
+                    <span>Install a model with Ollama, then rescan this workspace.</span>
+                    <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
+                  </div>
+                )}
                 <label className="field-label" htmlFor="temperature">Temperature <span className="field-value">{generation.temperature ?? 0.7}</span>
                   <input id="temperature" type="range" min="0" max="2" step="0.1" value={generation.temperature ?? 0.7} onChange={(event) => update({ generation: { ...generation, temperature: Number(event.target.value) } })} />
                 </label>
@@ -163,31 +215,82 @@ export function SettingsPanel({
               </div>
               <div className="settings-form">
                 <label className="toggle-row" htmlFor="translation-enabled">
-                  <span><strong>Translate responses</strong><small>Translate completed responses into a target language.</small></span>
-                  <input id="translation-enabled" type="checkbox" checked={translation.enabled ?? false} onChange={(event) => update({ translation: { ...translation, enabled: event.target.checked } })} />
+                  <span><strong>Translate responses</strong><small>Off by default. Translation never blocks normal chat.</small></span>
+                  <input id="translation-enabled" type="checkbox" checked={translation.enabled ?? false} onChange={(event) => setTranslationEnabled(event.target.checked)} />
                 </label>
-                <label className="field-label" htmlFor="target-language">Target language
-                  <input id="target-language" value={translation.target_language ?? "Spanish"} onChange={(event) => update({ translation: { ...translation, target_language: event.target.value } })} />
-                </label>
-                <label className="field-label" htmlFor="translation-model">Translation model tag
-                  <input id="translation-model" value={modelSettings.translation ?? "translategemma:4b"} onChange={(event) => update({ models: { ...modelSettings, translation: event.target.value } })} maxLength={200} />
-                </label>
+                {translation.enabled && <>
+                  <label className="field-label" htmlFor="target-language">Target language
+                    <input id="target-language" value={translation.target_language ?? "Spanish"} onChange={(event) => update({ translation: { ...translation, target_language: event.target.value } })} />
+                  </label>
+                  {installedModels.length > 0 ? (
+                    <div className="field-label">
+                      <span id="translation-model-label">Translation model</span>
+                      <RoundedPicker id="translation-model" labelledBy="translation-model-label" value={selectedTranslationModel} options={modelOptions} placeholder={`${configuredTranslationModel} is not installed`} onChange={(translationModel) => update({ models: { ...modelSettings, translation: translationModel } })} />
+                    </div>
+                  ) : <p className="field-error">Install a local model before enabling translation.</p>}
+                  {!installedModels.includes(DEFAULT_TRANSLATION_MODEL) && <div className="translation-install">
+                    <span><strong>Default translation model</strong><small>{DEFAULT_TRANSLATION_MODEL} is optional and is only used when translation is enabled.</small></span>
+                    <button className="button button-secondary" type="button" onClick={() => void onPullModel(DEFAULT_TRANSLATION_MODEL)} disabled={modelBusy}>Install default</button>
+                  </div>}
+                </>}
               </div>
             </section>
           )}
 
           {section === "system" && (
-            <ModelsPanel models={models} busy={modelBusy} progress={modelProgress} setupUrl={setupUrl} onCheck={onCheckModels} onPull={onPullModel} />
+            <ModelsPanel models={models} busy={modelBusy} progress={modelProgress} setupUrl={setupUrl} onCheck={onCheckModels} />
           )}
         </div>
       </div>
 
       <footer className="settings-dialog-footer">
         <button className="button button-secondary" type="button" onClick={onClose}>Close</button>
-        <button className="button button-primary" type="button" onClick={() => void onSave(draft)} disabled={saving}>
-          <Save aria-hidden="true" size={16} /> {saving ? "Saving…" : "Save settings"}
+        <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving}>
+          <Save aria-hidden="true" size={16} /> {saving ? "Saving..." : "Save settings"}
         </button>
       </footer>
     </section>
+  );
+}
+
+function RoundedPicker({ id, labelledBy, value, options, placeholder = "Choose a model", onChange, disabled = false }: { id: string; labelledBy: string; value: string; options: PickerOption[]; placeholder?: string; onChange: (value: string) => void; disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const selected = options.find((option) => option.value === value);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape") setOpen(false);
+    if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      setOpen(true);
+    }
+  };
+
+  return (
+    <div className={`rounded-picker ${open ? "rounded-picker-open" : ""}`} ref={rootRef}>
+      <button id={id} className="rounded-picker-trigger" type="button" aria-labelledby={labelledBy} aria-haspopup="listbox" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((current) => !current)} onKeyDown={handleKeyDown} disabled={disabled || options.length === 0}>
+        <span className="rounded-picker-selection">
+          <strong>{selected?.label ?? placeholder}</strong>
+          {selected?.detail && <small>{selected.detail}</small>}
+        </span>
+        <ChevronDown aria-hidden="true" size={17} />
+      </button>
+      {open && <div id={listId} className="rounded-picker-list" role="listbox" aria-labelledby={labelledBy}>
+        {options.map((option) => <button key={option.value} className={`rounded-picker-option ${option.value === value ? "rounded-picker-option-active" : ""}`} type="button" role="option" aria-label={option.label} aria-selected={option.value === value} onClick={() => { onChange(option.value); setOpen(false); }}>
+          <span><strong>{option.label}</strong>{option.detail && <small>{option.detail}</small>}</span>
+          {option.value === value && <Check aria-hidden="true" size={16} />}
+        </button>)}
+      </div>}
+    </div>
   );
 }

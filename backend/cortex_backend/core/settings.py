@@ -30,8 +30,11 @@ class OnboardingSettings(_SettingsModel):
 
 
 class ModelSettings(_SettingsModel):
-    chat: ModelTag = "qwen3:8b"
-    title: ModelTag = "granite4:tiny-h"
+    # Chat and title models are selected from the models Ollama reports on
+    # this machine.  Keeping them unset until that scan happens avoids
+    # shipping a hidden, hard-coded model preference.
+    chat: ModelTag | None = None
+    title: ModelTag | None = None
     translation: ModelTag = "translategemma:4b"
 
 
@@ -53,7 +56,9 @@ class TranslationSettings(_SettingsModel):
 
 class SuggestionSettings(_SettingsModel):
     enabled: bool = True
-    model: ModelTag = "qwen3:8b"
+    # Retained only so existing settings payloads can be read. Suggestions are
+    # generated without a dedicated model selection in the web workspace.
+    model: ModelTag | None = None
 
 
 class CortexSettings(_SettingsModel):

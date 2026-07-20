@@ -11,10 +11,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+import pytest
 
 from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api.routes import _generation_snapshot, _model_sets
 from cortex_backend.api.jobs import JobConflict, JobOwnershipError, JobRegistry
 from cortex_backend.api.security import SessionManager, SessionSecurityError
+from cortex_backend.api.schemas import GenerationRequest
+from cortex_backend.core.settings import CortexSettings, TranslationSettings
+from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 
@@ -124,6 +129,32 @@ def test_expired_session_is_rejected_without_exposing_token_details():
         pass
     else:
         raise AssertionError("expired session was accepted")
+
+
+def test_generation_selects_a_live_local_model_and_translation_is_opt_in():
+    settings = CortexSettings()
+    snapshot = _generation_snapshot(
+        "job-1",
+        GenerationRequest(user_input="hello"),
+        settings,
+        ("local-chat:9b",),
+    )
+
+    assert snapshot.model == "local-chat:9b"
+    assert snapshot.title_model == "local-chat:9b"
+    assert _model_sets(settings) == ((), ())
+
+    translation_enabled = settings.model_copy(
+        update={"translation": TranslationSettings(enabled=True)}
+    )
+    assert _model_sets(translation_enabled) == ((), ("translategemma:4b",))
+    with pytest.raises(ChatDomainError):
+        _generation_snapshot(
+            "job-2",
+            GenerationRequest(user_input="hello"),
+            translation_enabled,
+            ("local-chat:9b",),
+        )
 
 
 def test_resource_routes_persist_and_require_confirmation_for_clear():
@@ -314,8 +345,8 @@ def test_fake_ollama_server_and_model_failures_are_deterministic():
             headers=headers,
         ) as response:
             events = _events("".join(response.iter_text()))
-        assert events[-1]["data"]["connection"]["status"] == "error"
-        assert any(event["phase"] == "model_pull" for event in events)
+        assert events[-1]["data"]["connection"]["status"] == "connected"
+        assert not any(event["phase"] == "model_pull" for event in events)
 
 
 def test_job_registry_enforces_ownership_and_one_active_job():

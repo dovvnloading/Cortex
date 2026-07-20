@@ -1,5 +1,4 @@
-import { ExternalLink, RefreshCw, Download, Cpu } from "lucide-react";
-import { useState } from "react";
+import { ExternalLink, RefreshCw, Cpu } from "lucide-react";
 import type { ModelResponse } from "../../../contracts/cortex-api";
 
 type Progress = {
@@ -14,20 +13,12 @@ type Props = {
   progress: Progress | null;
   setupUrl: string;
   onCheck: () => Promise<void>;
-  onPull: (model: string) => Promise<void>;
 };
 
-export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, onPull }: Props) {
-  const [model, setModel] = useState("");
+export function ModelsPanel({ models, busy, progress, setupUrl, onCheck }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
-
-  const submit = () => {
-    const value = model.trim();
-    if (!value) return;
-    void onPull(value).then(() => setModel(""));
-  };
 
   return (
     <section className="panel models-panel" aria-labelledby="models-title">
@@ -47,10 +38,10 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, onPull 
           Ollama setup <ExternalLink aria-hidden="true" size={14} />
         </a>
         <button className="button button-quiet" onClick={() => void onCheck()} disabled={busy}>
-          <RefreshCw aria-hidden="true" size={15} /> Check now
+          <RefreshCw aria-hidden="true" size={15} /> Rescan local models
         </button>
       </div>
-      <p className="muted-note">{connection?.message ?? "Checking the local Ollama service."}</p>
+      <p className="muted-note">{connection?.message ?? "Checking the local Ollama service."} Cortex only lists models already installed through Ollama on this PC.</p>
       <div className="model-list" aria-label="Installed models">
         {(models.installed_models ?? []).length ? (models.installed_models ?? []).map((installed) => (
           <span className="model-chip" key={installed}>{installed}</span>
@@ -59,22 +50,16 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, onPull 
       {missing.length > 0 && (
         <div className="model-missing">
           <strong>Required tags missing</strong>
-          {missing.map((item) => <button key={item} className="button button-secondary" onClick={() => void onPull(item)} disabled={busy}><Download aria-hidden="true" size={14} /> Pull {item}</button>)}
+          {missing.map((item) => <span key={item}>{item}</span>)}
         </div>
       )}
       {optionalMissing.length > 0 && (
         <div className="model-missing model-optional-missing">
           <strong>Optional features unavailable</strong>
-          <span>Auto-generated chat titles and other optional features use these tags when available.</span>
-          {optionalMissing.map((item) => <button key={item} className="button button-secondary" onClick={() => void onPull(item)} disabled={busy}><Download aria-hidden="true" size={14} /> Pull {item}</button>)}
+          <span>Translation is enabled but its selected local model is unavailable.</span>
+          {optionalMissing.map((item) => <span key={item}>{item}</span>)}
         </div>
       )}
-      <div className="model-pull-form">
-        <label className="field-label" htmlFor="model-tag">Pull an exact model tag
-          <input id="model-tag" value={model} onChange={(event) => setModel(event.target.value)} placeholder="nemotron-3-nano:4b" maxLength={200} />
-        </label>
-        <button className="button button-primary" onClick={submit} disabled={busy || !model.trim()}><Download aria-hidden="true" size={15} /> Pull model</button>
-      </div>
       {progress && (
         <div className="model-progress" role="status" aria-live="polite">
           <div className="model-progress-heading"><span>{progress.model}</span><span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span></div>

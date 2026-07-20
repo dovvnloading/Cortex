@@ -444,14 +444,7 @@ def build_router() -> APIRouter:
         def runner(sink, cancel_event):
             if cancel_event.is_set():
                 return {"cancelled": True}
-            sink.publish_progress("model_check", "Checking required model tags.")
-            installed = deps.models.list_installed()
-            missing = tuple(model for model in required if model not in installed)
-            if missing:
-                sink.publish_progress(
-                    "model_pull",
-                    f"Pulling {len(missing)} required model tag(s).",
-                )
+            sink.publish_progress("model_check", "Scanning local Ollama models.")
             connection = deps.models.check(
                 required_models=required,
                 optional_models=optional,
@@ -660,9 +653,17 @@ def build_router() -> APIRouter:
         deps: BackendDependenciesProtocol = Depends(dependencies),
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobAccepted:
-        settings = _load_settings(deps)
-        job_id = uuid4().hex
-        generation_snapshot = _generation_snapshot(job_id, payload, settings)
+        try:
+            settings = _load_settings(deps)
+            job_id = uuid4().hex
+            generation_snapshot = _generation_snapshot(
+                job_id,
+                payload,
+                settings,
+                deps.models.list_installed(),
+            )
+        except ChatDomainError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         def runner(sink, cancel_event):
             if cancel_event.is_set():
@@ -836,6 +837,16 @@ async def _start_generation_job(
         if chat_revision(chat) != payload.base_revision:
             raise ChatDomainError("This chat changed. Reload it before generating again.")
 
+    settings = _load_settings(deps)
+    job_id = uuid4().hex
+    generation_payload = payload.model_copy(update={"thread_id": thread_id})
+    generation_snapshot = _generation_snapshot(
+        job_id,
+        generation_payload,
+        settings,
+        deps.models.list_installed(),
+    )
+
     user_message_id: str | None = None
     if target_message_id is None:
         user_message_id = deps.chats.add_message(
@@ -844,11 +855,6 @@ async def _start_generation_job(
             payload.user_input,
             thread_title="New Chat" if chat is None else None,
         )
-
-    settings = _load_settings(deps)
-    job_id = uuid4().hex
-    generation_payload = payload.model_copy(update={"thread_id": thread_id})
-    generation_snapshot = _generation_snapshot(job_id, generation_payload, settings)
 
     def runner(sink, cancel_event):
         result = deps.generation.generate(
@@ -1006,17 +1012,13 @@ def _migration_response(report: SettingsMigrationReport | None):
 
 
 def _model_sets(settings: CortexSettings) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    required = (settings.models.chat,)
+    # Model selection is driven by the local Ollama inventory, not a bundled
+    # list of model tags. A selected chat model is used directly at generation
+    # time, while translation remains the only opt-in optional dependency.
+    required: tuple[str, ...] = ()
     optional: list[str] = []
-    # The title model is deliberately optional so a missing lightweight model
-    # never blocks response generation.  It must still be surfaced here so the
-    # model panel can explain why auto-titles are falling back to first-message
-    # titles and let the user pull the exact configured tag.
-    optional.append(settings.models.title)
     if settings.translation.enabled:
         optional.append(settings.models.translation)
-    if settings.suggestions.enabled:
-        optional.append(settings.suggestions.model)
     return required, tuple(
         model for model in dict.fromkeys(optional) if model not in required
     )
@@ -1053,13 +1055,29 @@ def _generation_snapshot(
     job_id: str,
     payload: GenerationRequest,
     settings: CortexSettings,
+    installed_models: tuple[str, ...],
 ) -> GenerationSnapshot:
+    chat_model = _selected_local_model(settings.models.chat, installed_models)
+    if chat_model is None:
+        raise ChatDomainError(
+            "No local Ollama model is available. Install one, then rescan Models in Settings."
+        )
+    # Titles intentionally share the selected chat model. This keeps model
+    # selection to one local, user-visible choice and avoids hidden defaults.
+    title_model = chat_model
+    if (
+        settings.translation.enabled
+        and settings.models.translation not in installed_models
+    ):
+        raise ChatDomainError(
+            "Choose or install a local translation model before enabling translation."
+        )
     return GenerationSnapshot(
         job_id=job_id,
         thread_id=payload.thread_id or "",
         user_input=payload.user_input,
-        model=settings.models.chat,
-        title_model=settings.models.title,
+        model=chat_model,
+        title_model=title_model,
         translation_model=settings.models.translation,
         model_options={
             "temperature": settings.generation.temperature,
@@ -1071,6 +1089,16 @@ def _generation_snapshot(
         target_language=settings.translation.target_language,
         user_system_instructions=settings.generation.system_instructions or None,
     )
+
+
+def _selected_local_model(
+    configured_model: str | None,
+    installed_models: tuple[str, ...],
+) -> str | None:
+    """Use a saved local model when present, otherwise the live inventory."""
+    if configured_model and configured_model in installed_models:
+        return configured_model
+    return installed_models[0] if installed_models else None
 
 
 def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
