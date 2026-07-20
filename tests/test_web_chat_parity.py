@@ -81,6 +81,7 @@ def test_new_generation_persists_both_turns_and_replays_parity_events():
 
         chat = client.get(f"/api/v1/chats/{payload['thread_id']}", headers=headers).json()
         assert [message["role"] for message in chat["messages"]] == ["user", "assistant"]
+        assert chat["title"] == "hello"
         assert all(message["id"] for message in chat["messages"])
         assert chat["revision"] == 2
 
@@ -90,6 +91,32 @@ def test_new_generation_persists_both_turns_and_replays_parity_events():
         )
         replay_events = _events(replay.text)
         assert replay_events and all(event["event_id"] > 5 for event in replay_events)
+
+
+def test_new_generation_persists_model_title_and_returns_it_in_completion_event():
+    state = FakeOllamaState(title_response="Cortex launch planning")
+    app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "title-1", "user_input": "Plan the Cortex launch"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        completed = events[-1]
+        assert completed["event"] == "generation.completed"
+        assert completed["data"]["title"] == "Cortex launch planning"
+        chat = client.get(
+            f"/api/v1/chats/{accepted['thread_id']}", headers=headers
+        ).json()
+        assert chat["title"] == "Cortex launch planning"
 
 
 def test_failed_generation_keeps_user_turn_without_successful_assistant():

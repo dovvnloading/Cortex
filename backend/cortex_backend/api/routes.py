@@ -20,6 +20,7 @@ from cortex_backend.services.chat import (
     chat_revision,
     follow_up_suggestions,
     message_position,
+    normalize_title,
     title_from_first_message,
 )
 from cortex_backend.core.settings import CortexSettings
@@ -892,7 +893,22 @@ async def _start_generation_job(
         updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
         title = str(updated_chat.get("title") or "New Chat")
         if target_message_id is None and title == "New Chat":
-            generated_title = title_from_first_message(payload.user_input)
+            raw_title = None
+            title_generator = getattr(deps.generation, "generate_chat_title", None)
+            if callable(title_generator):
+                try:
+                    raw_title = title_generator(generation_snapshot, result.response)
+                except Exception as exc:  # optional title work must not fail a chat
+                    logging.warning(
+                        "Cortex chat title generation failed (%s).",
+                        type(exc).__name__,
+                    )
+            generated_title = normalize_title(raw_title, fallback="")
+            if (
+                not generated_title
+                or generated_title.casefold() in {"new chat", "untitled chat"}
+            ):
+                generated_title = title_from_first_message(payload.user_input)
             if generated_title != title:
                 try:
                     deps.chats.rename_chat(thread_id, generated_title)
@@ -992,6 +1008,11 @@ def _migration_response(report: SettingsMigrationReport | None):
 def _model_sets(settings: CortexSettings) -> tuple[tuple[str, ...], tuple[str, ...]]:
     required = (settings.models.chat,)
     optional: list[str] = []
+    # The title model is deliberately optional so a missing lightweight model
+    # never blocks response generation.  It must still be surfaced here so the
+    # model panel can explain why auto-titles are falling back to first-message
+    # titles and let the user pull the exact configured tag.
+    optional.append(settings.models.title)
     if settings.translation.enabled:
         optional.append(settings.models.translation)
     if settings.suggestions.enabled:

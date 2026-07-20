@@ -30,6 +30,11 @@ class _ResponseClient:
         return {"message": {"content": "visible answer", "thinking": "private thoughts"}}
 
 
+class _TitleClient:
+    def chat(self, **kwargs):
+        return {"message": {"content": '  "Cortex launch planning"\n'}}
+
+
 class BoundarySafetyTests(unittest.TestCase):
     def test_memory_command_accepts_valid_json_and_deduplicates(self):
         agent = SynthesisAgent("chat", "title", "translate", _FailingClient())
@@ -112,6 +117,18 @@ class BoundarySafetyTests(unittest.TestCase):
         self.assertNotIn("private user prompt", rendered_logs)
         self.assertNotIn("private history", rendered_logs)
         self.assertNotIn("private thoughts", rendered_logs)
+
+    def test_chat_title_generation_uses_the_title_model_and_normalizes_output(self):
+        agent = SynthesisAgent("chat", "title", "translate", _TitleClient())
+
+        title = agent.generate_chat_title("User: Plan the Cortex launch")
+
+        self.assertEqual(title, "Cortex launch planning")
+
+    def test_chat_title_generation_failure_is_non_fatal(self):
+        agent = SynthesisAgent("chat", "title", "translate", _FailingClient())
+
+        self.assertIsNone(agent.generate_chat_title("User: Plan the Cortex launch"))
 
 
 if __name__ == "__main__":

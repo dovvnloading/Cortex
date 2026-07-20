@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import logging
 from threading import Event
 from typing import Any, Protocol
 
@@ -56,7 +57,6 @@ class GenerationEngine(Protocol):
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         """Translate a generated response when requested."""
-
 
 HistoryLoader = Callable[[str], Sequence[Mapping[str, Any]]]
 MemoryLoader = Callable[[], Sequence[str]]
@@ -182,6 +182,43 @@ class GenerationService:
             response=response,
             thoughts=thoughts,
             memory_command=memory_command,
+        )
+
+    def generate_chat_title(
+        self,
+        snapshot: GenerationSnapshot,
+        response: str,
+    ) -> str | None:
+        """Generate an optional title after response content is available.
+
+        This is deliberately separate from :meth:`generate`: the API can
+        publish the answer deltas and persist the assistant turn before the
+        lightweight title model runs.  A title-model outage therefore cannot
+        stall or invalidate an otherwise successful response.
+        """
+        engine = self._engine_factory(snapshot)
+        title_generator = getattr(engine, "generate_chat_title", None)
+        if not callable(title_generator):
+            return None
+        try:
+            return title_generator(self._title_history(snapshot.user_input, response))
+        except Exception as exc:  # defensive boundary for optional work
+            logging.warning(
+                "Cortex chat title generation failed (%s).",
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _title_history(user_input: str, response: str) -> str:
+        """Format a bounded first-turn transcript for the optional title model."""
+        # User input is capped by the API, but keeping title prompts small is
+        # still important for local models and avoids sending accidental large
+        # payloads to a second model call.
+        max_content = 4000
+        return (
+            f"User: {str(user_input)[:max_content]}\n"
+            f"Assistant: {str(response)[:max_content]}"
         )
 
     @staticmethod

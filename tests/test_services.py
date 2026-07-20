@@ -33,6 +33,8 @@ class _FakeEngine:
         self.history_messages: list[dict] | None = None
         self.memory_inputs: list[str] | None = None
         self.options: dict | None = None
+        self.title_history: str | None = None
+        self.title_response: str | None = None
 
     def fit_memories_to_context(
         self,
@@ -73,6 +75,10 @@ class _FakeEngine:
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         return self.translation
+
+    def generate_chat_title(self, chat_history: str) -> str | None:
+        self.title_history = chat_history
+        return self.title_response
 
 
 class _FakeGateway:
@@ -147,6 +153,44 @@ class GenerationServiceTests(unittest.TestCase):
 
         self.assertEqual(result.memory_command, MemoryCommand())
         self.assertIsNone(engine.memory_inputs)
+
+    def test_new_turn_generates_a_bounded_chat_title_without_affecting_response(self):
+        engine = _FakeEngine()
+        engine.title_response = "Project planning"
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(
+            _snapshot(user_input="Plan a focused launch for Cortex"),
+            progress_sink=_ProgressRecorder(),
+        )
+        title = service.generate_chat_title(
+            _snapshot(user_input="Plan a focused launch for Cortex"),
+            result.response,
+        )
+
+        self.assertEqual(result.response, "translated")
+        self.assertEqual(title, "Project planning")
+        self.assertEqual(
+            engine.title_history,
+            "User: Plan a focused launch for Cortex\nAssistant: translated",
+        )
+
+    def test_response_generation_does_not_call_optional_title_model(self):
+        engine = _FakeEngine()
+        engine.title_response = "Should not be used"
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+        self.assertIsNone(engine.title_history)
 
     def test_failed_translation_is_a_safe_model_operation_error(self):
         service = GenerationService(

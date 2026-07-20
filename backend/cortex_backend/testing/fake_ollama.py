@@ -37,6 +37,7 @@ class FakeOllamaState:
     malformed_stream: bool = False
     generation_response: str | None = None
     generation_thoughts: str | None = None
+    title_response: str | None = None
     disconnect_after_chunks: int | None = None
     fail_pull_stream: bool = False
 
@@ -161,6 +162,10 @@ class FakeGenerationEngine:
                 error_details="fake_translation_failure",
             )
         return TranslationResult.succeeded(f"[{target_language}] {text}")
+
+    def generate_chat_title(self, chat_history: str) -> str | None:
+        del chat_history
+        return self.state.title_response
 
 
 def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:

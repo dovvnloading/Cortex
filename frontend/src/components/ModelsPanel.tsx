@@ -21,6 +21,7 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, onPull 
   const [model, setModel] = useState("");
   const connection = models.connection;
   const missing = models.missing_models ?? [];
+  const optionalMissing = models.optional_missing_models ?? [];
 
   const submit = () => {
     const value = model.trim();
@@ -59,6 +60,13 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, onPull 
         <div className="model-missing">
           <strong>Required tags missing</strong>
           {missing.map((item) => <button key={item} className="button button-secondary" onClick={() => void onPull(item)} disabled={busy}><Download aria-hidden="true" size={14} /> Pull {item}</button>)}
+        </div>
+      )}
+      {optionalMissing.length > 0 && (
+        <div className="model-missing model-optional-missing">
+          <strong>Optional features unavailable</strong>
+          <span>Auto-generated chat titles and other optional features use these tags when available.</span>
+          {optionalMissing.map((item) => <button key={item} className="button button-secondary" onClick={() => void onPull(item)} disabled={busy}><Download aria-hidden="true" size={14} /> Pull {item}</button>)}
         </div>
       )}
       <div className="model-pull-form">
