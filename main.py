@@ -1,19 +1,14 @@
-"""Cortex's single Windows-first web application entry point."""
+"""Cortex's single Windows-first native web application entry point."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 import socket
 import signal
 import sys
 import time
-import urllib.error
-from urllib.parse import quote
-from urllib.request import Request, urlopen
-import webbrowser
 
 
 ROOT = Path(__file__).resolve().parent
@@ -24,9 +19,15 @@ import uvicorn  # noqa: E402
 from Cortex_Preview import build_preview_app  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
+    DesktopWindowConfig,
+    DesktopWindowError,
     FrontendBuildError,
     InstanceLock,
+    WebViewRuntimeError,
+    activate_process_window,
     ensure_frontend,
+    ensure_webview2_runtime,
+    run_desktop_window,
 )
 from cortex_backend.launcher.supervisor import (  # noqa: E402
     ChildProcessSupervisor,
@@ -51,9 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the backend and a supervised Vite development server",
     )
     parser.add_argument(
+        "--headless",
         "--no-browser",
+        dest="headless",
         action="store_true",
-        help="start the runtime without opening a browser",
+        help="start only the loopback backend (the --no-browser name is deprecated)",
     )
     parser.add_argument(
         "--port",
@@ -103,8 +106,14 @@ def _is_packaged() -> bool:
 
 def _frontend_root() -> Path:
     if _is_packaged():
-        return Path(getattr(sys, "_MEIPASS")) / "frontend"
+        return _resource_root() / "frontend"
     return ROOT / "frontend"
+
+
+def _resource_root() -> Path:
+    if _is_packaged():
+        return Path(getattr(sys, "_MEIPASS"))
+    return ROOT / "packaging" / ".runtime"
 
 
 def _free_port() -> int:
@@ -117,36 +126,10 @@ def _requested_port(value: int) -> int:
     return _free_port() if value == 0 else value
 
 
-def _handoff(record_port: int, secret: str) -> str:
-    request = Request(
-        f"http://127.0.0.1:{record_port}/api/v1/session/handoff",
-        method="POST",
-        headers={"Host": "127.0.0.1", "X-Cortex-Handoff": secret},
-    )
-    try:
-        with urlopen(request, timeout=3.0) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "A Cortex instance is recorded, but its authenticated handoff is unavailable."
-        ) from exc
-    token = payload.get("bootstrap_token")
-    if not isinstance(token, str) or not token:
-        raise RuntimeError("The running Cortex instance returned an invalid handoff.")
-    return token
+def _desktop_url(port: int, token: str) -> str:
+    from urllib.parse import quote
 
-
-def _browser_url(port: int, token: str) -> str:
     return f"http://127.0.0.1:{port}/#bootstrap={quote(token, safe='')}"
-
-
-def _announce_and_open(port: int, token: str, *, no_browser: bool) -> None:
-    url = _browser_url(port, token)
-    if no_browser:
-        print(f"Cortex is ready. Open this one-time local URL: {url}")
-    else:
-        print(f"Cortex is ready at http://127.0.0.1:{port}")
-        webbrowser.open(url, new=1, autoraise=True)
 
 
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
@@ -171,6 +154,66 @@ def _install_shutdown_signals(server: uvicorn.Server) -> None:
     sigbreak = getattr(signal, "SIGBREAK", None)
     if sigbreak is not None:
         signal.signal(sigbreak, request_shutdown)
+
+
+def _monitor_native_window(
+    window,
+    *,
+    backend,
+    frontend,
+    server,
+    readiness_url: str,
+) -> None:
+    """Close the shell only after sustained backend-readiness failure."""
+    failed_probes = 0
+    while not window.events.closed.is_set():
+        ready = wait_for_http(
+            readiness_url,
+            timeout=0.25,
+            is_alive=lambda: not window.events.closed.is_set(),
+        )
+        if ready:
+            failed_probes = 0
+        else:
+            failed_probes += 1
+        if backend.error is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            raise RuntimeError("Cortex backend stopped unexpectedly.") from backend.error
+        if failed_probes >= 12:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            if server.should_exit:
+                return
+            raise RuntimeError(
+                "Cortex backend became unavailable after 12 consecutive readiness probes."
+            )
+        if frontend is not None and not frontend.running:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Vite stopped unexpectedly with exit code {frontend.returncode}."
+            )
+        time.sleep(0.1)
+
+
+def _run_headless(*, backend, frontend, server) -> int:
+    print("Cortex's loopback backend is ready in headless mode.")
+    while backend.running:
+        if backend.error is not None:
+            raise RuntimeError("Cortex backend stopped unexpectedly.") from backend.error
+        if frontend is not None and not frontend.running:
+            raise RuntimeError(
+                f"Vite stopped unexpectedly with exit code {frontend.returncode}."
+            )
+        time.sleep(0.1)
+    return 0 if server.should_exit else 1
 
 
 def _run_web(args: argparse.Namespace) -> int:
@@ -204,16 +247,15 @@ def _run_web(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            secret = instance.read_secret(existing)
-            if not secret:
-                print("The running Cortex instance has no valid handoff secret.", file=sys.stderr)
+            if args.headless:
+                print(f"Cortex is already running on loopback port {existing.port}.")
+                return 0
+            if not activate_process_window(existing.pid):
+                print(
+                    "Cortex is already running, but its native window could not be activated.",
+                    file=sys.stderr,
+                )
                 return 2
-            try:
-                token = _handoff(existing.port, secret)
-            except RuntimeError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            _announce_and_open(existing.port, token, no_browser=args.no_browser)
             return 0
 
         try:
@@ -278,21 +320,40 @@ def _run_web(args: argparse.Namespace) -> int:
                     raise RuntimeError("Vite did not become ready within 30 seconds.")
                 browser_port = frontend_port
 
+            if args.headless:
+                return _run_headless(backend=backend, frontend=frontend, server=server)
+
+            ensure_webview2_runtime(_resource_root())
             token = app.state.session_manager.bootstrap_token
-            _announce_and_open(browser_port, token, no_browser=args.no_browser)
-            while backend.running:
-                if backend.error is not None:
-                    raise RuntimeError("Cortex backend stopped unexpectedly.") from backend.error
-                if frontend is not None and not frontend.running:
-                    raise RuntimeError(
-                        f"Vite stopped unexpectedly with exit code {frontend.returncode}."
-                    )
-                time.sleep(0.1)
-            return 0 if server.should_exit else 1
+            print("Cortex is ready in its native desktop window.")
+            run_desktop_window(
+                DesktopWindowConfig(
+                    url=_desktop_url(browser_port, token),
+                    storage_path=paths.webview_profile,
+                    debug=args.dev,
+                ),
+                monitor=lambda window: _monitor_native_window(
+                    window,
+                    backend=backend,
+                    frontend=frontend,
+                    server=server,
+                    readiness_url=(
+                        f"http://127.0.0.1:{backend_port}/api/v1/health/ready"
+                    ),
+                ),
+            )
+            server.should_exit = True
+            return 0
         except KeyboardInterrupt:
             print("Stopping Cortex…")
             return 0
-        except (OSError, RuntimeError, TimeoutError) as exc:
+        except (
+            DesktopWindowError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            WebViewRuntimeError,
+        ) as exc:
             print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
             return 1
         finally:
@@ -313,10 +374,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _validate_args(args, parser)
     try:
-        return _run_web(args)
+        result = _run_web(args)
     except AppPathError as exc:
         print(f"Cortex data-path error: {exc}", file=sys.stderr)
-        return 2
+        result = 2
+    if result and _is_packaged() and os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Cortex could not start. Run the package from a terminal for diagnostics.",
+                "Cortex startup error",
+                0x10,
+            )
+        except Exception:
+            pass
+    return result
 
 
 if __name__ == "__main__":

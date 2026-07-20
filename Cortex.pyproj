@@ -1,0 +1,68 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>27074d97-8d76-4f0f-91bf-af1af1df144d</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>main.py</StartupFile>
+    <SearchPath>backend</SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>Cortex</Name>
+    <RootNamespace>Cortex</RootNamespace>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>false</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="main.py" />
+    <Compile Include="Cortex_Preview.py" />
+    <Compile Include="backend\cortex_backend\**\*.py" />
+    <Compile Include="tests\**\*.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="assets\**\*" />
+    <Content Include="contracts\**\*" />
+    <Content Include="frontend\src\**\*" />
+    <Content Include="frontend\e2e\**\*" />
+    <Content Include="frontend\index.html" />
+    <Content Include="frontend\package.json" />
+    <Content Include="frontend\package-lock.json" />
+    <Content Include="frontend\tsconfig.json" />
+    <Content Include="frontend\vite.config.ts" />
+    <Content Include="packaging\**\*" />
+    <Content Include="README.md" />
+    <Content Include="requirements.txt" />
+    <Content Include="pyproject.toml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="assets\" />
+    <Folder Include="backend\" />
+    <Folder Include="backend\cortex_backend\" />
+    <Folder Include="backend\cortex_backend\api\" />
+    <Folder Include="backend\cortex_backend\core\" />
+    <Folder Include="backend\cortex_backend\launcher\" />
+    <Folder Include="backend\cortex_backend\repositories\" />
+    <Folder Include="backend\cortex_backend\services\" />
+    <Folder Include="backend\cortex_backend\testing\" />
+    <Folder Include="contracts\" />
+    <Folder Include="frontend\" />
+    <Folder Include="frontend\e2e\" />
+    <Folder Include="frontend\src\" />
+    <Folder Include="frontend\src\api\" />
+    <Folder Include="frontend\src\app\" />
+    <Folder Include="frontend\src\components\" />
+    <Folder Include="frontend\src\styles\" />
+    <Folder Include="frontend\src\test\" />
+    <Folder Include="packaging\" />
+    <Folder Include="tests\" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+  <Target Name="BeforeBuild" />
+  <Target Name="AfterBuild" />
+</Project>

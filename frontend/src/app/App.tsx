@@ -5,7 +5,7 @@ import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { ChatPage } from "../components/ChatPage";
 import { Onboarding } from "../components/Onboarding";
-import { SettingsPanel } from "../components/SettingsPanel";
+import { SettingsPanel, type SettingsPanelProps } from "../components/SettingsPanel";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
@@ -65,15 +65,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [modelBusy, setModelBusy] = useState(false);
   const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-
-  const quitCortex = async () => {
-    if (!window.confirm("Quit Cortex?")) return;
-    try {
-      await api.shutdown();
-    } catch (error) {
-      notify(apiMessage(error, "Could not shut down Cortex."), "error");
-    }
-  };
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
@@ -202,9 +193,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat} onQuit={quitCortex}>
+      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
-          <Route path="/settings" element={<SettingsPanel settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
+          <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
           <Route path="/chat/new" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="/chat/:threadId" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="*" element={<Navigate to="/chat/new" replace />} />
@@ -230,6 +221,11 @@ function ChatRoute({ api, onChatChanged, onForked }: { api: CortexApi; onChatCha
   const { threadId } = useParams();
   const navigate = useNavigate();
   return <ChatPage api={api} threadId={threadId ?? null} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
+}
+
+function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
+  const navigate = useNavigate();
+  return <SettingsPanel {...props} onClose={() => navigate(activeChatId ? `/chat/${activeChatId}` : "/chat/new")} />;
 }
 
 function updateChatSummary(setChats: Dispatch<SetStateAction<ChatSummary[]>>, chat: ChatResponse): void {

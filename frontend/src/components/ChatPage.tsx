@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Bot, Copy, GitBranch, RefreshCw, Send, Square, UserRound } from "lucide-react";
+import { Copy, GitBranch, RefreshCw, Send, Square } from "lucide-react";
 import type { ChatMessage, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
 import { SafeMarkdown } from "./SafeMarkdown";
@@ -245,18 +245,23 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
 
   return (
     <section className="chat-page" aria-labelledby="chat-title">
-      <header className="chat-heading">
-        <div><p className="eyebrow">CONVERSATION</p><h2 id="chat-title">{chat?.title ?? "New Chat"}</h2><p className="page-lede">Private, local, and persisted only after the backend accepts the turn.</p></div>
-        <span className={`status-pill ${error ? "status-danger" : activeJob ? "status-working" : "status-success"}`} role="status"><span className="connection-dot" aria-hidden="true" />{error ? "Needs attention" : activeJob ? status : "Ready"}</span>
-      </header>
+      <h2 id="chat-title" className="sr-only">{chat?.title ?? "New Chat"}</h2>
       <div className="transcript" ref={transcriptRef} aria-live="polite">
-        {!messages.length && !partial && <div className="chat-empty-state"><Bot size={28} aria-hidden="true" /><h3>Start a local conversation</h3><p>Ask a question below. Cortex will persist the user turn, stream the response, and reconcile the saved chat.</p></div>}
+        {!messages.length && !partial && <div className="chat-empty-state"><h3>How can I help?</h3><p>Ask a question to begin a new conversation.</p></div>}
         {messages.map((message, index) => <MessageCard key={message.id ?? `${message.role}-${index}`} message={message} isFinalAssistant={message.id === finalAssistantId} busy={Boolean(activeJob)} onRegenerate={() => void startGeneration(lastPrompt || messages[index - 1]?.content || "", message.id ?? undefined)} onFork={() => void fork(message)} forking={forkingMessage === message.id} />)}
-        {activeJob && (partial || thoughts || status) && <div className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-avatar"><Bot size={17} aria-hidden="true" /></div><div className="message-body"><div className="message-meta">Cortex <span>{status}</span></div>{thoughts && <details className="reasoning" open><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></div>}
+        {activeJob && (partial || thoughts || status) && <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-bubble"><div className="loading-label">{status}</div>{thoughts && <details className="reasoning" open><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></article>}
       </div>
       {suggestions.length > 0 && !activeJob && <div className="suggestions" aria-label="Follow-up suggestions">{suggestions.map((suggestion) => <button className="suggestion-chip" key={suggestion} onClick={() => setDraft(suggestion)}>{suggestion}</button>)}</div>}
       {error && <div className="chat-error" role="alert"><span>{error}</span><button className="button button-quiet" onClick={() => void startGeneration(lastPrompt)}>Retry</button></div>}
-      <form className="composer" onSubmit={send}><label className="sr-only" htmlFor="chat-composer">Message Cortex</label><textarea id="chat-composer" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} disabled={Boolean(activeJob)} placeholder="Message Cortex…" rows={3} /><div className="composer-footer"><span className="composer-hint">Enter to send · Shift+Enter for a new line</span>{activeJob ? <button className="button button-danger" type="button" onClick={() => void cancel()}><Square size={15} aria-hidden="true" /> Cancel</button> : <button className="button button-primary" type="submit" disabled={!draft.trim()}><Send size={15} aria-hidden="true" /> Send</button>}</div></form>
+      <div className="input-container">
+        <form className="composer" onSubmit={send}>
+          <label className="sr-only" htmlFor="chat-composer">Message Cortex</label>
+          <textarea id="chat-composer" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} disabled={Boolean(activeJob)} placeholder="Ask a question..." rows={1} />
+          {activeJob
+            ? <button className="button button-danger composer-submit" type="button" onClick={() => void cancel()}><Square size={15} aria-hidden="true" /> Cancel</button>
+            : <button className="button button-primary composer-submit" type="submit" disabled={!draft.trim()}><Send size={15} aria-hidden="true" /> Send</button>}
+        </form>
+      </div>
     </section>
   );
 }
@@ -269,7 +274,7 @@ function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onFork, fo
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
   };
-  return <article className={`message-card message-${message.role}`}><div className="message-avatar">{message.role === "user" ? <UserRound size={17} aria-hidden="true" /> : <Bot size={17} aria-hidden="true" />}</div><div className="message-body"><div className="message-meta">{message.role === "user" ? "You" : "Cortex"}</div>{message.thoughts && <details className="reasoning"><summary>Reasoning</summary><SafeMarkdown content={message.thoughts} /></details>}<div className="markdown-body">{message.role === "user" ? <p>{message.content}</p> : <SafeMarkdown content={message.content} />}</div>{message.sources && message.sources.length > 0 && <details className="sources"><summary>Sources</summary><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></details>}<div className="message-actions"><button className="icon-button icon-button-small" type="button" aria-label="Copy message" onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="sr-only">Copied</span>}</button>{message.role === "assistant" && <><button className="icon-button icon-button-small" type="button" aria-label="Regenerate response" disabled={!isFinalAssistant || busy} onClick={onRegenerate}><RefreshCw size={14} aria-hidden="true" /></button><button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" disabled={busy || forking || !message.id} onClick={onFork}><GitBranch size={14} aria-hidden="true" /></button></>}</div></div></article>;
+  return <article className={`message-card message-${message.role}`}><div className="message-bubble">{message.thoughts && <details className="reasoning"><summary>Reasoning</summary><SafeMarkdown content={message.thoughts} /></details>}<div className="markdown-body">{message.role === "user" ? <p>{message.content}</p> : <SafeMarkdown content={message.content} />}</div>{message.sources && message.sources.length > 0 && <details className="sources"><summary>Sources</summary><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></details>}</div><div className="message-actions"><button className="icon-button icon-button-small" type="button" aria-label="Copy message" onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="sr-only">Copied</span>}</button>{message.role === "assistant" && <><button className="icon-button icon-button-small" type="button" aria-label="Regenerate response" disabled={!isFinalAssistant || busy} onClick={onRegenerate}><RefreshCw size={14} aria-hidden="true" /></button><button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" disabled={busy || forking || !message.id} onClick={onFork}><GitBranch size={14} aria-hidden="true" /></button></>}</div></article>;
 }
 
 function createRequestId(): string {

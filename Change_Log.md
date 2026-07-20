@@ -1,3 +1,20 @@
+### **Cortex Native Web Shell & Self-Bootstrapping Package**
+
+**Date:** 2026-07-20
+**Version:** Native web shell
+
+* Cortex now renders its React frontend in an owned pywebview/WebView2 desktop
+  window instead of launching the user's installed browser.
+* The window uses a private Cortex-owned profile, remains tied to backend/Vite
+  supervision, and closes the complete owned runtime when the native window exits.
+* Windows packaging is configured to verify and bundle Microsoft's signed
+  Evergreen WebView2 bootstrapper, install the runtime only when absent, include
+  the pywebview bridge, and emit a windowed executable without a companion console.
+* Second launches restore the existing Cortex window, while an explicit
+  headless mode remains available for diagnostics and automation.
+
+---
+
 ### **Cortex Web Modernization: Qt Removal and Release Candidate**
 
 **Date:** 2026-07-20

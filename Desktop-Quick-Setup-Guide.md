@@ -1,7 +1,9 @@
 # Cortex Windows Quick Setup
 
-Cortex runs as a local web application hosted by its Python backend. The
-browser is only the interface; chat data and model calls remain on the machine.
+Cortex runs as a local web application hosted by its Python backend and rendered
+inside its own native pywebview window. Cortex does not launch the interface in
+the user's browser or reuse a browser profile; chat data and model calls remain
+on the machine.
 
 ## 1. Install Ollama
 
@@ -28,20 +30,23 @@ python main.py
 ```
 
 Cortex builds the frontend if necessary, starts its loopback backend, opens a
-browser session, and owns shutdown of the processes it started. Use
-`python main.py --no-browser` when opening the displayed local URL manually.
+native desktop window, and owns shutdown of the processes it started. Use
+`python main.py --headless` only for backend diagnostics or automation.
 
 ## 4. Windows package
 
 The one-folder package can be built from a development checkout:
 
 ```powershell
-python main.py --build-frontend
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
 Launch `dist\Cortex\Cortex.exe`. The packaged application includes the web
-bundle and does not require Node.js or a global Python installation.
+bundle, Python runtime, pywebview bridge, and a signed Microsoft WebView2
+bootstrapper. It does not require Node.js, a global Python installation, or an
+installed browser. If WebView2 is missing, the packaged bootstrapper installs
+the Evergreen Runtime before Cortex opens; that one-time path requires internet
+access.
 
 ## Data and recovery
 
@@ -60,7 +65,7 @@ do not attempt an untested in-place downgrade.
 
 - If Cortex reports Ollama unavailable, verify the Ollama service and endpoint.
 - If no models appear, run `ollama list` and install a generation model.
-- If the browser does not open, run `python main.py --no-browser` and use the
-  one-time loopback URL printed in the terminal.
+- If the native window does not open from source, reinstall `requirements.txt`
+  and verify that Microsoft Edge WebView2 Runtime is installed.
 - If a previous Cortex instance is already running, launching Cortex again
-  hands off to that instance rather than starting a second server.
+  restores its native window rather than starting a second server.

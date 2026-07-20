@@ -43,6 +43,7 @@ class AppPathsTests(unittest.TestCase):
             self.assertFalse(data_dir.exists())
             self.assertEqual(paths.ensure_data_dir(), data_dir)
             self.assertTrue(data_dir.is_dir())
+            self.assertEqual(paths.webview_profile, data_dir / "webview")
 
     def test_missing_windows_appdata_fails_with_a_safe_error(self):
         with self.assertRaisesRegex(AppPathError, "APPDATA"):

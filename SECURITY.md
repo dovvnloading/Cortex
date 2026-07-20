@@ -1,7 +1,7 @@
 # Security Policy
 
 Cortex is designed to keep conversations, memories, and model execution local.
-The Python API binds to loopback and requires an expiring authenticated browser
+The Python API binds to loopback and requires an expiring authenticated native-window
 session. Prompts, responses, memories, and raw model output are excluded from
 diagnostic logging.
 

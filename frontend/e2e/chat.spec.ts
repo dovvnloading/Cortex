@@ -4,14 +4,9 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   const threadId = "thread-e2e";
   const jobId = "job-e2e";
   let chatLoaded = false;
-  let shutdownRequested = false;
 
   await page.route("**/api/v1/session/exchange", async (route) => {
     await route.fulfill({ json: { session_token: "session-e2e", expires_at: "2099-01-01T00:00:00Z" } });
-  });
-  await page.route("**/api/v1/system/shutdown", async (route) => {
-    shutdownRequested = true;
-    await route.fulfill({ json: { status: "accepted" } });
   });
   await page.route("**/api/v1/system", async (route) => {
     await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
@@ -53,9 +48,6 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Echo: hello")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toBeVisible();
-  page.once("dialog", (dialog) => void dialog.accept());
-  await page.getByRole("button", { name: "Quit Cortex" }).first().click();
-  await expect.poll(() => shutdownRequested).toBe(true);
 });
 
 test("supports retry, regenerate, and fork without losing the persisted thread", async ({ page }) => {
@@ -168,11 +160,14 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByLabel("Launcher token").fill("launcher-token");
   await page.getByRole("button", { name: "Open workspace" }).click();
   await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Remember tea");
+  await page.getByRole("button", { name: "AI Model", exact: true }).click();
   await page.getByLabel("System instructions").fill("Be concise.");
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page.getByText("Settings saved.")).toBeVisible();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Remember tea");
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "Clear all" }).click();
   await expect(page.getByText("Permanent memories cleared.")).toBeVisible();
@@ -182,6 +177,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByRole("button", { name: "Remove memory 1" }).click();
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("Memory changes saved.")).toBeVisible();
+  await page.getByRole("button", { name: "System", exact: true }).click();
   await page.getByLabel("Pull an exact model tag").fill("nemotron-3-nano:4b");
   await page.getByRole("button", { name: "Pull model" }).click();
   await expect(page.getByText("50%")).toBeVisible();
