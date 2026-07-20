@@ -864,14 +864,23 @@ async def _start_generation_job(
             cancellation_event=cancel_event,
             history_messages=history_messages,
         )
+        # The generation service checks cancellation around its model work,
+        # but the API owns the following persistence and optional title work.
+        # Keep those side effects behind explicit checkpoints as well.
+        if cancel_event.is_set():
+            return {"cancelled": True}
         if result.thoughts:
             for delta in _chunks(result.thoughts):
+                if cancel_event.is_set():
+                    return {"cancelled": True}
                 sink.publish_progress(
                     "thinking_delta",
                     "Reasoning available.",
                     data={"delta": delta},
                 )
         for delta in _chunks(result.response):
+            if cancel_event.is_set():
+                return {"cancelled": True}
             sink.publish_progress(
                 "content_delta",
                 "Response content available.",
@@ -879,8 +888,14 @@ async def _start_generation_job(
             )
 
         for memo in result.memory_command.additions:
+            if cancel_event.is_set():
+                return {"cancelled": True}
             deps.memories.add_memo(memo)
+        if cancel_event.is_set():
+            return {"cancelled": True}
         sink.publish_progress("persisting", "Saving the response.")
+        if cancel_event.is_set():
+            return {"cancelled": True}
         if target_message_id is None:
             assistant_message_id = deps.chats.add_message(
                 thread_id,
@@ -897,9 +912,13 @@ async def _start_generation_job(
             )
             assistant_message_id = target_message_id
 
+        if cancel_event.is_set():
+            return {"cancelled": True}
         updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
         title = str(updated_chat.get("title") or "New Chat")
         if target_message_id is None and title == "New Chat":
+            if cancel_event.is_set():
+                return {"cancelled": True}
             raw_title = None
             title_generator = getattr(deps.generation, "generate_chat_title", None)
             if callable(title_generator):
@@ -910,6 +929,8 @@ async def _start_generation_job(
                         "Cortex chat title generation failed (%s).",
                         type(exc).__name__,
                     )
+            if cancel_event.is_set():
+                return {"cancelled": True}
             generated_title = normalize_title(raw_title, fallback="")
             if (
                 not generated_title
@@ -917,6 +938,8 @@ async def _start_generation_job(
             ):
                 generated_title = title_from_first_message(payload.user_input)
             if generated_title != title:
+                if cancel_event.is_set():
+                    return {"cancelled": True}
                 try:
                     deps.chats.rename_chat(thread_id, generated_title)
                     title = generated_title
@@ -924,6 +947,8 @@ async def _start_generation_job(
                     logging.warning(
                         "Cortex title update failed (%s).", type(exc).__name__
                     )
+        if cancel_event.is_set():
+            return {"cancelled": True}
         updated_chat = deps.chats.get_chat(thread_id) or updated_chat
         return {
             "thread_id": thread_id,
@@ -971,6 +996,8 @@ def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str
         return "generation.completed"
     if kind == "error":
         return "generation.failed"
+    if kind == "state" and job_status == "cancelling":
+        return "generation.cancelling"
     if kind == "state" and job_status == "cancelled":
         return "generation.cancelled"
     if kind == "state" and job_status == "queued":

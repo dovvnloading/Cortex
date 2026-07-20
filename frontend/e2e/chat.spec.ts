@@ -45,7 +45,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   await expect(page.getByText("What will you make today?")).toHaveCount(0);
   await expect(page.getByText("LOCAL, PRIVATE, YOURS")).toHaveCount(0);
   await page.getByLabel("Message Cortex").fill("hello");
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("Echo: hello")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toHaveCount(0);
 });
@@ -106,14 +106,14 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
   await page.goto("/?bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByLabel("Message Cortex").fill("fail");
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("alert")).toContainText("Generation failed");
-  await page.getByRole("button", { name: "Retry" }).click();
+  await page.getByRole("button", { name: "Retry last message" }).click();
   await expect(page.getByText("Echo: fail")).toBeVisible();
   await page.getByRole("button", { name: "Regenerate response" }).click();
   await expect(page.getByText("Echo: regenerated")).toBeVisible();
   await page.getByRole("button", { name: "Fork chat from this message" }).click();
-  await expect(page.getByRole("heading", { name: "Fork of fail" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fork of fail", level: 1 })).toBeVisible();
 });
 
 test("manages settings, permanent memory, and model pull progress", async ({ page }) => {

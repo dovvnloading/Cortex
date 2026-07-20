@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from threading import Event
+import time
 
 from fastapi.testclient import TestClient
 
@@ -145,6 +147,115 @@ def test_failed_generation_keeps_user_turn_without_successful_assistant():
             f"/api/v1/chats/{accepted['thread_id']}", headers=headers
         ).json()
         assert [message["role"] for message in chat["messages"]] == ["user"]
+
+
+def test_cancelled_generation_waits_for_worker_and_skips_response_persistence():
+    state = FakeOllamaState(
+        generation_delay_seconds=0.2,
+        title_response="This title must not be persisted",
+    )
+    app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "cancel-1", "user_input": "cancel this response"},
+            headers=headers,
+        ).json()
+        for _ in range(100):
+            current = client.get(
+                f"/api/v1/generations/{accepted['job_id']}", headers=headers
+            ).json()
+            if current["status"] == "running":
+                break
+            time.sleep(0.002)
+        else:
+            raise AssertionError("generation did not begin running")
+
+        cancelled = client.post(
+            f"/api/v1/generations/{accepted['job_id']}/cancel",
+            headers=headers,
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelling"
+        blocked = client.post(
+            "/api/v1/generations",
+            json={"thread_id": accepted["thread_id"], "user_input": "must wait"},
+            headers=headers,
+        )
+        assert blocked.status_code == 409
+
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        event_names = [event["event"] for event in events]
+        assert event_names[-2:] == ["generation.cancelling", "generation.cancelled"]
+        assert "generation.completed" not in event_names
+        chat = client.get(
+            f"/api/v1/chats/{accepted['thread_id']}", headers=headers
+        ).json()
+        assert chat["title"] == "New Chat"
+        assert [message["role"] for message in chat["messages"]] == ["user"]
+
+
+def test_cancelling_during_title_generation_does_not_apply_a_late_title():
+    dependencies = build_demo_dependencies()
+    title_started = Event()
+    release_title = Event()
+
+    def delayed_title(snapshot, response):
+        del snapshot, response
+        title_started.set()
+        release_title.wait(timeout=1)
+        return "Late title"
+
+    dependencies.generation.generate_chat_title = delayed_title
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        try:
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "cancel-title-1", "user_input": "make a title"},
+                headers=headers,
+            ).json()
+            assert title_started.wait(timeout=1), "title generator did not start"
+
+            cancelled = client.post(
+                f"/api/v1/generations/{accepted['job_id']}/cancel",
+                headers=headers,
+            )
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "cancelling"
+            blocked = client.post(
+                "/api/v1/generations",
+                json={"thread_id": accepted["thread_id"], "user_input": "must wait"},
+                headers=headers,
+            )
+            assert blocked.status_code == 409
+        finally:
+            release_title.set()
+
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        assert events[-1]["event"] == "generation.cancelled"
+        assert "generation.completed" not in [event["event"] for event in events]
+        chat = client.get(
+            f"/api/v1/chats/{accepted['thread_id']}", headers=headers
+        ).json()
+        assert chat["title"] == "New Chat"
+        assert [message["role"] for message in chat["messages"]] == [
+            "user",
+            "assistant",
+        ]
 
 
 def test_fork_and_regeneration_use_message_ids_and_preserve_original_until_success():

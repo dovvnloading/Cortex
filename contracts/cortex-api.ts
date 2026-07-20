@@ -88,7 +88,7 @@ export interface ForkRequest {
 
 export interface GenerationEvent {
   event_id: number;
-  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelled";
+  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelling" | "generation.cancelled";
   job_id: string;
   thread_id: string;
   timestamp: string;
@@ -131,7 +131,7 @@ export interface InstalledModel {
 export interface JobAccepted {
   job_id: string;
   kind: "generation" | "models";
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   thread_id?: string | null;
   user_message_id?: string | null;
 }
@@ -140,7 +140,7 @@ export interface JobStatusResponse {
   job_id: string;
   kind: "generation" | "models";
   thread_id?: string | null;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   sequence: number;
   error?: string | null;
   result?: Record<string, unknown> | null;
@@ -196,7 +196,7 @@ export interface SSEEvent {
   id: number;
   job_id: string;
   kind: "state" | "progress" | "completed" | "error";
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   phase?: string | null;
   data?: Record<string, unknown>;
 }

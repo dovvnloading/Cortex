@@ -14,7 +14,14 @@ from cortex_backend.services.progress import ProgressEvent
 
 
 JobKind = Literal["generation", "models"]
-JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+JobStatus = Literal[
+    "queued",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
 EventKind = Literal["state", "progress", "completed", "error"]
 TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
     {"succeeded", "failed", "cancelled"}
@@ -111,7 +118,14 @@ class JobProgressSink:
     ) -> None:
         """Publish a typed event while the owning job is still active."""
         with self._registry._lock:
-            if self._record.status in TERMINAL_STATUSES:
+            # A cancellation request is intentionally non-terminal while the
+            # synchronous worker unwinds. Do not let callbacks from that
+            # worker turn the record back into ``running`` or add stale output
+            # after the cancellation state has been published.
+            if (
+                self._record.status != "running"
+                or self._record.cancel_event.is_set()
+            ):
                 return
             self._registry._append_event(
                 self._record,
@@ -218,14 +232,13 @@ class JobRegistry:
     def cancel(self, job_id: str, *, owner: str) -> JobSnapshot:
         record = self._owned_record(job_id, owner)
         with self._lock:
-            if record.status not in TERMINAL_STATUSES:
+            if record.status not in TERMINAL_STATUSES and record.status != "cancelling":
                 record.cancel_event.set()
-                record.error = "Job cancelled."
                 self._append_event(
                     record,
                     kind="state",
-                    status="cancelled",
-                    data={"message": "Job cancelled."},
+                    status="cancelling",
+                    data={"message": "Stopping response..."},
                 )
             return self._snapshot(record)
 
@@ -255,7 +268,7 @@ class JobRegistry:
             await asyncio.sleep(self._poll_seconds)
 
     async def shutdown(self) -> None:
-        """Request cancellation and stop registry tasks during app shutdown."""
+        """Request cancellation and wait for owned workers to finish safely."""
         with self._lock:
             records = [
                 record
@@ -263,19 +276,21 @@ class JobRegistry:
                 if record.status not in TERMINAL_STATUSES
             ]
             for record in records:
-                record.cancel_event.set()
-                self._append_event(
-                    record,
-                    kind="state",
-                    status="cancelled",
-                    data={"message": "Job cancelled during shutdown."},
-                )
+                if record.status != "cancelling":
+                    record.cancel_event.set()
+                    self._append_event(
+                        record,
+                        kind="state",
+                        status="cancelling",
+                        data={"message": "Stopping response during shutdown..."},
+                    )
             tasks = [record.task for record in self._records.values() if record.task]
-        for task in tasks:
-            if task is not asyncio.current_task():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        pending = [task for task in tasks if task is not asyncio.current_task()]
+        if pending:
+            # Cancelling an asyncio task does not stop its ``to_thread``
+            # worker. Waiting for the task lets the worker observe the event,
+            # complete its cleanup, and finalize the cancellation itself.
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _run(
         self,
@@ -286,6 +301,9 @@ class JobRegistry:
         try:
             with self._lock:
                 if record.status in TERMINAL_STATUSES:
+                    return
+                if record.status == "cancelling" or record.cancel_event.is_set():
+                    self._finalize_cancellation(record)
                     return
                 self._append_event(
                     record,
@@ -302,14 +320,8 @@ class JobRegistry:
             with self._lock:
                 if record.status in TERMINAL_STATUSES:
                     return
-                if record.cancel_event.is_set():
-                    record.error = "Job cancelled."
-                    self._append_event(
-                        record,
-                        kind="state",
-                        status="cancelled",
-                        data={"message": "Job cancelled."},
-                    )
+                if record.status == "cancelling" or record.cancel_event.is_set():
+                    self._finalize_cancellation(record)
                     return
                 data = dict(
                     serialize_result(result) if serialize_result else _serialize(result)
@@ -322,10 +334,19 @@ class JobRegistry:
                     data=data,
                 )
         except asyncio.CancelledError:
+            with self._lock:
+                if (
+                    record.status not in TERMINAL_STATUSES
+                    and (record.status == "cancelling" or record.cancel_event.is_set())
+                ):
+                    self._finalize_cancellation(record)
             raise
         except Exception as exc:
             with self._lock:
                 if record.status in TERMINAL_STATUSES:
+                    return
+                if record.status == "cancelling" or record.cancel_event.is_set():
+                    self._finalize_cancellation(record)
                     return
                 logging.error(
                     "Cortex %s job failed (%s).", record.kind, type(exc).__name__
@@ -345,6 +366,18 @@ class JobRegistry:
             with self._lock:
                 if self._active.get(record.kind) == record.job_id:
                     self._active.pop(record.kind, None)
+
+    def _finalize_cancellation(self, record: _JobRecord) -> None:
+        """Publish the terminal cancellation only after the worker has exited."""
+        if record.status in TERMINAL_STATUSES:
+            return
+        record.error = "Job cancelled."
+        self._append_event(
+            record,
+            kind="state",
+            status="cancelled",
+            data={"message": "Job cancelled."},
+        )
 
     def _owned_record(self, job_id: str, owner: str) -> _JobRecord:
         with self._lock:

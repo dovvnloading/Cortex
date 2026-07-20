@@ -9,6 +9,7 @@ import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 from fastapi.testclient import TestClient
 import pytest
@@ -302,7 +303,23 @@ def test_generation_conflict_and_cancellation_are_explicit():
             headers=headers,
         )
         assert cancelled.status_code == 200
-        assert cancelled.json()["status"] == "cancelled"
+        assert cancelled.json()["status"] == "cancelling"
+        assert (
+            client.post(
+                "/api/v1/jobs/generation",
+                json={"thread_id": "thread-1", "user_input": "still blocked"},
+                headers=headers,
+            ).status_code
+            == 409
+        )
+        with client.stream(
+            "GET", f"/api/v1/jobs/{first.json()['job_id']}/events", headers=headers
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        assert [event["status"] for event in events][-2:] == [
+            "cancelling",
+            "cancelled",
+        ]
 
 
 def test_fake_ollama_server_and_model_failures_are_deterministic():
@@ -353,48 +370,97 @@ def test_job_registry_enforces_ownership_and_one_active_job():
     async def exercise():
         registry = JobRegistry(poll_seconds=0.001)
         captured: dict[str, ProgressSink] = {}
+        worker_started = Event()
+        release_worker = Event()
 
         def runner(sink, cancel_event):
             captured["sink"] = sink
+            worker_started.set()
             while not cancel_event.is_set():
                 time.sleep(0.001)
+            release_worker.wait(timeout=1)
             return {"done": True}
 
-        first = await registry.start(
-            kind="generation",
-            owner="owner-a",
-            thread_id="thread-1",
-            runner=runner,
-        )
-        await asyncio.sleep(0.01)
         try:
-            await registry.start(
+            first = await registry.start(
                 kind="generation",
                 owner="owner-a",
                 thread_id="thread-1",
                 runner=runner,
             )
-        except JobConflict:
-            pass
-        else:
-            raise AssertionError("second active generation was accepted")
-        try:
-            registry.status(first.job_id, owner="owner-b")
-        except JobOwnershipError:
-            pass
-        else:
-            raise AssertionError("foreign job access was accepted")
-        registry.cancel(first.job_id, owner="owner-a")
-        before = registry.status(first.job_id, owner="owner-a").sequence
-        captured["sink"].publish(
-            ProgressEvent(
-                job_id=first.job_id,
-                thread_id="thread-1",
-                phase="analysis",
-                message="stale callback",
+            for _ in range(100):
+                if worker_started.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            else:
+                raise AssertionError("generation worker did not start")
+
+            try:
+                await registry.start(
+                    kind="generation",
+                    owner="owner-a",
+                    thread_id="thread-1",
+                    runner=runner,
+                )
+            except JobConflict:
+                pass
+            else:
+                raise AssertionError("second active generation was accepted")
+            try:
+                registry.status(first.job_id, owner="owner-b")
+            except JobOwnershipError:
+                pass
+            else:
+                raise AssertionError("foreign job access was accepted")
+
+            requested = registry.cancel(first.job_id, owner="owner-a")
+            assert requested.status == "cancelling"
+            assert requested.error is None
+            assert registry.active_snapshot(kind="generation") == requested
+
+            try:
+                await registry.start(
+                    kind="generation",
+                    owner="owner-a",
+                    thread_id="thread-1",
+                    runner=runner,
+                )
+            except JobConflict:
+                pass
+            else:
+                raise AssertionError("cancelling generation released the active slot")
+
+            before = registry.status(first.job_id, owner="owner-a").sequence
+            captured["sink"].publish(
+                ProgressEvent(
+                    job_id=first.job_id,
+                    thread_id="thread-1",
+                    phase="analysis",
+                    message="stale callback",
+                )
             )
-        )
-        assert registry.status(first.job_id, owner="owner-a").sequence == before
-        await registry.shutdown()
+            assert registry.status(first.job_id, owner="owner-a").sequence == before
+
+            release_worker.set()
+            for _ in range(100):
+                finished = registry.status(first.job_id, owner="owner-a")
+                if finished.status == "cancelled":
+                    break
+                await asyncio.sleep(0.001)
+            else:
+                raise AssertionError("cancelling generation did not finish")
+            assert finished.error == "Job cancelled."
+            assert registry.active_snapshot(kind="generation") is None
+            events = [
+                event
+                async for event in registry.events(first.job_id, owner="owner-a")
+            ]
+            assert [event.status for event in events][-2:] == [
+                "cancelling",
+                "cancelled",
+            ]
+        finally:
+            release_worker.set()
+            await registry.shutdown()
 
     asyncio.run(exercise())
