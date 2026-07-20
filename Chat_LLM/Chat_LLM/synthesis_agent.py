@@ -4,7 +4,7 @@ Defines the agent responsible for synthesizing responses from the language model
 
 This module contains the PromptTemplate for constructing structured prompts and the
 SynthesisAgent for interacting with the Ollama client to generate responses,
-parse special commands from the output, and generate chat titles.
+parse validated memory commands from the output, and generate chat titles.
 """
 
 import logging
@@ -12,6 +12,7 @@ import json
 import re
 import time
 from utils import get_asset_path
+from generation_types import MemoryCommand, ModelOperationError, TranslationResult
 
 class PromptTemplate:
     """Manages the creation of detailed system prompts for the LLM."""
@@ -212,7 +213,7 @@ class SynthesisAgent:
         self.ollama_client = ollama_client
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
 
-    def generate(self, query: str, chat_history: str, permanent_memories: list[str], memories_enabled: bool, user_system_instructions: str | None, options: dict | None = None) -> tuple[str, str | None, dict]:
+    def generate(self, query: str, chat_history: str, permanent_memories: list[str], memories_enabled: bool, user_system_instructions: str | None, options: dict | None = None) -> tuple[str, str | None, MemoryCommand]:
         """
         Generates a synthesized response and extracts thoughts and commands.
 
@@ -228,7 +229,7 @@ class SynthesisAgent:
             A tuple containing:
             - str: The final, user-facing answer, cleaned of all special tags.
             - str | None: The content of the reasoning/thinking block.
-            - dict: A dictionary of parsed commands, e.g., {'memos': [...], 'clear_memory': bool}.
+            - MemoryCommand: A validated set of requested memory actions.
         """
         prompt_messages = PromptTemplate.build_synthesis_prompt(
             query, chat_history, permanent_memories, memories_enabled, user_system_instructions
@@ -247,8 +248,6 @@ class SynthesisAgent:
                 messages=prompt_messages,
                 options=api_options
             )
-            logging.critical(f"\n\n--- RAW AI RESPONSE OBJECT ---\n{response}\n--- RAW AI RESPONSE OBJECT END ---\n\n")
-
             message_obj = response.get('message', {})
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')
@@ -257,10 +256,14 @@ class SynthesisAgent:
             return self._format_response(final_answer), thoughts, commands
 
         except Exception as e:
-            logging.error(f"Error during LLM generation: {e}", exc_info=True)
-            return "There was an error generating the response.", None, {}
+            logging.error("LLM generation failed (%s).", type(e).__name__)
+            raise ModelOperationError(
+                "Generation failed. Please try again.",
+                operation="generation",
+                cause=e,
+            ) from e
 
-    def translate_text(self, text: str, target_language: str) -> str:
+    def translate_text(self, text: str, target_language: str) -> TranslationResult:
         """
         Translates the given text into the target language using the configured translation model.
 
@@ -269,10 +272,10 @@ class SynthesisAgent:
             target_language (str): The name of the language to translate into.
 
         Returns:
-            str: The translated text, or the original text if translation failed.
+            TranslationResult: A successful translation or a user-facing failure.
         """
         if not text or not text.strip():
-            return text
+            return TranslationResult.succeeded(text or "")
 
         logging.info(f"Translating response to {target_language} using '{self.translation_model}'...")
         
@@ -286,13 +289,16 @@ class SynthesisAgent:
             )
             translated_text = response.get('message', {}).get('content', '')
             if translated_text:
-                return self._format_response(translated_text)
+                return TranslationResult.succeeded(self._format_response(translated_text))
             else:
                 logging.warning("Translation returned empty response.")
-                return text
+                return TranslationResult.failed("Translation failed. Please try again.", error_details="empty_response")
         except Exception as e:
-            logging.error(f"Error during translation: {e}", exc_info=True)
-            return text
+            logging.error("Translation failed (%s).", type(e).__name__)
+            return TranslationResult.failed(
+                "Translation failed. Please try again.",
+                error_details=type(e).__name__,
+            )
 
     def generate_suggestions(self, chat_history: str, model: str) -> list[str]:
         """
@@ -340,18 +346,18 @@ class SynthesisAgent:
                             break
                 
                 if suggestions:
-                    logging.info(f"SUGGESTIONS: Success: {suggestions}")
+                    logging.info("SUGGESTIONS: parsed %s valid suggestions.", len(suggestions))
                     return suggestions
                 else:
                     logging.warning(f"SUGGESTIONS: No valid lines parsed on attempt {attempt+1}")
 
             except Exception as e:
-                logging.error(f"SUGGESTIONS: Error on attempt {attempt+1}: {e}")
+                logging.error("SUGGESTIONS: attempt %s failed (%s).", attempt + 1, type(e).__name__)
                 time.sleep(0.5)
 
         return []
 
-    def _parse_and_clean_response(self, response_text: str, thoughts_text: str | None) -> tuple[str, str | None, dict]:
+    def _parse_and_clean_response(self, response_text: str, thoughts_text: str | None) -> tuple[str, str | None, MemoryCommand]:
         """
         Extracts commands from the response and handles thoughts from different sources.
 
@@ -360,12 +366,10 @@ class SynthesisAgent:
             thoughts_text (str | None): The explicit thinking/reasoning content, if available.
 
         Returns:
-            A tuple containing:
-            - str: The final, user-facing answer, cleaned of all special tags.
-            - str | None: The extracted thoughts/reasoning.
-            - dict: A dictionary of parsed commands.
+            A tuple containing the cleaned answer, extracted reasoning, and a
+            validated structured memory command.
         """
-        commands = {'memos': [], 'clear_memory': False}
+        command = MemoryCommand()
         thoughts = thoughts_text
         text_to_clean = response_text
         
@@ -379,20 +383,65 @@ class SynthesisAgent:
         else:
             logging.info("Used explicit 'thinking' field from API response.")
 
-        memo_pattern = re.compile(r'<memo>(.*?)</memo>', re.DOTALL)
-        memos = memo_pattern.findall(text_to_clean)
-        if memos:
-            commands['memos'] = [m.strip() for m in memos]
-            
-        if '<clear_memory />' in text_to_clean:
-            commands['clear_memory'] = True
-            
-        cleaned_text = re.sub(memo_pattern, '', text_to_clean)
-        cleaned_text = cleaned_text.replace('<clear_memory />', '')
+        command_pattern = re.compile(r'<memory_command>\s*(.*?)\s*</memory_command>', re.DOTALL | re.IGNORECASE)
+        command_matches = command_pattern.findall(text_to_clean)
+        if command_matches:
+            if len(command_matches) == 1:
+                command = self._parse_memory_command(command_matches[0])
+            else:
+                logging.warning("Ignoring multiple memory command blocks in one response.")
+
+        # Legacy tags are removed from the visible response, but never executed.
+        legacy_pattern = re.compile(r'<memo>.*?</memo>|<clear_memory\s*/?>', re.DOTALL | re.IGNORECASE)
+        cleaned_text = re.sub(command_pattern, '', text_to_clean)
+        cleaned_text = re.sub(legacy_pattern, '', cleaned_text)
         
         final_answer = cleaned_text.strip()
         
-        return final_answer, thoughts, commands
+        return final_answer, thoughts, command
+
+    @staticmethod
+    def _parse_memory_command(raw_command: str) -> MemoryCommand:
+        """Parse and validate the model's structured memory command."""
+        if len(raw_command) > 5000:
+            logging.warning("Ignoring malformed memory command (payload too large).")
+            return MemoryCommand()
+        try:
+            payload = json.loads(raw_command)
+        except (TypeError, ValueError):
+            logging.warning("Ignoring malformed memory command (invalid JSON).")
+            return MemoryCommand()
+
+        if not isinstance(payload, dict) or set(payload) - {"add", "clear"}:
+            logging.warning("Ignoring malformed memory command (invalid fields).")
+            return MemoryCommand()
+
+        additions = payload.get("add", [])
+        clear_requested = payload.get("clear", False)
+        if not isinstance(additions, list) or not isinstance(clear_requested, bool):
+            logging.warning("Ignoring malformed memory command (invalid value types).")
+            return MemoryCommand()
+        if len(additions) > 5:
+            logging.warning("Ignoring malformed memory command (too many additions).")
+            return MemoryCommand()
+
+        validated: list[str] = []
+        seen: set[str] = set()
+        for memo in additions:
+            if not isinstance(memo, str):
+                logging.warning("Ignoring malformed memory command (non-text addition).")
+                return MemoryCommand()
+            memo = memo.strip()
+            key = memo.casefold()
+            if not memo or len(memo) > 500 or key in seen:
+                if len(memo) > 500:
+                    logging.warning("Ignoring malformed memory command (addition too long).")
+                    return MemoryCommand()
+                continue
+            seen.add(key)
+            validated.append(memo)
+
+        return MemoryCommand(tuple(validated), clear_requested)
 
     def generate_chat_title(self, chat_history: str) -> str | None:
         """
@@ -418,10 +467,10 @@ class SynthesisAgent:
             )
             title = self._format_response(response['message']['content'])
             title = title.strip().strip('"')
-            logging.info(f"Generated chat title: '{title}'")
+            logging.info("Generated chat title with %s characters.", len(title))
             return title if title else None
         except Exception as e:
-            logging.error(f"Error during chat title generation: {e}", exc_info=True)
+            logging.error("Chat title generation failed (%s).", type(e).__name__)
             return None
 
     def _format_response(self, raw_text: str) -> str:

@@ -3,19 +3,24 @@
 Widgets related to rendering the chat interface, including messages, code blocks, and popups.
 """
 
-import html
-import markdown
 import re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton,
     QTextEdit, QStackedWidget, QLineEdit, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QSize
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QSize, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 
 from syntax_highlighter import SyntaxHighlighter
 from utils import get_asset_path
 from ui_components import CustomContextMenu
+from safe_rendering import is_safe_external_url, markdown_to_safe_html, sanitize_html
+
+
+def _open_safe_link(value: str) -> None:
+    """Open only approved web links from rendered model output."""
+    if is_safe_external_url(value):
+        QDesktopServices.openUrl(QUrl(value))
 
 class SuggestionBubble(QFrame):
     """
@@ -41,7 +46,9 @@ class SuggestionBubble(QFrame):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(0)
         
-        self.label = QLabel(text)
+        self.label = QLabel()
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
+        self.label.setText(text)
         self.label.setWordWrap(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Ensure label creates no background/border artifacts
@@ -518,7 +525,9 @@ class ChatMessageWidget(QWidget):
         """)
         system_layout = QHBoxLayout(system_frame)
         system_layout.setContentsMargins(16, 10, 16, 10)
-        self.message_label = QLabel(text)
+        self.message_label = QLabel()
+        self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.message_label.setText(text)
         self.message_label.setStyleSheet("""
             QLabel { background: transparent; border: none; color: #9a3412; font-size: 13px; font-weight: 500; }
             *[theme="dark"] QLabel { color: #fbbf24; }
@@ -541,8 +550,9 @@ class ChatMessageWidget(QWidget):
             bubble_inner_layout = QVBoxLayout(bubble)
             bubble_inner_layout.setContentsMargins(18, 14, 18, 14)
             bubble_inner_layout.setSpacing(10)
-            html_content = raw_text.replace('\n', '<br>')
-            text_label = QLabel(html_content)
+            text_label = QLabel()
+            text_label.setTextFormat(Qt.TextFormat.PlainText)
+            text_label.setText(raw_text)
             text_label.setObjectName("MessageContent")
             text_label.setWordWrap(True)
             text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -675,12 +685,13 @@ class ChatMessageWidget(QWidget):
         if remaining_text: self._add_text_label(layout, remaining_text)
 
     def _add_text_label(self, layout, text_content):
-        html_content = markdown.markdown(text_content, extensions=['tables', 'nl2br'])
+        html_content = markdown_to_safe_html(text_content)
         text_label = QLabel(html_content)
         text_label.setObjectName("MessageContent")
         text_label.setWordWrap(True)
         text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        text_label.setOpenExternalLinks(True)
+        text_label.setOpenExternalLinks(False)
+        text_label.linkActivated.connect(_open_safe_link)
         text_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         text_label.customContextMenuRequested.connect(self.show_context_menu)
         style = """
@@ -719,10 +730,15 @@ class ChatMessageWidget(QWidget):
         """)
         frame_layout = QVBoxLayout(thoughts_frame)
         frame_layout.setContentsMargins(14, 14, 14, 14)
-        thoughts_html = markdown.markdown(self.thoughts, extensions=['fenced_code', 'nl2br'])
+        thoughts_html = markdown_to_safe_html(self.thoughts, fenced_code=True)
         thoughts_label = QLabel(thoughts_html)
         thoughts_label.setWordWrap(True)
-        thoughts_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        thoughts_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        thoughts_label.setOpenExternalLinks(False)
+        thoughts_label.linkActivated.connect(_open_safe_link)
         # Removed invalid line-height and white-space properties
         thoughts_label.setStyleSheet("""
             QLabel { color: #4b5563; font-size: 13px; background: transparent; border: none; font-family: 'SF Mono', 'Consolas', monospace; }
@@ -782,16 +798,21 @@ class ChatMessageWidget(QWidget):
             header_layout.addStretch()
             header_layout.addWidget(score_label)
             source_item_layout.addLayout(header_layout)
-            question_label = QLabel(f"<b>Q:</b> {html.escape(source_doc.get('question', 'N/A'))}")
+            question_label = QLabel(
+                f"<b>Q:</b> {sanitize_html(str(source_doc.get('question', 'N/A')))}"
+            )
             question_label.setObjectName("SourceQuestionLabel")
             question_label.setWordWrap(True)
             question_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             source_item_layout.addWidget(question_label)
-            answer_label = QLabel(markdown.markdown(source_doc.get('answer', 'N/A'), extensions=['fenced_code', 'nl2br']))
+            answer_label = QLabel(
+                markdown_to_safe_html(str(source_doc.get('answer', 'N/A')), fenced_code=True)
+            )
             answer_label.setObjectName("SourceAnswerLabel")
             answer_label.setWordWrap(True)
             answer_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            answer_label.setOpenExternalLinks(True)
+            answer_label.setOpenExternalLinks(False)
+            answer_label.linkActivated.connect(_open_safe_link)
             source_item_layout.addWidget(answer_label)
             sources_layout.addWidget(source_widget)
         self.sources_button.toggled.connect(self.toggle_sources_view)
