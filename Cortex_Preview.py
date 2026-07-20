@@ -26,6 +26,7 @@ from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository  # noqa: E402
+from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository  # noqa: E402
 from cortex_backend.services.generation import GenerationService  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
 
@@ -39,7 +40,11 @@ def build_preview_app():
     paths = AppPaths.for_current_user()
     database = DatabaseManager(app_paths=paths)
     permanent_memory = PermanentMemoryManager(app_paths=paths)
-    settings_repository = QSettingsAdapter(QSettings("ChatLLM", "ChatLLM-Assistant"))
+    legacy_settings = QSettingsAdapter(QSettings("ChatLLM", "ChatLLM-Assistant"))
+    settings_repository = SQLiteSettingsRepository(
+        paths.database,
+        legacy=legacy_settings,
+    )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
     client = ollama.Client(host=ollama_host)
 
@@ -72,6 +77,7 @@ def build_preview_app():
         preview=True,
         qt_default=True,
         serve_frontend=True,
+        ollama_host=ollama_host,
     )
     return app
 

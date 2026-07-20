@@ -220,6 +220,18 @@
             "default": false,
             "title": "Confirm",
             "type": "boolean"
+          },
+          "confirmation_intent": {
+            "anyOf": [
+              {
+                "const": "clear_permanent_memory",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Intent"
           }
         },
         "title": "ClearMemoryRequest",
@@ -332,6 +344,88 @@
           }
         },
         "title": "CreateChatRequest",
+        "type": "object"
+      },
+      "DiagnosticsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Api Version",
+            "type": "string"
+          },
+          "connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "installed_models": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Installed Models",
+            "type": "array"
+          },
+          "invalid_settings_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalid Settings Keys",
+            "type": "array"
+          },
+          "migration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SettingsMigrationReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ollama_host": {
+            "title": "Ollama Host",
+            "type": "string"
+          },
+          "ollama_setup_url": {
+            "title": "Ollama Setup Url",
+            "type": "string"
+          },
+          "optional_models": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Optional Models",
+            "type": "array"
+          },
+          "required_models": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Models",
+            "type": "array"
+          },
+          "settings_source": {
+            "title": "Settings Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "settings_source",
+          "ollama_host",
+          "ollama_setup_url"
+        ],
+        "title": "DiagnosticsResponse",
         "type": "object"
       },
       "ForkRequest": {
@@ -517,6 +611,42 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "InstalledModel": {
+        "additionalProperties": false,
+        "properties": {
+          "modified_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "InstalledModel",
+        "type": "object"
+      },
       "JobAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -677,6 +807,22 @@
         "title": "MemorySettings",
         "type": "object"
       },
+      "ModelPullRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "ModelPullRequest",
+        "type": "object"
+      },
       "ModelResponse": {
         "additionalProperties": false,
         "properties": {
@@ -704,6 +850,14 @@
               "type": "string"
             },
             "title": "Missing Models",
+            "type": "array"
+          },
+          "models": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/InstalledModel"
+            },
+            "title": "Models",
             "type": "array"
           },
           "optional_missing_models": {
@@ -952,6 +1106,80 @@
         "title": "SessionExchangeResponse",
         "type": "object"
       },
+      "SettingsMigrationReport": {
+        "additionalProperties": false,
+        "properties": {
+          "backup_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backup Path"
+          },
+          "imported_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Imported Keys",
+            "type": "array"
+          },
+          "invalid_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalid Keys",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "migration_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Migration Key"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "not_needed",
+              "migrated",
+              "already_migrated",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "source"
+        ],
+        "title": "SettingsMigrationReport",
+        "type": "object"
+      },
       "SettingsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -961,6 +1189,24 @@
               "type": "string"
             },
             "title": "Invalid Keys",
+            "type": "array"
+          },
+          "migration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SettingsMigrationReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "present_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Present Keys",
             "type": "array"
           },
           "settings": {
@@ -1017,6 +1263,16 @@
             "const": "v1",
             "default": "v1",
             "title": "Api Version",
+            "type": "string"
+          },
+          "ollama_host": {
+            "default": "http://127.0.0.1:11434",
+            "title": "Ollama Host",
+            "type": "string"
+          },
+          "ollama_setup_url": {
+            "default": "https://ollama.com/download",
+            "title": "Ollama Setup Url",
             "type": "string"
           },
           "preview": {
@@ -1439,6 +1695,24 @@
           }
         },
         "summary": "Regenerate Chat"
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "operationId": "diagnostics_api_v1_diagnostics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Diagnostics"
       }
     },
     "/api/v1/generations": {
@@ -1931,6 +2205,44 @@
           }
         },
         "summary": "List Models"
+      }
+    },
+    "/api/v1/models/pulls": {
+      "post": {
+        "operationId": "pull_model_api_v1_models_pulls_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPullRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pull Model"
       }
     },
     "/api/v1/session/exchange": {

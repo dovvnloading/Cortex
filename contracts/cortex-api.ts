@@ -41,6 +41,7 @@ export interface ChatSummary {
 
 export interface ClearMemoryRequest {
   confirm?: boolean;
+  confirmation_intent?: string | null;
 }
 
 export interface ConnectionResult {
@@ -66,6 +67,19 @@ export interface CortexSettings {
 
 export interface CreateChatRequest {
   title?: string;
+}
+
+export interface DiagnosticsResponse {
+  api_version?: string;
+  settings_source: string;
+  invalid_settings_keys?: Array<string>;
+  migration?: SettingsMigrationReport | null;
+  installed_models?: Array<string>;
+  required_models?: Array<string>;
+  optional_models?: Array<string>;
+  connection?: ConnectionResult | null;
+  ollama_host: string;
+  ollama_setup_url: string;
 }
 
 export interface ForkRequest {
@@ -103,6 +117,12 @@ export interface HealthResponse {
   status?: string;
 }
 
+export interface InstalledModel {
+  name: string;
+  size?: number | null;
+  modified_at?: string | null;
+}
+
 export interface JobAccepted {
   job_id: string;
   kind: "generation" | "models";
@@ -129,6 +149,10 @@ export interface MemorySettings {
   enabled?: boolean;
 }
 
+export interface ModelPullRequest {
+  model: string;
+}
+
 export interface ModelResponse {
   required_models: Array<string>;
   optional_models: Array<string>;
@@ -136,6 +160,7 @@ export interface ModelResponse {
   missing_models?: Array<string>;
   optional_missing_models?: Array<string>;
   connection?: ConnectionResult | null;
+  models?: Array<InstalledModel>;
 }
 
 export interface ModelSettings {
@@ -181,10 +206,22 @@ export interface SessionExchangeResponse {
   token_type?: string;
 }
 
+export interface SettingsMigrationReport {
+  status: "not_needed" | "migrated" | "already_migrated" | "failed";
+  source: string;
+  migration_key?: string | null;
+  imported_keys?: Array<string>;
+  invalid_keys?: Array<string>;
+  backup_path?: string | null;
+  message?: string | null;
+}
+
 export interface SettingsResponse {
   settings: CortexSettings;
   source: string;
+  present_keys?: Array<string>;
   invalid_keys?: Array<string>;
+  migration?: SettingsMigrationReport | null;
 }
 
 export interface SettingsUpdateRequest {
@@ -203,6 +240,8 @@ export interface SystemResponse {
   qt_default?: boolean;
   session_required?: boolean;
   started_at: string;
+  ollama_host?: string;
+  ollama_setup_url?: string;
 }
 
 export interface TranslationSettings {

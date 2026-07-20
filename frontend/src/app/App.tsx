@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import type { ChatResponse, ChatSummary, CortexSettings, MemoryResponse, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, ChatSummary, CortexSettings, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { ChatPage } from "../components/ChatPage";
@@ -53,19 +53,23 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [settings, setSettings] = useState<CortexSettings | null>(null);
   const [memos, setMemos] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelResponse | null>(null);
   const [saving, setSaving] = useState(false);
   const [memoryBusy, setMemoryBusy] = useState(false);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const [systemResponse, chatResponse, settingsResponse, memoryResponse] = await Promise.all([
+      const [systemResponse, chatResponse, settingsResponse, memoryResponse, modelResponse] = await Promise.all([
         api.system(),
         api.chats(),
         api.settings(),
         api.memories(),
+        api.models(),
       ]);
       setSystem(systemResponse);
       setChats(chatResponse);
@@ -73,6 +77,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "system");
       setMemos(memoryResponse.memos);
+      setModels(modelResponse);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         onSessionExpired();
@@ -144,8 +149,39 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
+  const replaceMemory = async (next: string[]) => {
+    setMemoryBusy(true);
+    try {
+      const response = await api.replaceMemories(next);
+      setMemos(response.memos);
+      notify("Memory changes saved.", "success");
+    } catch (error) { notify(apiMessage(error, "Could not save memory changes."), "error"); }
+    finally { setMemoryBusy(false); }
+  };
+
+  const runModelJob = async (accepted: JobAccepted, model = "required models") => {
+    setModelBusy(true);
+    setModelProgress({ model, status: "Starting…", percent: null });
+    try {
+      await api.streamJob(accepted.job_id, (event) => updateModelProgress(event, setModelProgress));
+      setModels(await api.models());
+      notify("Model operation completed.", "success");
+    } catch (error) { notify(apiMessage(error, "Model operation failed."), "error"); }
+    finally { setModelBusy(false); }
+  };
+
+  const checkModels = async () => {
+    try { await runModelJob(await api.checkModels()); }
+    catch (error) { notify(apiMessage(error, "Could not check Ollama models."), "error"); }
+  };
+
+  const pullModel = async (model: string) => {
+    try { await runModelJob(await api.pullModel(model), model); }
+    catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
+  };
+
   if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace…</main>;
-  if (loadError || !system || !settings) {
+  if (loadError || !system || !settings || !models) {
     return <main className="fatal-state"><h1>Workspace unavailable</h1><p>{loadError ?? "Cortex returned an incomplete workspace."}</p><button className="button button-primary" onClick={() => void loadWorkspace()}>Retry</button></main>;
   }
 
@@ -153,7 +189,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     <BrowserRouter>
       <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
-          <Route path="/settings" element={<SettingsPanel settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onClearMemory={clearMemory} />} />
+          <Route path="/settings" element={<SettingsPanel settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
           <Route path="/chat/new" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="/chat/:threadId" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="*" element={<Navigate to="/chat/new" replace />} />
@@ -161,6 +197,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       </AppShell>
     </BrowserRouter>
   );
+}
+
+function updateModelProgress(
+  event: SSEEvent,
+  setProgress: Dispatch<SetStateAction<{ model: string; status: string; percent: number | null } | null>>,
+): void {
+  if (event.kind !== "progress") return;
+  const data = event.data ?? {};
+  const model = typeof data.model === "string" ? data.model : "required models";
+  const status = typeof data.message === "string" ? data.message : event.phase ?? "Working";
+  const percent = typeof data.percent === "number" ? data.percent : null;
+  setProgress({ model, status, percent });
 }
 
 function ChatRoute({ api, onChatChanged, onForked }: { api: CortexApi; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {

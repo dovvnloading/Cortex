@@ -38,6 +38,7 @@ class FakeOllamaState:
     generation_response: str | None = None
     generation_thoughts: str | None = None
     disconnect_after_chunks: int | None = None
+    fail_pull_stream: bool = False
 
 
 class FakeOllamaGateway:
@@ -55,11 +56,22 @@ class FakeOllamaGateway:
             "models": [{"name": model} for model in sorted(self.state.installed_models)]
         }
 
-    def pull(self, model: str) -> dict[str, str]:
+    def pull(self, model: str, *, stream: bool = False) -> Any:
         if self.state.fail_pull:
             raise ConnectionError("fake model pull failed")
-        self.state.installed_models.add(model)
-        return {"status": "success", "model": model}
+        if not stream:
+            self.state.installed_models.add(model)
+            return {"status": "success", "model": model}
+
+        def updates():
+            yield {"status": "pulling manifest", "total": 100, "completed": 0}
+            if self.state.fail_pull_stream:
+                raise ConnectionError("fake model pull stream failed")
+            yield {"status": "pulling layers", "total": 100, "completed": 50}
+            self.state.installed_models.add(model)
+            yield {"status": "success", "total": 100, "completed": 100}
+
+        return updates()
 
 
 class FakeGenerationEngine:
