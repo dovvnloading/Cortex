@@ -84,6 +84,11 @@ class AppPaths:
         """Retain the dormant legacy path without enabling vector memory."""
         return self.data_dir / "cortex_vectors.sqlite"
 
+    @property
+    def webview_profile(self) -> Path:
+        """Keep native webview state isolated from every installed browser profile."""
+        return self.data_dir / "webview"
+
     def ensure_data_dir(self) -> Path:
         """Create the data root only when a caller explicitly requests it."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

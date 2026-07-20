@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +12,12 @@ from fastapi.testclient import TestClient
 import main as launcher_main
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.launcher import frontend as frontend_module
+from cortex_backend.launcher import desktop as desktop_module
+from cortex_backend.launcher import webview_runtime as runtime_module
+from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock
+from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
 
 
 def test_normal_launch_selects_an_available_backend_port(
@@ -30,6 +35,214 @@ def test_explicit_backend_port_remains_strict():
     args = launcher_main.build_parser().parse_args(["--port", "8765"])
 
     assert launcher_main._requested_port(args.port) == 8765
+
+
+def test_default_launch_is_native_and_legacy_no_browser_alias_is_headless():
+    assert launcher_main.build_parser().parse_args([]).headless is False
+    assert launcher_main.build_parser().parse_args(["--headless"]).headless is True
+    assert launcher_main.build_parser().parse_args(["--no-browser"]).headless is True
+
+
+def test_desktop_url_keeps_bootstrap_token_in_fragment():
+    url = launcher_main._desktop_url(43125, "one time/token")
+
+    assert url == "http://127.0.0.1:43125/#bootstrap=one%20time%2Ftoken"
+
+
+def test_native_window_uses_private_isolated_edge_webview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    webview_settings: dict[str, object] = {}
+    closed = SimpleNamespace(is_set=lambda: False)
+    window = SimpleNamespace(events=SimpleNamespace(closed=closed))
+    calls: dict[str, object] = {}
+
+    class FakeWebview:
+        renderer = "edgechromium"
+        settings = webview_settings
+
+        @staticmethod
+        def create_window(*args, **kwargs):
+            calls["create"] = (args, kwargs)
+            return window
+
+        @staticmethod
+        def start(**kwargs):
+            calls["start"] = kwargs
+            kwargs["func"]()
+
+    monkeypatch.setattr(
+        desktop_module.importlib,
+        "import_module",
+        lambda name: FakeWebview if name == "webview" else None,
+    )
+    monitored: list[object] = []
+    storage = tmp_path / "private-webview"
+
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=storage),
+        monitor=monitored.append,
+    )
+
+    assert storage.is_dir()
+    assert monitored == [window]
+    assert calls["start"]["gui"] == "edgechromium"
+    assert calls["start"]["private_mode"] is True
+    assert calls["start"]["storage_path"] == str(storage)
+    assert webview_settings["ALLOW_DOWNLOADS"] is False
+    assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
+
+
+def test_native_window_rejects_legacy_windows_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        destroy=lambda: None,
+    )
+
+    class FakeWebview:
+        renderer = "mshtml"
+        settings: dict[str, object] = {}
+
+        @staticmethod
+        def create_window(*_args, **_kwargs):
+            return window
+
+        @staticmethod
+        def start(**kwargs):
+            kwargs["func"]()
+
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_module.importlib, "import_module", lambda _name: FakeWebview)
+
+    with pytest.raises(DesktopWindowError, match="legacy browser engine"):
+        desktop_module.run_desktop_window(
+            DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path)
+        )
+
+
+def test_webview2_bootstrap_is_skipped_when_runtime_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: "150.0.1.2")
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("installer should not run"),
+    )
+
+    assert runtime_module.ensure_webview2_runtime(tmp_path) == "150.0.1.2"
+
+
+def test_webview2_bootstrap_installs_and_rechecks_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bootstrapper = tmp_path / "webview2" / runtime_module.WEBVIEW2_BOOTSTRAPPER
+    bootstrapper.parent.mkdir()
+    bootstrapper.write_bytes(b"signed-at-build-time")
+    versions = iter((None, "150.0.1.2"))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: next(versions))
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
+
+    assert runtime_module.ensure_webview2_runtime(tmp_path) == "150.0.1.2"
+    assert calls[0][0] == [str(bootstrapper), "/silent", "/install"]
+    assert calls[0][1]["timeout"] == 600
+
+
+def test_webview2_bootstrap_fails_closed_when_bundle_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: None)
+
+    with pytest.raises(WebViewRuntimeError, match="bootstrapper is missing"):
+        runtime_module.ensure_webview2_runtime(tmp_path)
+
+
+def test_default_runtime_starts_backend_then_native_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    record = SimpleNamespace(pid=1234, port=43125)
+
+    class FakeInstance:
+        def __init__(self, _profile_dir):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            pass
+
+        def acquire(self, *, port):
+            assert port == 43125
+            return record
+
+        def read_secret(self, selected):
+            assert selected is record
+            return "handoff-secret"
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            session_manager=SimpleNamespace(bootstrap_token="bootstrap-token")
+        )
+    )
+    server = SimpleNamespace(should_exit=False)
+    backend_instances: list[object] = []
+
+    class FakeBackend:
+        def __init__(self, selected_server):
+            assert selected_server is server
+            self.running = False
+            self.accepting_startup = True
+            self.error = None
+            backend_instances.append(self)
+
+        def start(self):
+            self.running = True
+
+        def stop(self):
+            self.running = False
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
+    monkeypatch.setattr(launcher_main, "_requested_port", lambda _port: 43125)
+    monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(launcher_main, "build_preview_app", lambda **_kwargs: app)
+    monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
+    monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
+    monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+    monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        launcher_main,
+        "ensure_webview2_runtime",
+        lambda root: calls.append(("runtime", root)),
+    )
+    monkeypatch.setattr(
+        launcher_main,
+        "run_desktop_window",
+        lambda config, monitor: calls.append(("window", config)),
+    )
+
+    args = launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path)])
+    assert launcher_main._run_web(args) == 0
+
+    assert [name for name, _value in calls] == ["runtime", "window"]
+    window_config = calls[1][1]
+    assert isinstance(window_config, DesktopWindowConfig)
+    assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token"
+    assert window_config.storage_path == tmp_path / "webview"
+    assert server.should_exit is True
+    assert backend_instances[0].running is False
 
 
 def _frontend_fixture(tmp_path: Path) -> Path:
