@@ -35,7 +35,10 @@ from cortex_backend.launcher.supervisor import (  # noqa: E402
 )
 
 
-DEFAULT_PORT = 8765
+# Normal launches must coexist with other loopback development servers.
+# Port 0 means "ask the OS for an available port"; an explicitly supplied
+# --port value remains strict and will still fail if that port is occupied.
+DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
 CORTEX_VERSION = "0.1.0"
 
@@ -56,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help="loopback backend port, or 0 to choose a free port",
+        help="loopback backend port (default: automatically choose a free port)",
     )
     parser.add_argument(
         "--build-frontend",
