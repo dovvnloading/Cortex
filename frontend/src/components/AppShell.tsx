@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { FilePlus2, LayoutDashboard, Menu, Pencil, Settings, Trash2, X } from "lucide-react";
+import { FilePlus2, LayoutDashboard, LogOut, Menu, Pencil, Settings, Trash2, X } from "lucide-react";
 import type { ChatSummary, SystemResponse } from "../../../contracts/cortex-api";
 
 type Props = {
@@ -12,6 +12,7 @@ type Props = {
   onSelectChat: (id: string) => void;
   onRenameChat: (id: string, title: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
+  onQuit: () => Promise<void>;
   children: ReactNode;
 };
 
@@ -24,6 +25,7 @@ export function AppShell({
   onSelectChat,
   onRenameChat,
   onDeleteChat,
+  onQuit,
   children,
 }: Props) {
   const navigate = useNavigate();
@@ -61,7 +63,7 @@ export function AppShell({
             </div>
           )) : <p className="sidebar-empty">Your saved chats will appear here.</p>}
         </div>
-        <div className="sidebar-footer"><span className="connection-dot" aria-hidden="true" /> Local session active</div>
+        <div className="sidebar-footer"><span className="connection-dot" aria-hidden="true" /> Local session active <button className="icon-button" aria-label="Quit Cortex" title="Quit Cortex" onClick={() => void onQuit()}><LogOut aria-hidden="true" size={16} /></button></div>
       </aside>
       <div className="content-shell">
         <header className="topbar">
@@ -69,6 +71,7 @@ export function AppShell({
           <div className="topbar-actions">
             <span className="status-pill status-success"><span className="connection-dot" aria-hidden="true" /> {system.preview ? "Preview" : "Local"}</span>
             <select className="theme-select" aria-label="Theme" value={theme} onChange={(event) => onThemeChange(event.target.value as typeof theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+            <button className="icon-button" aria-label="Quit Cortex" title="Quit Cortex" onClick={() => void onQuit()}><LogOut aria-hidden="true" size={17} /></button>
           </div>
         </header>
         <main className="main-content">{children}</main>

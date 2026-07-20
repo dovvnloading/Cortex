@@ -25,6 +25,15 @@ class SessionExchangeResponse(APIModel):
     token_type: Literal["bearer"] = "bearer"
 
 
+class HandoffResponse(APIModel):
+    bootstrap_token: str
+    expires_at: datetime
+
+
+class ShutdownResponse(APIModel):
+    status: Literal["accepted"] = "accepted"
+
+
 class SystemResponse(APIModel):
     api_version: Literal["v1"] = "v1"
     status: Literal["ok"] = "ok"

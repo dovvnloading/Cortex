@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+from collections.abc import Callable
 from typing import Iterable
 
 from fastapi import FastAPI
@@ -85,6 +86,8 @@ def create_app(
     serve_frontend: bool = False,
     frontend_dist: Path | None = None,
     ollama_host: str | None = None,
+    handoff_secret: str | None = None,
+    readiness_check: Callable[[], bool] | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -104,7 +107,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.started_at = datetime.now(timezone.utc)
+        app.state.ready = True
         yield
+        app.state.ready = False
         await app.state.jobs.shutdown()
 
     app = FastAPI(
@@ -121,6 +126,16 @@ def create_app(
     app.state.jobs = JobRegistry()
     app.state.preview = preview
     app.state.qt_default = qt_default
+    app.state.ready = False
+    app.state.shutting_down = False
+    app.state.handoff_secret = handoff_secret
+    app.state.shutdown_callback = None
+    app.state.readiness_check = readiness_check
+    app.state.required_paths = ()
+    app.state.serve_frontend = serve_frontend
+    app.state.frontend_dist = (
+        frontend_dist or Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    ).resolve()
     app.state.ollama_host = ollama_host or os.environ.get(
         "CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434"
     )
@@ -140,8 +155,7 @@ def create_app(
     if serve_frontend:
         _mount_frontend(
             app,
-            frontend_dist
-            or Path(__file__).resolve().parents[3] / "frontend" / "dist",
+            app.state.frontend_dist,
         )
     return app
 

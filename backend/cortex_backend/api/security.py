@@ -37,6 +37,7 @@ class SessionManager:
         if ttl_seconds < 60:
             raise ValueError("session TTL must be at least 60 seconds")
         self._bootstrap_token = bootstrap_token or secrets.token_urlsafe(32)
+        self._bootstrap_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
         self._bootstrap_used = False
         self._ttl = timedelta(seconds=ttl_seconds)
         self._allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
@@ -49,12 +50,24 @@ class SessionManager:
         return self._bootstrap_token
 
     @property
+    def bootstrap_expires_at(self) -> datetime:
+        return self._bootstrap_expires_at
+
+    def issue_bootstrap_token(self) -> tuple[str, datetime]:
+        """Rotate the one-time browser handoff token for a running instance."""
+        with self._lock:
+            self._bootstrap_token = secrets.token_urlsafe(32)
+            self._bootstrap_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+            self._bootstrap_used = False
+            return self._bootstrap_token, self._bootstrap_expires_at
+
+    @property
     def allowed_hosts(self) -> frozenset[str]:
         return self._allowed_hosts
 
     def exchange(self, bootstrap_token: str) -> SessionExchange:
         with self._lock:
-            if self._bootstrap_used or not hmac.compare_digest(
+            if self._bootstrap_used or self._bootstrap_expires_at <= datetime.now(timezone.utc) or not hmac.compare_digest(
                 bootstrap_token,
                 self._bootstrap_token,
             ):

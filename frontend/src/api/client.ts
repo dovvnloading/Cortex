@@ -7,6 +7,7 @@ import type {
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
+  ShutdownResponse,
   JobAccepted,
   JobStatusResponse,
   HealthResponse,
@@ -288,6 +289,10 @@ export class CortexApi {
       method: "PUT",
       body: JSON.stringify({ memos }),
     });
+  }
+
+  shutdown(): Promise<ShutdownResponse> {
+    return this.request<ShutdownResponse>("/system/shutdown", { method: "POST" });
   }
 
   private async request<T>(

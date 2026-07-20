@@ -5,7 +5,7 @@ More info -> https://dovvnloading.github.io/Cortex/
 <img width="1920" height="1032" alt="501164220-d5817af5-db5d-4f4b-96c0-7a455e234b49" src="https://github.com/user-attachments/assets/8b80241a-3842-42c4-8c38-ea0e197ab303" />
 
 
-Cortex is a desktop AI assistant for running local large language models through Ollama, with a native PySide6 interface and persistent local data storage.
+Cortex is a local-first desktop AI assistant for running language models through Ollama. The default runtime is a React/Vite web interface hosted by a Python backend; the native PySide6 interface remains available as an explicit compatibility fallback.
 
 The project is focused on local-first operation: conversation processing, memory, translation, and chat state all run on your machine.
 
@@ -27,7 +27,8 @@ The project is focused on local-first operation: conversation processing, memory
 ## Overview
 
 Cortex combines:
-- A Qt-based desktop application (`PySide6`) for a native UI.
+- A React/Vite web application launched and supervised by Python.
+- A temporary Qt-based desktop fallback (`PySide6`).
 - Ollama-backed model orchestration for chat, title generation, and translation.
 - Persistent conversation and memo memory systems backed by SQLite and atomic JSON writes.
 - Multi-threaded workers to keep the UI responsive during long-running model operations.
@@ -46,8 +47,9 @@ Cortex combines:
 Cortex is organized around three layers:
 
 1. **Presentation Layer**
-   - Built with PySide6 widgets and custom UI components.
-   - Main window and dialogs manage chat, settings, memory controls, and translation/suggestion toggles.
+   - React/TypeScript components provide chat, settings, memory, model, and diagnostics workflows.
+   - The Python launcher owns the backend, browser handoff, frontend build, and graceful shutdown lifecycle.
+   - The legacy PySide6 widgets remain available behind `--legacy-qt` during migration.
 
 2. **Orchestration Layer**
    - The `Orchestrator` in `Chat_LLM.py` coordinates model calls, thread lifecycle, and feature toggles.
@@ -62,6 +64,10 @@ Cortex is organized around three layers:
 
 ```text
 .
+├── main.py                       # Default web launcher and process supervisor
+├── backend/                      # FastAPI API and domain services
+├── frontend/                     # React/Vite TypeScript application
+├── packaging/                    # Windows one-folder package prototype
 ├── Chat_LLM/
 │   ├── assets/                  # Icons and prompt assets
 │   └── Chat_LLM/
@@ -73,7 +79,6 @@ Cortex is organized around three layers:
 │       └── ...
 ├── Cortex_Startup.py            # Startup utility for Ollama setup/model pulling
 ├── requirements.txt             # Root Python dependencies
-├── index.html                   # Landing page
 └── README.md
 ```
 
@@ -108,7 +113,7 @@ Install Ollama for your platform from the official site:
 Example:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull nemotron-3-nano:4b
 ```
 
 Optional models used by advanced features:
@@ -126,7 +131,25 @@ ollama pull translategemma:4b
 From repository root:
 
 ```bash
-python Chat_LLM/Chat_LLM/Chat_LLM.py
+python main.py
+```
+
+The launcher builds the React bundle when its source or lockfile changes, starts
+the loopback FastAPI backend, waits for readiness, opens an authenticated local
+browser session, and shuts down its owned processes when the UI is quit. A
+packaged Windows build includes the bundle and does not require Node.js.
+
+For frontend development, run both supervised processes with:
+
+```bash
+python main.py --dev
+```
+
+Useful launcher options include `--no-browser`, `--port 0`, `--data-dir PATH`,
+and `--build-frontend`. The temporary native UI remains available with:
+
+```bash
+python main.py --legacy-qt
 ```
 
 ### 4) Optional: run the setup utility
@@ -136,26 +159,25 @@ The startup utility can help install/pull models with a GUI workflow:
 python Cortex_Startup.py
 ```
 
-## Preview Web UI
+## Web UI and packaging
 
-The staged React/Vite web UI is opt-in while the native Qt launcher remains
-the default. From the repository root, build the frontend once and start the
-local preview backend:
+The web UI is the default runtime. To prepare the production bundle without
+starting Cortex:
 
 ```bash
-cd frontend
-npm ci
-npm run build
-cd ..
-python Cortex_Preview.py
+python main.py --build-frontend
 ```
 
-Open the printed loopback URL and enter the one-time bootstrap token printed
-by the preview process. The preview exposes validated settings, permanent
-memory management, Ollama connectivity, installed model tags, exact model
-pull progress, diagnostics, and the streamed chat workflow. On the first
-preview settings read, legacy QSettings are imported into additive SQLite
-settings tables; the legacy QSettings source is not rewritten.
+The one-folder Windows package prototype can be built with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
+```
+
+The web application exposes validated settings, permanent memory management,
+Ollama connectivity, installed model tags, exact model pull progress,
+diagnostics, and the streamed chat workflow. Legacy QSettings are imported into
+additive SQLite settings tables; the legacy QSettings source is not rewritten.
 
 ## Configuration and Runtime Behavior
 
@@ -219,14 +241,23 @@ Run the headless test suite and compile check before opening a pull request:
 
 ```bash
 python -m pytest
-python -m compileall -q Chat_LLM/Chat_LLM
+python -m compileall -q main.py backend Chat_LLM/Chat_LLM
+
+cd frontend
+npm ci
+npm run typecheck
+npm run lint
+npm test -- --run
+npm run build
 ```
 
-Launch the Windows desktop application with:
+The default launcher is:
 
 ```bash
-python Chat_LLM/Chat_LLM/Chat_LLM.py
+python main.py
 ```
+
+Use `python main.py --legacy-qt` only when testing the temporary native fallback.
 
 Contribution process: see `CONTRIBUTING.md`. Security disclosures: see `SECURITY.md`. Project history: see `Change_Log.md`.
 

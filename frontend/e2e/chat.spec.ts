@@ -4,9 +4,14 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   const threadId = "thread-e2e";
   const jobId = "job-e2e";
   let chatLoaded = false;
+  let shutdownRequested = false;
 
   await page.route("**/api/v1/session/exchange", async (route) => {
     await route.fulfill({ json: { session_token: "session-e2e", expires_at: "2099-01-01T00:00:00Z" } });
+  });
+  await page.route("**/api/v1/system/shutdown", async (route) => {
+    shutdownRequested = true;
+    await route.fulfill({ json: { status: "accepted" } });
   });
   await page.route("**/api/v1/system", async (route) => {
     await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, qt_default: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
@@ -48,6 +53,9 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Echo: hello")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "Quit Cortex" }).first().click();
+  await expect.poll(() => shutdownRequested).toBe(true);
 });
 
 test("supports retry, regenerate, and fork without losing the persisted thread", async ({ page }) => {

@@ -22,6 +22,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
@@ -29,4 +36,31 @@ jobs:
         run: python -m pytest
 
       - name: Compile application modules
-        run: python -m compileall -q backend Chat_LLM/Chat_LLM
+        run: python -m compileall -q main.py backend Chat_LLM/Chat_LLM
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Check frontend types
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test -- --run
+
+      - name: Build frontend bundle
+        working-directory: frontend
+        run: npm run build
+
+      - name: Verify launcher-managed bundle
+        shell: pwsh
+        run: python main.py --build-frontend --data-dir "$env:RUNNER_TEMP\cortex-quality-data"
+
+      - name: Build one-folder package prototype
+        run: python -m PyInstaller --noconfirm --clean packaging/Cortex.spec

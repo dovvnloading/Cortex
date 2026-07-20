@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
+import hmac
 import json
 import logging
 from typing import Any
@@ -39,6 +40,7 @@ from .schemas import (
     ForkRequest,
     GenerationEvent,
     GenerationRequest,
+    HandoffResponse,
     RegenerationRequest,
     HealthResponse,
     JobAccepted,
@@ -51,6 +53,7 @@ from .schemas import (
     ReplaceMemoryRequest,
     SessionExchangeRequest,
     SessionExchangeResponse,
+    ShutdownResponse,
     SettingsResponse,
     SettingsMigrationReport as SettingsMigrationReportResponse,
     SettingsUpdateRequest,
@@ -66,6 +69,18 @@ def build_router() -> APIRouter:
     @router.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
         request.app.state.session_manager.validate_request_context(request)
+        return HealthResponse()
+
+    @router.get("/health/live", response_model=HealthResponse)
+    def health_live(request: Request) -> HealthResponse:
+        request.app.state.session_manager.validate_request_context(request)
+        return HealthResponse()
+
+    @router.get("/health/ready", response_model=HealthResponse)
+    def health_ready(request: Request) -> HealthResponse:
+        request.app.state.session_manager.validate_request_context(request)
+        if not _runtime_is_ready(request):
+            raise HTTPException(status_code=503, detail="Cortex is not ready.")
         return HealthResponse()
 
     @router.post("/session/exchange", response_model=SessionExchangeResponse)
@@ -87,6 +102,17 @@ def build_router() -> APIRouter:
             expires_at=exchanged.principal.expires_at,
         )
 
+    @router.post("/session/handoff", response_model=HandoffResponse)
+    def handoff(request: Request) -> HandoffResponse:
+        manager = request.app.state.session_manager
+        manager.validate_request_context(request)
+        supplied = request.headers.get("X-Cortex-Handoff", "")
+        expected = request.app.state.handoff_secret
+        if not expected or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="Cortex handoff unavailable.")
+        token, expires_at = manager.issue_bootstrap_token()
+        return HandoffResponse(bootstrap_token=token, expires_at=expires_at)
+
     def require_session(request: Request) -> SessionPrincipal:
         return request.app.state.session_manager.require(request)
 
@@ -104,6 +130,18 @@ def build_router() -> APIRouter:
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,
         )
+
+    @router.post("/system/shutdown", response_model=ShutdownResponse)
+    def shutdown(
+        request: Request,
+        _: SessionPrincipal = Depends(require_session),
+    ) -> ShutdownResponse:
+        callback = request.app.state.shutdown_callback
+        if callback is None:
+            raise HTTPException(status_code=409, detail="Shutdown is unavailable in this preview.")
+        request.app.state.shutting_down = True
+        callback()
+        return ShutdownResponse()
 
     @router.get("/diagnostics", response_model=DiagnosticsResponse)
     def diagnostics(
@@ -742,6 +780,33 @@ def build_router() -> APIRouter:
         )
 
     return router
+
+
+def _runtime_is_ready(request: Request) -> bool:
+    app = request.app
+    if not app.state.ready or app.state.shutting_down:
+        return False
+    if any(not path.exists() for path in tuple(app.state.required_paths)):
+        return False
+    if app.state.serve_frontend and not (app.state.frontend_dist / "index.html").is_file():
+        return False
+    route_paths = set(app.openapi().get("paths", {}))
+    if not {
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/system",
+    }.issubset(route_paths):
+        return False
+    readiness_check = app.state.readiness_check
+    if readiness_check is None:
+        return True
+    try:
+        return bool(readiness_check())
+    except Exception as exc:  # keep readiness safe without exposing internals
+        logging.getLogger("cortex.readiness").warning(
+            "Cortex readiness check failed (%s).", type(exc).__name__
+        )
+        return False
 
 
 async def _start_generation_job(
