@@ -28,7 +28,7 @@ from memory import (
     PermanentMemoryManager,
     VectorDatabaseManager,
 )
-from generation_types import ConnectionResult, GenerationSnapshot
+from generation_types import ConnectionResult, GenerationSnapshot, MemoryCommand, ModelOperationError
 from utils import get_asset_path, LANGUAGES
 from splash_screen import SplashScreen
 from ui_styles import FOCUSED_LIGHT_STYLESHEET, FOCUSED_DARK_STYLESHEET
@@ -106,7 +106,7 @@ class TitleGenerationWorker(QObject):
             new_title = self.synthesis_agent.generate_chat_title(self.chat_history)
             self.finished.emit(new_title or "Untitled Chat", self.thread_id)
         except Exception as e:
-            logging.error(f"Error during title generation for thread {self.thread_id}: {e}")
+            logging.error("Title generation failed for thread %s (%s).", self.thread_id, type(e).__name__)
             self.finished.emit("Untitled Chat", self.thread_id)
 
 
@@ -136,12 +136,12 @@ class SuggestionWorker(QObject):
             if not suggestions:
                 logging.warning(f"SUGGESTIONS: Model '{self.model}' returned NO suggestions.")
             else:
-                logging.info(f"SUGGESTIONS: Model '{self.model}' returned {len(suggestions)} items: {suggestions}")
+                logging.info("SUGGESTIONS: Model '%s' returned %s items.", self.model, len(suggestions))
             
             self.finished.emit(suggestions, self.thread_id)
             
         except Exception as e:
-            logging.error(f"SUGGESTIONS: Critical Worker error: {e}", exc_info=True)
+            logging.error("SUGGESTIONS: worker failed (%s).", type(e).__name__)
             self.finished.emit([], self.thread_id)
 
 
@@ -163,7 +163,7 @@ class ConnectionWorker(QObject):
             result = self.orchestrator.check_ollama_models_sync()
             self.finished.emit(result)
         except Exception as e:
-            logging.error(f"Failed to connect or pull Ollama models. Error: {e}", exc_info=False)
+            logging.error("Failed to connect or pull Ollama models (%s).", type(e).__name__)
             self.finished.emit(
                 ConnectionResult.failed(
                     "Could not connect to Ollama. Make sure Ollama is running and try again.",
@@ -197,7 +197,7 @@ class UpdateCheckWorker(QObject):
                     local_version = self.current_version.strip()
                     
                     # This is the crucial debugging log. It will show any hidden characters.
-                    logging.critical(f"Update Check: Comparing local version {repr(local_version)} with remote version {repr(latest_version)}")
+                    logging.info("Update check compared local and remote version markers.")
                     
                     if latest_version and latest_version != local_version:
                         logging.info(f"Update available: Local='{local_version}', Remote='{latest_version}'")
@@ -209,7 +209,7 @@ class UpdateCheckWorker(QObject):
                     logging.warning(f"Update check failed: HTTP status {response.status}")
                     self.finished.emit('error')
         except Exception as e:
-            logging.error(f"An error occurred during update check: {e}")
+            logging.error("An error occurred during update check (%s).", type(e).__name__)
             self.finished.emit('error')
 
 
@@ -280,7 +280,13 @@ class Orchestrator:
             translation_model=config['translation_model'],
             ollama_client=self.ollama_client
         )
-        logging.info(f"Orchestrator initialized. Memos: {self.memories_enabled}, Trans: {self.translation_enabled}, Suggestions: {self.suggestions_enabled} ({self.suggestions_model})")
+        logging.info(
+            "Orchestrator initialized. Memos=%s, translation=%s, suggestions=%s, suggestion_model=%s.",
+            self.memories_enabled,
+            self.translation_enabled,
+            self.suggestions_enabled,
+            self.suggestions_model,
+        )
 
     def set_chat_model(self, model_name: str):
         """
@@ -464,7 +470,7 @@ class Orchestrator:
             except RuntimeError:
                 logging.warning("abort_current_suggestions: Thread object already deleted (RuntimeError). Safe to clear reference.")
             except Exception as e:
-                logging.error(f"abort_current_suggestions error: {e}")
+                logging.error("abort_current_suggestions failed (%s).", type(e).__name__)
             
             # Always clear the references
             self.suggestion_thread = None
@@ -644,7 +650,7 @@ class Orchestrator:
             )
             return response.get('embedding', [])
         except Exception as e:
-            logging.error(f"Failed to generate embedding: {e}")
+            logging.error("Failed to generate embedding (%s).", type(e).__name__)
             return []
 
     def commit_user_message(self, thread_id: str, user_input: str):
@@ -710,7 +716,7 @@ class Orchestrator:
         snapshot_or_user_input: GenerationSnapshot | str,
         thread_id: str | None = None,
         status_signal: Signal = None,
-    ) -> tuple[str, str | None, str | None]:
+    ) -> tuple[str, str | None, str | None, MemoryCommand]:
         """
         Generates an AI response for a specific thread, including optional translation.
 
@@ -723,7 +729,7 @@ class Orchestrator:
             status_signal (Signal, optional): Signal to emit status updates to the UI.
 
         Returns:
-            A tuple containing (response, sources, thoughts).
+            A tuple containing (response, sources, thoughts, memory_command).
         """
         if isinstance(snapshot_or_user_input, GenerationSnapshot):
             snapshot = snapshot_or_user_input
@@ -762,7 +768,7 @@ class Orchestrator:
         )
 
         # 1. Generate the main response from the AI.
-        response, thoughts, commands = generation_agent.generate(
+        response, thoughts, memory_command = generation_agent.generate(
             query=user_input,
             chat_history=chat_history,
             permanent_memories=permanent_memos,
@@ -770,16 +776,9 @@ class Orchestrator:
             user_system_instructions=snapshot.user_system_instructions,
             options=dict(snapshot.model_options),
         )
+        if not snapshot.memories_enabled:
+            memory_command = MemoryCommand()
         
-        # Process any special commands returned by the model.
-        if snapshot.memories_enabled:
-            if commands.get('clear_memory', False):
-                self.permanent_memory_manager.clear_memos()
-                logging.info("AI triggered a permanent memory wipe.")
-            for memo in commands.get('memos', []):
-                self.permanent_memory_manager.add_memo(memo)
-                logging.info(f"AI created a new permanent memory: '{memo}'")
-
         # 2. PROMPT CHAINING: Translation Layer
         # If translation is enabled, take the main response and run it through the translation model.
         if snapshot.translation_enabled:
@@ -790,10 +789,16 @@ class Orchestrator:
                     status_signal.emit(f"Translating to {snapshot.target_language}...")
 
             # Note: We do NOT translate the 'thoughts' (reasoning), only the final output.
-            response = generation_agent.translate_text(response, snapshot.target_language)
+            translation_result = generation_agent.translate_text(response, snapshot.target_language)
+            if not translation_result.success:
+                raise ModelOperationError(
+                    translation_result.error or "Translation failed. Please try again.",
+                    operation="translation",
+                )
+            response = translation_result.text or ""
 
         logging.info("Response generation finished for thread %s.", thread_id)
-        return response, None, thoughts
+        return response, None, thoughts, memory_command
 
     def start_new_chat(self):
         """Initializes a new, temporary in-memory chat session."""

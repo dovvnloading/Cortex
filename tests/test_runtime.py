@@ -13,7 +13,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from Chat_LLM import ConnectionWorker  # noqa: E402
-from generation_types import ConnectionResult, GenerationResult, GenerationSnapshot  # noqa: E402
+from generation_types import ConnectionResult, GenerationResult, GenerationSnapshot, MemoryCommand  # noqa: E402
 from query_worker import GenerationJobController  # noqa: E402
 
 
@@ -30,7 +30,7 @@ class _ConnectionOrchestrator:
 class _GenerationOrchestrator:
     def process_query_sync(self, snapshot, status_signal=None):
         time.sleep(0.05)
-        return "response", None, "thoughts"
+        return "response", None, "thoughts", MemoryCommand()
 
 
 class RuntimeTests(unittest.TestCase):

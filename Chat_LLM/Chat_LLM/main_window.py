@@ -30,6 +30,7 @@ from ui_widgets import (
 from ui_chat_elements import SuggestionBubble
 from ui_dialogs import SettingsDialog
 from generation_types import ConnectionResult, GenerationResult
+from memory_commands import apply_memory_command
 from query_worker import GenerationJobController
 from memory import PersistenceError
 
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         self.history_item_widgets = {}  # Maps thread_id to ChatHistoryItemWidget
         self.loading_widgets = {}       # Maps thread_id to an active loading ChatMessageWidget
         self.last_ai_message_widget = None # Tracks the most recent AI message for regeneration
+        self.last_submitted_input = ""
         
         self.connection_status = ("connecting", "Checking Ollama...")
         self.connection_ready = False
@@ -522,7 +524,7 @@ class MainWindow(QMainWindow):
             return
 
         if not isinstance(result, ConnectionResult):
-            logging.error("Ignoring malformed connection result: %r", result)
+            logging.error("Ignoring malformed connection result.")
             self.set_connection_status("error", "Unable to verify Ollama connection.")
             self.set_ui_enabled(False)
             return
@@ -577,6 +579,7 @@ class MainWindow(QMainWindow):
             self.orchestrator.generate_title_async(active_thread_id, chat_history_for_title, self.on_title_generated)
 
         self.append_message('user', "You", user_input)
+        self.last_submitted_input = user_input
         
         self.input_field.clear()
         
@@ -679,7 +682,10 @@ class MainWindow(QMainWindow):
 
     def on_query_finished(self, result: GenerationResult):
         if not isinstance(result, GenerationResult) or not self.generation_controller.accepts(result):
-            logging.warning("Ignoring stale or malformed generation callback: %r", result)
+            if isinstance(result, GenerationResult):
+                logging.warning("Ignoring stale generation callback for job %s.", result.job_id)
+            else:
+                logging.warning("Ignoring malformed generation callback.")
             return
 
         thread_id = result.thread_id
@@ -711,22 +717,43 @@ class MainWindow(QMainWindow):
                     sources=None,
                     thoughts=result.thoughts,
                 )
+                memory_action_error = None
+                try:
+                    apply_memory_command(
+                        self.orchestrator.permanent_memory_manager,
+                        result.memory_command,
+                        confirm_clear=self.confirm_memory_clear,
+                    )
+                except (PersistenceError, ValueError) as exc:
+                    logging.error("Could not apply model memory action (%s).", type(exc).__name__)
+                    memory_action_error = "The response was saved, but the requested memory update could not be applied."
+                if memory_action_error:
+                    self.append_message('system', "System", memory_action_error)
             else:
                 self.append_message(
                     'system',
                     "System",
                     result.error or "Generation failed. Please try again.",
                 )
+                if self.last_submitted_input:
+                    self.input_field.setText(self.last_submitted_input)
             self.set_chat_ui_for_processing(False)
 
             if result.success and self.orchestrator.suggestions_enabled:
                 self.show_suggestion_loading_state()
                 chat_history = self.orchestrator.memory_manager.get_formatted_history()
                 self.orchestrator.generate_suggestions_async(thread_id, chat_history, self.display_suggestions)
-
         else:
-            print(f"Handled finished query for background thread: {thread_id}")
-        
+            logging.info("Handled finished query for background thread %s.", thread_id)
+
+    def confirm_memory_clear(self) -> bool:
+        """Ask the user before a model-requested permanent-memory wipe."""
+        dialog = ConfirmDeleteDialog(self)
+        dialog.message_label.setText(
+            "The assistant requested deleting ALL permanent memories. Continue? This action cannot be undone."
+        )
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
 
     def show_suggestion_loading_state(self):
         self.clear_suggestions()

@@ -36,7 +36,7 @@ class QueryWorker(QObject):
                 self.status_updated.emit(status_text, job_id)
 
             self.status_updated.emit("START_FINAL_ANIMATION", job_id)
-            response, _, thoughts = self.orchestrator.process_query_sync(
+            response, _, thoughts, memory_command = self.orchestrator.process_query_sync(
                 self.snapshot,
                 status_signal=self.status_updated,
             )
@@ -46,14 +46,17 @@ class QueryWorker(QObject):
                     thoughts,
                     job_id=job_id,
                     thread_id=thread_id,
+                    memory_command=memory_command,
                 )
             )
         except Exception as exc:
-            logging.error("Interactive generation failed for job %s: %s", job_id, exc, exc_info=True)
+            logging.error("Interactive generation failed for job %s (%s).", job_id, type(exc).__name__)
+            user_message = getattr(exc, "user_message", "Generation failed. Please try again.")
+            error_details = getattr(exc, "error_details", type(exc).__name__)
             self.finished.emit(
                 GenerationResult.failed(
-                    "Generation failed.",
-                    error_details=str(exc),
+                    user_message,
+                    error_details=error_details,
                     job_id=job_id,
                     thread_id=thread_id,
                 )

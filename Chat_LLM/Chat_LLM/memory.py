@@ -600,6 +600,9 @@ class VectorDatabaseManager:
 
 class PermanentMemoryManager:
     """Manages the persistence of long-term 'memory nuggets' for the AI."""
+    MAX_MEMOS = 100
+    MAX_MEMO_LENGTH = 500
+
     def __init__(self, memory_file_path: str | None = None):
         """Initialize the manager and recover from a valid backup when needed."""
         app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
@@ -614,6 +617,30 @@ class PermanentMemoryManager:
         if not all(isinstance(memo, str) for memo in data['memos']):
             raise ValueError("memory entries must be strings")
         return list(data['memos'])
+
+    @classmethod
+    def normalize_memos(cls, memos: list[str]) -> list[str]:
+        """Validate, trim, cap, and case-insensitively deduplicate memos."""
+        if not isinstance(memos, list):
+            raise ValueError("memos must be a list")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for memo in memos:
+            if not isinstance(memo, str):
+                raise ValueError("memory entries must be strings")
+            memo = memo.strip()
+            if not memo:
+                continue
+            if len(memo) > cls.MAX_MEMO_LENGTH:
+                raise ValueError(f"memory entries may not exceed {cls.MAX_MEMO_LENGTH} characters")
+            key = memo.casefold()
+            if key in seen:
+                continue
+            if len(normalized) >= cls.MAX_MEMOS:
+                raise ValueError(f"no more than {cls.MAX_MEMOS} memories may be stored")
+            seen.add(key)
+            normalized.append(memo)
+        return normalized
 
     def _load_memos(self) -> list[str]:
         """
@@ -644,7 +671,7 @@ class PermanentMemoryManager:
                 dir=directory,
             )
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                json.dump({'memos': self._validate_memo_data({'memos': self.memos})}, stream, indent=2)
+                json.dump({'memos': self.normalize_memos(self.memos)}, stream, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
 
@@ -683,14 +710,16 @@ class PermanentMemoryManager:
         Args:
             memo_text (str): The fact to be remembered.
         """
-        if memo_text not in self.memos:
-            previous_memos = list(self.memos)
-            self.memos.append(memo_text)
-            try:
-                self._save_memos()
-            except PersistenceError:
-                self.memos = previous_memos
-                raise
+        normalized = self.normalize_memos(self.memos + [memo_text])
+        if normalized == self.memos:
+            return
+        previous_memos = list(self.memos)
+        self.memos = normalized
+        try:
+            self._save_memos()
+        except PersistenceError:
+            self.memos = previous_memos
+            raise
 
     def update_memos(self, memos: list[str]):
         """
@@ -701,7 +730,7 @@ class PermanentMemoryManager:
         """
         # Filter out any empty strings that might have come from the UI.
         previous_memos = list(self.memos)
-        self.memos = [memo for memo in memos if memo]
+        self.memos = self.normalize_memos(memos)
         try:
             self._save_memos()
         except PersistenceError:

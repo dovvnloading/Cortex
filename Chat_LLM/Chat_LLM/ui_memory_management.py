@@ -7,13 +7,13 @@ used within it, such as MemoryItemWidget for individual memory entries.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit, QPushButton, QFrame, QDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit, QPushButton, QFrame, QDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap, QPainter
 
 from ui_widgets import CustomButton, BlurringBaseDialog, ConfirmDeleteDialog
-from memory import PermanentMemoryManager
+from memory import PermanentMemoryManager, PersistenceError
 
 class DeleteButton(QPushButton):
     """A custom styled button specifically for deletion actions within the memory dialog."""
@@ -218,7 +218,11 @@ class MemoryManagementDialog(BlurringBaseDialog):
                     if text: # Ignore empty memos
                         new_memos.append(text)
         
-        self.permanent_memory_manager.update_memos(new_memos)
+        try:
+            self.permanent_memory_manager.update_memos(new_memos)
+        except (PersistenceError, ValueError) as exc:
+            QMessageBox.warning(self, "Memory not saved", "The memory changes could not be saved. Please try again.")
+            return
         self.accept() # Close the dialog
 
     def _on_clear_all(self):
@@ -233,6 +237,9 @@ class MemoryManagementDialog(BlurringBaseDialog):
                 item = self.memos_layout.takeAt(0)
                 if widget := item.widget():
                     self._remove_memo_widget(widget)
-            # Clear the data in the manager.
-            self.permanent_memory_manager.clear_memos()
+            try:
+                self.permanent_memory_manager.clear_memos()
+            except PersistenceError:
+                QMessageBox.warning(self, "Memory not cleared", "The memories could not be cleared. Please try again.")
+                return
             self.accept() # Close the dialog

@@ -130,7 +130,9 @@ class ChatHistoryItemWidget(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 8, 0)
 
-        self.title_label = QLabel(title)
+        self.title_label = QLabel()
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setText(title)
         self.title_label.setWordWrap(False)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.title_label)
@@ -161,6 +163,7 @@ class ChatHistoryItemWidget(QFrame):
         self.update_style()
 
     def set_title(self, title: str):
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setText(title)
 
     def get_title(self) -> str:
