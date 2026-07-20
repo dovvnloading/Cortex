@@ -1,5 +1,5 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-pythonpath = ["Chat_LLM/Chat_LLM"]
+pythonpath = ["backend", "Chat_LLM/Chat_LLM"]
 addopts = "-ra"

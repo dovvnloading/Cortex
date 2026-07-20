@@ -29,4 +29,4 @@ jobs:
         run: python -m pytest
 
       - name: Compile application modules
-        run: python -m compileall -q Chat_LLM/Chat_LLM
+        run: python -m compileall -q backend Chat_LLM/Chat_LLM
