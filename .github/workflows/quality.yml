@@ -62,5 +62,8 @@ jobs:
         shell: pwsh
         run: python main.py --build-frontend --data-dir "$env:RUNNER_TEMP\cortex-quality-data"
 
+      - name: Install package builder
+        run: python -m pip install pyinstaller
+
       - name: Build one-folder package prototype
         run: python -m PyInstaller --noconfirm --clean packaging/Cortex.spec
