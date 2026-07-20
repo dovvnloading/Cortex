@@ -11,6 +11,11 @@ venv/
 .vs/
 .vscode/
 
+# Frontend dependencies and generated web output
+node_modules/
+frontend/dist/
+frontend/coverage/
+
 # Local application data
 *.sqlite
 *.sqlite3

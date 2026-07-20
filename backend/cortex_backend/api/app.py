@@ -5,10 +5,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from cortex_backend.repositories.chats import ChatRepository, InMemoryChatRepository
@@ -78,6 +81,8 @@ def create_app(
     preview: bool = True,
     qt_default: bool = True,
     allowed_hosts: Iterable[str] | None = None,
+    serve_frontend: bool = False,
+    frontend_dist: Path | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -126,4 +131,30 @@ def create_app(
         max_age=600,
     )
     app.include_router(build_router(), prefix="/api/v1")
+    if serve_frontend:
+        _mount_frontend(
+            app,
+            frontend_dist
+            or Path(__file__).resolve().parents[3] / "frontend" / "dist",
+        )
     return app
+
+
+def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
+    """Serve a verified production bundle without intercepting API paths."""
+    dist = frontend_dist.resolve()
+    index = dist / "index.html"
+    if not index.is_file():
+        return
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="frontend-assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def frontend_route(path: str):
+        if path.startswith("api/"):
+            return FileResponse(index, status_code=404)
+        candidate = (dist / path).resolve()
+        if candidate.is_relative_to(dist) and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index)

@@ -71,6 +71,7 @@ def build_preview_app():
         session_manager=session_manager,
         preview=True,
         qt_default=True,
+        serve_frontend=True,
     )
     return app
 
