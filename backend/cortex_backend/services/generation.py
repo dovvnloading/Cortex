@@ -92,6 +92,7 @@ class GenerationService:
         *,
         progress_sink: ProgressSink | None = None,
         cancellation_event: Event | None = None,
+        history_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> GenerationServiceResult:
         """Generate from one immutable snapshot and emit owned progress."""
         sink = progress_sink or NullProgressSink()
@@ -116,13 +117,16 @@ class GenerationService:
             engine = self._engine_factory(snapshot)
 
         self._check_cancelled(cancellation_event)
-        history_messages = [
-            dict(message) for message in self._history_loader(snapshot.thread_id)
-        ]
-        if history_messages and history_messages[-1].get("role") == "user":
-            history_messages.pop()
+        loaded_history = (
+            history_messages
+            if history_messages is not None
+            else self._history_loader(snapshot.thread_id)
+        )
+        working_history = [dict(message) for message in loaded_history]
+        if working_history and working_history[-1].get("role") == "user":
+            working_history.pop()
         chat_history = engine.fit_history_to_context(
-            history_messages,
+            working_history,
             query=snapshot.user_input,
             permanent_memories=permanent_memories,
             memories_enabled=snapshot.memories_enabled,

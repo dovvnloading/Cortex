@@ -3,8 +3,14 @@ import type {
   ChatResponse,
   ChatSummary,
   CreateChatRequest,
+  ForkRequest,
+  GenerationEvent,
+  GenerationRequest,
+  JobAccepted,
+  JobStatusResponse,
   HealthResponse,
   MemoryResponse,
+  RegenerationRequest,
   RenameChatRequest,
   SessionExchangeResponse,
   SettingsResponse,
@@ -95,6 +101,88 @@ export class CortexApi {
     );
   }
 
+  forkChat(threadId: string, messageId: string): Promise<ChatResponse> {
+    const payload: ForkRequest = { message_id: messageId };
+    return this.request<ChatResponse>(
+      `/chats/${encodeURIComponent(threadId)}/forks`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  generate(payload: GenerationRequest): Promise<JobAccepted> {
+    return this.request<JobAccepted>("/generations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  regenerate(threadId: string, payload: RegenerationRequest): Promise<JobAccepted> {
+    return this.request<JobAccepted>(
+      `/chats/${encodeURIComponent(threadId)}/regenerations`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  generationStatus(jobId: string): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(`/generations/${encodeURIComponent(jobId)}`);
+  }
+
+  cancelGeneration(jobId: string): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(
+      `/generations/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+  }
+
+  async streamGeneration(
+    jobId: string,
+    onEvent: (event: GenerationEvent) => void,
+    options: { signal?: AbortSignal; afterEventId?: number } = {},
+  ): Promise<void> {
+    const headers = this.authHeaders();
+    if (options.afterEventId !== undefined) {
+      headers.set("Last-Event-ID", String(options.afterEventId));
+    }
+    const response = await this.fetcher(
+      `${this.baseUrl}/generations/${encodeURIComponent(jobId)}/events`,
+      { headers, signal: options.signal },
+    );
+    if (response.status === 401) {
+      this.clearSession();
+    }
+    if (!response.ok || !response.body) {
+      throw new ApiError(response.status, await this.errorDetail(response));
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const chunk = await reader.read();
+      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (!data) continue;
+        onEvent(JSON.parse(data) as GenerationEvent);
+      }
+      if (chunk.done) break;
+    }
+    if (buffer.trim()) {
+      const data = buffer
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+      if (data) onEvent(JSON.parse(data) as GenerationEvent);
+    }
+  }
+
   async deleteChat(threadId: string): Promise<void> {
     await this.request<void>(`/chats/${encodeURIComponent(threadId)}`, {
       method: "DELETE",
@@ -136,12 +224,11 @@ export class CortexApi {
     options: RequestInit & { authenticated?: boolean } = {},
   ): Promise<T> {
     const { authenticated = true, ...requestInit } = options;
-    const headers = new Headers(requestInit.headers);
+    const headers = authenticated
+      ? this.authHeaders(requestInit.headers)
+      : new Headers(requestInit.headers);
     if (requestInit.body && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
-    }
-    if (authenticated && this.sessionToken) {
-      headers.set("Authorization", `Bearer ${this.sessionToken}`);
     }
 
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
@@ -152,17 +239,34 @@ export class CortexApi {
       this.clearSession();
     }
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as
-        | { detail?: string }
-        | null;
+      const detail = await this.errorDetail(response);
       throw new ApiError(
         response.status,
-        body?.detail ?? "Cortex API request failed.",
+        detail,
       );
     }
     if (response.status === 204) {
       return undefined as T;
     }
     return (await response.json()) as T;
+  }
+
+  private authHeaders(init?: HeadersInit): Headers {
+    const headers = new Headers(init);
+    if (this.sessionToken) {
+      headers.set("Authorization", `Bearer ${this.sessionToken}`);
+    }
+    return headers;
+  }
+
+  private async errorDetail(response: Response): Promise<string> {
+    const body = (await response.json().catch(() => null)) as
+      | { detail?: string | { message?: string } }
+      | null;
+    if (typeof body?.detail === "string") return body.detail;
+    if (body?.detail && typeof body.detail.message === "string") {
+      return body.detail.message;
+    }
+    return "Cortex API request failed.";
   }
 }

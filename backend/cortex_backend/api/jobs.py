@@ -39,6 +39,7 @@ class JobEvent:
 
     sequence: int
     job_id: str
+    thread_id: str | None
     kind: EventKind
     status: JobStatus
     phase: str | None = None
@@ -56,6 +57,7 @@ class JobSnapshot:
     status: JobStatus
     sequence: int
     error: str | None = None
+    result: Mapping[str, Any] | None = None
 
 
 JobRunner = Callable[["JobProgressSink", Event], Any]
@@ -73,6 +75,7 @@ class _JobRecord:
     status: JobStatus = "queued"
     sequence: int = 0
     error: str | None = None
+    result: Mapping[str, Any] | None = None
     events: list[JobEvent] = field(default_factory=list)
     task: asyncio.Task[Any] | None = None
 
@@ -87,17 +90,35 @@ class JobProgressSink:
     def publish(self, event: ProgressEvent) -> None:
         self.publish_progress(event.phase, event.message)
 
-    def publish_progress(self, phase: str, message: str) -> None:
+    def publish_progress(
+        self,
+        phase: str,
+        message: str,
+        *,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
         """Publish a safe progress message for generation or model work."""
+        payload = {"message": message, **dict(data or {})}
+        self.publish_event("progress", phase=phase, data=payload)
+
+    def publish_event(
+        self,
+        kind: EventKind,
+        *,
+        phase: str | None = None,
+        data: Mapping[str, Any] | None = None,
+        status: JobStatus = "running",
+    ) -> None:
+        """Publish a typed event while the owning job is still active."""
         with self._registry._lock:
             if self._record.status in TERMINAL_STATUSES:
                 return
             self._registry._append_event(
                 self._record,
-                kind="progress",
-                status="running",
+                kind=kind,
+                status=status,
                 phase=phase,
-                data={"message": message},
+                data=data,
             )
 
 
@@ -172,6 +193,26 @@ class JobRegistry:
     def status(self, job_id: str, *, owner: str) -> JobSnapshot:
         record = self._owned_record(job_id, owner)
         with self._lock:
+            return self._snapshot(record)
+
+    def request_snapshot(
+        self, *, kind: JobKind, owner: str, request_id: str | None
+    ) -> JobSnapshot | None:
+        """Return a previously accepted request for safe retry idempotency."""
+        if not request_id:
+            return None
+        with self._lock:
+            job_id = self._request_index.get((kind, owner, request_id))
+            record = self._records.get(job_id) if job_id else None
+            return self._snapshot(record) if record is not None else None
+
+    def active_snapshot(self, *, kind: JobKind) -> JobSnapshot | None:
+        """Return the active job, if any, without exposing its owner."""
+        with self._lock:
+            job_id = self._active.get(kind)
+            record = self._records.get(job_id) if job_id else None
+            if record is None or record.status in TERMINAL_STATUSES:
+                return None
             return self._snapshot(record)
 
     def cancel(self, job_id: str, *, owner: str) -> JobSnapshot:
@@ -273,6 +314,7 @@ class JobRegistry:
                 data = dict(
                     serialize_result(result) if serialize_result else _serialize(result)
                 )
+                record.result = data
                 self._append_event(
                     record,
                     kind="completed",
@@ -342,6 +384,7 @@ class JobRegistry:
         event = JobEvent(
             sequence=record.sequence,
             job_id=record.job_id,
+            thread_id=record.thread_id,
             kind=kind,
             status=status,
             phase=phase,
@@ -360,6 +403,7 @@ class JobRegistry:
             status=record.status,
             sequence=record.sequence,
             error=record.error,
+            result=dict(record.result) if record.result is not None else None,
         )
 
 
