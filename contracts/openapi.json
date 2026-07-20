@@ -71,7 +71,7 @@
         "additionalProperties": false,
         "properties": {
           "theme": {
-            "default": "light",
+            "default": "dark",
             "enum": [
               "light",
               "dark",

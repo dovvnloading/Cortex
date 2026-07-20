@@ -64,7 +64,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
+  const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
@@ -81,7 +81,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setChats(chatResponse);
       setActiveChatId((current) => current && chatResponse.some((chat) => chat.id === current) ? current : chatResponse[0]?.id ?? null);
       setSettings(settingsResponse.settings);
-      setTheme(settingsResponse.settings.appearance?.theme ?? "system");
+      setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
       setModels(modelResponse);
     } catch (error) {
@@ -129,7 +129,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       const response = await api.updateSettings({ settings: next });
       setSettings(response.settings);
-      setTheme(response.settings.appearance?.theme ?? "system");
+      setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
     } catch (error) { notify(apiMessage(error, "Could not save settings."), "error"); }
     finally { setSaving(false); }

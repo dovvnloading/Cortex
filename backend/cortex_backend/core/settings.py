@@ -22,7 +22,7 @@ class _SettingsModel(BaseModel):
 
 
 class AppearanceSettings(_SettingsModel):
-    theme: Literal["light", "dark", "system"] = "light"
+    theme: Literal["light", "dark", "system"] = "dark"
 
 
 class OnboardingSettings(_SettingsModel):

@@ -93,7 +93,7 @@ export function SettingsPanel({
               </div>
               <div className="settings-form">
                 <label className="field-label" htmlFor="theme">Theme
-                  <select id="theme" value={appearance.theme ?? "system"} onChange={(event) => update({ appearance: { ...appearance, theme: event.target.value as "light" | "dark" | "system" } })}>
+                  <select id="theme" value={appearance.theme ?? "dark"} onChange={(event) => update({ appearance: { ...appearance, theme: event.target.value as "light" | "dark" | "system" } })}>
                     <option value="system">System</option>
                     <option value="light">Light</option>
                     <option value="dark">Dark</option>

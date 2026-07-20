@@ -25,7 +25,7 @@ class TypedSettingsTests(unittest.TestCase):
     def test_defaults_match_the_web_runtime_contract(self):
         settings = CortexSettings()
 
-        self.assertEqual(settings.appearance.theme, "light")
+        self.assertEqual(settings.appearance.theme, "dark")
         self.assertFalse(settings.onboarding.agreement_accepted)
         self.assertEqual(settings.models.chat, "qwen3:8b")
         self.assertEqual(settings.models.title, "granite4:tiny-h")
