@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import ctypes
 from ctypes import wintypes
 import importlib
+import inspect
+import os
 from pathlib import Path
 import sys
 import time
@@ -30,6 +32,17 @@ class DesktopWindowConfig:
     debug: bool = False
 
 
+_WINDOW_ICON_HANDLES: list[int] = []
+
+
+def _start_accepts_icon(webview: Any) -> bool:
+    """Return whether this pywebview build accepts ``start(icon=...)``."""
+    try:
+        return "icon" in inspect.signature(webview.start).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def run_desktop_window(
     config: DesktopWindowConfig,
     *,
@@ -50,6 +63,9 @@ def run_desktop_window(
     # always remains in this owned window and never uses a browser profile.
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
+
+    icon_path = config.icon_path if config.icon_path and config.icon_path.is_file() else None
+    start_accepts_icon = _start_accepts_icon(webview)
 
     window = webview.create_window(
         config.title,
@@ -75,6 +91,12 @@ def run_desktop_window(
                     "Cortex requires the Microsoft Edge WebView2 Runtime; the legacy "
                     "browser engine is intentionally disabled."
                 )
+            if icon_path and not start_accepts_icon:
+                _apply_windows_window_icon(
+                    pid=os.getpid(),
+                    title=config.title,
+                    icon_path=icon_path,
+                )
             if monitor is not None:
                 monitor(window)
         except Exception as exc:  # surfaced after the GUI loop exits
@@ -85,15 +107,16 @@ def run_desktop_window(
                 pass
 
     try:
-        icon_path = config.icon_path if config.icon_path and config.icon_path.is_file() else None
-        webview.start(
-            func=after_start,
-            gui="edgechromium" if sys.platform == "win32" else None,
-            debug=config.debug,
-            private_mode=True,
-            storage_path=str(config.storage_path),
-            icon=str(icon_path) if icon_path else None,
-        )
+        start_options: dict[str, Any] = {
+            "func": after_start,
+            "gui": "edgechromium" if sys.platform == "win32" else None,
+            "debug": config.debug,
+            "private_mode": True,
+            "storage_path": str(config.storage_path),
+        }
+        if icon_path and start_accepts_icon:
+            start_options["icon"] = str(icon_path)
+        webview.start(**start_options)
     except Exception as exc:
         raise DesktopWindowError(f"Cortex could not start its native window: {exc}") from exc
 
@@ -106,10 +129,10 @@ def run_desktop_window(
         ) from error
 
 
-def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
-    """Restore and focus a top-level Windows window owned by ``pid``."""
+def _find_process_window(pid: int, title: str, *, timeout: float) -> int | None:
+    """Find a visible top-level Windows window by owning process and title."""
     if sys.platform != "win32" or pid <= 0:
-        return False
+        return None
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     enum_callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -142,7 +165,7 @@ def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
             if (
                 owner.value == pid
                 and user32.IsWindowVisible(hwnd)
-                and title_buffer.value == "Cortex"
+                and title_buffer.value == title
             ):
                 matches.append(hwnd)
                 return False
@@ -150,10 +173,74 @@ def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
 
         user32.EnumWindows(collect, 0)
         if matches:
-            hwnd = matches[0]
-            user32.ShowWindowAsync(hwnd, 9)  # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
-            return True
+            return matches[0]
         if time.monotonic() >= deadline:
-            return False
+            return None
         time.sleep(0.1)
+
+
+def _apply_windows_window_icon(*, pid: int, title: str, icon_path: Path) -> bool:
+    """Apply Cortex's icon for older pywebview builds without ``start(icon=...)``."""
+    if sys.platform != "win32" or not icon_path.is_file():
+        return False
+
+    try:
+        hwnd = _find_process_window(pid, title, timeout=3.0)
+        if hwnd is None:
+            return False
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.LoadImageW.argtypes = [
+            wintypes.HINSTANCE,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.SendMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.SendMessageW.restype = wintypes.LPARAM
+
+        icon_handle = user32.LoadImageW(
+            None,
+            str(icon_path),
+            1,  # IMAGE_ICON
+            0,
+            0,
+            0x0010 | 0x0040,  # LR_LOADFROMFILE | LR_DEFAULTSIZE
+        )
+        if not icon_handle:
+            return False
+
+        handle_value = getattr(icon_handle, "value", icon_handle)
+        if handle_value is None:
+            return False
+        user32.SendMessageW(hwnd, 0x0080, 0, handle_value)  # WM_SETICON, ICON_SMALL
+        user32.SendMessageW(hwnd, 0x0080, 1, handle_value)  # WM_SETICON, ICON_BIG
+        _WINDOW_ICON_HANDLES.append(int(handle_value))
+        return True
+    except Exception:
+        # A decorative icon must never prevent Cortex from starting.
+        return False
+
+
+def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
+    """Restore and focus a top-level Windows window owned by ``pid``."""
+    hwnd = _find_process_window(pid, "Cortex", timeout=timeout)
+    if hwnd is None:
+        return False
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindowAsync.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.ShowWindowAsync(hwnd, 9)  # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+    return True

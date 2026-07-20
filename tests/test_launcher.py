@@ -67,9 +67,16 @@ def test_native_window_uses_private_isolated_edge_webview(
             return window
 
         @staticmethod
-        def start(**kwargs):
-            calls["start"] = kwargs
-            kwargs["func"]()
+        def start(*, func, gui, debug, private_mode, storage_path, icon=None):
+            calls["start"] = {
+                "func": func,
+                "gui": gui,
+                "debug": debug,
+                "private_mode": private_mode,
+                "storage_path": storage_path,
+                "icon": icon,
+            }
+            func()
 
     monkeypatch.setattr(
         desktop_module.importlib,
@@ -98,6 +105,57 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["icon"] == str(icon)
     assert webview_settings["ALLOW_DOWNLOADS"] is False
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
+
+
+def test_native_window_legacy_start_without_icon_option_still_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    calls: dict[str, object] = {}
+    applied: list[dict[str, object]] = []
+    icon = tmp_path / "cortex.ico"
+    icon.write_bytes(b"test-icon")
+    window = SimpleNamespace(events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)))
+
+    class LegacyWebview:
+        settings: dict[str, object] = {}
+
+        @staticmethod
+        def create_window(*_args, **_kwargs):
+            return window
+
+        @staticmethod
+        def start(*, func, gui, debug, private_mode, storage_path):
+            calls["start"] = {
+                "func": func,
+                "gui": gui,
+                "debug": debug,
+                "private_mode": private_mode,
+                "storage_path": storage_path,
+            }
+            func()
+
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        desktop_module.importlib,
+        "import_module",
+        lambda _name: LegacyWebview,
+    )
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_window_icon",
+        lambda **kwargs: applied.append(kwargs) or True,
+    )
+
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(
+            url="http://127.0.0.1:8765",
+            storage_path=tmp_path / "private-webview",
+            icon_path=icon,
+        )
+    )
+
+    assert "icon" not in calls["start"]
+    assert applied == [{"pid": desktop_module.os.getpid(), "title": "Cortex", "icon_path": icon}]
 
 
 def test_native_window_rejects_legacy_windows_renderer(
