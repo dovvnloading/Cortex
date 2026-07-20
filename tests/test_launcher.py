@@ -8,10 +8,28 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import main as launcher_main
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock
+
+
+def test_normal_launch_selects_an_available_backend_port(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(launcher_main, "_free_port", lambda: 43125)
+
+    args = launcher_main.build_parser().parse_args([])
+
+    assert args.port == 0
+    assert launcher_main._requested_port(args.port) == 43125
+
+
+def test_explicit_backend_port_remains_strict():
+    args = launcher_main.build_parser().parse_args(["--port", "8765"])
+
+    assert launcher_main._requested_port(args.port) == 8765
 
 
 def _frontend_fixture(tmp_path: Path) -> Path:
