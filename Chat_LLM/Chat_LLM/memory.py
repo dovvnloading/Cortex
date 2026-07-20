@@ -23,7 +23,8 @@ import math
 import struct
 import tempfile
 from datetime import datetime, timedelta, timezone
-from PySide6.QtCore import QStandardPaths
+
+from cortex_backend.core.paths import AppPaths
 
 
 def _utc_now() -> datetime:
@@ -52,11 +53,21 @@ class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
     SCHEMA_VERSION = 1
 
-    def __init__(self, db_path: str | None = None, legacy_history_dir: str | None = None):
+    def __init__(
+        self,
+        db_path: str | None = None,
+        legacy_history_dir: str | None = None,
+        app_paths: AppPaths | None = None,
+    ):
         """Initialize the manager without retaining a cross-thread SQLite connection."""
-        app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.db_path = db_path or os.path.join(app_data_path, "cortex_db.sqlite")
-        self.legacy_history_dir = legacy_history_dir or os.path.join(app_data_path, "chat_history")
+        if db_path is None or legacy_history_dir is None:
+            resolved_paths = app_paths or AppPaths.for_current_user()
+            db_path = db_path or str(resolved_paths.database)
+            legacy_history_dir = legacy_history_dir or str(
+                resolved_paths.legacy_chat_history
+            )
+        self.db_path = db_path
+        self.legacy_history_dir = legacy_history_dir
         logging.info(f"Database path set to: {self.db_path}")
         self._ensure_parent_directory()
         self._create_tables()
@@ -471,9 +482,15 @@ class VectorDatabaseManager:
     Uses a separate SQLite database to store text and their high-dimensional vector representations
     encoded as binary blobs.
     """
-    def __init__(self):
-        app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.db_path = os.path.join(app_data_path, "cortex_vectors.sqlite")
+    def __init__(
+        self,
+        db_path: str | None = None,
+        app_paths: AppPaths | None = None,
+    ):
+        if db_path is None:
+            resolved_paths = app_paths or AppPaths.for_current_user()
+            db_path = str(resolved_paths.vector_database)
+        self.db_path = db_path
         self._conn = None
         self._ensure_connection()
         self._create_tables()
@@ -603,10 +620,16 @@ class PermanentMemoryManager:
     MAX_MEMOS = 100
     MAX_MEMO_LENGTH = 500
 
-    def __init__(self, memory_file_path: str | None = None):
+    def __init__(
+        self,
+        memory_file_path: str | None = None,
+        app_paths: AppPaths | None = None,
+    ):
         """Initialize the manager and recover from a valid backup when needed."""
-        app_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.memory_file_path = memory_file_path or os.path.join(app_data_path, "memory_bank.json")
+        if memory_file_path is None:
+            resolved_paths = app_paths or AppPaths.for_current_user()
+            memory_file_path = str(resolved_paths.permanent_memory)
+        self.memory_file_path = memory_file_path
         self.backup_file_path = f"{self.memory_file_path}.bak"
         self.memos = self._load_memos()
 

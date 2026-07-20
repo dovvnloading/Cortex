@@ -17,6 +17,14 @@ import os
 import ctypes
 import re
 import urllib.request
+from pathlib import Path
+
+# Keep the documented source-checkout launch command working while the backend
+# is introduced in stages. Packaging will replace this transitional path setup.
+BACKEND_ROOT = Path(__file__).resolve().parents[2] / "backend"
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog
 from PySide6.QtCore import QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QIcon
