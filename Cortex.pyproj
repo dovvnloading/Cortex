@@ -30,6 +30,7 @@
     <Content Include="contracts\**\*" />
     <Content Include="frontend\src\**\*" />
     <Content Include="frontend\e2e\**\*" />
+    <Content Include="frontend\public\**\*" />
     <Content Include="frontend\index.html" />
     <Content Include="frontend\package.json" />
     <Content Include="frontend\package-lock.json" />
@@ -53,6 +54,7 @@
     <Folder Include="contracts\" />
     <Folder Include="frontend\" />
     <Folder Include="frontend\e2e\" />
+    <Folder Include="frontend\public\" />
     <Folder Include="frontend\src\" />
     <Folder Include="frontend\src\api\" />
     <Folder Include="frontend\src\app\" />

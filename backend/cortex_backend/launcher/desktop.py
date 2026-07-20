@@ -22,6 +22,7 @@ class DesktopWindowConfig:
     url: str
     storage_path: Path
     title: str = "Cortex"
+    icon_path: Path | None = None
     width: int = 1440
     height: int = 960
     min_width: int = 960
@@ -84,12 +85,14 @@ def run_desktop_window(
                 pass
 
     try:
+        icon_path = config.icon_path if config.icon_path and config.icon_path.is_file() else None
         webview.start(
             func=after_start,
             gui="edgechromium" if sys.platform == "win32" else None,
             debug=config.debug,
             private_mode=True,
             storage_path=str(config.storage_path),
+            icon=str(icon_path) if icon_path else None,
         )
     except Exception as exc:
         raise DesktopWindowError(f"Cortex could not start its native window: {exc}") from exc

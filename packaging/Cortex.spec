@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve().parent
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+APP_ICON = ROOT / "assets" / "cortex.ico"
 WEBVIEW2_BOOTSTRAPPER = (
     ROOT / "packaging" / ".runtime" / "webview2" / "MicrosoftEdgeWebview2Setup.exe"
 )
@@ -18,6 +19,8 @@ if not WEBVIEW2_BOOTSTRAPPER.is_file():
         "The signed WebView2 bootstrapper is missing; run "
         "`powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1`."
     )
+if not APP_ICON.is_file():
+    raise SystemExit("Cortex's application icon is missing: assets/cortex.ico")
 
 a = Analysis(
     [str(ROOT / "main.py")],
@@ -55,6 +58,7 @@ exe = EXE(
     a.scripts,
     [],
     name="Cortex",
+    icon=str(APP_ICON),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
