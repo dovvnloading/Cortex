@@ -1,3 +1,20 @@
+### **Cortex Web Modernization: Launcher Cutover**
+
+**Date:** 2026-07-20
+**Version:** Web modernization — Stage 6
+
+* The React/Vite web application is now the default `python main.py` runtime.
+* The Python launcher owns frontend builds, backend/Vite supervision, loopback
+  readiness, authenticated browser handoff, single-instance behavior, and
+  graceful UI shutdown.
+* Source builds use lock/source fingerprints and atomic bundle replacement;
+  one-folder Windows packaging includes the frontend and does not require
+  Node.js at runtime.
+* The legacy PySide6 runtime remains available through `python main.py
+  --legacy-qt` while the migration continues.
+
+---
+
 ### **Cortex Web Preview: System Parity & Safe Migration**
 
 **Date:** 2026-07-20

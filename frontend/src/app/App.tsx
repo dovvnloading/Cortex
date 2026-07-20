@@ -10,10 +10,16 @@ import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
 
+function readBootstrapToken(): string {
+  const searchToken = new URLSearchParams(window.location.search).get("bootstrap");
+  if (searchToken) return searchToken;
+  return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("bootstrap") ?? "";
+}
+
 export function App({ api: providedApi }: Props) {
   const [api] = useState(() => providedApi ?? new CortexApi());
   const [sessionReady, setSessionReady] = useState(api.hasSession);
-  const [bootstrapToken] = useState(() => new URLSearchParams(window.location.search).get("bootstrap") ?? "");
+  const [bootstrapToken] = useState(readBootstrapToken);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const handleSessionExpired = useCallback(() => setSessionReady(false), []);
@@ -59,6 +65,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [modelBusy, setModelBusy] = useState(false);
   const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
+
+  const quitCortex = async () => {
+    if (!window.confirm("Quit Cortex?")) return;
+    try {
+      await api.shutdown();
+    } catch (error) {
+      notify(apiMessage(error, "Could not shut down Cortex."), "error");
+    }
+  };
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
@@ -187,7 +202,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      <AppShell chats={chats} activeChatId={activeChatId} system={system} theme={theme} onThemeChange={setTheme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat} onQuit={quitCortex}>
         <Routes>
           <Route path="/settings" element={<SettingsPanel settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
           <Route path="/chat/new" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />

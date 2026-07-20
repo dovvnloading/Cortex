@@ -598,6 +598,26 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HandoffResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bootstrap_token": {
+            "title": "Bootstrap Token",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bootstrap_token",
+          "expires_at"
+        ],
+        "title": "HandoffResponse",
+        "type": "object"
+      },
       "HealthResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1235,6 +1255,19 @@
           "settings"
         ],
         "title": "SettingsUpdateRequest",
+        "type": "object"
+      },
+      "ShutdownResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "ShutdownResponse",
         "type": "object"
       },
       "SuggestionSettings": {
@@ -1888,6 +1921,42 @@
         "summary": "Health"
       }
     },
+    "/api/v1/health/live": {
+      "get": {
+        "operationId": "health_live_api_v1_health_live_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Live"
+      }
+    },
+    "/api/v1/health/ready": {
+      "get": {
+        "operationId": "health_ready_api_v1_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Ready"
+      }
+    },
     "/api/v1/jobs/generation": {
       "post": {
         "operationId": "start_generation_api_v1_jobs_generation_post",
@@ -2283,6 +2352,24 @@
         "summary": "Exchange"
       }
     },
+    "/api/v1/session/handoff": {
+      "post": {
+        "operationId": "handoff_api_v1_session_handoff_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandoffResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Handoff"
+      }
+    },
     "/api/v1/settings": {
       "get": {
         "operationId": "get_settings_api_v1_settings_get",
@@ -2353,6 +2440,24 @@
           }
         },
         "summary": "System"
+      }
+    },
+    "/api/v1/system/shutdown": {
+      "post": {
+        "operationId": "shutdown_api_v1_system_shutdown_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShutdownResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Shutdown"
       }
     }
   }

@@ -113,6 +113,11 @@ export interface HTTPValidationError {
   detail?: Array<ValidationError>;
 }
 
+export interface HandoffResponse {
+  bootstrap_token: string;
+  expires_at: string;
+}
+
 export interface HealthResponse {
   status?: string;
 }
@@ -226,6 +231,10 @@ export interface SettingsResponse {
 
 export interface SettingsUpdateRequest {
   settings: CortexSettings;
+}
+
+export interface ShutdownResponse {
+  status?: string;
 }
 
 export interface SuggestionSettings {

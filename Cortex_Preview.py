@@ -35,9 +35,16 @@ from qt_settings_adapter import QSettingsAdapter  # noqa: E402
 from synthesis_agent import SynthesisAgent  # noqa: E402
 
 
-def build_preview_app():
+def build_preview_app(
+    *,
+    data_dir: Path | None = None,
+    frontend_dist: Path | None = None,
+    serve_frontend: bool = True,
+    qt_default: bool = True,
+    handoff_secret: str | None = None,
+):
     """Build the explicit legacy-backed preview without starting a server."""
-    paths = AppPaths.for_current_user()
+    paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
     database = DatabaseManager(app_paths=paths)
     permanent_memory = PermanentMemoryManager(app_paths=paths)
     legacy_settings = QSettingsAdapter(QSettings("ChatLLM", "ChatLLM-Assistant"))
@@ -68,6 +75,29 @@ def build_preview_app():
         models=model_service,
         generation=generation_service,
     )
+
+    def readiness_check() -> bool:
+        """Verify durable paths, SQLite schema, memory, and settings access."""
+        if not paths.data_dir.is_dir() or not paths.database.is_file():
+            return False
+        with database.connect() as connection:
+            schema_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        if schema_version > database.SCHEMA_VERSION:
+            return False
+        if not {"threads", "messages"}.issubset(tables):
+            return False
+        permanent_memory.get_memos()
+        settings_repository.load()
+        return True
+
     session_manager = SessionManager(
         allowed_hosts=("127.0.0.1", "localhost", "::1"),
     )
@@ -75,10 +105,14 @@ def build_preview_app():
         dependencies,
         session_manager=session_manager,
         preview=True,
-        qt_default=True,
-        serve_frontend=True,
+        qt_default=qt_default,
+        serve_frontend=serve_frontend,
+        frontend_dist=frontend_dist,
         ollama_host=ollama_host,
+        handoff_secret=handoff_secret,
+        readiness_check=readiness_check,
     )
+    app.state.required_paths = (paths.data_dir, paths.database)
     return app
 
 

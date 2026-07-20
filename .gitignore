@@ -17,6 +17,7 @@ frontend/dist/
 frontend/coverage/
 frontend/test-results/
 frontend/playwright-report/
+frontend/.cortex-*
 
 # Local application data
 *.sqlite
@@ -31,3 +32,5 @@ legacy_history/quarantine/
 build/
 dist/
 *.egg-info/
+*.secret
+cortex.instance.*
