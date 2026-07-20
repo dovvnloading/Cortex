@@ -26,7 +26,7 @@ export function AppShell({
 }: Props) {
   const navigate = useNavigate();
   const location = useLocation();
-  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [sidebarVisible, setSidebarVisible] = useState(() => !isCompactWindow());
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
 
@@ -38,6 +38,16 @@ export function AppShell({
   const closeSidebarOnCompactLayout = () => {
     if (window.matchMedia("(max-width: 760px)").matches) setSidebarVisible(false);
   };
+
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const compactLayout = window.matchMedia("(max-width: 760px)");
+    const closeForCompactLayout = (event: MediaQueryListEvent) => {
+      if (event.matches) setSidebarVisible(false);
+    };
+    compactLayout.addEventListener("change", closeForCompactLayout);
+    return () => compactLayout.removeEventListener("change", closeForCompactLayout);
+  }, []);
 
   const createChat = () => {
     navigate("/chat/new");
@@ -108,6 +118,12 @@ export function AppShell({
       {deleteTarget && <DeleteChatDialog chat={deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={async () => { await onDeleteChat(deleteTarget.id); setDeleteTarget(null); }} />}
     </div>
   );
+}
+
+function isCompactWindow(): boolean {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(max-width: 760px)").matches;
 }
 
 function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: () => void; onSave: (id: string, title: string) => Promise<void> }) {

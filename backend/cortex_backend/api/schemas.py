@@ -162,7 +162,14 @@ class ModelPullRequest(APIModel):
 
 
 JobKind = Literal["generation", "models"]
-JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+JobStatus = Literal[
+    "queued",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
 
 
 class GenerationRequest(APIModel):
@@ -221,6 +228,7 @@ GenerationEventName = Literal[
     "generation.persisting",
     "generation.completed",
     "generation.failed",
+    "generation.cancelling",
     "generation.cancelled",
 ]
 

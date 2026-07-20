@@ -464,6 +464,7 @@
               "generation.persisting",
               "generation.completed",
               "generation.failed",
+              "generation.cancelling",
               "generation.cancelled"
             ],
             "title": "Event",
@@ -686,6 +687,7 @@
             "enum": [
               "queued",
               "running",
+              "cancelling",
               "succeeded",
               "failed",
               "cancelled"
@@ -770,6 +772,7 @@
             "enum": [
               "queued",
               "running",
+              "cancelling",
               "succeeded",
               "failed",
               "cancelled"
@@ -1079,6 +1082,7 @@
             "enum": [
               "queued",
               "running",
+              "cancelling",
               "succeeded",
               "failed",
               "cancelled"
