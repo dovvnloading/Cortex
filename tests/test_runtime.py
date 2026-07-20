@@ -13,7 +13,14 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from Chat_LLM import ConnectionWorker  # noqa: E402
-from generation_types import ConnectionResult, GenerationResult, GenerationSnapshot, MemoryCommand  # noqa: E402
+from cortex_backend.services.generation import GenerationServiceResult  # noqa: E402
+from cortex_backend.services.progress import ProgressEvent  # noqa: E402
+from generation_types import (  # noqa: E402
+    ConnectionResult,
+    GenerationResult,
+    GenerationSnapshot,
+    MemoryCommand,
+)
 from query_worker import GenerationJobController  # noqa: E402
 
 
@@ -28,9 +35,40 @@ class _ConnectionOrchestrator:
 
 
 class _GenerationOrchestrator:
-    def process_query_sync(self, snapshot, status_signal=None):
+    def process_query_sync(self, snapshot, progress_sink=None):
         time.sleep(0.05)
+        if progress_sink:
+            progress_sink.publish(
+                ProgressEvent(
+                    job_id=snapshot.job_id,
+                    thread_id=snapshot.thread_id,
+                    phase="analysis",
+                    message="Analyzing the request...",
+                )
+            )
         return "response", None, "thoughts", MemoryCommand()
+
+
+class _GenerationServiceSpy:
+    def __init__(self):
+        self.snapshot = None
+        self.progress_sink = None
+
+    def generate(self, snapshot, *, progress_sink=None):
+        self.snapshot = snapshot
+        self.progress_sink = progress_sink
+        return GenerationServiceResult("service response", "service thoughts", MemoryCommand())
+
+
+class _ModelServiceSpy:
+    def __init__(self):
+        self.required_models = None
+        self.optional_models = None
+
+    def check(self, *, required_models, optional_models):
+        self.required_models = required_models
+        self.optional_models = optional_models
+        return ConnectionResult.connected("ready")
 
 
 class RuntimeTests(unittest.TestCase):
@@ -94,6 +132,56 @@ class RuntimeTests(unittest.TestCase):
         self.app.exec()
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].success)
+
+    def test_legacy_orchestrator_delegates_generation_to_headless_service(self):
+        from Chat_LLM import Orchestrator
+
+        orchestrator = object.__new__(Orchestrator)
+        service = _GenerationServiceSpy()
+        orchestrator.generation_service = service
+        snapshot = GenerationSnapshot(
+            job_id="job-delegated",
+            thread_id="thread-delegated",
+            user_input="hello",
+            model="qwen3:8b",
+            title_model="granite4:tiny-h",
+            translation_model="translategemma:4b",
+            model_options={},
+            memories_enabled=False,
+            translation_enabled=False,
+            target_language="English",
+            user_system_instructions=None,
+        )
+
+        result = orchestrator.process_query_sync(snapshot)
+
+        self.assertEqual(result, ("service response", None, "service thoughts", MemoryCommand()))
+        self.assertIs(service.snapshot, snapshot)
+        self.assertIsNone(service.progress_sink)
+
+    def test_legacy_orchestrator_delegates_exact_model_requirements(self):
+        from Chat_LLM import Orchestrator
+
+        orchestrator = object.__new__(Orchestrator)
+        service = _ModelServiceSpy()
+        orchestrator.model_service = service
+        orchestrator.config = {
+            "gen_model": "qwen3:8b",
+            "title_model": "granite4:tiny-h",
+            "translation_model": "translategemma:4b",
+        }
+        orchestrator.translation_enabled = True
+        orchestrator.suggestions_enabled = True
+        orchestrator.suggestions_model = "qwen3:4b"
+
+        result = orchestrator.check_ollama_models_sync()
+
+        self.assertTrue(result.success)
+        self.assertEqual(service.required_models, ("qwen3:8b", "granite4:tiny-h"))
+        self.assertEqual(
+            service.optional_models,
+            ["translategemma:4b", "qwen3:4b"],
+        )
 
 
 if __name__ == "__main__":

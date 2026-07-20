@@ -5,7 +5,18 @@ import logging
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from generation_types import GenerationResult, GenerationSnapshot
+
+
+class QtProgressSink:
+    """Adapt typed backend progress to the legacy Qt signal boundary."""
+
+    def __init__(self, signal: Signal):
+        self._signal = signal
+
+    def publish(self, event: ProgressEvent) -> None:
+        self._signal.emit(event.message, event.job_id)
 
 
 class QueryWorker(QObject):
@@ -23,22 +34,20 @@ class QueryWorker(QObject):
         job_id = self.snapshot.job_id
         thread_id = self.snapshot.thread_id
         try:
-            for status_text in ("Analyzing the request...", "Gathering thoughts..."):
-                if QThread.currentThread().isInterruptionRequested():
-                    self.finished.emit(
-                        GenerationResult.failed(
-                            "Generation cancelled.",
-                            job_id=job_id,
-                            thread_id=thread_id,
-                        )
+            if QThread.currentThread().isInterruptionRequested():
+                self.finished.emit(
+                    GenerationResult.failed(
+                        "Generation cancelled.",
+                        job_id=job_id,
+                        thread_id=thread_id,
                     )
-                    return
-                self.status_updated.emit(status_text, job_id)
+                )
+                return
 
-            self.status_updated.emit("START_FINAL_ANIMATION", job_id)
+            progress_sink: ProgressSink = QtProgressSink(self.status_updated)
             response, _, thoughts, memory_command = self.orchestrator.process_query_sync(
                 self.snapshot,
-                status_signal=self.status_updated,
+                progress_sink=progress_sink,
             )
             self.finished.emit(
                 GenerationResult.succeeded(
@@ -50,7 +59,11 @@ class QueryWorker(QObject):
                 )
             )
         except Exception as exc:
-            logging.error("Interactive generation failed for job %s (%s).", job_id, type(exc).__name__)
+            logging.error(
+                "Interactive generation failed for job %s (%s).",
+                job_id,
+                type(exc).__name__,
+            )
             user_message = getattr(exc, "user_message", "Generation failed. Please try again.")
             error_details = getattr(exc, "error_details", type(exc).__name__)
             self.finished.emit(
