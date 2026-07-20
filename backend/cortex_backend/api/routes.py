@@ -151,7 +151,8 @@ def build_router() -> APIRouter:
     ) -> DiagnosticsResponse:
         settings = _load_settings_result(deps)
         required, optional = _model_sets(settings.settings)
-        installed = deps.models.list_installed()
+        inventory, connection = deps.models.inventory()
+        installed = tuple(model.name for model in inventory)
         return DiagnosticsResponse(
             settings_source=settings.source,
             invalid_settings_keys=settings.invalid_keys,
@@ -159,7 +160,7 @@ def build_router() -> APIRouter:
             installed_models=installed,
             required_models=required,
             optional_models=optional,
-            connection=deps.models.probe(),
+            connection=connection,
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,
         )
@@ -368,13 +369,14 @@ def build_router() -> APIRouter:
     ) -> ModelResponse:
         settings = _load_settings(deps)
         required, optional = _model_sets(settings)
-        installed = deps.models.list_installed()
+        inventory, connection = deps.models.inventory()
+        installed = tuple(model.name for model in inventory)
         return _model_response(
             required,
             optional,
             installed,
-            models=deps.models.list_installed_details(),
-            connection=deps.models.probe(),
+            models=inventory,
+            connection=connection,
         )
 
     @router.post(

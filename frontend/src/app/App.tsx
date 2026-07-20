@@ -4,8 +4,10 @@ import type { ChatResponse, ChatSummary, CortexSettings, JobAccepted, MemoryResp
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { ChatPage } from "../components/ChatPage";
+import { LocalSetup } from "../components/LocalSetup";
 import { Onboarding } from "../components/Onboarding";
 import { SettingsPanel, type SettingsPanelProps } from "../components/SettingsPanel";
+import { localModelNames } from "../lib/localModels";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
@@ -19,7 +21,7 @@ function readBootstrapToken(): string {
 export function App({ api: providedApi }: Props) {
   const [api] = useState(() => providedApi ?? new CortexApi());
   const [sessionReady, setSessionReady] = useState(api.hasSession);
-  const [bootstrapToken] = useState(readBootstrapToken);
+  const [bootstrapToken, setBootstrapToken] = useState(readBootstrapToken);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const handleSessionExpired = useCallback(() => setSessionReady(false), []);
@@ -36,6 +38,10 @@ export function App({ api: providedApi }: Props) {
           try {
             await api.exchangeBootstrapToken(token);
             window.history.replaceState({}, "", window.location.pathname);
+            // Bootstrap credentials are one-time handoff tokens. Keep the
+            // session token in the API client, but never retain a token that
+            // would fail if a later 401 returns us to the onboarding screen.
+            setBootstrapToken("");
             setSessionReady(true);
           } catch (error) {
             setOnboardingError(error instanceof ApiError ? error.detail : "Could not connect to Cortex.");
@@ -165,13 +171,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
-  const runModelJob = async (accepted: JobAccepted, model = "required models") => {
+  const runModelJob = async (accepted: JobAccepted, model = "local model inventory") => {
     setModelBusy(true);
-    setModelProgress({ model, status: "Starting…", percent: null });
+    setModelProgress({ model, status: "Starting...", percent: null });
     try {
       await api.streamJob(accepted.job_id, (event) => updateModelProgress(event, setModelProgress));
-      setModels(await api.models());
-      notify("Model operation completed.", "success");
+      const refreshedModels = await api.models();
+      setModels(refreshedModels);
+      if (!refreshedModels.connection?.success) {
+        notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
+        return;
+      }
+      notify(model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
     } catch (error) { notify(apiMessage(error, "Model operation failed."), "error"); }
     finally { setModelBusy(false); }
   };
@@ -186,9 +197,45 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
   };
 
-  if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace…</main>;
+  const chooseLocalModel = async (model: string): Promise<boolean> => {
+    if (!settings) return false;
+    setSaving(true);
+    try {
+      const response = await api.updateSettings({
+        settings: {
+          ...settings,
+          models: { ...settings.models, chat: model, title: null },
+          suggestions: { ...settings.suggestions, model: null },
+        },
+      });
+      setSettings(response.settings);
+      setTheme(response.settings.appearance?.theme ?? "dark");
+      notify(`${model} is ready for local chat.`, "success");
+      return true;
+    } catch (error) {
+      notify(apiMessage(error, "Could not save the local model selection."), "error");
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace...</main>;
   if (loadError || !system || !settings || !models) {
     return <main className="fatal-state"><h1>Workspace unavailable</h1><p>{loadError ?? "Cortex returned an incomplete workspace."}</p><button className="button button-primary" onClick={() => void loadWorkspace()}>Retry</button></main>;
+  }
+
+  const localModels = localModelNames(models);
+  const hasLocalInventory = Array.isArray(models.installed_models) || Array.isArray(models.models);
+  const selectedModel = settings.models?.chat?.trim() || null;
+  const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
+  const runtimeConnected = models.connection?.success ?? true;
+  const needsLocalSetup = runtimeConnected
+    ? !selectedModelAvailable
+    : !selectedModel;
+
+  if (needsLocalSetup) {
+    return <LocalSetup models={models} settings={settings} busy={modelBusy || saving} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onRescan={checkModels} onSelectModel={chooseLocalModel} />;
   }
 
   return (
@@ -196,8 +243,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
           <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
-          <Route path="/chat/new" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
-          <Route path="/chat/:threadId" element={<ChatRoute api={api} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="/chat/new" element={<ChatRoute api={api} activeModel={selectedModel} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
+          <Route path="/chat/:threadId" element={<ChatRoute api={api} activeModel={selectedModel} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
           <Route path="*" element={<Navigate to="/chat/new" replace />} />
         </Routes>
       </AppShell>
@@ -211,16 +258,16 @@ function updateModelProgress(
 ): void {
   if (event.kind !== "progress") return;
   const data = event.data ?? {};
-  const model = typeof data.model === "string" ? data.model : "required models";
+  const model = typeof data.model === "string" ? data.model : "local model inventory";
   const status = typeof data.message === "string" ? data.message : event.phase ?? "Working";
   const percent = typeof data.percent === "number" ? data.percent : null;
   setProgress({ model, status, percent });
 }
 
-function ChatRoute({ api, onChatChanged, onForked }: { api: CortexApi; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
+function ChatRoute({ api, activeModel, runtimeReady, runtimeMessage, onChatChanged, onForked }: { api: CortexApi; activeModel: string | null; runtimeReady: boolean; runtimeMessage: string | null; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
   const { threadId } = useParams();
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId ?? null} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
+  return <ChatPage api={api} threadId={threadId ?? null} activeModel={activeModel} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
 }
 
 function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {

@@ -20,7 +20,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
     await route.fulfill({ json: { id: threadId, title: "hello", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "m-1", role: "user", content: "hello" }, { id: "m-2", role: "assistant", content: "Echo: hello" }] } });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true, model: null } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });
@@ -41,8 +41,6 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   });
 
   await page.goto("/?bootstrap=launcher-token");
-  await page.getByLabel("Launcher token").fill("launcher-token");
-  await page.getByRole("button", { name: "Open workspace" }).click();
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByLabel("Message Cortex").fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
@@ -80,7 +78,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ status: 201, json: { id: "fork-e2e", title: "Fork of fail", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "fm-1", role: "user", content: "fail" }, { id: "fm-2", role: "assistant", content: "Echo: fail" }] } });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true, model: null } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });
@@ -104,8 +102,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
   });
 
   await page.goto("/?bootstrap=launcher-token");
-  await page.getByLabel("Launcher token").fill("launcher-token");
-  await page.getByRole("button", { name: "Open workspace" }).click();
+  await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByLabel("Message Cortex").fill("fail");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("alert")).toContainText("Generation failed");
@@ -157,8 +154,8 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   });
 
   await page.goto("/?bootstrap=launcher-token");
-  await page.getByLabel("Launcher token").fill("launcher-token");
-  await page.getByRole("button", { name: "Open workspace" }).click();
+  await page.getByRole("radio", { name: /local-chat:7b/i }).click();
+  await page.getByRole("button", { name: /Continue with local-chat:7b/ }).click();
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();

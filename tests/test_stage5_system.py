@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
@@ -85,6 +87,54 @@ def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_pa
     assert repeated.migration.status == "already_migrated"
     assert legacy.read_bytes() == before
     with repository.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM settings_migration_ledger"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_settings_migration_is_safe_for_parallel_workspace_reads(tmp_path: Path):
+    legacy = _copy_qsettings_fixture(tmp_path)
+    repository = SQLiteSettingsRepository(
+        tmp_path / "cortex.sqlite",
+        legacy=LegacySettingsReader(legacy),
+    )
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(lambda _: repository.load(), range(5)))
+
+    assert {result.settings.models.chat for result in results} == {"gemma3:4b"}
+    assert sum(result.migration is not None for result in results) == 5
+    with repository.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM settings_migration_ledger"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_settings_migration_is_safe_across_repository_instances(tmp_path: Path):
+    legacy = _copy_qsettings_fixture(tmp_path)
+    migration_barrier = Barrier(2)
+
+    class BarrieredLegacyReader:
+        def __init__(self, path: Path) -> None:
+            self.reader = LegacySettingsReader(path)
+
+        def load(self, *, defaults=None):
+            result = self.reader.load(defaults=defaults)
+            migration_barrier.wait()
+            return result
+
+    db_path = tmp_path / "cortex.sqlite"
+    repositories = (
+        SQLiteSettingsRepository(db_path, legacy=BarrieredLegacyReader(legacy)),
+        SQLiteSettingsRepository(db_path, legacy=BarrieredLegacyReader(legacy)),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda repository: repository.load(), repositories))
+
+    assert {result.settings.models.chat for result in results} == {"gemma3:4b"}
+    assert {result.migration.status for result in results if result.migration} == {"migrated", "already_migrated"}
+    with repositories[0].connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM settings_migration_ledger"
         ).fetchone()[0] == 1

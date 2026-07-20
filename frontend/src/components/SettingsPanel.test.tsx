@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CortexSettings, ModelResponse } from "../../../contracts/cortex-api";
@@ -49,8 +49,12 @@ describe("SettingsPanel", () => {
     expect(screen.getByText(/Cortex scans the Ollama models installed on this PC/)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "Chat model tag" })).not.toBeInTheDocument();
     const picker = screen.getByRole("button", { name: "Chat model" });
-    await user.click(picker);
-    await user.click(screen.getByRole("option", { name: "local-chat:7b" }));
+    picker.focus();
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect(screen.getByRole("option", { name: "local-chat:13b" })).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect(screen.getByRole("option", { name: "local-chat:7b" })).toHaveFocus());
+    await user.keyboard("{Enter}");
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({

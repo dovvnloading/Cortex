@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Copy, GitBranch, RefreshCw, Send, Square } from "lucide-react";
+import { Copy, GitBranch, RefreshCw, Send, ShieldCheck, Sparkles, Square } from "lucide-react";
 import type { ChatMessage, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
 import { SafeMarkdown } from "./SafeMarkdown";
@@ -7,6 +7,9 @@ import { SafeMarkdown } from "./SafeMarkdown";
 type Props = {
   api: CortexApi;
   threadId: string | null;
+  activeModel: string | null;
+  runtimeReady: boolean;
+  runtimeMessage: string | null;
   onThreadCreated: (threadId: string) => void;
   onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
@@ -20,7 +23,7 @@ type GenerationState = {
 
 const ACTIVE_JOB_KEY = "cortex.active.generation";
 
-export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onForked }: Props) {
+export function ChatPage({ api, threadId, activeModel, runtimeReady, runtimeMessage, onThreadCreated, onChatChanged, onForked }: Props) {
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
   const [draft, setDraft] = useState("");
@@ -36,6 +39,7 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
   const abortRef = useRef<AbortController | null>(null);
   const consumingJob = useRef<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const loadChat = useCallback(async () => {
     setLoading(true);
@@ -82,6 +86,15 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
     if (node) node.scrollTop = node.scrollHeight;
   }, [chat?.messages?.length, partial, thoughts]);
 
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    composer.style.height = "0px";
+    const nextHeight = Math.min(Math.max(composer.scrollHeight, 52), 184);
+    composer.style.height = `${nextHeight}px`;
+    composer.style.overflowY = composer.scrollHeight > 184 ? "auto" : "hidden";
+  }, [draft]);
+
   const messages = useMemo(() => chat?.messages ?? [], [chat?.messages]);
   const finalAssistantId = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null,
@@ -95,7 +108,7 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
     abortRef.current = controller;
     let cursor = job.lastEventId;
     let terminal = false;
-    setStatus("Connecting to generation…");
+    setStatus("Connecting to generation...");
     setError(null);
     try {
       while (!terminal && !controller.signal.aborted) {
@@ -136,7 +149,7 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
             if (snapshot.status !== "succeeded") setError(snapshot.error ?? "Generation did not complete.");
             await reconcileChat(job.threadId);
           } else {
-            setStatus("Connection interrupted. Reconnecting…");
+            setStatus("Connection interrupted. Reconnecting...");
             await delay(250);
           }
           if (streamError instanceof ApiError && streamError.status === 401) return;
@@ -169,6 +182,10 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
   const startGeneration = async (prompt: string, regenerateMessageId?: string) => {
     const input = prompt.trim();
     if (!input || activeJob) return;
+    if (!runtimeReady) {
+      setError(runtimeMessage ?? "Ollama is unavailable. Start it, then rescan Models in Settings.");
+      return;
+    }
     setLastPrompt(input);
     setError(null);
     setPartial("");
@@ -217,11 +234,16 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
     }
   };
 
+  const choosePrompt = (prompt: string) => {
+    setDraft(prompt);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
   const cancel = async () => {
     if (!activeJob) return;
     try {
       await api.cancelGeneration(activeJob.jobId);
-      setStatus("Cancelling…");
+      setStatus("Cancelling...");
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.detail : "Could not cancel generation.");
     }
@@ -240,29 +262,55 @@ export function ChatPage({ api, threadId, onThreadCreated, onChatChanged, onFork
     }
   };
 
-  if (loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation…</div>;
+  const composerDisabled = Boolean(activeJob) || !runtimeReady;
+
+  if (loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
   if (error && !chat) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
 
   return (
     <section className="chat-page" aria-labelledby="chat-title">
       <h2 id="chat-title" className="sr-only">{chat?.title ?? "New Chat"}</h2>
       <div className="transcript" ref={transcriptRef} aria-live="polite">
-        {!messages.length && !partial && <div className="chat-empty-state"><h3>How can I help?</h3><p>Ask a question to begin a new conversation.</p></div>}
+        {!messages.length && !partial && <EmptyChatState activeModel={activeModel} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} onChoosePrompt={choosePrompt} />}
         {messages.map((message, index) => <MessageCard key={message.id ?? `${message.role}-${index}`} message={message} isFinalAssistant={message.id === finalAssistantId} busy={Boolean(activeJob)} onRegenerate={() => void startGeneration(lastPrompt || messages[index - 1]?.content || "", message.id ?? undefined)} onFork={() => void fork(message)} forking={forkingMessage === message.id} />)}
-        {activeJob && (partial || thoughts || status) && <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-bubble"><div className="loading-label">{status}</div>{thoughts && <details className="reasoning" open><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></article>}
+        {activeJob && (partial || thoughts || status) && <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-bubble"><div className="loading-label">{status}</div>{thoughts && <details className="reasoning"><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></article>}
       </div>
-      {suggestions.length > 0 && !activeJob && <div className="suggestions" aria-label="Follow-up suggestions">{suggestions.map((suggestion) => <button className="suggestion-chip" key={suggestion} onClick={() => setDraft(suggestion)}>{suggestion}</button>)}</div>}
+      {suggestions.length > 0 && !activeJob && <div className="suggestions" aria-label="Follow-up suggestions">{suggestions.map((suggestion) => <button className="suggestion-chip" key={suggestion} onClick={() => choosePrompt(suggestion)}>{suggestion}</button>)}</div>}
       {error && <div className="chat-error" role="alert"><span>{error}</span><button className="button button-quiet" onClick={() => void startGeneration(lastPrompt)}>Retry</button></div>}
       <div className="input-container">
         <form className="composer" onSubmit={send}>
           <label className="sr-only" htmlFor="chat-composer">Message Cortex</label>
-          <textarea id="chat-composer" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} disabled={Boolean(activeJob)} placeholder="Ask a question..." rows={1} />
+          <textarea ref={composerRef} id="chat-composer" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} disabled={composerDisabled} placeholder={runtimeReady ? "Ask a question..." : "Start Ollama to continue"} rows={1} />
           {activeJob
             ? <button className="button button-danger composer-submit" type="button" onClick={() => void cancel()}><Square size={15} aria-hidden="true" /> Cancel</button>
-            : <button className="button button-primary composer-submit" type="submit" disabled={!draft.trim()}><Send size={15} aria-hidden="true" /> Send</button>}
+            : <button className="button button-primary composer-submit" type="submit" disabled={!draft.trim() || !runtimeReady}><Send size={15} aria-hidden="true" /> Send</button>}
         </form>
+        <div className="composer-meta">
+          <span className={`composer-runtime ${runtimeReady ? "composer-runtime-ready" : "composer-runtime-error"}`}><span className="composer-runtime-dot" aria-hidden="true" />{runtimeReady ? <><strong>Local model</strong> {activeModel ?? "Ready"}</> : "Ollama unavailable"}</span>
+          <span className="composer-shortcut"><kbd>Enter</kbd> to send <span aria-hidden="true">&middot;</span> <kbd>Shift + Enter</kbd> for a new line</span>
+        </div>
       </div>
     </section>
+  );
+}
+
+function EmptyChatState({ activeModel, runtimeReady, runtimeMessage, onChoosePrompt }: { activeModel: string | null; runtimeReady: boolean; runtimeMessage: string | null; onChoosePrompt: (prompt: string) => void }) {
+  const prompts = [
+    "Help me plan a focused day.",
+    "Explain a complex idea clearly.",
+    "Turn my rough notes into a polished draft.",
+  ];
+  return (
+    <div className="chat-empty-state chat-launchpad">
+      <div className="chat-launchpad-mark" aria-hidden="true"><img src="/cortex.svg" alt="" /></div>
+      <p className="eyebrow">LOCAL, PRIVATE, YOURS</p>
+      <h3>{runtimeReady ? "What will you make today?" : "Your local runtime is offline"}</h3>
+      <p>{runtimeReady ? `Cortex is ready on this computer${activeModel ? ` with ${activeModel}` : ""}. Start with an idea, a question, or a rough draft.` : runtimeMessage ?? "Start Ollama, then rescan Models in Settings to continue."}</p>
+      {runtimeReady && <div className="launchpad-prompts" aria-label="Conversation starters">
+        {prompts.map((prompt) => <button className="launchpad-prompt" type="button" key={prompt} onClick={() => onChoosePrompt(prompt)}><Sparkles aria-hidden="true" size={15} /><span>{prompt}</span></button>)}
+      </div>}
+      <div className="launchpad-privacy"><ShieldCheck aria-hidden="true" size={15} /> Your conversations stay in your local Cortex workspace.</div>
+    </div>
   );
 }
 
