@@ -134,7 +134,6 @@ class GenerationService:
             num_ctx=num_ctx,
         )
 
-        self._publish(sink, snapshot, "final_response", "START_FINAL_ANIMATION")
         self._check_cancelled(cancellation_event)
         response, thoughts, memory_command = engine.generate(
             query=snapshot.user_input,

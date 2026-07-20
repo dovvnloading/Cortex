@@ -77,6 +77,10 @@ def test_new_generation_persists_both_turns_and_replays_parity_events():
             "generation.completed",
         ]
         assert any(event["event"] == "generation.content_delta" for event in events)
+        assert all(
+            event.get("data", {}).get("message") != "START_FINAL_ANIMATION"
+            for event in events
+        )
         assert events[-1]["data"]["assistant_message_id"]
 
         chat = client.get(f"/api/v1/chats/{payload['thread_id']}", headers=headers).json()
