@@ -14,7 +14,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
     await route.fulfill({ json: { status: "accepted" } });
   });
   await page.route("**/api/v1/system", async (route) => {
-    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, qt_default: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
+    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
   });
   await page.route("**/api/v1/chats", async (route) => {
     if (route.request().method() === "GET") await route.fulfill({ json: chatLoaded ? [{ id: threadId, title: "hello", timestamp: "2026-01-01T00:00:00Z" }] : [] });
@@ -67,7 +67,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ json: { session_token: "session-e2e", expires_at: "2099-01-01T00:00:00Z" } });
   });
   await page.route("**/api/v1/system", async (route) => {
-    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, qt_default: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
+    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
   });
   await page.route("**/api/v1/chats", async (route) => {
     if (route.request().method() === "GET") await route.fulfill({ json: [] });
@@ -133,7 +133,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
     await route.fulfill({ json: { session_token: "session-system", expires_at: "2099-01-01T00:00:00Z" } });
   });
   await page.route("**/api/v1/system", async (route) => {
-    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, qt_default: true, session_required: true, started_at: "2026-01-01T00:00:00Z", ollama_setup_url: "https://ollama.com/download" } });
+    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z", ollama_setup_url: "https://ollama.com/download" } });
   });
   await page.route("**/api/v1/chats", async (route) => {
     await route.fulfill({ json: [] });

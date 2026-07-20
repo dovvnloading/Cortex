@@ -1,3 +1,19 @@
+### **Cortex Web Modernization: Qt Removal and Release Candidate**
+
+**Date:** 2026-07-20
+**Version:** Web modernization — Stage 7
+
+* The React/Vite web application and Python backend are now the only supported
+  Cortex runtime; the obsolete desktop source, Qt dependencies, setup utility,
+  and Visual Studio project artifacts were removed.
+* Legacy SQLite, JSON-chat, permanent-memory, and Windows registry settings
+  remain readable. Legacy settings are imported through a Qt-free reader while
+  the original source stays untouched for documented rollback.
+* Windows packaging includes prompt assets and the production frontend without
+  requiring Node.js or a global Python installation at runtime.
+
+---
+
 ### **Cortex Web Modernization: Launcher Cutover**
 
 **Date:** 2026-07-20
@@ -10,8 +26,8 @@
 * Source builds use lock/source fingerprints and atomic bundle replacement;
   one-folder Windows packaging includes the frontend and does not require
   Node.js at runtime.
-* The legacy PySide6 runtime remains available through `python main.py
-  --legacy-qt` while the migration continues.
+* The temporary compatibility path used during migration was retired in the
+  following release-candidate stage.
 
 ---
 

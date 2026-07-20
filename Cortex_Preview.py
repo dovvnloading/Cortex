@@ -1,9 +1,4 @@
-"""Opt-in local FastAPI preview launcher for the staged Cortex web migration.
-
-The legacy Qt desktop launcher remains the default. This module intentionally
-binds only to loopback and does not launch a browser or modify user data beyond
-the existing database/settings/memory adapters when the preview is selected.
-"""
+"""Build the local Cortex FastAPI application and its durable dependencies."""
 
 from __future__ import annotations
 
@@ -15,24 +10,24 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
-sys.path.insert(0, str(ROOT / "Chat_LLM" / "Chat_LLM"))
 
 import ollama  # noqa: E402
-from PySide6.QtCore import QSettings  # noqa: E402
 import uvicorn  # noqa: E402
 
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
+from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
+from cortex_backend.repositories.legacy_storage import (  # noqa: E402
+    DatabaseManager,
+    PermanentMemoryManager,
+)
 from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository  # noqa: E402
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository  # noqa: E402
 from cortex_backend.services.generation import GenerationService  # noqa: E402
+from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
-
-from memory import DatabaseManager, PermanentMemoryManager  # noqa: E402
-from qt_settings_adapter import QSettingsAdapter  # noqa: E402
-from synthesis_agent import SynthesisAgent  # noqa: E402
 
 
 def build_preview_app(
@@ -40,17 +35,16 @@ def build_preview_app(
     data_dir: Path | None = None,
     frontend_dist: Path | None = None,
     serve_frontend: bool = True,
-    qt_default: bool = True,
     handoff_secret: str | None = None,
 ):
-    """Build the explicit legacy-backed preview without starting a server."""
+    """Build the local web application without starting a server."""
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
     database = DatabaseManager(app_paths=paths)
+    database.migrate_from_json_if_needed()
     permanent_memory = PermanentMemoryManager(app_paths=paths)
-    legacy_settings = QSettingsAdapter(QSettings("ChatLLM", "ChatLLM-Assistant"))
     settings_repository = SQLiteSettingsRepository(
         paths.database,
-        legacy=legacy_settings,
+        legacy=LegacySettingsReader(),
     )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
     client = ollama.Client(host=ollama_host)
@@ -105,7 +99,6 @@ def build_preview_app(
         dependencies,
         session_manager=session_manager,
         preview=True,
-        qt_default=qt_default,
         serve_frontend=serve_frontend,
         frontend_dist=frontend_dist,
         ollama_host=ollama_host,

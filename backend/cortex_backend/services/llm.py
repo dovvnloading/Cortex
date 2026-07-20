@@ -9,10 +9,23 @@ parse validated memory commands from the output, and generate chat titles.
 
 import logging
 import json
+from pathlib import Path
 import re
+import sys
 import time
-from utils import get_asset_path
-from generation_types import MemoryCommand, ModelOperationError, TranslationResult
+
+from cortex_backend.core.generation import (
+    MemoryCommand,
+    ModelOperationError,
+    TranslationResult,
+)
+
+
+def _get_asset_path(filename: str) -> Path:
+    """Resolve prompt assets in both source and PyInstaller runtimes."""
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "assets" / filename
+    return Path(__file__).resolve().parents[3] / "assets" / filename
 
 class PromptTemplate:
     """Manages the creation of detailed system prompts for the LLM."""
@@ -29,7 +42,7 @@ class PromptTemplate:
             return PromptTemplate._system_prompt_cache
 
         try:
-            prompt_path = get_asset_path("system_prompt.txt")
+            prompt_path = _get_asset_path("system_prompt.txt")
             with open(prompt_path, 'r', encoding='utf-8') as f:
                 prompt = f.read()
             PromptTemplate._system_prompt_cache = prompt
@@ -52,7 +65,7 @@ class PromptTemplate:
             return PromptTemplate._memory_prompt_cache
 
         try:
-            prompt_path = get_asset_path("memory_prompt.txt")
+            prompt_path = _get_asset_path("memory_prompt.txt")
             with open(prompt_path, 'r', encoding='utf-8') as f:
                 prompt = f.read()
             PromptTemplate._memory_prompt_cache = prompt

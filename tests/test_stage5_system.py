@@ -7,13 +7,17 @@ from pathlib import Path
 import shutil
 
 from fastapi.testclient import TestClient
-from PySide6.QtCore import QSettings
 
+from Cortex_Preview import build_preview_app
 from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.repositories.legacy_settings import LegacySettingsReader
+from cortex_backend.repositories.legacy_storage import (
+    DatabaseManager,
+    PermanentMemoryManager,
+)
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository
 from cortex_backend.services.models import ModelService
 from cortex_backend.testing.fake_ollama import FakeOllamaState
-from qt_settings_adapter import QSettingsAdapter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,17 +26,17 @@ CHAT_FIXTURE = ROOT / "tests" / "fixtures" / "legacy_chat" / "fixture-chat.json"
 MEMORY_FIXTURE = ROOT / "tests" / "fixtures" / "memory" / "memory_bank.json"
 
 
-def _copy_qsettings_fixture(tmp_path: Path) -> QSettings:
+def _copy_qsettings_fixture(tmp_path: Path) -> Path:
     path = tmp_path / "legacy.ini"
     shutil.copy2(QSETTINGS_FIXTURE, path)
-    return QSettings(str(path), QSettings.Format.IniFormat)
+    return path
 
 
 def test_qsettings_fixture_maps_every_legacy_key_without_mutating_source(tmp_path: Path):
     legacy = _copy_qsettings_fixture(tmp_path)
-    before = (tmp_path / "legacy.ini").read_bytes()
+    before = legacy.read_bytes()
 
-    result = QSettingsAdapter(legacy).load()
+    result = LegacySettingsReader(legacy).load()
 
     assert result.invalid_keys == ()
     assert set(result.present_keys) == {
@@ -52,20 +56,23 @@ def test_qsettings_fixture_maps_every_legacy_key_without_mutating_source(tmp_pat
     assert result.settings.models.chat == "gemma3:4b"
     assert result.settings.generation.num_ctx == 8192
     assert result.settings.translation.target_language == "French"
-    assert (tmp_path / "legacy.ini").read_bytes() == before
+    assert legacy.read_bytes() == before
 
 
 def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_path: Path):
     legacy = _copy_qsettings_fixture(tmp_path)
-    legacy.setValue("temperature", "not-a-number")
-    legacy.setValue("num_ctx", "1024")
-    legacy.remove("suggestions_model")
-    legacy.sync()
-    before = {key: legacy.value(key) for key in legacy.allKeys()}
+    legacy.write_text(
+        legacy.read_text(encoding="utf-8")
+        .replace("temperature=1.25", "temperature=not-a-number")
+        .replace("num_ctx=8192", "num_ctx=1024")
+        .replace("suggestions_model=qwen3:4b\n", ""),
+        encoding="utf-8",
+    )
+    before = legacy.read_bytes()
 
     repository = SQLiteSettingsRepository(
         tmp_path / "cortex.sqlite",
-        legacy=QSettingsAdapter(legacy),
+        legacy=LegacySettingsReader(legacy),
     )
     migrated = repository.load()
     repeated = repository.load()
@@ -76,7 +83,7 @@ def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_pa
     assert migrated.migration.status == "migrated"
     assert repeated.migration is not None
     assert repeated.migration.status == "already_migrated"
-    assert {key: legacy.value(key) for key in legacy.allKeys()} == before
+    assert legacy.read_bytes() == before
     with repository.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM settings_migration_ledger"
@@ -87,7 +94,7 @@ def test_settings_database_backup_restores_previous_valid_snapshot(tmp_path: Pat
     legacy = _copy_qsettings_fixture(tmp_path)
     repository = SQLiteSettingsRepository(
         tmp_path / "cortex.sqlite",
-        legacy=QSettingsAdapter(legacy),
+        legacy=LegacySettingsReader(legacy),
     )
     original = repository.load().settings
     updated = original.model_copy(
@@ -110,8 +117,6 @@ def test_existing_chat_and_memory_fixtures_remain_unchanged(tmp_path: Path):
     memory_path = tmp_path / "memory_bank.json"
     shutil.copy2(MEMORY_FIXTURE, memory_path)
 
-    from memory import DatabaseManager, PermanentMemoryManager
-
     database = DatabaseManager(
         db_path=str(tmp_path / "cortex.sqlite"),
         legacy_history_dir=str(legacy_dir),
@@ -123,6 +128,31 @@ def test_existing_chat_and_memory_fixtures_remain_unchanged(tmp_path: Path):
     assert database.load_chat("fixture-chat")["messages"][1]["content"] == "Fixture answer"
     assert memories.get_memos() == json.loads(memory_path.read_text(encoding="utf-8"))["memos"]
     assert (legacy_dir / CHAT_FIXTURE.name).exists() is False
+
+
+def test_packaged_runtime_builder_opens_existing_chat_fixture_without_qt(tmp_path: Path):
+    legacy_dir = tmp_path / "chat_history"
+    legacy_dir.mkdir()
+    shutil.copy2(CHAT_FIXTURE, legacy_dir / CHAT_FIXTURE.name)
+
+    app = build_preview_app(
+        data_dir=tmp_path,
+        serve_frontend=False,
+    )
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        token = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": app.state.session_manager.bootstrap_token},
+        ).json()["session_token"]
+        response = client.get(
+            "/api/v1/chats",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == "fixture-chat"
+    assert not (legacy_dir / CHAT_FIXTURE.name).exists()
+    assert list(tmp_path.glob("chat_history_migrated_*/*.json"))
 
 
 def test_model_inventory_pull_progress_and_failure_are_safe():

@@ -1,8 +1,4 @@
-"""Cortex's single Windows-first application entry point.
-
-The web application is the default runtime.  ``--legacy-qt`` remains an
-explicit compatibility escape hatch while the migration is completed.
-"""
+"""Cortex's single Windows-first web application entry point."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import socket
-import subprocess
 import signal
 import sys
 import time
@@ -23,7 +18,6 @@ import webbrowser
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
-sys.path.insert(0, str(ROOT / "Chat_LLM" / "Chat_LLM"))
 
 import uvicorn  # noqa: E402
 
@@ -84,11 +78,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="explicit local data directory (recommended for isolated runs)",
     )
-    parser.add_argument(
-        "--legacy-qt",
-        action="store_true",
-        help="run the temporary legacy PySide6 application",
-    )
     return parser
 
 
@@ -97,8 +86,6 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--port must be 0 or between 1024 and 65535")
     if args.dev and args.build_frontend:
         parser.error("--dev and --build-frontend cannot be combined")
-    if args.legacy_qt and (args.dev or args.build_frontend or args.skip_build_check):
-        parser.error("--legacy-qt cannot be combined with web launcher options")
 
 
 def _resolve_paths(data_dir: Path | None) -> AppPaths:
@@ -157,14 +144,6 @@ def _announce_and_open(port: int, token: str, *, no_browser: bool) -> None:
     else:
         print(f"Cortex is ready at http://127.0.0.1:{port}")
         webbrowser.open(url, new=1, autoraise=True)
-
-
-def _run_legacy_qt() -> int:
-    legacy_entry = ROOT / "Chat_LLM" / "Chat_LLM" / "Chat_LLM.py"
-    if not legacy_entry.is_file():
-        print(f"Legacy Qt entry point is missing: {legacy_entry}", file=sys.stderr)
-        return 2
-    return subprocess.run([sys.executable, str(legacy_entry)], check=False).returncode
 
 
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
@@ -257,7 +236,6 @@ def _run_web(args: argparse.Namespace) -> int:
             data_dir=paths.data_dir,
             frontend_dist=dist,
             serve_frontend=not args.dev,
-            qt_default=False,
             handoff_secret=handoff_secret,
         )
         server = _server_for_app(app, port=backend_port, log_level=args.log_level)
@@ -270,7 +248,7 @@ def _run_web(args: argparse.Namespace) -> int:
             if not wait_for_http(
                 f"http://127.0.0.1:{backend_port}/api/v1/health/ready",
                 timeout=30,
-                is_alive=lambda: backend.running,
+                is_alive=lambda: backend.accepting_startup,
             ):
                 if backend.error is not None:
                     raise RuntimeError("Cortex backend failed during startup.") from backend.error
@@ -331,8 +309,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_args(args, parser)
-    if args.legacy_qt:
-        return _run_legacy_qt()
     try:
         return _run_web(args)
     except AppPathError as exc:

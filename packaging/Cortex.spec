@@ -1,4 +1,4 @@
-# PyInstaller one-folder prototype for the Windows desktop target.
+# PyInstaller one-folder package for the Windows web runtime.
 
 from pathlib import Path
 
@@ -16,10 +16,12 @@ a = Analysis(
     pathex=[
         str(ROOT),
         str(ROOT / "backend"),
-        str(ROOT / "Chat_LLM" / "Chat_LLM"),
     ],
     binaries=[],
-    datas=[(str(FRONTEND_DIST), "frontend/dist")],
+    datas=[
+        (str(FRONTEND_DIST), "frontend/dist"),
+        (str(ROOT / "assets"), "assets"),
+    ],
     hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto"],
     hookspath=[],
     hooksconfig={},

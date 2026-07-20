@@ -1,20 +1,11 @@
 """Headless tests for model-command validation and rendered-content safety."""
 
-import sys
 import unittest
-import logging
-from pathlib import Path
 
-
-PROJECT_DIR = Path(__file__).parents[1] / "Chat_LLM" / "Chat_LLM"
-if str(PROJECT_DIR) not in sys.path:
-    sys.path.insert(0, str(PROJECT_DIR))
-
-from generation_types import MemoryCommand, TranslationResult  # noqa: E402
-from memory_commands import apply_memory_command  # noqa: E402
-from memory import PermanentMemoryManager  # noqa: E402
-from safe_rendering import is_safe_external_url, markdown_to_safe_html  # noqa: E402
-from synthesis_agent import SynthesisAgent  # noqa: E402
+from cortex_backend.core.generation import MemoryCommand, TranslationResult
+from cortex_backend.repositories.legacy_storage import PermanentMemoryManager
+from cortex_backend.services.llm import SynthesisAgent
+from cortex_backend.services.memory_commands import apply_memory_command
 
 
 class _FakeMemoryManager:
@@ -93,21 +84,6 @@ class BoundarySafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PermanentMemoryManager.normalize_memos([str(index) for index in range(101)])
 
-    def test_rendering_removes_active_html_and_rejects_unsafe_links(self):
-        rendered = markdown_to_safe_html(
-            '<script>alert(1)</script> [safe](https://example.com) '
-            '[bad](javascript:alert(1)) <img src="file:///secret">'
-        )
-
-        self.assertNotIn("<script", rendered.lower())
-        self.assertNotIn("javascript:", rendered.lower())
-        self.assertNotIn("<img", rendered.lower())
-        self.assertIn('href="https://example.com"', rendered)
-        self.assertTrue(is_safe_external_url("https://example.com/path"))
-        self.assertFalse(is_safe_external_url("javascript:alert(1)"))
-        self.assertFalse(is_safe_external_url("file:///secret"))
-        self.assertFalse(is_safe_external_url("data:text/html,hello"))
-
     def test_translation_failure_is_explicit(self):
         agent = SynthesisAgent("chat", "title", "translate", _FailingClient())
 
@@ -119,6 +95,8 @@ class BoundarySafetyTests(unittest.TestCase):
         self.assertEqual(result.error, "Translation failed. Please try again.")
 
     def test_generation_logging_does_not_emit_raw_response(self):
+        import logging
+
         agent = SynthesisAgent("chat", "title", "translate", _ResponseClient())
         records = []
         handler = logging.Handler()

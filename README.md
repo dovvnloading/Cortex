@@ -1,266 +1,137 @@
-More info -> https://dovvnloading.github.io/Cortex/
+More info: <https://dovvnloading.github.io/Cortex/>
 
 # Cortex
 
-<img width="1920" height="1032" alt="501164220-d5817af5-db5d-4f4b-96c0-7a455e234b49" src="https://github.com/user-attachments/assets/8b80241a-3842-42c4-8c38-ea0e197ab303" />
+Cortex is a local-first AI assistant for Ollama. The application is a React,
+Vite, and TypeScript web UI hosted by a Python FastAPI backend. `main.py`
+supervises the complete local runtime: it prepares the frontend, starts the
+backend, opens an authenticated loopback browser session, and shuts down owned
+processes cleanly.
 
+## Capabilities
 
-Cortex is a local-first desktop AI assistant for running language models through Ollama. The default runtime is a React/Vite web interface hosted by a Python backend; the native PySide6 interface remains available as an explicit compatibility fallback.
+- Local chat with configurable Ollama models, streaming responses, reasoning,
+  sources, retry, fork, and regeneration.
+- Persistent SQLite conversations and atomic JSON permanent memory.
+- Validated settings, model inventory and pull progress, translation, and
+  follow-up suggestions.
+- Loopback-only API authentication with one-time browser handoff tokens.
+- Windows one-folder packaging with the frontend bundled and no Node.js or
+  system Python required at runtime.
 
-The project is focused on local-first operation: conversation processing, memory, translation, and chat state all run on your machine.
-
-## Table of Contents
-- [Overview](#overview)
-- [Core Capabilities](#core-capabilities)
-- [System Architecture](#system-architecture)
-- [Repository Layout](#repository-layout)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Preview Web UI](#preview-web-ui)
-- [Configuration and Runtime Behavior](#configuration-and-runtime-behavior)
-- [Data and Persistence](#data-and-persistence)
-- [Troubleshooting](#troubleshooting)
-- [Security and Privacy Notes](#security-and-privacy-notes)
-- [Development](#development)
-- [License](#license)
-
-## Overview
-
-Cortex combines:
-- A React/Vite web application launched and supervised by Python.
-- A temporary Qt-based desktop fallback (`PySide6`).
-- Ollama-backed model orchestration for chat, title generation, and translation.
-- Persistent conversation and memo memory systems backed by SQLite and atomic JSON writes.
-- Multi-threaded workers to keep the UI responsive during long-running model operations.
-
-## Core Capabilities
-
-- **Local chat with Ollama models**: configurable generation model, host, and generation parameters.
-- **Threaded conversation management**: new chat creation, title generation, and chat history handling.
-- **Translation pipeline**: optional post-generation translation using a dedicated model.
-- **Suggestion generation**: optional context-aware follow-up suggestions.
-- **Permanent memo memory**: persistent user/project memory used to improve response relevance.
-- **Theme and UX controls**: light/dark theme support and UI state persisted via `QSettings`.
-
-## System Architecture
-
-Cortex is organized around three layers:
-
-1. **Presentation Layer**
-   - React/TypeScript components provide chat, settings, memory, model, and diagnostics workflows.
-   - The Python launcher owns the backend, browser handoff, frontend build, and graceful shutdown lifecycle.
-   - The legacy PySide6 widgets remain available behind `--legacy-qt` during migration.
-
-2. **Orchestration Layer**
-   - The `Orchestrator` in `Chat_LLM.py` coordinates model calls, thread lifecycle, and feature toggles.
-   - Worker objects and `QThread` usage isolate blocking operations (query execution, title generation, update checks, model connection checks).
-
-3. **Data + Model Layer**
-   - Ollama client interaction for inference.
-   - Persistent storage for chat records and permanent memory data.
-   - Prompt-building and synthesis logic in the synthesis agent.
-
-## Repository Layout
+## Architecture
 
 ```text
-.
-├── main.py                       # Default web launcher and process supervisor
-├── backend/                      # FastAPI API and domain services
-├── frontend/                     # React/Vite TypeScript application
-├── packaging/                    # Windows one-folder package prototype
-├── Chat_LLM/
-│   ├── assets/                  # Icons and prompt assets
-│   └── Chat_LLM/
-│       ├── Chat_LLM.py          # Main application entry point + orchestrator
-│       ├── main_window.py       # Primary UI window
-│       ├── synthesis_agent.py   # Prompting + generation/translation/suggestions
-│       ├── memory.py            # Memory/database managers
-│       ├── ui_*.py              # UI components/styles/dialogs
-│       └── ...
-├── Cortex_Startup.py            # Startup utility for Ollama setup/model pulling
-├── requirements.txt             # Root Python dependencies
-└── README.md
+main.py
+  ├─ supervised FastAPI backend (Python)
+  │    ├─ versioned API, jobs, SSE, authentication
+  │    ├─ SQLite/settings/memory repositories
+  │    └─ Ollama/model services
+  └─ supervised Vite server (development only)
+
+frontend/                 React/Vite/TypeScript UI
+backend/cortex_backend/  framework-independent domain and runtime code
+assets/                  prompt assets used by the model boundary
+packaging/               Windows PyInstaller build
+tests/                   headless Python and browser-facing tests
 ```
 
-The runnable desktop source is under `Chat_LLM/Chat_LLM/`, tests are under `tests/`, and `pyproject.toml` contains the test configuration.
+The supported runtime is Windows. User data remains in the existing location:
+`%APPDATA%\ChatLLM\ChatLLM-Assistant`. Legacy SQLite, JSON chat, permanent
+memory, and QSettings data are read without changing their original formats.
+Legacy settings are imported additively into SQLite; the original registry
+source is left untouched so a verified backup can be used for rollback.
+
+Semantic vector memory is intentionally dormant until retrieval is integrated
+end to end; Cortex does not initialize or pull an embedding model at startup.
 
 ## Requirements
 
-### Runtime
-- Python 3.10+
-- Ollama installed and running (default host: `http://127.0.0.1:11434`)
+Runtime:
 
-### Python Dependencies
-Install from the repository root:
+- Windows 10 or later
+- Python 3.10+ for source execution
+- Ollama installed and running at `http://127.0.0.1:11434`
+- At least one locally installed generation model
 
-```bash
-pip install -r requirements.txt
-```
+Development additionally requires Node.js 22+ and npm. A small local model such
+as `nemotron-3-nano:4b` is a good smoke-test default.
 
-Root dependencies currently include:
-- `PySide6`
-- `markdown`
-- `ollama`
-- `pytest`
+## Quick start
 
-## Quick Start
+Install Ollama from <https://ollama.com/download>, then install a model:
 
-### 1) Install Ollama
-Install Ollama for your platform from the official site:
-- <https://ollama.com/download>
-
-### 2) Pull at least one chat model
-Example:
-
-```bash
+```powershell
 ollama pull nemotron-3-nano:4b
 ```
 
-Optional models used by advanced features:
+Install Python dependencies and launch:
 
-```bash
-# Chat title generation
-ollama pull granite4:tiny-h
-
-# Translation
-ollama pull translategemma:4b
-
-```
-
-### 3) Launch Cortex
-From repository root:
-
-```bash
+```powershell
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-The launcher builds the React bundle when its source or lockfile changes, starts
-the loopback FastAPI backend, waits for readiness, opens an authenticated local
-browser session, and shuts down its owned processes when the UI is quit. A
-packaged Windows build includes the bundle and does not require Node.js.
+The first source launch builds the frontend when needed. For frontend work,
+use the supervised development runtime:
 
-For frontend development, run both supervised processes with:
-
-```bash
+```powershell
 python main.py --dev
 ```
 
-Useful launcher options include `--no-browser`, `--port 0`, `--data-dir PATH`,
-and `--build-frontend`. The temporary native UI remains available with:
+Useful options are `--no-browser`, `--port 0`, `--data-dir PATH`,
+`--skip-build-check`, and `--build-frontend`.
 
-```bash
-python main.py --legacy-qt
-```
+If Ollama is unavailable, Cortex still starts and presents the local setup and
+connection state; generation remains unavailable until the service returns.
 
-### 4) Optional: run the setup utility
-The startup utility can help install/pull models with a GUI workflow:
+## Packaging
 
-```bash
-python Cortex_Startup.py
-```
-
-## Web UI and packaging
-
-The web UI is the default runtime. To prepare the production bundle without
-starting Cortex:
-
-```bash
-python main.py --build-frontend
-```
-
-The one-folder Windows package prototype can be built with:
+Build the production frontend and Windows one-folder executable with:
 
 ```powershell
+python main.py --build-frontend
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
-The web application exposes validated settings, permanent memory management,
-Ollama connectivity, installed model tags, exact model pull progress,
-diagnostics, and the streamed chat workflow. Legacy QSettings are imported into
-additive SQLite settings tables; the legacy QSettings source is not rewritten.
-
-## Configuration and Runtime Behavior
-
-Default runtime configuration is defined in `Chat_LLM/Chat_LLM/Chat_LLM.py` (`CONFIG` dictionary), including:
-- Ollama host URL
-- default generation/title/translation models
-- generation parameters (`temperature`, `num_ctx`, `seed`)
-- available chat model list
-- update check URL
-
-User-specific settings (theme, feature toggles, selected models, and related UI preferences) are persisted with `QSettings`.
-
-## Data and Persistence
-
-Cortex uses local persistence for conversation state and memory systems. In practice, this includes:
-- chat/thread records and related metadata
-- permanent memo-style memory for personalization
-- local user settings via `QSettings`
-
-Semantic vector memory is intentionally disabled until its retrieval path is integrated end to end; Cortex does not initialize or pull an embedding model at startup.
-
-## Troubleshooting
-
-### Ollama connection errors
-- Verify Ollama is installed and running.
-- Confirm the host in configuration/settings matches your local Ollama endpoint.
-
-### No response or slow response
-- Ensure your selected model exists locally (`ollama list`).
-- Reduce model size if hardware resources are limited.
-- Check RAM/CPU/GPU load while generating.
-
-### Missing model errors for optional features
-- Pull the required specialized model (translation/title) or disable that feature in settings.
-
-### UI startup issues
-- Run from a terminal to inspect logs.
-- Confirm Python dependencies are installed in the active environment.
-
-## Security and Privacy Notes
-
-Cortex is designed for local usage, but your privacy posture still depends on local environment configuration:
-- Keep Ollama bound to local interfaces unless remote access is intentionally configured.
-- Review any custom model endpoints before use.
-- Protect your local machine and account, since all data is stored locally.
+The artifact is produced at `dist/Cortex/Cortex.exe`. The package contains the
+frontend and prompt assets and does not need Node.js or a global Python
+installation when launched.
 
 ## Development
 
-From the repository root, create a virtual environment and install the bounded development dependencies:
-
-```bash
+```powershell
 python -m venv .venv
-
-# Windows PowerShell
 .venv\Scripts\Activate.ps1
-
 python -m pip install -r requirements.txt
-```
-
-Run the headless test suite and compile check before opening a pull request:
-
-```bash
 python -m pytest
-python -m compileall -q main.py backend Chat_LLM/Chat_LLM
+python -m compileall -q main.py backend
 
-cd frontend
+Push-Location frontend
 npm ci
 npm run typecheck
 npm run lint
 npm test -- --run
 npm run build
+Pop-Location
 ```
 
-The default launcher is:
+Contract artifacts are generated from the FastAPI application:
 
-```bash
-python main.py
+```powershell
+python tools/generate_contracts.py
 ```
 
-Use `python main.py --legacy-qt` only when testing the temporary native fallback.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
+[Change_Log.md](Change_Log.md) for project and release guidance.
 
-Contribution process: see `CONTRIBUTING.md`. Security disclosures: see `SECURITY.md`. Project history: see `Change_Log.md`.
+## Privacy and security
+
+Cortex binds its API to loopback and uses an authenticated, expiring browser
+handoff. Prompts, responses, memories, and model output are not written to
+diagnostic logs. Ollama remains local unless the user intentionally configures
+a different endpoint.
 
 ## License
 
-This project is licensed under the terms in `LICENSE`.
+This project is licensed under the terms in [LICENSE](LICENSE).

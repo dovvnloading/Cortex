@@ -5,7 +5,7 @@ describe("CortexApi", () => {
   it("exchanges a bootstrap token and sends the session bearer on protected calls", async () => {
     const fetcher = vi.fn<typeof fetch>();
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ status: "ok", preview: true, qt_default: true, started_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ status: "ok", preview: true, started_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
     const api = new CortexApi("/api/v1", fetcher);
 
     await api.exchangeBootstrapToken("bootstrap");

@@ -246,7 +246,6 @@ export interface SystemResponse {
   api_version?: string;
   status?: string;
   preview?: boolean;
-  qt_default?: boolean;
   session_required?: boolean;
   started_at: string;
   ollama_host?: string;

@@ -40,23 +40,38 @@ class ServerSupervisor:
     server: Any
     thread: threading.Thread | None = field(default=None, init=False)
     error: BaseException | None = field(default=None, init=False)
+    started: threading.Event = field(default_factory=threading.Event, init=False)
+    exited_unexpectedly: threading.Event = field(
+        default_factory=threading.Event, init=False
+    )
 
     def start(self) -> None:
         if self.thread is not None:
             raise RuntimeError("server supervisor already started")
 
         def run() -> None:
+            self.started.set()
             try:
                 self.server.run()
             except BaseException as exc:  # surfaced to the launcher loop
                 self.error = exc
+            finally:
+                if not self.server.should_exit:
+                    self.exited_unexpectedly.set()
 
         self.thread = threading.Thread(target=run, name="cortex-uvicorn", daemon=True)
         self.thread.start()
+        if not self.started.wait(timeout=5.0):
+            raise RuntimeError("Cortex backend thread did not start within 5 seconds.")
 
     @property
     def running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
+
+    @property
+    def accepting_startup(self) -> bool:
+        """Remain probeable until the server exits or is asked to stop."""
+        return not self.exited_unexpectedly.is_set() and not self.server.should_exit
 
     def stop(self, *, timeout: float = 15.0) -> None:
         self.server.should_exit = True

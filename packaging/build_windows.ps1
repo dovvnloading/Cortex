@@ -9,4 +9,4 @@ if (-not (Test-Path -LiteralPath $executable)) {
     throw "PyInstaller did not produce the expected one-folder executable: $executable"
 }
 
-Write-Host "Cortex package prototype ready: $executable"
+Write-Host "Cortex Windows package ready: $executable"

@@ -26,7 +26,7 @@ export function SystemStatusCard({ system }: { system: SystemResponse }) {
         </div>
       </div>
       <p className="muted-note">
-        {system.qt_default ? "The native Qt path remains the default launcher." : "The web path is the active launcher."}
+        The web path is the active local launcher.
       </p>
     </section>
   );

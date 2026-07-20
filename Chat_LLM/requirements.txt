@@ -1,7 +1,0 @@
-PySide6
-markdown
-ollama
-pydantic>=2.13,<2.14
-fastapi>=0.139,<0.140
-uvicorn>=0.51,<0.52
-httpx>=0.27,<1
