@@ -35,7 +35,10 @@ from memory import (
     DatabaseManager,
     PermanentMemoryManager,
 )
-from generation_types import ConnectionResult, GenerationSnapshot, MemoryCommand, ModelOperationError
+from generation_types import ConnectionResult, GenerationSnapshot, MemoryCommand
+from cortex_backend.services.generation import GenerationService
+from cortex_backend.services.models import ModelService
+from cortex_backend.services.progress import ProgressSink
 from utils import get_asset_path, LANGUAGES
 from splash_screen import SplashScreen
 from ui_styles import FOCUSED_LIGHT_STYLESHEET, FOCUSED_DARK_STYLESHEET
@@ -274,6 +277,7 @@ class Orchestrator:
 
         # Initialize core components.
         self.ollama_client = ollama.Client(host=config['ollama_host'])
+        self.model_service = ModelService(self.ollama_client)
         self.database_manager = DatabaseManager()
         self.database_manager.migrate_from_json_if_needed() # Perform one-time migration
         self.memory_manager = MemoryManager()
@@ -285,6 +289,11 @@ class Orchestrator:
             title_model=config['title_model'],
             translation_model=config['translation_model'],
             ollama_client=self.ollama_client
+        )
+        self.generation_service = GenerationService(
+            history_loader=self._load_generation_history,
+            memory_loader=self.permanent_memory_manager.get_memos,
+            engine_factory=self._create_generation_engine,
         )
         logging.info(
             "Orchestrator initialized. Memos=%s, translation=%s, suggestions=%s, suggestion_model=%s.",
@@ -482,65 +491,20 @@ class Orchestrator:
             self.suggestion_thread = None
             self.suggestion_worker = None
 
-    @staticmethod
-    def _extract_model_tags(response) -> set[str]:
-        """Return exact Ollama model tags from old and current client responses."""
-        if isinstance(response, dict):
-            entries = response.get('models', [])
-        else:
-            entries = getattr(response, 'models', [])
-
-        tags = set()
-        for entry in entries or []:
-            if isinstance(entry, dict):
-                tag = entry.get('name') or entry.get('model')
-            else:
-                tag = getattr(entry, 'model', None) or getattr(entry, 'name', None)
-            if tag:
-                tags.add(str(tag).strip())
-        return tags
-
     def check_ollama_models_sync(self) -> ConnectionResult:
-        """Check Ollama and pull only the exact required model tags."""
-        logging.info("Attempting to connect to Ollama and verify required models...")
-        local_models = self._extract_model_tags(self.ollama_client.list())
-
+        """Check Ollama through the Qt-free model service."""
         required_models = tuple(dict.fromkeys((
             self.config['gen_model'],
             self.config['title_model'],
         )))
-        missing_models = tuple(model for model in required_models if model not in local_models)
-
-        for model in missing_models:
-            logging.info("Required model tag '%s' is not installed; pulling that exact tag.", model)
-            self.ollama_client.pull(model)
-
-        if missing_models:
-            local_models = self._extract_model_tags(self.ollama_client.list())
-        still_missing = tuple(model for model in required_models if model not in local_models)
-        if still_missing:
-            raise RuntimeError(
-                "Ollama did not report the required model tags after pulling: "
-                + ", ".join(still_missing)
-            )
-
         optional_models = []
         if self.translation_enabled:
             optional_models.append(self.config['translation_model'])
         if self.suggestions_enabled and self.suggestions_model not in required_models:
             optional_models.append(self.suggestions_model)
-        optional_missing = tuple(dict.fromkeys(
-            model for model in optional_models if model and model not in local_models
-        ))
-
-        message = "Connected to Ollama and verified the required model tags."
-        if optional_missing:
-            message += " Optional models unavailable: " + ", ".join(optional_missing)
-        logging.info(message)
-        return ConnectionResult.connected(
-            message,
-            missing_models=missing_models,
-            optional_missing_models=optional_missing,
+        return self.model_service.check(
+            required_models=required_models,
+            optional_models=optional_models,
         )
 
     def check_connection_async(self, finished_callback: callable):
@@ -698,22 +662,35 @@ class Orchestrator:
             user_system_instructions=self.user_system_instructions,
         )
 
+    def _load_generation_history(self, thread_id: str) -> list[dict]:
+        """Provide active-memory or persisted history to the headless service."""
+        if thread_id == self.active_thread_id:
+            return list(self.memory_manager.get_full_history())
+        chat_data = self.database_manager.load_chat(thread_id)
+        return list(chat_data.get('messages', [])) if chat_data else []
+
+    def _create_generation_engine(self, snapshot: GenerationSnapshot) -> SynthesisAgent:
+        """Build the legacy model adapter for one immutable generation snapshot."""
+        return SynthesisAgent(
+            gen_model=snapshot.model,
+            title_model=snapshot.title_model,
+            translation_model=snapshot.translation_model,
+            ollama_client=self.ollama_client,
+        )
+
     def process_query_sync(
         self,
         snapshot_or_user_input: GenerationSnapshot | str,
         thread_id: str | None = None,
-        status_signal: Signal = None,
+        progress_sink: ProgressSink | None = None,
     ) -> tuple[str, str | None, str | None, MemoryCommand]:
         """
-        Generates an AI response for a specific thread, including optional translation.
-
-        This involves retrieving the correct chat history, getting permanent memories,
-        calling the synthesis agent, and then potentially chaining through the translation layer.
+        Generate an AI response through the Qt-free generation service.
 
         Args:
             snapshot_or_user_input: Immutable generation snapshot, or the legacy user input string.
             thread_id (str, optional): Thread ID when using the legacy string form.
-            status_signal (Signal, optional): Signal to emit status updates to the UI.
+            progress_sink (ProgressSink, optional): Typed progress consumer.
 
         Returns:
             A tuple containing (response, sources, thoughts, memory_command).
@@ -725,82 +702,11 @@ class Orchestrator:
                 raise ValueError("thread_id is required when processing a raw user input")
             snapshot = self.create_generation_snapshot(snapshot_or_user_input, thread_id)
 
-        user_input = snapshot.user_input
-        thread_id = snapshot.thread_id
-        logging.info("Starting response generation for thread %s.", thread_id)
-
-        is_active_thread = (thread_id == self.active_thread_id)
-
-        permanent_memos = (
-            self.permanent_memory_manager.get_memos()
-            if snapshot.memories_enabled else []
+        result = self.generation_service.generate(
+            snapshot,
+            progress_sink=progress_sink,
         )
-        if snapshot.memories_enabled:
-            permanent_memos = SynthesisAgent.fit_memories_to_context(
-                permanent_memos,
-                query=snapshot.user_input,
-                user_system_instructions=snapshot.user_system_instructions,
-                num_ctx=snapshot.model_options.get('num_ctx', self.config['num_ctx']),
-            )
-
-        # Get the complete history and fit only the newest messages into the
-        # configured context window after reserving prompt, memory, and output space.
-        if is_active_thread:
-            history_messages = list(self.memory_manager.get_full_history())
-        else:
-            # For background threads, load history directly from the database.
-            chat_data = self.database_manager.load_chat(thread_id)
-            history_messages = list(chat_data.get('messages', [])) if chat_data else []
-        if history_messages and history_messages[-1].get('role') == 'user':
-            history_messages.pop()
-        chat_history = SynthesisAgent.fit_history_to_context(
-            history_messages,
-            query=user_input,
-            permanent_memories=permanent_memos,
-            memories_enabled=snapshot.memories_enabled,
-            user_system_instructions=snapshot.user_system_instructions,
-            num_ctx=snapshot.model_options.get('num_ctx', self.config['num_ctx']),
-        )
-
-        generation_agent = SynthesisAgent(
-            gen_model=snapshot.model,
-            title_model=snapshot.title_model,
-            translation_model=snapshot.translation_model,
-            ollama_client=self.ollama_client,
-        )
-
-        # 1. Generate the main response from the AI.
-        response, thoughts, memory_command = generation_agent.generate(
-            query=user_input,
-            chat_history=chat_history,
-            permanent_memories=permanent_memos,
-            memories_enabled=snapshot.memories_enabled,
-            user_system_instructions=snapshot.user_system_instructions,
-            options=dict(snapshot.model_options),
-        )
-        if not snapshot.memories_enabled:
-            memory_command = MemoryCommand()
-        
-        # 2. PROMPT CHAINING: Translation Layer
-        # If translation is enabled, take the main response and run it through the translation model.
-        if snapshot.translation_enabled:
-            if status_signal:
-                try:
-                    status_signal.emit(f"Translating to {snapshot.target_language}...", snapshot.job_id)
-                except TypeError:
-                    status_signal.emit(f"Translating to {snapshot.target_language}...")
-
-            # Note: We do NOT translate the 'thoughts' (reasoning), only the final output.
-            translation_result = generation_agent.translate_text(response, snapshot.target_language)
-            if not translation_result.success:
-                raise ModelOperationError(
-                    translation_result.error or "Translation failed. Please try again.",
-                    operation="translation",
-                )
-            response = translation_result.text or ""
-
-        logging.info("Response generation finished for thread %s.", thread_id)
-        return response, None, thoughts, memory_command
+        return result.response, None, result.thoughts, result.memory_command
 
     def start_new_chat(self):
         """Initializes a new, temporary in-memory chat session."""
