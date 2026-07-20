@@ -374,6 +374,22 @@ def test_frontend_manifest_detects_source_changes(tmp_path: Path):
     (root / "src" / "App.tsx").write_text("export default { changed: true };", encoding="utf-8")
     assert frontend_module.needs_build(root) is True
 
+    refreshed_manifest = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(refreshed_manifest.as_dict()), encoding="utf-8"
+    )
+    (root / "public").mkdir()
+    (root / "public" / "cortex.svg").write_text("<svg />", encoding="utf-8")
+
+    assert frontend_module.needs_build(root) is True
+
 
 def test_frontend_build_replaces_bundle_atomically_and_records_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

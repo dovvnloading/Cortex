@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Save, X } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { CortexSettings, ModelResponse } from "../../../contracts/cortex-api";
+import { localModelNames } from "../lib/localModels";
 import { MemoryPanel } from "./MemoryPanel";
 import { ModelsPanel } from "./ModelsPanel";
 
@@ -59,10 +60,7 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
   const [section, setSection] = useState<SettingsSection>("general");
-  const installedModels = useMemo(
-    () => Array.from(new Set((models.models?.map((model) => model.name) ?? models.installed_models ?? []).map((model) => model.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
-    [models],
-  );
+  const installedModels = localModelNames(models);
   const appearance = draft.appearance ?? {};
   const generation = draft.generation ?? {};
   const modelSettings = draft.models ?? {};
@@ -71,7 +69,7 @@ export function SettingsPanel({
   const suggestions = draft.suggestions ?? {};
   const selectedChatModel = installedModels.includes(modelSettings.chat ?? "")
     ? modelSettings.chat ?? ""
-    : installedModels[0] ?? "";
+    : "";
   const configuredTranslationModel = modelSettings.translation ?? DEFAULT_TRANSLATION_MODEL;
   const selectedTranslationModel = installedModels.includes(configuredTranslationModel)
     ? configuredTranslationModel
@@ -102,7 +100,7 @@ export function SettingsPanel({
   });
 
   return (
-    <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <section className="settings-dialog" aria-labelledby="settings-title">
       <header className="settings-dialog-header">
         <h2 id="settings-title">Settings</h2>
         <button className="icon-button icon-button-small" type="button" aria-label="Close settings" onClick={onClose}>
@@ -255,9 +253,14 @@ export function SettingsPanel({
 
 function RoundedPicker({ id, labelledBy, value, options, placeholder = "Choose a model", onChange, disabled = false }: { id: string; labelledBy: string; value: string; options: PickerOption[]; placeholder?: string; onChange: (value: string) => void; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const listId = useId();
-  const selected = options.find((option) => option.value === value);
+  const selectedIndex = options.findIndex((option) => option.value === value);
+  const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
+  const initialIndex = selectedIndex >= 0 ? selectedIndex : 0;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -268,17 +271,83 @@ function RoundedPicker({ id, labelledBy, value, options, placeholder = "Choose a
     return () => document.removeEventListener("pointerdown", closeOutside);
   }, [open]);
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === "Escape") setOpen(false);
-    if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+  const focusOption = (index: number) => {
+    setActiveIndex(index);
+    setOpen(true);
+    window.requestAnimationFrame(() => optionRefs.current[index]?.focus());
+  };
+
+  const closePicker = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  const selectOption = (index: number) => {
+    onChange(options[index].value);
+    closePicker(true);
+  };
+
+  const nextOptionIndex = (index: number, direction: 1 | -1) => (index + direction + options.length) % options.length;
+
+  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (!options.length) return;
+    if (event.key === "Escape") {
       event.preventDefault();
-      setOpen(true);
+      closePicker();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOption(open ? nextOptionIndex(activeIndex, 1) : initialIndex);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(open ? nextOptionIndex(activeIndex, -1) : selectedIndex >= 0 ? nextOptionIndex(selectedIndex, -1) : options.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (open) closePicker();
+      else focusOption(initialIndex);
+    }
+  };
+
+  const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePicker(true);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+      event.preventDefault();
+      focusOption(nextOptionIndex(index, 1));
+      return;
+    }
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusOption(nextOptionIndex(index, -1));
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      focusOption(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      focusOption(options.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectOption(index);
     }
   };
 
   return (
     <div className={`rounded-picker ${open ? "rounded-picker-open" : ""}`} ref={rootRef}>
-      <button id={id} className="rounded-picker-trigger" type="button" aria-labelledby={labelledBy} aria-haspopup="listbox" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((current) => !current)} onKeyDown={handleKeyDown} disabled={disabled || options.length === 0}>
+      <button ref={triggerRef} id={id} className="rounded-picker-trigger" type="button" aria-labelledby={labelledBy} aria-haspopup="listbox" aria-expanded={open} aria-controls={listId} onClick={() => { if (open) closePicker(); else { setActiveIndex(initialIndex); setOpen(true); } }} onKeyDown={handleTriggerKeyDown} disabled={disabled || options.length === 0}>
         <span className="rounded-picker-selection">
           <strong>{selected?.label ?? placeholder}</strong>
           {selected?.detail && <small>{selected.detail}</small>}
@@ -286,7 +355,7 @@ function RoundedPicker({ id, labelledBy, value, options, placeholder = "Choose a
         <ChevronDown aria-hidden="true" size={17} />
       </button>
       {open && <div id={listId} className="rounded-picker-list" role="listbox" aria-labelledby={labelledBy}>
-        {options.map((option) => <button key={option.value} className={`rounded-picker-option ${option.value === value ? "rounded-picker-option-active" : ""}`} type="button" role="option" aria-label={option.label} aria-selected={option.value === value} onClick={() => { onChange(option.value); setOpen(false); }}>
+        {options.map((option, index) => <button key={option.value} ref={(node) => { optionRefs.current[index] = node; }} className={`rounded-picker-option ${option.value === value ? "rounded-picker-option-active" : ""}`} type="button" role="option" aria-label={option.label} aria-selected={option.value === value} tabIndex={index === activeIndex ? 0 : -1} onFocus={() => setActiveIndex(index)} onKeyDown={(event) => handleOptionKeyDown(event, index)} onClick={() => selectOption(index)}>
           <span><strong>{option.label}</strong>{option.detail && <small>{option.detail}</small>}</span>
           {option.value === value && <Check aria-hidden="true" size={16} />}
         </button>)}

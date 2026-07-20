@@ -55,16 +55,17 @@ class ModelService:
 
     def list_installed(self) -> tuple[str, ...]:
         """Return the exact installed model tags in stable order."""
-        try:
-            return tuple(item.name for item in self.list_installed_details())
-        except Exception as exc:
-            logging.error("Ollama model listing failed (%s).", type(exc).__name__)
-            return ()
+        return tuple(item.name for item in self.list_installed_details())
 
     def list_installed_details(self) -> tuple[InstalledModel, ...]:
         """Return normalized installed model metadata without logging content."""
+        models, _ = self.inventory()
+        return models
+
+    def inventory(self) -> tuple[tuple[InstalledModel, ...], ConnectionResult]:
+        """Read one authoritative local inventory and its connection result."""
         try:
-            return tuple(
+            models = tuple(
                 sorted(
                     self.extract_model_details(self._gateway.list()),
                     key=lambda item: item.name,
@@ -72,19 +73,16 @@ class ModelService:
             )
         except Exception as exc:
             logging.error("Ollama model metadata listing failed (%s).", type(exc).__name__)
-            return ()
-
-    def probe(self) -> ConnectionResult:
-        """Check Ollama reachability without pulling or changing model state."""
-        try:
-            self._gateway.list()
-        except Exception as exc:
-            logging.error("Ollama connectivity probe failed (%s).", type(exc).__name__)
-            return ConnectionResult.failed(
+            return (), ConnectionResult.failed(
                 "Could not connect to Ollama. Please start Ollama and retry.",
                 details=type(exc).__name__,
             )
-        return ConnectionResult.connected("Connected to Ollama.")
+        return models, ConnectionResult.connected("Connected to Ollama.")
+
+    def probe(self) -> ConnectionResult:
+        """Check Ollama reachability without pulling or changing model state."""
+        _, connection = self.inventory()
+        return connection
 
     def check(
         self,

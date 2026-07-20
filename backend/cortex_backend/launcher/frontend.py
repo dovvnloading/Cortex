@@ -69,6 +69,9 @@ def _tracked_files(frontend_root: Path) -> list[Path]:
         for extension in ("*.ts", "*.tsx", "*.css")
         for path in (frontend_root / "src").rglob(extension)
     )
+    public_dir = frontend_root / "public"
+    if public_dir.is_dir():
+        files.extend(path for path in public_dir.rglob("*") if path.is_file())
     return [path for path in files if path.is_file()]
 
 

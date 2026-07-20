@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Onboarding } from "./Onboarding";
@@ -15,5 +15,15 @@ describe("Onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Open workspace" }));
 
     expect(onSubmit).toHaveBeenCalledWith("bootstrap-token");
+  });
+
+  it("uses a launcher-provided token automatically for the owned desktop window", async () => {
+    const onSubmit = vi.fn<(token: string) => Promise<void>>().mockResolvedValue();
+    const { container } = render(<Onboarding initialToken="desktop-handoff" error={null} busy={false} onSubmit={onSubmit} />);
+
+    expect(screen.getByRole("heading", { name: "Opening Cortex" })).toBeVisible();
+    expect(container.querySelector("#bootstrap-token")).not.toBeInTheDocument();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith("desktop-handoff"));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 from collections.abc import Iterator
+from threading import RLock
 
 from cortex_backend.core.settings import CortexSettings
 
@@ -45,6 +46,10 @@ class SQLiteSettingsRepository:
         self.db_path = Path(db_path)
         self.backup_path = Path(f"{self.db_path}.bak")
         self.legacy = legacy
+        # Fresh workspace loading fans out into settings and model requests.
+        # Keep the one-time legacy import atomic within this process so those
+        # requests cannot race to create the initial settings row.
+        self._load_lock = RLock()
         self._pre_schema_backup = self._create_backup()
         self._ensure_schema()
 
@@ -164,91 +169,104 @@ class SQLiteSettingsRepository:
         return report
 
     def load(self, *, defaults: CortexSettings | None = None) -> SettingsReadResult:
-        existing = self._read_row()
-        if existing is not None:
-            settings, source = existing
-            return SettingsReadResult(
-                settings=settings,
-                source=source,
-                migration=self._ledger_report()
-                or SettingsMigrationReport(status="not_needed", source=source),
-            )
-
-        if self.legacy is None:
-            settings = defaults or CortexSettings()
-            return SettingsReadResult(
-                settings=settings,
-                source="sqlite",
-                migration=SettingsMigrationReport(status="not_needed", source="defaults"),
-            )
-
-        legacy_result = self.legacy.load(defaults=defaults)
-        backup_path = self._pre_schema_backup or self._create_backup()
-        try:
-            with self.connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO cortex_settings
-                        (id, schema_version, revision, payload, updated_at)
-                    VALUES (1, ?, ?, ?, ?)
-                    """,
-                    (
-                        SETTINGS_SCHEMA_VERSION,
-                        legacy_result.settings.revision,
-                        legacy_result.settings.model_dump_json(),
-                        _utc_now(),
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO settings_migration_ledger
-                        (migration_key, source, status, imported_keys, invalid_keys,
-                         backup_path, message, applied_at)
-                    VALUES (?, ?, 'migrated', ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        MIGRATION_KEY,
-                        legacy_result.source,
-                        json.dumps(legacy_result.present_keys),
-                        json.dumps(legacy_result.invalid_keys),
-                        backup_path,
-                        "Legacy QSettings imported once; source left untouched.",
-                        _utc_now(),
-                    ),
-                )
-        except sqlite3.IntegrityError:
-            # Another request completed the one-time import. The durable row is
-            # authoritative and is returned below.
+        with self._load_lock:
             existing = self._read_row()
-            if existing is None:
-                raise SettingsRepositoryError("Settings migration did not persist.")
-            settings, source = existing
-            return SettingsReadResult(
-                settings=settings,
-                source=source,
-                migration=self._ledger_report(),
-            )
-        except SettingsRepositoryError:
-            raise
-        except Exception as exc:
-            raise SettingsRepositoryError("Legacy settings migration failed.") from exc
+            if existing is not None:
+                settings, source = existing
+                return SettingsReadResult(
+                    settings=settings,
+                    source=source,
+                    migration=self._ledger_report()
+                    or SettingsMigrationReport(status="not_needed", source=source),
+                )
 
-        report = SettingsMigrationReport(
-            status="migrated",
-            source=legacy_result.source,
-            migration_key=MIGRATION_KEY,
-            imported_keys=legacy_result.present_keys,
-            invalid_keys=legacy_result.invalid_keys,
-            backup_path=backup_path,
-            message="Legacy QSettings imported once; source left untouched.",
-        )
-        return SettingsReadResult(
-            settings=legacy_result.settings,
-            source="sqlite_migrated",
-            present_keys=legacy_result.present_keys,
-            invalid_keys=legacy_result.invalid_keys,
-            migration=report,
-        )
+            if self.legacy is None:
+                settings = defaults or CortexSettings()
+                return SettingsReadResult(
+                    settings=settings,
+                    source="sqlite",
+                    migration=SettingsMigrationReport(status="not_needed", source="defaults"),
+                )
+
+            legacy_result = self.legacy.load(defaults=defaults)
+            # A database that existed before this repository was initialized
+            # was already snapshotted before additive schema work. A brand-new
+            # database has no settings to preserve, so avoid a redundant file
+            # copy while concurrent startup requests are beginning.
+            backup_path = self._pre_schema_backup
+            migrated_here = False
+            try:
+                with self.connect() as connection:
+                    insert_result = connection.execute(
+                        """
+                        INSERT INTO cortex_settings
+                            (id, schema_version, revision, payload, updated_at)
+                        VALUES (1, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO NOTHING
+                        """,
+                        (
+                            SETTINGS_SCHEMA_VERSION,
+                            legacy_result.settings.revision,
+                            legacy_result.settings.model_dump_json(),
+                            _utc_now(),
+                        ),
+                    )
+                    migrated_here = insert_result.rowcount == 1
+                    if migrated_here:
+                        connection.execute(
+                            """
+                            INSERT INTO settings_migration_ledger
+                                (migration_key, source, status, imported_keys, invalid_keys,
+                                 backup_path, message, applied_at)
+                            VALUES (?, ?, 'migrated', ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                MIGRATION_KEY,
+                                legacy_result.source,
+                                json.dumps(legacy_result.present_keys),
+                                json.dumps(legacy_result.invalid_keys),
+                                backup_path,
+                                "Legacy QSettings imported once; source left untouched.",
+                                _utc_now(),
+                            ),
+                        )
+            except SettingsRepositoryError as exc:
+                raise SettingsRepositoryError("Legacy settings migration failed.") from exc
+            except Exception as exc:
+                raise SettingsRepositoryError("Legacy settings migration failed.") from exc
+
+            if not migrated_here:
+                # Another repository instance or process won the atomic
+                # insert. Its committed row and ledger are authoritative.
+                existing = self._read_row()
+                if existing is None:
+                    raise SettingsRepositoryError("Settings migration did not persist.")
+                settings, source = existing
+                report = self._ledger_report()
+                if report is None:
+                    raise SettingsRepositoryError("Settings migration completed without a migration ledger.")
+                return SettingsReadResult(
+                    settings=settings,
+                    source=source,
+                    migration=report,
+                )
+
+            report = SettingsMigrationReport(
+                status="migrated",
+                source=legacy_result.source,
+                migration_key=MIGRATION_KEY,
+                imported_keys=legacy_result.present_keys,
+                invalid_keys=legacy_result.invalid_keys,
+                backup_path=backup_path,
+                message="Legacy QSettings imported once; source left untouched.",
+            )
+            return SettingsReadResult(
+                settings=legacy_result.settings,
+                source="sqlite_migrated",
+                present_keys=legacy_result.present_keys,
+                invalid_keys=legacy_result.invalid_keys,
+                migration=report,
+            )
 
     def save(self, settings: CortexSettings) -> None:
         if not isinstance(settings, CortexSettings):
