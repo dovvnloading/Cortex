@@ -131,7 +131,7 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(result.memory_command.additions, ("remember tea",))
         self.assertEqual(
             [event.phase for event in recorder.events],
-            ["analysis", "thoughts", "final_response", "translation"],
+            ["analysis", "thoughts", "translation"],
         )
         self.assertTrue(all(event.job_id == "job-1" for event in recorder.events))
         self.assertTrue(all(event.thread_id == "thread-1" for event in recorder.events))

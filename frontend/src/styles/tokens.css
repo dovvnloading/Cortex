@@ -246,7 +246,8 @@ a { color: inherit; text-decoration: none; }
 .message-user .message-bubble { border-color: transparent; border-bottom-right-radius: 5px; background: linear-gradient(135deg, var(--user-start), var(--user-end)); color: #fff; box-shadow: 0 5px 15px rgba(199, 90, 40, 0.22); }
 .message-assistant .message-bubble { border-bottom-left-radius: 5px; }
 .message-pending .message-bubble { border-style: dashed; }
-.loading-label { margin-bottom: 8px; color: var(--text-muted); font-size: 0.76rem; font-weight: 650; }
+.generation-status { display: inline-flex; align-self: flex-start; align-items: center; gap: 9px; min-height: 30px; padding: 5px 3px; color: var(--text-muted); font-size: 0.8rem; font-weight: 600; }
+.generation-status .loading-spinner { width: 15px; height: 15px; border-width: 2px; }
 .markdown-body { overflow-wrap: anywhere; color: inherit; font-size: 0.9rem; line-height: 1.65; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }

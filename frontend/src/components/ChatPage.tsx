@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { Copy, GitBranch, RefreshCw, Send, ShieldCheck, Sparkles, Square } from "lucide-react";
 import type { ChatMessage, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
+import { humanizeGenerationStatus } from "../lib/generationStatus";
 import { SafeMarkdown } from "./SafeMarkdown";
 
 type Props = {
@@ -273,7 +274,8 @@ export function ChatPage({ api, threadId, activeModel, runtimeReady, runtimeMess
       <div className="transcript" ref={transcriptRef} aria-live="polite">
         {!messages.length && !partial && <EmptyChatState activeModel={activeModel} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} onChoosePrompt={choosePrompt} />}
         {messages.map((message, index) => <MessageCard key={message.id ?? `${message.role}-${index}`} message={message} isFinalAssistant={message.id === finalAssistantId} busy={Boolean(activeJob)} onRegenerate={() => void startGeneration(lastPrompt || messages[index - 1]?.content || "", message.id ?? undefined)} onFork={() => void fork(message)} forking={forkingMessage === message.id} />)}
-        {activeJob && (partial || thoughts || status) && <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-bubble"><div className="loading-label">{status}</div>{thoughts && <details className="reasoning"><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></article>}
+        {activeJob && !partial && !thoughts && <GenerationStatus status={status} />}
+        {activeJob && (partial || thoughts) && <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><div className="message-bubble">{thoughts && <details className="reasoning"><summary>Reasoning</summary><SafeMarkdown content={thoughts} /></details>}{partial && <div className="markdown-body"><SafeMarkdown content={partial} /></div>}<span className="streaming-caret" aria-hidden="true" /></div></article>}
       </div>
       {suggestions.length > 0 && !activeJob && <div className="suggestions" aria-label="Follow-up suggestions">{suggestions.map((suggestion) => <button className="suggestion-chip" key={suggestion} onClick={() => choosePrompt(suggestion)}>{suggestion}</button>)}</div>}
       {error && <div className="chat-error" role="alert"><span>{error}</span><button className="button button-quiet" onClick={() => void startGeneration(lastPrompt)}>Retry</button></div>}
@@ -292,6 +294,10 @@ export function ChatPage({ api, threadId, activeModel, runtimeReady, runtimeMess
       </div>
     </section>
   );
+}
+
+function GenerationStatus({ status }: { status: string }) {
+  return <div className="generation-status" role="status"><span className="loading-spinner" aria-hidden="true" />{humanizeGenerationStatus(status)}</div>;
 }
 
 function EmptyChatState({ activeModel, runtimeReady, runtimeMessage, onChoosePrompt }: { activeModel: string | null; runtimeReady: boolean; runtimeMessage: string | null; onChoosePrompt: (prompt: string) => void }) {
