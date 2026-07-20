@@ -78,9 +78,15 @@ def test_native_window_uses_private_isolated_edge_webview(
     )
     monitored: list[object] = []
     storage = tmp_path / "private-webview"
+    icon = tmp_path / "cortex.ico"
+    icon.write_bytes(b"test-icon")
 
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=storage),
+        DesktopWindowConfig(
+            url="http://127.0.0.1:8765",
+            storage_path=storage,
+            icon_path=icon,
+        ),
         monitor=monitored.append,
     )
 
@@ -89,6 +95,7 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["gui"] == "edgechromium"
     assert calls["start"]["private_mode"] is True
     assert calls["start"]["storage_path"] == str(storage)
+    assert calls["start"]["icon"] == str(icon)
     assert webview_settings["ALLOW_DOWNLOADS"] is False
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
 

@@ -116,6 +116,11 @@ def _resource_root() -> Path:
     return ROOT / "packaging" / ".runtime"
 
 
+def _app_asset_root() -> Path:
+    """Resolve assets from the source tree or PyInstaller's bundled root."""
+    return Path(getattr(sys, "_MEIPASS")) if _is_packaged() else ROOT
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -330,6 +335,7 @@ def _run_web(args: argparse.Namespace) -> int:
                 DesktopWindowConfig(
                     url=_desktop_url(browser_port, token),
                     storage_path=paths.webview_profile,
+                    icon_path=_app_asset_root() / "assets" / "cortex.ico",
                     debug=args.dev,
                 ),
                 monitor=lambda window: _monitor_native_window(
