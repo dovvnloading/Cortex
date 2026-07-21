@@ -942,12 +942,14 @@ pass without executing code.
 - Keep the typed recipe, signed bundle, broker transport, and trusted artifact boundary
   provider-independent until the sandbox qualification gate passes.
 - The owner-bound copy-in, exact-claim output validation, quarantine, hashing, and
-  atomic publication boundary is implemented; collect opt-in aggregate reliability
-  metrics, never content, after the provider is qualified.
+  atomic publication boundary is implemented. The fixed-function provider core is
+  qualification-only; collect opt-in aggregate reliability metrics, never content,
+  after the provider is sandbox-qualified.
 
-**Implementation gate:** parser and artifact-boundary adversarial suites pass; no source
-overwrite is possible. **Release gate:** parser fuzzing, artifact security review, and
-fixed-function provider qualification must pass before any provider is enabled.
+**Implementation gate:** parser, artifact-boundary, and qualification-provider adversarial
+suites pass; no source overwrite is possible. **Release gate:** parser fuzzing, artifact
+security review, hostile decoder corpus, OS sandbox qualification, and fixed-function
+provider lifecycle health must pass before any provider is enabled.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

@@ -50,7 +50,8 @@ WebP, finite JSON, and ordinary UTF-8 text are recognized. Portable executables,
 ELF/OLE files, shortcuts, shebang scripts, archives, active HTML/SVG/JavaScript,
 and common shell/PowerShell launchers are rejected. Unknown non-active bytes may be
 stored as `application/octet-stream`; this is metadata safety, not permission to decode
-or execute them. Image decoding remains a later provider qualification gate.
+or execute them. Production image decoding remains behind the separate sandboxed
+[recipe provider qualification gate](0001-phase2-recipe-provider.md).
 
 ### 3. Private output staging and exact claims
 
