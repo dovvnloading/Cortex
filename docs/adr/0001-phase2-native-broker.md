@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 native broker adapter
 
-- **Status:** Implemented and verified; bundle installation, staging, and provider enablement remain blocked
+- **Status:** Implemented and verified; user-artifact staging and provider enablement remain blocked
 - **Parent:** [Phase 2 authenticated broker contract](0001-phase2-broker-contract.md)
 - **Scope:** Windows named-pipe transport, protected DACL, OS peer identity, and
   authenticated session-key establishment
