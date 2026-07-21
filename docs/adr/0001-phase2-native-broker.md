@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 native broker adapter
 
-- **Status:** Implemented and verified; user-artifact staging and provider enablement remain blocked
+- **Status:** Implemented and verified; provider enablement remains blocked
 - **Parent:** [Phase 2 authenticated broker contract](0001-phase2-broker-contract.md)
 - **Scope:** Windows named-pipe transport, protected DACL, OS peer identity, and
   authenticated session-key establishment
@@ -56,7 +56,9 @@ and payloads are not exposed.
 
 This ADR does not launch or supervise a process, create an AppContainer or Job
 Object, install a signed bundle, copy files, decode images, publish artifacts,
-enable a lifecycle provider, or expose a model tool. Those remain separate gates.
+enable a lifecycle provider, or expose a model tool. Artifact copy-in/publication is
+covered by the separate [trusted artifact boundary](0001-phase2-artifact-boundary.md);
+decoding and lifecycle enablement remain separate gates.
 
 ## Verification
 
