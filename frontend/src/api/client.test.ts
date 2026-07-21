@@ -42,4 +42,26 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
     expect(new Headers(request.headers).get("Last-Event-ID")).toBe("0");
   });
+
+  it("binds an approval decision to the encoded execution job route", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      job_id: "job/approval",
+      request_id: "request-1",
+      profile: "artifact.extended.v1",
+      status: "queued",
+      sequence: 3,
+      approval_state: "approved",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const api = new CortexApi("/api/v1", fetcher);
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+
+    await api.decideExecutionApproval("job/approval", "approved");
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/execution/job%2Fapproval/approval",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ decision: "approved" }) }),
+    );
+    const request = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
+  });
 });

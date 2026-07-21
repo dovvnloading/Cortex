@@ -428,6 +428,434 @@
         "title": "DiagnosticsResponse",
         "type": "object"
       },
+      "ExecutionAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "profile": {
+            "const": "fake.v1",
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence"
+        ],
+        "title": "ExecutionAccepted",
+        "type": "object"
+      },
+      "ExecutionApprovalDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approved",
+              "denied"
+            ],
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ExecutionApprovalDecisionRequest",
+        "type": "object"
+      },
+      "ExecutionPreviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "default": "success",
+            "enum": [
+              "success",
+              "failure"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "step_delay_seconds": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Step Delay Seconds",
+            "type": "number"
+          },
+          "steps": {
+            "default": 3,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "title": "ExecutionPreviewRequest",
+        "type": "object"
+      },
+      "ExecutionSSEEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "event": {
+            "enum": [
+              "execution.queued",
+              "execution.started",
+              "execution.progress",
+              "execution.cancelling",
+              "execution.recovered",
+              "execution.completed",
+              "execution.failed",
+              "execution.cancelled"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Phase"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "job_id",
+          "event",
+          "status"
+        ],
+        "title": "ExecutionSSEEvent",
+        "type": "object"
+      },
+      "ExecutionStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Expires At"
+          },
+          "approval_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Reason"
+          },
+          "approval_state": {
+            "default": "not_required",
+            "enum": [
+              "not_required",
+              "pending",
+              "approved",
+              "denied",
+              "expired"
+            ],
+            "title": "Approval State",
+            "type": "string"
+          },
+          "can_cancel": {
+            "default": false,
+            "title": "Can Cancel",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "profile": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence"
+        ],
+        "title": "ExecutionStatusResponse",
+        "type": "object"
+      },
+      "ExecutionTaskListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionTaskSummary"
+            },
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "title": "ExecutionTaskListResponse",
+        "type": "object"
+      },
+      "ExecutionTaskSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Expires At"
+          },
+          "approval_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Reason"
+          },
+          "approval_state": {
+            "default": "not_required",
+            "enum": [
+              "not_required",
+              "pending",
+              "approved",
+              "denied",
+              "expired"
+            ],
+            "title": "Approval State",
+            "type": "string"
+          },
+          "can_cancel": {
+            "default": false,
+            "title": "Can Cancel",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "profile": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "profile",
+          "status",
+          "sequence",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ExecutionTaskSummary",
+        "type": "object"
+      },
       "ForkRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1288,6 +1716,7 @@
       },
       "SuggestionSettings": {
         "additionalProperties": false,
+        "description": "Legacy-compatible settings retained for reading existing workspaces.",
         "properties": {
           "enabled": {
             "default": true,
@@ -1319,6 +1748,11 @@
             "default": "v1",
             "title": "Api Version",
             "type": "string"
+          },
+          "execution_preview_available": {
+            "default": false,
+            "title": "Execution Preview Available",
+            "type": "boolean"
           },
           "ollama_host": {
             "default": "http://127.0.0.1:11434",
@@ -1763,6 +2197,256 @@
           }
         },
         "summary": "Diagnostics"
+      }
+    },
+    "/api/v1/execution/preview/fake": {
+      "post": {
+        "operationId": "start_fake_execution_api_v1_execution_preview_fake_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Fake Execution"
+      }
+    },
+    "/api/v1/execution/tasks": {
+      "get": {
+        "operationId": "execution_tasks_api_v1_execution_tasks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_terminal",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Terminal",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionTaskListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execution Tasks"
+      }
+    },
+    "/api/v1/execution/{job_id}": {
+      "get": {
+        "operationId": "execution_status_api_v1_execution__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execution Status"
+      }
+    },
+    "/api/v1/execution/{job_id}/approval": {
+      "post": {
+        "operationId": "decide_execution_approval_api_v1_execution__job_id__approval_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionApprovalDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Execution Approval"
+      }
+    },
+    "/api/v1/execution/{job_id}/cancel": {
+      "post": {
+        "operationId": "cancel_execution_api_v1_execution__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Execution"
+      }
+    },
+    "/api/v1/execution/{job_id}/events": {
+      "get": {
+        "operationId": "execution_events_api_v1_execution__job_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "Server-sent execution events."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execution Events"
       }
     },
     "/api/v1/generations": {

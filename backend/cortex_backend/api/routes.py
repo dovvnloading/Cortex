@@ -30,6 +30,11 @@ from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.fake import FakeExecutionPlan
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
+from cortex_backend.execution.repository import (
+    ApprovalPolicyError,
+    ApprovalTransitionError,
+    ExecutionRepositoryError,
+)
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import JobConflict, JobNotFound, JobOwnershipError, JobSnapshot
@@ -42,6 +47,7 @@ from .schemas import (
     CreateChatRequest,
     DiagnosticsResponse,
     ExecutionAccepted,
+    ExecutionApprovalDecisionRequest,
     ExecutionPreviewRequest,
     ExecutionSSEEvent,
     ExecutionStatusResponse,
@@ -450,6 +456,37 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> ExecutionStatusResponse:
         repository = _execution_repository(request)
+        job = repository.get_job(job_id, owner=principal.session_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        return _execution_status_response(repository, job)
+
+    @router.post(
+        "/execution/{job_id}/approval", response_model=ExecutionStatusResponse
+    )
+    def decide_execution_approval(
+        job_id: str,
+        payload: ExecutionApprovalDecisionRequest,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ExecutionStatusResponse:
+        repository = _execution_repository(request)
+        try:
+            repository.decide_approval(
+                job_id,
+                owner=principal.session_id,
+                decision=payload.decision,
+            )
+        except (ApprovalPolicyError, ApprovalTransitionError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except ExecutionRepositoryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Execution job not found.",
+            ) from exc
         job = repository.get_job(job_id, owner=principal.session_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
@@ -1377,16 +1414,27 @@ def _execution_message(event: ExecutionEvent | None) -> str | None:
 
 def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatusResponse:
     event = _execution_latest_event(repository, job)
+    approval = repository.get_approval(job.job_id, owner=job.owner)
+    approval_state = approval.state if approval is not None else job.approval_state
     return ExecutionStatusResponse(
         job_id=job.job_id,
         request_id=job.request_id,
-        profile="fake.v1",
+        profile=job.profile,
         status=job.status,
         sequence=job.sequence,
         phase=event.phase if event else None,
         message=_execution_message(event),
-        approval_state=job.approval_state,
-        can_cancel=job.status in {"queued", "running", "cancelling"},
+        approval_state=approval_state,
+        approval_reason=approval.reason if approval is not None else None,
+        approval_expires_at=(
+            datetime.fromisoformat(approval.expires_at)
+            if approval is not None and approval.expires_at is not None
+            else None
+        ),
+        can_cancel=(
+            job.status in {"queued", "running", "cancelling"}
+            and approval_state in {"not_required", "approved"}
+        ),
         error=job.error,
         result=dict(job.result) if job.result is not None else None,
     )
@@ -1396,12 +1444,14 @@ def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSumma
     response = _execution_status_response(repository, job)
     return ExecutionTaskSummary(
         job_id=response.job_id,
-        profile="fake.v1",
+        profile=response.profile,
         status=response.status,
         sequence=response.sequence,
         phase=response.phase,
         message=response.message,
         approval_state=response.approval_state,
+        approval_reason=response.approval_reason,
+        approval_expires_at=response.approval_expires_at,
         can_cancel=response.can_cancel,
         created_at=datetime.fromisoformat(job.created_at),
         updated_at=datetime.fromisoformat(job.updated_at),

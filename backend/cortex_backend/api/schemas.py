@@ -204,15 +204,21 @@ class ExecutionAccepted(APIModel):
     sequence: int
 
 
+class ExecutionApprovalDecisionRequest(APIModel):
+    decision: Literal["approved", "denied"]
+
+
 class ExecutionStatusResponse(APIModel):
     job_id: str
     request_id: str
-    profile: Literal["fake.v1"]
+    profile: str = Field(min_length=1, max_length=100)
     status: ExecutionStatus
     sequence: int
     phase: str | None = None
     message: str | None = None
     approval_state: ExecutionApprovalState = "not_required"
+    approval_reason: str | None = None
+    approval_expires_at: datetime | None = None
     can_cancel: bool = False
     error: str | None = None
     result: dict[str, Any] | None = None
@@ -220,19 +226,21 @@ class ExecutionStatusResponse(APIModel):
 
 class ExecutionTaskSummary(APIModel):
     job_id: str
-    profile: Literal["fake.v1"]
+    profile: str = Field(min_length=1, max_length=100)
     status: ExecutionStatus
     sequence: int
     phase: str | None = None
     message: str | None = None
     approval_state: ExecutionApprovalState = "not_required"
+    approval_reason: str | None = None
+    approval_expires_at: datetime | None = None
     can_cancel: bool = False
     created_at: datetime
     updated_at: datetime
 
 
 class ExecutionTaskListResponse(APIModel):
-    tasks: list[ExecutionTaskSummary] = Field(default_factory=list)
+    tasks: list[ExecutionTaskSummary]
 
 
 class ExecutionSSEEvent(APIModel):

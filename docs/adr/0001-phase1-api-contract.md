@@ -1,6 +1,6 @@
 # ADR-0001 Phase 1 API and task-tray contract
 
-- **Status:** Contract frozen; fake-only preview transport wired
+- **Status:** Contract frozen; fake preview and approval-decision transport wired
 - **Parent:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
 - **Scope:** Authenticated, owner-scoped lifecycle transport for the Phase 1
   deterministic fake executor
@@ -32,6 +32,7 @@ deduplicated by `(owner, request_id)`. Retrying a request returns the original
 | --- | --- | --- |
 | `POST /api/v1/execution/preview/fake` | Start a bounded deterministic fake job; available only when `preview` and an injected fake coordinator are both true. | `202 ExecutionAccepted` |
 | `GET /api/v1/execution/{job_id}` | Read the owner-scoped durable snapshot. | `200 ExecutionStatusResponse` |
+| `POST /api/v1/execution/{job_id}/approval` | Allow once or deny an already-pending, owner-owned approval; never creates or launches work. | `200 ExecutionStatusResponse` |
 | `POST /api/v1/execution/{job_id}/cancel` | Request cooperative cancellation; idempotent after terminal state. | `200 ExecutionStatusResponse` |
 | `GET /api/v1/execution/{job_id}/events` | Replay ordered events after `Last-Event-ID`, then follow live events. | `text/event-stream` |
 | `GET /api/v1/execution/tasks` | Return the owner's active/recent task summaries for the global tray. | `200 ExecutionTaskListResponse` |
@@ -109,13 +110,18 @@ ignored after terminal state is committed.
 ## Approval state
 
 Phase 1 fake jobs use `approval_state="not_required"`; no approval prompt is
-shown. The repository now persists the response state and enforces the transition
+shown. The repository persists the response state and enforces the transition
 rules in [the recovery/approval contract](0001-phase1-recovery-approval.md). The
 durable response shape supports `not_required`, `pending`, `approved`, `denied`,
-and `expired` for later profiles.
+and `expired` for later profiles. The owner-scoped decision behavior and safe
+presentation fields are frozen in [the approval UI/API contract](0001-phase1-approval-ui.md).
 Automatic execution must never transition to `pending`; broader capabilities will
 require a separate policy/approval ADR and an explicit user action. The UI must
-render `pending` as an actionable approval card, never as a generic spinner.
+render `pending` as an actionable approval card, never as a generic spinner. The
+decision endpoint accepts only allow-once or deny for an existing immutable scope;
+it cannot accept replacement scope and never dispatches a provider. Denial or
+expiry terminally cancels the inert job with a stable diagnostic so no approval
+task remains queued forever.
 
 ## Task-tray accessibility and cancellation
 
@@ -148,7 +154,11 @@ connection as reconnectable rather than as success or failure.
    traceback fields.
 7. The task tray exposes the required landmark, live region, status text, and
    keyboard Stop action in component tests.
+8. Approval decisions are owner-scoped and exactly-once; expiry wins over a late
+   allow, sensitive scope/payload data is redacted, and the actionable card is
+   keyboard-native without taking focus.
 
-This contract does not close Phase 1. It authorizes the next implementation step:
-inject the fake-only preview coordinator into the app factory and add the
-owner-scoped routes under tests, while keeping real code execution unavailable.
+This contract does not close Phase 1. Fake preview, replay, task tray, recovery,
+and approval-decision slices are implemented. Installation-principal wiring and
+production lifecycle integration remain separate reviewed stages; real code
+execution is still unavailable.

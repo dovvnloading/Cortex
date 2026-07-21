@@ -5,6 +5,7 @@ import type {
   CreateChatRequest,
   DiagnosticsResponse,
   ExecutionSSEEvent,
+  ExecutionApprovalDecisionRequest,
   ExecutionStatusResponse,
   ExecutionTaskListResponse,
   ForkRequest,
@@ -247,6 +248,19 @@ export class CortexApi {
     return this.request<ExecutionStatusResponse>(
       `/execution/${encodeURIComponent(jobId)}/cancel`,
       { method: "POST" },
+    );
+  }
+
+  decideExecutionApproval(
+    jobId: string,
+    decision: ExecutionApprovalDecisionRequest["decision"],
+  ): Promise<ExecutionStatusResponse> {
+    return this.request<ExecutionStatusResponse>(
+      `/execution/${encodeURIComponent(jobId)}/approval`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      },
     );
   }
 

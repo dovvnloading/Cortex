@@ -245,6 +245,10 @@ a { color: inherit; text-decoration: none; }
 .execution-task-copy strong, .execution-task-copy span { overflow: hidden; color: var(--text); font-size: 0.76rem; text-overflow: ellipsis; white-space: nowrap; }
 .execution-task-copy span { color: var(--text-muted); font-size: 0.7rem; }
 .execution-task-stop { flex: 0 0 auto; min-height: 30px; padding: 0 9px; font-size: 0.72rem; }
+.execution-task-approval { align-items: flex-start; border-left: 3px solid var(--accent); padding-left: 10px; }
+.execution-task-approval .execution-task-copy { align-self: center; }
+.execution-task-approval-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.execution-task-decision { min-height: 32px; padding: 0 10px; font-size: 0.72rem; white-space: nowrap; }
 .chat-content { overflow: hidden; padding: 0; }
 .settings-content { display: grid; overflow: hidden; place-items: center; padding: 24px; background: color-mix(in srgb, var(--bg) 86%, #000 14%); }
 

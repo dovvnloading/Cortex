@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import type { ChatResponse, ChatSummary, CortexSettings, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, ChatSummary, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { ChatPage } from "../components/ChatPage";
@@ -145,6 +145,21 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
+  const decideExecutionApproval = async (
+    jobId: string,
+    decision: ExecutionApprovalDecisionRequest["decision"],
+  ) => {
+    try {
+      await api.decideExecutionApproval(jobId, decision);
+      const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+      setExecutionTasks(response.tasks);
+      notify(decision === "approved" ? "Background task approved once." : "Background task denied.", "success");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      else notify(apiMessage(error, "Could not record the approval decision."), "error");
+    }
+  };
+
   const renameChat = async (id: string, title: string) => {
     try {
       const chat = await api.renameChat(id, title);
@@ -274,7 +289,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
           <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
           <Route path="/chat/new" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />

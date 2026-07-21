@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Pencil, Plus, Settings, Trash2 } from "lucide-react";
-import type { ChatSummary, ExecutionTaskSummary, ModelResponse } from "../../../contracts/cortex-api";
+import type { ChatSummary, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../contracts/cortex-api";
 import { displayChatTitle } from "../lib/chatTitle";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
 
@@ -15,6 +15,7 @@ type Props = {
   onDeleteChat: (id: string) => Promise<void>;
   executionTasks?: ExecutionTaskSummary[];
   onCancelExecution?: (jobId: string) => Promise<void>;
+  onDecideExecutionApproval?: (jobId: string, decision: ExecutionApprovalDecisionRequest["decision"]) => Promise<void>;
   children: ReactNode;
 };
 
@@ -28,6 +29,7 @@ export function AppShell({
   onDeleteChat,
   executionTasks = [],
   onCancelExecution,
+  onDecideExecutionApproval,
   children,
 }: Props) {
   const navigate = useNavigate();
@@ -122,7 +124,11 @@ export function AppShell({
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}
       {deleteTarget && <DeleteChatDialog chat={deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={async () => { await onDeleteChat(deleteTarget.id); setDeleteTarget(null); }} />}
-      <ExecutionTaskTray tasks={executionTasks} onCancel={onCancelExecution} />
+      <ExecutionTaskTray
+        tasks={executionTasks}
+        onCancel={onCancelExecution}
+        onDecideApproval={onDecideExecutionApproval}
+      />
     </div>
   );
 }
