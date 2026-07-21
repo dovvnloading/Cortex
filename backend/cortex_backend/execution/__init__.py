@@ -6,6 +6,18 @@ providers are intentionally absent until later ADR gates are approved.
 
 from .fake import FakeExecutionPlan, FakeExecutionProvider
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
+from .recipes import (
+    CalculatorPlan,
+    CheckPlan,
+    ImageTransformPlan,
+    PrimitiveEvaluationError,
+    RecipeValidationError,
+    evaluate_calculator,
+    evaluate_check,
+    parse_calculator,
+    parse_check,
+    parse_image_transform,
+)
 from .repository import (
     ArtifactLimitError,
     ApprovalPolicyError,
@@ -22,9 +34,19 @@ __all__ = [
     "ExecutionRepository",
     "ExecutionRepositoryError",
     "ExecutionLifecycle",
+    "CalculatorPlan",
+    "CheckPlan",
     "FakeExecutionPlan",
     "FakeExecutionProvider",
+    "ImageTransformPlan",
     "LeaseConflict",
     "LifecycleSnapshot",
+    "PrimitiveEvaluationError",
+    "RecipeValidationError",
     "RuntimeHealth",
+    "evaluate_calculator",
+    "evaluate_check",
+    "parse_calculator",
+    "parse_check",
+    "parse_image_transform",
 ]
