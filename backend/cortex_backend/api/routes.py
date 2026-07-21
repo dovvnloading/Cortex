@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
+import asyncio
 import hmac
 import json
 import logging
@@ -26,6 +27,9 @@ from cortex_backend.core.settings import CortexSettings
 from cortex_backend.repositories.chats import ChatRepositoryError
 from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
+from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.execution.fake import FakeExecutionPlan
+from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import JobConflict, JobNotFound, JobOwnershipError, JobSnapshot
@@ -37,6 +41,12 @@ from .schemas import (
     ClearMemoryRequest,
     CreateChatRequest,
     DiagnosticsResponse,
+    ExecutionAccepted,
+    ExecutionPreviewRequest,
+    ExecutionSSEEvent,
+    ExecutionStatusResponse,
+    ExecutionTaskListResponse,
+    ExecutionTaskSummary,
     ForkRequest,
     GenerationEvent,
     GenerationRequest,
@@ -125,6 +135,10 @@ def build_router() -> APIRouter:
     ) -> SystemResponse:
         return SystemResponse(
             preview=request.app.state.preview,
+            execution_preview_available=(
+                request.app.state.preview
+                and request.app.state.execution_coordinator is not None
+            ),
             started_at=request.app.state.started_at,
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,
@@ -376,6 +390,139 @@ def build_router() -> APIRouter:
             installed,
             models=inventory,
             connection=connection,
+        )
+
+    @router.post(
+        "/execution/preview/fake",
+        response_model=ExecutionAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_fake_execution(
+        request: Request,
+        payload: ExecutionPreviewRequest,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ExecutionAccepted:
+        coordinator = _execution_coordinator(request)
+        try:
+            job = coordinator.start(
+                owner=principal.session_id,
+                request_id=payload.request_id,
+                plan=FakeExecutionPlan(
+                    outcome=payload.outcome,
+                    steps=payload.steps,
+                    step_delay_seconds=payload.step_delay_seconds,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ExecutionAccepted(
+            job_id=job.job_id,
+            request_id=job.request_id,
+            profile="fake.v1",
+            status=job.status,
+            sequence=job.sequence,
+        )
+
+    @router.get("/execution/tasks", response_model=ExecutionTaskListResponse)
+    def execution_tasks(
+        request: Request,
+        include_terminal: bool = False,
+        limit: int = 50,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ExecutionTaskListResponse:
+        repository = _execution_repository(request)
+        try:
+            jobs = repository.list_jobs(
+                owner=principal.session_id,
+                include_terminal=include_terminal,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ExecutionTaskListResponse(
+            tasks=[_execution_task_summary(repository, job) for job in jobs]
+        )
+
+    @router.get("/execution/{job_id}", response_model=ExecutionStatusResponse)
+    def execution_status(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ExecutionStatusResponse:
+        repository = _execution_repository(request)
+        job = repository.get_job(job_id, owner=principal.session_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        return _execution_status_response(repository, job)
+
+    @router.post(
+        "/execution/{job_id}/cancel", response_model=ExecutionStatusResponse
+    )
+    def cancel_execution(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ExecutionStatusResponse:
+        coordinator = _execution_coordinator(request)
+        try:
+            coordinator.cancel(job_id, owner=principal.session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Execution job not found.") from exc
+        job = coordinator.repository.get_job(job_id, owner=principal.session_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        return _execution_status_response(coordinator.repository, job)
+
+    @router.get(
+        "/execution/{job_id}/events",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Server-sent execution events.",
+                "content": {"text/event-stream": {}},
+            }
+        },
+    )
+    async def execution_events(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> StreamingResponse:
+        repository = _execution_repository(request)
+        if repository.get_job(job_id, owner=principal.session_id) is None:
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        cursor = _last_event_cursor(request)
+
+        async def stream():
+            next_sequence = cursor
+            idle_rounds = 0
+            while True:
+                events = repository.events(job_id, after_sequence=next_sequence)
+                if events:
+                    idle_rounds = 0
+                    for event in events:
+                        next_sequence = event.sequence
+                        yield _execution_sse_line(event)
+                    current = repository.get_job(job_id, owner=principal.session_id)
+                    if current is not None and current.status in TerminalExecutionStatus:
+                        return
+                else:
+                    idle_rounds += 1
+                    current = repository.get_job(job_id, owner=principal.session_id)
+                    if current is None:
+                        return
+                    if current.status in TerminalExecutionStatus:
+                        return
+                    if idle_rounds >= 600:
+                        return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.01)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @router.post(
@@ -1197,3 +1344,91 @@ def _raise_repository_error(operation: str, exc: Exception) -> None:
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"Could not {operation}.",
     ) from exc
+
+
+def _execution_coordinator(request: Request) -> DurableFakeCoordinator:
+    """Require the explicitly injected fake-only preview coordinator."""
+    coordinator = getattr(request.app.state, "execution_coordinator", None)
+    if not request.app.state.preview or coordinator is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution preview is unavailable.",
+        )
+    return coordinator
+
+
+def _execution_repository(request: Request):
+    return _execution_coordinator(request).repository
+
+
+def _execution_latest_event(
+    repository, job: ExecutionJob
+) -> ExecutionEvent | None:
+    events = repository.events(job.job_id, after_sequence=max(0, job.sequence - 1))
+    return events[-1] if events else None
+
+
+def _execution_message(event: ExecutionEvent | None) -> str | None:
+    if event is None:
+        return None
+    message = event.data.get("message")
+    return message if isinstance(message, str) else None
+
+
+def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatusResponse:
+    event = _execution_latest_event(repository, job)
+    return ExecutionStatusResponse(
+        job_id=job.job_id,
+        request_id=job.request_id,
+        profile="fake.v1",
+        status=job.status,
+        sequence=job.sequence,
+        phase=event.phase if event else None,
+        message=_execution_message(event),
+        can_cancel=job.status in {"queued", "running", "cancelling"},
+        error=job.error,
+        result=dict(job.result) if job.result is not None else None,
+    )
+
+
+def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
+    response = _execution_status_response(repository, job)
+    return ExecutionTaskSummary(
+        job_id=response.job_id,
+        profile="fake.v1",
+        status=response.status,
+        sequence=response.sequence,
+        phase=response.phase,
+        message=response.message,
+        can_cancel=response.can_cancel,
+        created_at=datetime.fromisoformat(job.created_at),
+        updated_at=datetime.fromisoformat(job.updated_at),
+    )
+
+
+def _last_event_cursor(request: Request) -> int:
+    raw = request.headers.get("last-event-id", "0")
+    try:
+        cursor = int(raw or "0")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer.") from exc
+    if cursor < 0:
+        raise HTTPException(status_code=400, detail="Last-Event-ID must be non-negative.")
+    return cursor
+
+
+def _execution_sse_line(event: ExecutionEvent) -> str:
+    payload = ExecutionSSEEvent(
+        id=event.sequence,
+        sequence=event.sequence,
+        job_id=event.job_id,
+        event=f"execution.{event.event}",
+        status=event.status,
+        phase=event.phase,
+        data=dict(event.data),
+    ).model_dump(mode="json")
+    return (
+        f"id: {event.sequence}\n"
+        f"event: execution.{event.event}\n"
+        f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    )

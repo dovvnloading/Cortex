@@ -39,6 +39,7 @@ class SystemResponse(APIModel):
     status: Literal["ok"] = "ok"
     preview: bool = True
     session_required: bool = True
+    execution_preview_available: bool = False
     started_at: datetime
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_setup_url: str = "https://ollama.com/download"
@@ -159,6 +160,88 @@ class ModelResponse(APIModel):
 
 class ModelPullRequest(APIModel):
     model: str = Field(min_length=1, max_length=200)
+
+
+ExecutionStatus = Literal[
+    "queued",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
+ExecutionEventName = Literal[
+    "execution.queued",
+    "execution.started",
+    "execution.progress",
+    "execution.cancelling",
+    "execution.recovered",
+    "execution.completed",
+    "execution.failed",
+    "execution.cancelled",
+]
+ExecutionApprovalState = Literal[
+    "not_required",
+    "pending",
+    "approved",
+    "denied",
+    "expired",
+]
+
+
+class ExecutionPreviewRequest(APIModel):
+    request_id: str = Field(min_length=1, max_length=200)
+    outcome: Literal["success", "failure"] = "success"
+    steps: int = Field(default=3, ge=1, le=20)
+    step_delay_seconds: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ExecutionAccepted(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal["fake.v1"]
+    status: ExecutionStatus
+    sequence: int
+
+
+class ExecutionStatusResponse(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal["fake.v1"]
+    status: ExecutionStatus
+    sequence: int
+    phase: str | None = None
+    message: str | None = None
+    approval_state: ExecutionApprovalState = "not_required"
+    can_cancel: bool = False
+    error: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class ExecutionTaskSummary(APIModel):
+    job_id: str
+    profile: Literal["fake.v1"]
+    status: ExecutionStatus
+    sequence: int
+    phase: str | None = None
+    message: str | None = None
+    can_cancel: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionTaskListResponse(APIModel):
+    tasks: list[ExecutionTaskSummary] = Field(default_factory=list)
+
+
+class ExecutionSSEEvent(APIModel):
+    id: int
+    sequence: int
+    job_id: str
+    event: ExecutionEventName
+    status: ExecutionStatus
+    phase: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 JobKind = Literal["generation", "models"]

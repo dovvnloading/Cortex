@@ -4,6 +4,9 @@ import type {
   ChatSummary,
   CreateChatRequest,
   DiagnosticsResponse,
+  ExecutionSSEEvent,
+  ExecutionStatusResponse,
+  ExecutionTaskListResponse,
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
@@ -230,6 +233,51 @@ export class CortexApi {
       `/jobs/${encodeURIComponent(jobId)}/cancel`,
       { method: "POST" },
     );
+  }
+
+  executionTasks(options: { includeTerminal?: boolean; limit?: number } = {}): Promise<ExecutionTaskListResponse> {
+    const params = new URLSearchParams();
+    if (options.includeTerminal !== undefined) params.set("include_terminal", String(options.includeTerminal));
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return this.request<ExecutionTaskListResponse>(`/execution/tasks${query ? `?${query}` : ""}`);
+  }
+
+  cancelExecution(jobId: string): Promise<ExecutionStatusResponse> {
+    return this.request<ExecutionStatusResponse>(
+      `/execution/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+  }
+
+  async streamExecution(
+    jobId: string,
+    onEvent: (event: ExecutionSSEEvent) => void,
+    options: { signal?: AbortSignal; afterEventId?: number } = {},
+  ): Promise<void> {
+    const headers = this.authHeaders();
+    if (options.afterEventId !== undefined) headers.set("Last-Event-ID", String(options.afterEventId));
+    const response = await this.fetcher(
+      `${this.baseUrl}/execution/${encodeURIComponent(jobId)}/events`,
+      { headers, signal: options.signal },
+    );
+    if (response.status === 401) this.clearSession();
+    if (!response.ok || !response.body) throw new ApiError(response.status, await this.errorDetail(response));
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const chunk = await reader.read();
+      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const data = frame.split("\n").filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim()).join("\n");
+        if (data) onEvent(JSON.parse(data) as ExecutionSSEEvent);
+      }
+      if (chunk.done) break;
+    }
   }
 
   async streamJob(

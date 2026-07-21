@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import type { ChatResponse, ChatSummary, CortexSettings, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, ChatSummary, CortexSettings, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { ChatPage } from "../components/ChatPage";
@@ -70,6 +70,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
+  const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
 
   const loadWorkspace = useCallback(async () => {
@@ -109,6 +110,40 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const resolved = theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : theme === "system" ? "light" : theme;
     document.documentElement.dataset.theme = resolved;
   }, [theme]);
+
+  useEffect(() => {
+    if (!system?.execution_preview_available) {
+      return undefined;
+    }
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+        if (!disposed) setExecutionTasks(response.tasks);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [api, onSessionExpired, system?.execution_preview_available]);
+
+  const visibleExecutionTasks = system?.execution_preview_available ? executionTasks : [];
+
+  const cancelExecution = async (jobId: string) => {
+    try {
+      await api.cancelExecution(jobId);
+      const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+      setExecutionTasks(response.tasks);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      else notify(apiMessage(error, "Could not stop the background task."), "error");
+    }
+  };
 
   const renameChat = async (id: string, title: string) => {
     try {
@@ -239,7 +274,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         <Routes>
           <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
           <Route path="/chat/new" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
