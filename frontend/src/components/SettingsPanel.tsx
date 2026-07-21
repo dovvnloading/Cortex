@@ -217,9 +217,27 @@ export function SettingsPanel({
                       <RoundedPicker id="translation-model" labelledBy="translation-model-label" value={selectedTranslationModel} options={modelOptions} placeholder={`${configuredTranslationModel} is not installed`} onChange={(translationModel) => update({ models: { ...modelSettings, translation: translationModel } })} />
                     </div>
                   ) : <p className="field-error">Install a local model before enabling translation.</p>}
-                  {!installedModels.includes(DEFAULT_TRANSLATION_MODEL) && <div className="translation-install">
+                  {!installedModels.includes(DEFAULT_TRANSLATION_MODEL) && <div className={`translation-install${modelBusy ? " translation-install-active" : ""}`}>
                     <span><strong>Default translation model</strong><small>{DEFAULT_TRANSLATION_MODEL} is optional and is only used when translation is enabled.</small></span>
-                    <button className="button button-secondary" type="button" onClick={() => void onPullModel(DEFAULT_TRANSLATION_MODEL)} disabled={modelBusy}>Install default</button>
+                    <button
+                      className="button button-secondary translation-install-button"
+                      type="button"
+                      onClick={() => void onPullModel(DEFAULT_TRANSLATION_MODEL)}
+                      disabled={modelBusy}
+                      aria-busy={modelBusy}
+                    >
+                      {modelBusy && <span className="loading-spinner button-loading-spinner" aria-hidden="true" />}
+                      {modelBusy ? (modelProgress?.model === DEFAULT_TRANSLATION_MODEL ? "Installing…" : "Working…") : "Install default"}
+                    </button>
+                    {modelBusy && (
+                      <div className="translation-install-status" role="status" aria-label="Model installation status" aria-live="polite">
+                        <span className="loading-spinner translation-install-status-spinner" aria-hidden="true" />
+                        <span className="translation-install-status-copy">
+                          {modelProgress?.model === DEFAULT_TRANSLATION_MODEL ? modelProgress.status : "Checking local model availability…"}
+                        </span>
+                        {modelProgress?.model === DEFAULT_TRANSLATION_MODEL && modelProgress.percent !== null && <strong>{modelProgress.percent}%</strong>}
+                      </div>
+                    )}
                   </div>}
                 </>}
               </div>
