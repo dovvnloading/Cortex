@@ -17,6 +17,7 @@ import uvicorn  # noqa: E402
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
+from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
 from cortex_backend.repositories.legacy_storage import (  # noqa: E402
@@ -39,6 +40,10 @@ def build_preview_app(
 ):
     """Build the local web application without starting a server."""
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
+    execution_repository = ExecutionRepository(
+        paths.execution_database,
+        paths.execution_artifacts,
+    )
     database = DatabaseManager(app_paths=paths)
     database.migrate_from_json_if_needed()
     permanent_memory = PermanentMemoryManager(app_paths=paths)
@@ -90,10 +95,14 @@ def build_preview_app(
             return False
         permanent_memory.get_memos()
         settings_repository.load()
+        if not paths.execution_database.is_file():
+            return False
+        execution_repository.installation_principal_id
         return True
 
     session_manager = SessionManager(
         allowed_hosts=("127.0.0.1", "localhost", "::1"),
+        installation_principal_id=execution_repository.installation_principal_id,
     )
     app = create_app(
         dependencies,
@@ -104,8 +113,14 @@ def build_preview_app(
         ollama_host=ollama_host,
         handoff_secret=handoff_secret,
         readiness_check=readiness_check,
+        installation_principal_id=execution_repository.installation_principal_id,
     )
-    app.state.required_paths = (paths.data_dir, paths.database)
+    app.state.execution_repository = execution_repository
+    app.state.required_paths = (
+        paths.data_dir,
+        paths.database,
+        paths.execution_database,
+    )
     return app
 
 

@@ -8,8 +8,10 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 from collections.abc import Iterator, Mapping
+from threading import RLock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -24,10 +26,12 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,99}$")
+_SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
+_SCHEMA_LOCK = RLock()
 
 
 class ExecutionRepositoryError(RuntimeError):
@@ -65,7 +69,15 @@ class ExecutionRepository:
         self.db_path = Path(db_path)
         self.artifact_root = Path(artifact_root)
         self.max_artifact_bytes = max_artifact_bytes
+        self._installation_principal_id: str | None = None
         self._ensure_schema()
+
+    @property
+    def installation_principal_id(self) -> str:
+        """Return the stable per-installation owner, creating it atomically once."""
+        if self._installation_principal_id is None:
+            self._installation_principal_id = self._load_or_create_installation_principal()
+        return self._installation_principal_id
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -75,7 +87,6 @@ class ExecutionRepository:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 10000")
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
             yield connection
             connection.commit()
         except sqlite3.Error as exc:
@@ -93,7 +104,12 @@ class ExecutionRepository:
     def _ensure_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
+        with _SCHEMA_LOCK:
+            self._ensure_schema_locked()
+
+    def _ensure_schema_locked(self) -> None:
         with self.connect() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS execution_schema (
@@ -155,6 +171,11 @@ class ExecutionRepository:
                     lease_owner TEXT NOT NULL,
                     lease_expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS execution_installation_principal (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    principal_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS execution_events_job_sequence
                     ON execution_events(job_id, sequence);
                 CREATE INDEX IF NOT EXISTS execution_jobs_status_updated
@@ -170,10 +191,53 @@ class ExecutionRepository:
             if current_version > SCHEMA_VERSION:
                 raise ExecutionRepositoryError("Execution schema is newer than this build.")
             if current_version < SCHEMA_VERSION:
+                principal = self._ensure_installation_principal_connection(connection)
+                ambiguous = connection.execute(
+                    """
+                    SELECT request_id
+                    FROM execution_jobs
+                    GROUP BY request_id
+                    HAVING COUNT(DISTINCT owner) > 1
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if ambiguous is not None:
+                    raise ExecutionRepositoryError(
+                        "Legacy execution owners are ambiguous; migration stopped safely."
+                    )
+                connection.execute(
+                    "UPDATE execution_jobs SET owner = ? WHERE owner <> ?",
+                    (principal, principal),
+                )
                 connection.execute(
                     "UPDATE execution_schema SET version = ? WHERE id = 1",
                     (SCHEMA_VERSION,),
                 )
+
+    def _ensure_installation_principal_connection(
+        self, connection: sqlite3.Connection
+    ) -> str:
+        candidate = secrets.token_hex(32)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO execution_installation_principal
+            (id, principal_id, created_at) VALUES (1, ?, ?)
+            """,
+            (candidate, self._now()),
+        )
+        row = connection.execute(
+            "SELECT principal_id FROM execution_installation_principal WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise ExecutionRepositoryError("Installation principal is missing.")
+        value = str(row["principal_id"])
+        if _SAFE_INSTALLATION_PRINCIPAL.fullmatch(value) is None:
+            raise ExecutionRepositoryError("Installation principal is invalid.")
+        return value
+
+    def _load_or_create_installation_principal(self) -> str:
+        with self.connect() as connection:
+            return self._ensure_installation_principal_connection(connection)
 
     @staticmethod
     def _now() -> str:

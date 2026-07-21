@@ -38,7 +38,7 @@ def _app(tmp_path, *, preview: bool = True):
 
 def _owner(app, headers: dict[str, str]) -> str:
     token = headers["Authorization"].removeprefix("Bearer ")
-    return app.state.session_manager.authenticate(token).session_id
+    return app.state.session_manager.authenticate(token).installation_principal_id
 
 
 def _pending_approval(app, *, owner: str, job_id: str, ttl_seconds: float = 60.0):
@@ -137,7 +137,7 @@ def test_preview_lifecycle_is_owner_scoped_idempotent_and_replayable(tmp_path):
         assert tasks.json()["tasks"][0]["approval_state"] == "not_required"
 
 
-def test_preview_api_rejects_foreign_owner_and_cancels_durably(tmp_path):
+def test_preview_api_reuses_installation_owner_across_sessions_and_cancels_durably(tmp_path):
     app = _app(tmp_path)
     with TestClient(app) as client:
         first_headers = _session(client, app)
@@ -151,10 +151,10 @@ def test_preview_api_rejects_foreign_owner_and_cancels_durably(tmp_path):
         assert accepted.status_code == 202
         job_id = accepted.json()["job_id"]
 
-        foreign = client.get(f"/api/v1/execution/{job_id}", headers=second_headers)
-        assert foreign.status_code == 404
+        shared = client.get(f"/api/v1/execution/{job_id}", headers=second_headers)
+        assert shared.status_code == 200
         cancelled = client.post(
-            f"/api/v1/execution/{job_id}/cancel", headers=first_headers
+            f"/api/v1/execution/{job_id}/cancel", headers=second_headers
         )
         assert cancelled.status_code == 200
         for _ in range(200):
@@ -175,8 +175,22 @@ def test_approval_api_is_owner_scoped_exactly_once_and_redacted(tmp_path):
 
         app.state.session_manager.issue_bootstrap_token()
         second_headers = _session(client, app)
+        foreign_job = "approval-foreign"
+        repository.create_job(
+            job_id=foreign_job,
+            owner="f" * 64,
+            request_id="request-approval-foreign",
+            profile="artifact.extended.v1",
+            payload={"private": "must-not-leak"},
+        )
+        repository.request_approval(
+            foreign_job,
+            owner="f" * 64,
+            scope_digest="foreign-scope",
+            reason="Foreign approval.",
+        )
         foreign = client.post(
-            "/api/v1/execution/approval-owner/approval",
+            f"/api/v1/execution/{foreign_job}/approval",
             headers=second_headers,
             json={"decision": "approved"},
         )
@@ -196,7 +210,7 @@ def test_approval_api_is_owner_scoped_exactly_once_and_redacted(tmp_path):
 
         approved = client.post(
             "/api/v1/execution/approval-owner/approval",
-            headers=first_headers,
+            headers=second_headers,
             json={"decision": "approved"},
         )
         assert approved.status_code == 200

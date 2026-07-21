@@ -89,6 +89,7 @@ def create_app(
     handoff_secret: str | None = None,
     readiness_check: Callable[[], bool] | None = None,
     execution_coordinator: DurableFakeCoordinator | None = None,
+    installation_principal_id: str | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -103,7 +104,27 @@ def create_app(
         )
     else:
         allowed = tuple(allowed_hosts)
-    manager = session_manager or SessionManager(allowed_hosts=allowed)
+    repository_principal = (
+        execution_coordinator.repository.installation_principal_id
+        if execution_coordinator is not None
+        else None
+    )
+    if (
+        installation_principal_id is not None
+        and repository_principal is not None
+        and installation_principal_id != repository_principal
+    ):
+        raise ValueError("installation principal does not match execution repository")
+    configured_principal = installation_principal_id or repository_principal
+    manager = session_manager or SessionManager(
+        allowed_hosts=allowed,
+        installation_principal_id=configured_principal,
+    )
+    if (
+        configured_principal is not None
+        and manager.installation_principal_id != configured_principal
+    ):
+        raise ValueError("session manager principal does not match installation principal")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -128,6 +149,7 @@ def create_app(
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
     app.state.execution_coordinator = execution_coordinator
+    app.state.installation_principal_id = manager.installation_principal_id
     app.state.preview = preview
     app.state.ready = False
     app.state.shutting_down = False

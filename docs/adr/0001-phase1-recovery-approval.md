@@ -1,6 +1,6 @@
 # ADR-0001 Phase 1 approval and restart-supervisor contract
 
-- **Status:** Implemented and verified; approval UI/API is the next bounded stage
+- **Status:** Implemented and verified; production lifecycle/recovery integration is the next bounded stage
 - **Parent:** [Phase 1 API/task-tray contract](0001-phase1-api-contract.md)
 - **Scope:** Durable approval state and fake-only startup recovery
 
@@ -62,8 +62,9 @@ reaping remains a later runtime gate backed by the Phase 0 Job Object evidence.
 
 - Fake preview creation always reports `approval_state=not_required`.
 - Status/task responses report the persisted effective approval state.
-- No approval endpoint is exposed in this fake-only stage; broader approval UX is
-  reserved for a separately policy-reviewed provider profile.
+- Approval decisions are exposed only for explicitly persisted, non-fake approval
+  rows; the endpoint accepts allow-once or deny for the exact owner/job and never
+  dispatches a provider. Broader provider policy remains separately reviewed.
 - A startup recovery event is replayable through the existing execution SSE route.
 
 ## Required tests before the stage can close

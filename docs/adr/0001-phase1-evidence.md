@@ -1,7 +1,7 @@
 # ADR-0001 Phase 1 evidence log
 
 - **Phase:** 1 — durable jobs, artifacts, and UI with a fake executor
-- **Status:** Approval UI/API slice complete; overall Phase 1 remains in progress
+- **Status:** Installation-principal slice complete; overall Phase 1 remains in progress
 - **Scope:** Durable execution workflow only; no model-generated code, guest
   runtime, recipe provider, or host subprocess is enabled.
 - **Source decision:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
@@ -15,14 +15,15 @@ failures can be exhausted without executing code.
 
 | ADR requirement | Status | Evidence |
 | --- | --- | --- |
-| Add additive schema/migrations | **Complete (initial schema)** | New execution SQLite schema is isolated behind an injected database path; schema version 1 is created additively. |
+| Add additive schema/migrations | **Complete (schema v3)** | New execution SQLite schema is isolated behind an injected database path; approval/supervisor tables and the installation-principal row are created additively; version-ahead databases fail closed. |
+| Stable installation principal | **Complete (Phase 1 slice)** | A random 256-bit principal is created atomically in the per-user execution database, validated on every cold load, mapped into short-lived sessions, and reused across repository/app restart. |
 | Durable jobs and leases | **Complete (backend slice)** | Lease ownership, expiry, idempotent creation, and stale-lease recovery are covered by repository tests. |
 | Ordered durable events/replay | **Complete (backend slice)** | Append-only sequence numbers and cursor replay survive repository re-instantiation. Terminal state is immutable. |
 | Artifact store and retention | **Complete (backend slice)** | Copy-in, generated-root confinement, SHA-256 verification, size limits, atomic publish, expiry checks, and cleanup are tested. |
 | Task tray/accessibility/approvals | **Complete (Phase 1 slice)** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, keyboard Stop action, active-work spinner, and a non-modal pending-approval card with safe reason/profile/expiry plus Allow once/Deny controls. Decisions are exact-job, owner-scoped, expiry-gated, and never launch a provider. |
 | Cancellation and recovery | **Complete (backend + startup supervisor)** | Cooperative fake cancellation, terminal cancellation, per-job lease recovery, single-instance supervisor exclusion/reclaim, startup rehydration, approval expiry, and malformed-payload fail-closed behavior are covered; process/runtime cancellation is deferred to later phases. |
 | Deterministic fake provider | **Complete (backend slice)** | `fake.v1` emits fixed prepare/progress/completion/failure/cancellation outcomes and never accepts source, paths, network, or host-process controls. |
-| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement/UI/API, and startup supervisor are green. Installation-principal wiring and production lifecycle/recovery integration remain. |
+| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement/UI/API, startup supervisor, and installation-principal wiring are green. Production lifecycle/recovery integration remains. |
 
 ## Cross-check findings
 
@@ -41,8 +42,16 @@ failures can be exhausted without executing code.
 - The task tray is mounted outside route content and polls only when the backend
   advertises the explicit preview capability. Normal app instances do not poll a
   missing execution service.
-- Schema version 2 adds approval and single-instance supervisor tables
-  additively; version-ahead databases fail closed.
+- Schema version 2 added approval and single-instance supervisor tables
+  additively; schema version 3 adds the installation-principal row and remains
+  backward-compatible with v2 databases. Version-ahead databases fail closed.
+- Execution owner fields use the stable installation principal, never the
+  expiring bearer-session ID. Sessions remain the authentication boundary, and
+  a principal mismatch between the session manager and execution repository
+  fails closed before the app starts.
+- A v2-to-v3 upgrade binds unambiguous legacy jobs to the newly persisted
+  installation principal. If legacy owners share a request key, migration stops
+  before rewriting either row so idempotency ambiguity cannot select a job.
 - Startup recovery rehydrates only fake.v1 payloads and skips pending/denied/expired
   approvals. Unknown profiles or malformed payloads fail with
   `recovery_invalid_payload`.
@@ -82,6 +91,9 @@ failures can be exhausted without executing code.
 13. Denied and expired approvals terminally cancel their inert job with stable
     `approval_denied`/`approval_expired` diagnostics; no unlaunchable approval job
     remains queued.
+14. Installation-principal creation is singleton under concurrent repository
+    initialization, malformed persisted identity fails closed, and a restarted
+    app can enumerate only the same installation's execution jobs.
 
 ## Re-run target
 
@@ -89,6 +101,7 @@ failures can be exhausted without executing code.
 python -m compileall -q backend\\cortex_backend\\execution tests\\test_phase1_execution.py
 python -m pytest tests/test_phase1_execution.py -q
 python -m pytest tests/test_phase1_execution_api.py -q
+python -m pytest tests/test_phase1_installation_principal.py -q
 python -m pytest tests/test_phase1_recovery_contract.py -q
 python -m pytest -q
 python tools/generate_contracts.py
@@ -99,9 +112,8 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** compileall passed; the full Python suite passed
-111 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
+117 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
 typecheck, production build (`tsc -b` + Vite), and all 39 component tests passed.
 Generated OpenAPI/TypeScript contracts are current and `git diff --check` passed.
-Phase 1 cannot close until installation-principal wiring and production
-lifecycle/recovery integration are separately reviewed; this stage does not enable
-production code execution.
+Phase 1 cannot close until production lifecycle/recovery integration is separately
+reviewed; this stage does not enable production code execution.

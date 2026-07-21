@@ -574,9 +574,13 @@ sequence is monotonic per job, so `Last-Event-ID` replays without gaps or duplic
 Payloads are versioned and contain only UI-safe fields.
 
 The stable owner is a per-installation principal protected by the Windows user context,
-not the expiring API session ID. Each authenticated native-window session maps to that
-principal, allowing a restart to reclaim its own jobs without weakening loopback API
-authentication.
+not the expiring API session ID. The Phase 1 implementation stores one random 256-bit
+identifier in the execution SQLite database under the per-user application-data root,
+validates it on every cold load, and maps each authenticated native-window session to
+that principal. This allows a restart to reclaim its own jobs without weakening
+loopback API authentication. The v2-to-v3 migration binds unambiguous legacy jobs to
+the principal; if two legacy owners share a request key, startup fails closed rather
+than guessing which idempotency record to keep.
 
 ### Delivery and idempotency
 
@@ -1096,8 +1100,12 @@ These are resolved by Phase 0 evidence without weakening the decision invariants
    and local privacy?
 7. Which local Ollama models can be positively identified as reliable native tool-call
    models, and what user experience applies to unqualified models?
-8. What installation-principal representation best supports restart reattachment
-   without broadening loopback-session access?
+8. **Resolved in Phase 1:** Which installation-principal representation best supports
+   restart reattachment without broadening loopback-session access? A random
+   256-bit identifier in the user-scoped execution SQLite store, validated at startup
+   and never accepted from the API, keeps the bearer session as the authentication
+   boundary while making durable ownership restart-stable. Windows user-bound storage
+   hardening remains part of the production lifecycle gate.
 
 ## Reversal and rollback
 
