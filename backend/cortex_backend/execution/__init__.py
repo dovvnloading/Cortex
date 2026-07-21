@@ -6,6 +6,17 @@ providers are intentionally absent until later ADR gates are approved.
 
 from .fake import FakeExecutionPlan, FakeExecutionProvider
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
+from .manifest import (
+    ManifestEntry,
+    ManifestState,
+    ManifestVerificationError,
+    SignedRecipeManifest,
+    TrustedRecipeKeys,
+    VerifiedRecipeManifest,
+    parse_signed_manifest,
+    verify_bundle_files,
+    verify_signed_manifest,
+)
 from .recipes import (
     CalculatorPlan,
     CheckPlan,
@@ -41,12 +52,21 @@ __all__ = [
     "ImageTransformPlan",
     "LeaseConflict",
     "LifecycleSnapshot",
+    "ManifestEntry",
+    "ManifestState",
+    "ManifestVerificationError",
     "PrimitiveEvaluationError",
     "RecipeValidationError",
     "RuntimeHealth",
+    "SignedRecipeManifest",
+    "TrustedRecipeKeys",
+    "VerifiedRecipeManifest",
     "evaluate_calculator",
     "evaluate_check",
+    "parse_signed_manifest",
     "parse_calculator",
     "parse_check",
     "parse_image_transform",
+    "verify_bundle_files",
+    "verify_signed_manifest",
 ]

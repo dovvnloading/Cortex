@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Contract foundation implemented and verified; provider enablement remains blocked
+- **Status:** Contract and signed-manifest verification implemented and verified; provider enablement remains blocked
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -50,7 +50,9 @@ sandbox gates have succeeded.
 
 This ADR does not authorize:
 
-- a signed recipe/runtime bundle or public-key verification;
+- installation or loading of a signed recipe/runtime bundle; manifest signature and
+  byte verification are implemented separately in
+  [the signed-manifest ADR](0001-phase2-signed-manifest.md);
 - image codecs, thumbnails, or decompression handling;
 - production broker named-pipe ACL, peer identity, framing, or IPC;
 - artifact copy-in, output validation, atomic publication, or source ownership binding;
@@ -62,12 +64,11 @@ packaged application remains on the explicitly disabled lifecycle from Phase 1.
 
 ## Required next gates
 
-1. Define and verify a signed, pinned recipe manifest and update/rollback policy.
-2. Implement the production broker contract with ACL, peer identity, framing, message
+1. Implement the production broker contract with ACL, peer identity, framing, message
    limits, and confused-deputy tests.
-3. Implement trusted copy-in/output validation and artifact publication tests,
+2. Implement trusted copy-in/output validation and artifact publication tests,
    including parser fuzzing and source non-overwrite proofs.
-4. Qualify the fixed-function provider inside the OS sandbox and wire it only through
+3. Qualify the fixed-function provider inside the OS sandbox and wire it only through
    a passing lifecycle health check after external review.
 
 ## Verification
