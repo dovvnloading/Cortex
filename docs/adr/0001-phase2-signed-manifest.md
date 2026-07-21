@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 signed recipe manifest and rollback gate
 
-- **Status:** Implemented and verified; installation and provider enablement remain blocked
+- **Status:** Implemented and verified; the storage installer is complete and provider enablement remains blocked
 - **Parent:** [Phase 2 typed recipe contract](0001-phase2-recipe-contract.md)
 - **Scope:** Canonical Ed25519 manifest signatures, pinned bundle bytes, monotonic
   update policy, and explicit rollback authorization
@@ -32,12 +32,13 @@ to the exact current manifest digest and must be accompanied by a separate trust
 local rollback authorization. A signed manifest alone cannot authorize rollback. This
 prevents a compromised or stale feed from silently downgrading a healthy installation.
 
-The verifier returns a candidate state but does not persist it. A future installer must
-verify the complete bundle, atomically install it, persist the candidate state only
-after successful installation, and retain the previous verified state for recovery.
-Power loss, partial replacement, failed verification, and failed startup must leave
-the previously accepted state active or leave execution unavailable; there is no
-fallback to an unverified directory.
+The verifier returns a candidate state but does not persist it. The storage boundary
+in [the bundle installation ADR](0001-phase2-bundle-installation.md) verifies the
+complete bundle, atomically installs an immutable digest generation, persists the
+candidate state only after successful installation, and retains the previous verified
+state for explicit recovery. Power loss, partial replacement, failed verification,
+and failed startup leave the previously accepted state active or leave execution
+unavailable; there is no fallback to an unverified directory.
 
 ## Bundle byte verification
 
@@ -58,11 +59,12 @@ detail is returned to a model or API response.
 
 ## Explicit non-goals
 
-This gate does not provide key rotation, remote update transport, persistent state
-storage, atomic installation, SBOM validation, Authenticode verification, image
-decoding, production broker IPC, OS sandboxing, or runtime/provider enablement. Each
-requires its own implementation evidence and review. The application lifecycle remains
-disabled for production execution.
+This manifest verifier does not provide remote update transport, SBOM validation,
+Authenticode verification, image decoding, production broker IPC, OS sandboxing, or
+runtime/provider enablement. Key rotation, persistent state, atomic installation,
+and explicit recovery are implemented separately in
+[the bundle installation ADR](0001-phase2-bundle-installation.md). The application
+lifecycle remains disabled for production execution.
 
 ## Verification
 

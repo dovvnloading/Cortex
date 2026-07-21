@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, and native broker transport complete; installation, staging, provider, and release gates remain open
+- **Status:** Typed contract, signed-manifest verification, native broker transport, and signed bundle installation complete; artifact staging, provider, and release gates remain open
 - **Scope:** Provider-independent validation and deterministic trusted primitives only
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -15,10 +15,10 @@
 | Calculator/check primitives | **Complete (trusted pure helpers)** | Decimal-only calculator operations and explicit comparisons are deterministic, bounded, and have no I/O or code execution surface. |
 | Canonical plan identity | **Complete** | Validated plans expose stable canonical JSON and SHA-256 digests for future idempotency/signature binding. |
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
-| Signed bundle installation/update | **Blocked / next gate** | Verification does not install, load, atomically replace, persist state, rotate keys, or enable a provider. |
+| Signed bundle installation/update | **Complete (storage-only)** | Digest-named immutable generations, exclusive staging, atomic activation state, chained keyring rotation, explicit rollback authorization, and previous-generation recovery are covered by installer tests. No provider is loaded. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
-| Copy-in, image decoding, output validation, publication | **Blocked / next gate** | No codec or provider path has been enabled; Phase 1 artifact storage remains the only publication mechanism. |
+| User-artifact copy-in, image decoding, output validation, publication | **Blocked / next gate** | The signed bundle installer copies only its declared bundle files; user-owned artifact snapshotting, codec validation, output publication, and source non-overwrite proofs remain unimplemented. |
 | Production sandbox provider and execution route | **Blocked / next gate** | The native pipe is transport-only; no Wasmtime, AppContainer, Job Object, subprocess, lifecycle provider, or production execution route was added. |
 
 ## Security invariants
@@ -49,6 +49,12 @@
 12. Native transport uses a protected local-only DACL, rejects remote clients, requires
     expected process binding, and closes on identity or handshake failure; it never
     falls back to a default ACL, alternate transport, or provider.
+13. Bundle installation copies only verified declared bytes into an exclusive staging
+    tree, rejects reparse points/hardlinks and source mutation, and activates only a
+    complete digest-named generation.
+14. The activation pointer is atomically replaced only after the generation is
+    verified; keyring updates are signature-chained and rollback/recovery always need
+    a separate trusted local decision.
 
 ## Re-run target
 
@@ -57,6 +63,7 @@ python -m pytest tests/test_phase2_recipe_contract.py -q
 python -m pytest tests/test_phase2_manifest.py -q
 python -m pytest tests/test_phase2_broker.py -q
 python -m pytest tests/test_phase2_native_broker.py -q
+python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -67,8 +74,8 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
-7 broker-contract tests, 9 native-broker tests, and the full Python suite passed (164 tests total)
-with one native-platform skip and one pre-existing
+7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, and the full
+Python suite passed (171 tests total) with one native-platform skip and one pre-existing
 `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution

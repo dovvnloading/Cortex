@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Typed contract, signed-manifest verification, and native broker transport implemented and verified; bundle installation, staging, and provider enablement remain blocked
+- **Status:** Typed contract, signed-manifest verification, native broker transport, and signed bundle installation implemented and verified; copy-in/output and provider enablement remain blocked
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -50,10 +50,10 @@ sandbox gates have succeeded.
 
 This ADR does not authorize:
 
-- installation or loading of a signed recipe/runtime bundle; manifest signature and
-  byte verification are implemented separately in
-  [the signed-manifest ADR](0001-phase2-signed-manifest.md), while atomic install,
-  persistent state, key rotation, and recovery remain separate;
+- production loading of a signed recipe/runtime bundle; manifest signature and byte
+  verification plus storage installation are implemented separately in
+  [the signed-manifest ADR](0001-phase2-signed-manifest.md) and
+  [the bundle installation ADR](0001-phase2-bundle-installation.md);
 - image codecs, thumbnails, or decompression handling;
 - artifact copy-in, output validation, atomic publication, or source ownership binding;
 - production execution beyond the transport-only
@@ -66,11 +66,9 @@ packaged application remains on the explicitly disabled lifecycle from Phase 1.
 
 ## Required next gates
 
-1. Implement signed bundle installation/update with atomic replacement, persistent
-   verified state, key rotation, and explicit rollback recovery.
-2. Implement trusted copy-in/output validation and artifact publication tests,
+1. Implement trusted user-artifact copy-in/output validation and artifact publication tests,
    including parser fuzzing and source non-overwrite proofs.
-3. Qualify the fixed-function provider inside the OS sandbox and wire it only through
+2. Qualify the fixed-function provider inside the OS sandbox and wire it only through
    a passing lifecycle health check after external review.
 
 ## Verification

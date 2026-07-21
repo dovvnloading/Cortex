@@ -1,8 +1,9 @@
 """Fail-closed verification for signed, pinned recipe bundles.
 
 Manifest verification authenticates a bundle description and its bytes.  It does not
-install, load, decode, execute, or publish a recipe provider.  Those actions remain
-separate sandbox and release gates.
+install, load, decode, execute, or publish a recipe provider.  Installation is kept
+in the separate ``SignedBundleInstaller`` storage gate; provider and sandbox actions
+remain release gates.
 """
 
 from __future__ import annotations
@@ -216,6 +217,31 @@ class TrustedRecipeKeys:
         except (TypeError, ValueError, UnsupportedAlgorithm):
             raise ManifestVerificationError("manifest_key_untrusted") from None
 
+    @property
+    def keys(self) -> Mapping[str, bytes]:
+        """Return a defensive snapshot of the configured public keys."""
+
+        return dict(self._keys)
+
+    @property
+    def revoked(self) -> frozenset[str]:
+        """Return the immutable revoked-key snapshot."""
+
+        return self._revoked
+
+    def digest(self) -> str:
+        """Return a stable digest of the key identifiers and raw public keys."""
+
+        payload = {
+            "keys": {
+                key_id: base64.urlsafe_b64encode(self._keys[key_id]).decode("ascii").rstrip("=")
+                for key_id in sorted(self._keys)
+            },
+            "revoked": sorted(self._revoked),
+        }
+        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return sha256(encoded.encode("ascii")).hexdigest()
+
 
 def _parse_version(version: str) -> tuple[int, int, int]:
     match = _SEMVER.fullmatch(version)
@@ -288,14 +314,9 @@ def verify_signed_manifest(
     current: ManifestState | None = None,
     rollback_authorized: bool = False,
 ) -> VerifiedRecipeManifest:
-    manifest = parse_signed_manifest(payload)
-    public_key = trusted_keys.public_key(manifest.key_id)
-    signature = _decode_signature(manifest.signature)
-    try:
-        public_key.verify(signature, manifest.signed_payload())
-    except (InvalidSignature, ValueError, TypeError):
-        raise ManifestVerificationError("manifest_signature_invalid") from None
-    digest = manifest.manifest_digest()
+    verified = verify_manifest_signature(payload, trusted_keys)
+    digest = verified.digest
+    manifest = verified.manifest
     rollback = _validate_transition(
         manifest,
         digest,
@@ -303,6 +324,26 @@ def verify_signed_manifest(
         rollback_authorized=rollback_authorized,
     )
     return VerifiedRecipeManifest(manifest=manifest, digest=digest, rollback=rollback)
+
+
+def verify_manifest_signature(
+    payload: Mapping[str, Any],
+    trusted_keys: TrustedRecipeKeys,
+) -> VerifiedRecipeManifest:
+    """Verify signature and digest without applying update/rollback transition rules."""
+
+    manifest = parse_signed_manifest(payload)
+    public_key = trusted_keys.public_key(manifest.key_id)
+    signature = _decode_signature(manifest.signature)
+    try:
+        public_key.verify(signature, manifest.signed_payload())
+    except (InvalidSignature, ValueError, TypeError):
+        raise ManifestVerificationError("manifest_signature_invalid") from None
+    return VerifiedRecipeManifest(
+        manifest=manifest,
+        digest=manifest.manifest_digest(),
+        rollback=False,
+    )
 
 
 def verify_bundle_files(manifest: SignedRecipeManifest, bundle_root: Path) -> None:
@@ -349,5 +390,6 @@ __all__ = [
     "VerifiedRecipeManifest",
     "parse_signed_manifest",
     "verify_bundle_files",
+    "verify_manifest_signature",
     "verify_signed_manifest",
 ]

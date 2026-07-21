@@ -1,8 +1,9 @@
 """Durable execution primitives and provider-independent safety contracts.
 
-Only the deterministic fake provider and reviewed broker contracts are exposed in
-this phase. The native adapter remains transport-only; real runtime providers stay
-absent until later ADR gates are approved.
+Only deterministic contracts, the storage-only signed bundle installer, and the
+reviewed broker transports are exposed in this phase. Native transport and bundle
+storage never load a provider; real runtime providers stay absent until later ADR
+gates are approved.
 """
 
 from .broker import (
@@ -21,6 +22,16 @@ from .broker import (
     encode_message,
 )
 from .fake import FakeExecutionPlan, FakeExecutionProvider
+from .bundle_installer import (
+    BundleInstallError,
+    BundleRecord,
+    InstalledBundle,
+    KeyringUpdate,
+    RollbackAuthorizer,
+    SignedBundleInstaller,
+    parse_keyring_update,
+    verify_keyring_update,
+)
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
 from .manifest import (
     ManifestEntry,
@@ -31,6 +42,7 @@ from .manifest import (
     VerifiedRecipeManifest,
     parse_signed_manifest,
     verify_bundle_files,
+    verify_manifest_signature,
     verify_signed_manifest,
 )
 from .native_broker import (
@@ -77,6 +89,8 @@ __all__ = [
     "BrokerPeerPolicy",
     "BrokerProtocolError",
     "BrokerSessionKeys",
+    "BundleInstallError",
+    "BundleRecord",
     "DEFAULT_NATIVE_CONNECT_TIMEOUT_MS",
     "DEFAULT_NATIVE_PIPE_BUFFER_BYTES",
     "ExecutionRepository",
@@ -87,6 +101,8 @@ __all__ = [
     "FakeExecutionPlan",
     "FakeExecutionProvider",
     "ImageTransformPlan",
+    "InstalledBundle",
+    "KeyringUpdate",
     "LeaseConflict",
     "LifecycleSnapshot",
     "ManifestEntry",
@@ -102,6 +118,8 @@ __all__ = [
     "PrimitiveEvaluationError",
     "RecipeValidationError",
     "RuntimeHealth",
+    "RollbackAuthorizer",
+    "SignedBundleInstaller",
     "SignedRecipeManifest",
     "TrustedRecipeKeys",
     "VerifiedRecipeManifest",
@@ -112,6 +130,9 @@ __all__ = [
     "parse_check",
     "parse_image_transform",
     "verify_bundle_files",
+    "verify_manifest_signature",
+    "parse_keyring_update",
+    "verify_keyring_update",
     "verify_signed_manifest",
     "PeerIdentity",
     "authorize_message",

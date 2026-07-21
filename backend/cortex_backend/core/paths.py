@@ -95,6 +95,11 @@ class AppPaths:
         return self.data_dir / "execution_artifacts"
 
     @property
+    def recipe_bundle_store(self) -> Path:
+        """Durable signed recipe generations and their verified activation state."""
+        return self.data_dir / "recipe_bundles"
+
+    @property
     def webview_profile(self) -> Path:
         """Keep native webview state isolated from every installed browser profile."""
         return self.data_dir / "webview"
