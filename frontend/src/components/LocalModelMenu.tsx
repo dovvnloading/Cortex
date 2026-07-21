@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Cpu, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, RefreshCw } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 export type LocalModelMenuProps = {
@@ -188,7 +188,6 @@ export function LocalModelMenu({
     return (
       <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${localModels[0]}`}>
         <span className="local-model-menu-single-label" title={localModels[0]}>
-          <Cpu aria-hidden="true" size={15} />
           <span>{localModels[0]}</span>
         </span>
         {renderRescan()}
@@ -215,7 +214,6 @@ export function LocalModelMenu({
         }}
         onKeyDown={handleTriggerKeyDown}
       >
-        <Cpu aria-hidden="true" size={15} />
         <span className="local-model-menu-trigger-label">{selected ?? (localModels.length ? "Select model" : "No local models")}</span>
         <ChevronDown aria-hidden="true" size={15} />
       </button>

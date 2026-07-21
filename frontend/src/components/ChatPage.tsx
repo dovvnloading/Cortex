@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Copy, GitBranch, RefreshCw } from "lucide-react";
 import type { ChatMessage, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
+import { displayChatTitle } from "../lib/chatTitle";
 import { composerDraftKey, readComposerDraft, writeComposerDraft } from "../lib/composerDraft";
 import { humanizeGenerationStatus } from "../lib/generationStatus";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
@@ -382,7 +383,7 @@ export function ChatPage({
 
   return (
     <section className="chat-page" aria-labelledby="chat-title">
-      <h2 id="chat-title" className="sr-only">{chat?.title ?? "New Chat"}</h2>
+      <h2 id="chat-title" className="sr-only">{displayChatTitle(chat?.title, "New Chat")}</h2>
       <div className="transcript" ref={transcriptRef} onScroll={updateTranscriptPosition}>
         {messages.map((message, index) => (
           <MessageCard

@@ -8,7 +8,7 @@ describe("LocalModelMenu", () => {
     const user = userEvent.setup();
     const onRescan = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
-    render(
+    const { container } = render(
       <LocalModelMenu
         models={["local-chat:7b"]}
         selectedModel="local-chat:7b"
@@ -19,6 +19,7 @@ describe("LocalModelMenu", () => {
 
     expect(screen.getByLabelText("Local model: local-chat:7b")).toBeVisible();
     expect(screen.queryByRole("button", { name: /selected local model/i })).not.toBeInTheDocument();
+    expect(container.querySelector(".lucide-cpu")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));
     expect(onRescan).toHaveBeenCalledTimes(1);
@@ -28,7 +29,7 @@ describe("LocalModelMenu", () => {
     const user = userEvent.setup();
     const onSelect = vi.fn<(model: string) => boolean>().mockReturnValue(true);
 
-    render(
+    const { container } = render(
       <LocalModelMenu
         models={["local-chat:7b", "local-chat:13b", "local-code:7b"]}
         selectedModel="local-chat:13b"
@@ -37,6 +38,7 @@ describe("LocalModelMenu", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "Selected local model: local-chat:13b" });
+    expect(container.querySelector(".lucide-cpu")).not.toBeInTheDocument();
     trigger.focus();
     await user.keyboard("{ArrowDown}");
 
@@ -66,6 +68,9 @@ describe("LocalModelMenu", () => {
     const trigger = screen.getByRole("button", { name: "Selected local model: local-chat:7b" });
     trigger.focus();
     await user.keyboard("{ArrowDown}");
+
+    const selectedOption = screen.getByRole("option", { name: "local-chat:7b" });
+    await waitFor(() => expect(selectedOption).toHaveFocus());
     await user.keyboard("{Escape}");
 
     await waitFor(() => expect(trigger).toHaveFocus());

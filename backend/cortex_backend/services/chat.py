@@ -20,6 +20,19 @@ def normalize_title(raw_title: str | None, *, fallback: str = "New Chat") -> str
     """Normalize generated/user-visible titles to a short single line."""
     title = re.sub(r"[\x00-\x1f\x7f]", " ", str(raw_title or ""))
     title = re.sub(r"\s+", " ", title).strip().strip("\"'`").strip()
+    title = re.sub(r"^(?:title\s*:\s*|#{1,6}\s+|[-+]\s+)", "", title, flags=re.IGNORECASE)
+
+    # Local models sometimes add Markdown emphasis despite the title prompt
+    # requesting plain text. Conversation labels are application chrome, not
+    # rich content, so unwrap only complete outer Markdown tokens.
+    for _ in range(3):
+        unwrapped = re.sub(r"^(\*\*|__|`)(.+)\1$", r"\2", title)
+        unwrapped = re.sub(r"^([*_])(.+)\1$", r"\2", unwrapped)
+        if unwrapped == title:
+            break
+        title = unwrapped.strip()
+
+    title = re.sub(r"^\[([^\]]+)\]\([^\)]+\)$", r"\1", title).strip()
     if not title:
         return fallback
     return title[:80].rstrip() or fallback

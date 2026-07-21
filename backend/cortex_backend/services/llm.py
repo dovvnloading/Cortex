@@ -18,6 +18,7 @@ from cortex_backend.core.generation import (
     ModelOperationError,
     TranslationResult,
 )
+from cortex_backend.services.chat import normalize_title as normalize_chat_title
 
 
 def _get_asset_path(filename: str) -> Path:
@@ -506,8 +507,4 @@ class SynthesisAgent:
     @staticmethod
     def normalize_title(raw_title: str | None, fallback: str = "Untitled Chat") -> str:
         """Normalize generated titles before they enter persistence or the UI."""
-        title = re.sub(r"[\x00-\x1f\x7f]", " ", str(raw_title or ""))
-        title = re.sub(r"\s+", " ", title).strip().strip('"\'`').strip()
-        if not title:
-            return fallback
-        return title[:80].rstrip() or fallback
+        return normalize_chat_title(raw_title, fallback=fallback)
