@@ -85,6 +85,16 @@ class AppPaths:
         return self.data_dir / "cortex_vectors.sqlite"
 
     @property
+    def execution_database(self) -> Path:
+        """Durable Phase 1 execution state kept separate from chat/settings data."""
+        return self.data_dir / "execution.sqlite"
+
+    @property
+    def execution_artifacts(self) -> Path:
+        """Generated artifact root; callers must still enforce per-artifact limits."""
+        return self.data_dir / "execution_artifacts"
+
+    @property
     def webview_profile(self) -> Path:
         """Keep native webview state isolated from every installed browser profile."""
         return self.data_dir / "webview"

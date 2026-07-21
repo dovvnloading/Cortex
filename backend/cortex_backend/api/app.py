@@ -27,6 +27,7 @@ from cortex_backend.repositories.settings import (
 )
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.models import ModelService
+from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.testing.fake_ollama import (
     FakeGenerationEngine,
     FakeOllamaGateway,
@@ -87,6 +88,7 @@ def create_app(
     ollama_host: str | None = None,
     handoff_secret: str | None = None,
     readiness_check: Callable[[], bool] | None = None,
+    execution_coordinator: DurableFakeCoordinator | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -110,6 +112,8 @@ def create_app(
         yield
         app.state.ready = False
         await app.state.jobs.shutdown()
+        if app.state.execution_coordinator is not None:
+            app.state.execution_coordinator.shutdown()
 
     app = FastAPI(
         title="Cortex Local API",
@@ -123,6 +127,7 @@ def create_app(
     app.state.dependencies = dependencies or build_demo_dependencies()
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
+    app.state.execution_coordinator = execution_coordinator
     app.state.preview = preview
     app.state.ready = False
     app.state.shutting_down = False

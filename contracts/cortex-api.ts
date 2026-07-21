@@ -158,6 +158,57 @@ export interface ModelPullRequest {
   model: string;
 }
 
+export type ExecutionStatus = "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+export type ExecutionEventName = "execution.queued" | "execution.started" | "execution.progress" | "execution.cancelling" | "execution.recovered" | "execution.completed" | "execution.failed" | "execution.cancelled";
+
+export interface ExecutionAccepted {
+  job_id: string;
+  request_id: string;
+  profile: "fake.v1";
+  status: ExecutionStatus;
+  sequence: number;
+}
+
+export interface ExecutionTaskSummary {
+  job_id: string;
+  profile: "fake.v1";
+  status: ExecutionStatus;
+  sequence: number;
+  phase?: string | null;
+  message?: string | null;
+  can_cancel?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExecutionTaskListResponse {
+  tasks: Array<ExecutionTaskSummary>;
+}
+
+export interface ExecutionStatusResponse {
+  job_id: string;
+  request_id: string;
+  profile: "fake.v1";
+  status: ExecutionStatus;
+  sequence: number;
+  phase?: string | null;
+  message?: string | null;
+  approval_state?: "not_required" | "pending" | "approved" | "denied" | "expired";
+  can_cancel?: boolean;
+  error?: string | null;
+  result?: Record<string, unknown> | null;
+}
+
+export interface ExecutionSSEEvent {
+  id: number;
+  sequence: number;
+  job_id: string;
+  event: ExecutionEventName;
+  status: ExecutionStatus;
+  phase?: string | null;
+  data?: Record<string, unknown>;
+}
+
 export interface ModelResponse {
   required_models: Array<string>;
   optional_models: Array<string>;
@@ -247,6 +298,7 @@ export interface SystemResponse {
   status?: string;
   preview?: boolean;
   session_required?: boolean;
+  execution_preview_available?: boolean;
   started_at: string;
   ollama_host?: string;
   ollama_setup_url?: string;
