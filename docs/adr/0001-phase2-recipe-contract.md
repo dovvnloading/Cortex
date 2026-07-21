@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Typed contract, signed-manifest verification, and transport-neutral broker contract implemented and verified; native transport and provider enablement remain blocked
+- **Status:** Typed contract, signed-manifest verification, and native broker transport implemented and verified; bundle installation, staging, and provider enablement remain blocked
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -52,10 +52,12 @@ This ADR does not authorize:
 
 - installation or loading of a signed recipe/runtime bundle; manifest signature and
   byte verification are implemented separately in
-  [the signed-manifest ADR](0001-phase2-signed-manifest.md);
+  [the signed-manifest ADR](0001-phase2-signed-manifest.md), while atomic install,
+  persistent state, key rotation, and recovery remain separate;
 - image codecs, thumbnails, or decompression handling;
-- native production broker named-pipe ACL, peer-token acquisition, or IPC;
 - artifact copy-in, output validation, atomic publication, or source ownership binding;
+- production execution beyond the transport-only
+  [native broker adapter](0001-phase2-native-broker.md);
 - Wasmtime/WASI, AppContainer/LPAC, Job Object, host process, or any other provider;
 - model prompt/tool exposure, automatic execution, or application lifecycle enablement.
 
@@ -64,9 +66,8 @@ packaged application remains on the explicitly disabled lifecycle from Phase 1.
 
 ## Required next gates
 
-1. Complete the native broker adapter: named-pipe DACL, peer-token binding, reviewed
-   key handshake, and connection lifecycle around the verified transport-neutral
-   contract in [the broker ADR](0001-phase2-broker-contract.md).
+1. Implement signed bundle installation/update with atomic replacement, persistent
+   verified state, key rotation, and explicit rollback recovery.
 2. Implement trusted copy-in/output validation and artifact publication tests,
    including parser fuzzing and source non-overwrite proofs.
 3. Qualify the fixed-function provider inside the OS sandbox and wire it only through

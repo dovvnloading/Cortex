@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, and broker contract complete; native provider and release gates remain open
+- **Status:** Typed contract, signed-manifest verification, and native broker transport complete; installation, staging, provider, and release gates remain open
 - **Scope:** Provider-independent validation and deterministic trusted primitives only
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -17,9 +17,9 @@
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
 | Signed bundle installation/update | **Blocked / next gate** | Verification does not install, load, atomically replace, persist state, rotate keys, or enable a provider. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
-| Native named-pipe adapter/DACL/peer-token binding | **Blocked / next gate** | No pipe, security descriptor, token query, key handshake, or executor connection is enabled. |
+| Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | Copy-in, image decoding, output validation, publication | **Blocked / next gate** | No codec or provider path has been enabled; Phase 1 artifact storage remains the only publication mechanism. |
-| Production broker and sandbox provider | **Blocked / next gate** | No named-pipe broker, Wasmtime, AppContainer, Job Object, subprocess, or production execution route was added. |
+| Production sandbox provider and execution route | **Blocked / next gate** | The native pipe is transport-only; no Wasmtime, AppContainer, Job Object, subprocess, lifecycle provider, or production execution route was added. |
 
 ## Security invariants
 
@@ -46,6 +46,9 @@
     closed.
 11. Peer ACL/identity and durable job ownership are checked outside the wire payload;
     a principal or job mismatch cannot be used as a confused deputy.
+12. Native transport uses a protected local-only DACL, rejects remote clients, requires
+    expected process binding, and closes on identity or handshake failure; it never
+    falls back to a default ACL, alternate transport, or provider.
 
 ## Re-run target
 
@@ -53,6 +56,7 @@
 python -m pytest tests/test_phase2_recipe_contract.py -q
 python -m pytest tests/test_phase2_manifest.py -q
 python -m pytest tests/test_phase2_broker.py -q
+python -m pytest tests/test_phase2_native_broker.py -q
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -63,7 +67,8 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
-7 broker-contract tests, and the full Python suite passed (155 tests total) with one pre-existing
+7 broker-contract tests, 9 native-broker tests, and the full Python suite passed (164 tests total)
+with one native-platform skip and one pre-existing
 `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution

@@ -1,8 +1,8 @@
 """Durable execution primitives and provider-independent safety contracts.
 
-Only the deterministic fake provider and transport-neutral broker contract are
-exposed in this phase. Native transports and real runtime providers remain absent
-until later ADR gates are approved.
+Only the deterministic fake provider and reviewed broker contracts are exposed in
+this phase. The native adapter remains transport-only; real runtime providers stay
+absent until later ADR gates are approved.
 """
 
 from .broker import (
@@ -32,6 +32,18 @@ from .manifest import (
     parse_signed_manifest,
     verify_bundle_files,
     verify_signed_manifest,
+)
+from .native_broker import (
+    DEFAULT_NATIVE_CONNECT_TIMEOUT_MS,
+    DEFAULT_NATIVE_PIPE_BUFFER_BYTES,
+    MAX_NATIVE_PIPE_NAME_LENGTH,
+    NativeBrokerClient,
+    NativeBrokerClientConfig,
+    NativeBrokerConnection,
+    NativeBrokerError,
+    NativeBrokerServer,
+    NativeBrokerServerConfig,
+    build_pipe_sddl,
 )
 from .recipes import (
     CalculatorPlan,
@@ -65,6 +77,8 @@ __all__ = [
     "BrokerPeerPolicy",
     "BrokerProtocolError",
     "BrokerSessionKeys",
+    "DEFAULT_NATIVE_CONNECT_TIMEOUT_MS",
+    "DEFAULT_NATIVE_PIPE_BUFFER_BYTES",
     "ExecutionRepository",
     "ExecutionRepositoryError",
     "ExecutionLifecycle",
@@ -78,6 +92,13 @@ __all__ = [
     "ManifestEntry",
     "ManifestState",
     "ManifestVerificationError",
+    "MAX_NATIVE_PIPE_NAME_LENGTH",
+    "NativeBrokerClient",
+    "NativeBrokerClientConfig",
+    "NativeBrokerConnection",
+    "NativeBrokerError",
+    "NativeBrokerServer",
+    "NativeBrokerServerConfig",
     "PrimitiveEvaluationError",
     "RecipeValidationError",
     "RuntimeHealth",
@@ -94,6 +115,7 @@ __all__ = [
     "verify_signed_manifest",
     "PeerIdentity",
     "authorize_message",
+    "build_pipe_sddl",
     "decode_frame",
     "decode_message",
     "encode_frame",
