@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import re
 import secrets
 from threading import RLock
 from typing import Iterable
@@ -18,9 +19,20 @@ class SessionSecurityError(RuntimeError):
     """Raised for invalid or expired launcher-session credentials."""
 
 
+_INSTALLATION_PRINCIPAL_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_installation_principal_id(value: str) -> str:
+    """Validate the opaque, non-secret installation owner identifier."""
+    if not isinstance(value, str) or not _INSTALLATION_PRINCIPAL_PATTERN.fullmatch(value):
+        raise ValueError("installation_principal_id must be 64 lowercase hex characters")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SessionPrincipal:
     session_id: str
+    installation_principal_id: str
     expires_at: datetime
 
 
@@ -33,6 +45,7 @@ class SessionManager:
         bootstrap_token: str | None = None,
         ttl_seconds: int = 3600,
         allowed_hosts: Iterable[str] = ("127.0.0.1", "localhost", "::1"),
+        installation_principal_id: str | None = None,
     ):
         if ttl_seconds < 60:
             raise ValueError("session TTL must be at least 60 seconds")
@@ -41,6 +54,9 @@ class SessionManager:
         self._bootstrap_used = False
         self._ttl = timedelta(seconds=ttl_seconds)
         self._allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
+        self._installation_principal_id = validate_installation_principal_id(
+            installation_principal_id or secrets.token_hex(32)
+        )
         self._sessions: dict[str, SessionPrincipal] = {}
         self._lock = RLock()
 
@@ -65,6 +81,11 @@ class SessionManager:
     def allowed_hosts(self) -> frozenset[str]:
         return self._allowed_hosts
 
+    @property
+    def installation_principal_id(self) -> str:
+        """Return the stable owner shared by sessions in this installation."""
+        return self._installation_principal_id
+
     def exchange(self, bootstrap_token: str) -> SessionExchange:
         with self._lock:
             if self._bootstrap_used or self._bootstrap_expires_at <= datetime.now(timezone.utc) or not hmac.compare_digest(
@@ -78,6 +99,7 @@ class SessionManager:
             session_id = secrets.token_urlsafe(16)
             self._sessions[self._digest(raw_token)] = SessionPrincipal(
                 session_id=session_id,
+                installation_principal_id=self._installation_principal_id,
                 expires_at=expires_at,
             )
             return SessionExchange(

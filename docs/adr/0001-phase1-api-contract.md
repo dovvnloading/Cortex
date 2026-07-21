@@ -1,6 +1,6 @@
 # ADR-0001 Phase 1 API and task-tray contract
 
-- **Status:** Contract frozen; fake preview and approval-decision transport wired
+- **Status:** Contract frozen; fake preview, approval transport, and installation-principal ownership wired
 - **Parent:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
 - **Scope:** Authenticated, owner-scoped lifecycle transport for the Phase 1
   deterministic fake executor
@@ -17,13 +17,18 @@ scope for this stage.
 ## Authentication and ownership
 
 Every endpoint uses the existing loopback `SessionManager` bearer session. The
-session principal's `session_id` is the execution owner; a caller cannot read,
-cancel, stream, or enumerate another owner's jobs. A missing, malformed, expired,
-or cross-owner request returns the existing 401/403/404 contract without revealing
-whether another owner's job exists.
+session is short-lived authentication state; its `installation_principal_id` is
+the execution owner. The principal is a random 256-bit identifier persisted in the
+durable execution database under Cortex's per-user application-data directory and
+is never returned by the API. Each native-window session maps to that same
+principal, so a UI reload or application restart can reattach the installation's
+own tasks without weakening loopback authentication. A caller cannot read,
+cancel, stream, or enumerate a job owned by another installation principal. A
+missing, malformed, expired, or cross-owner request returns the existing
+401/403/404 contract without revealing whether another owner's job exists.
 
 `request_id` is required for the preview creation route, is immutable, and is
-deduplicated by `(owner, request_id)`. Retrying a request returns the original
+deduplicated by `(installation_principal_id, request_id)`. Retrying a request returns the original
 `job_id` and never starts a second worker.
 
 ## Preview lifecycle endpoints
@@ -159,6 +164,6 @@ connection as reconnectable rather than as success or failure.
    keyboard-native without taking focus.
 
 This contract does not close Phase 1. Fake preview, replay, task tray, recovery,
-and approval-decision slices are implemented. Installation-principal wiring and
-production lifecycle integration remain separate reviewed stages; real code
-execution is still unavailable.
+approval-decision transport, and installation-principal wiring are implemented.
+Production provider lifecycle integration remains a separate reviewed stage; real
+code execution is still unavailable.

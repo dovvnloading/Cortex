@@ -411,7 +411,7 @@ def build_router() -> APIRouter:
         coordinator = _execution_coordinator(request)
         try:
             job = coordinator.start(
-                owner=principal.session_id,
+                owner=_execution_owner(principal),
                 request_id=payload.request_id,
                 plan=FakeExecutionPlan(
                     outcome=payload.outcome,
@@ -439,7 +439,7 @@ def build_router() -> APIRouter:
         repository = _execution_repository(request)
         try:
             jobs = repository.list_jobs(
-                owner=principal.session_id,
+                owner=_execution_owner(principal),
                 include_terminal=include_terminal,
                 limit=limit,
             )
@@ -456,7 +456,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> ExecutionStatusResponse:
         repository = _execution_repository(request)
-        job = repository.get_job(job_id, owner=principal.session_id)
+        job = repository.get_job(job_id, owner=_execution_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(repository, job)
@@ -474,7 +474,7 @@ def build_router() -> APIRouter:
         try:
             repository.decide_approval(
                 job_id,
-                owner=principal.session_id,
+                owner=_execution_owner(principal),
                 decision=payload.decision,
             )
         except (ApprovalPolicyError, ApprovalTransitionError) as exc:
@@ -487,7 +487,7 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Execution job not found.",
             ) from exc
-        job = repository.get_job(job_id, owner=principal.session_id)
+        job = repository.get_job(job_id, owner=_execution_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(repository, job)
@@ -502,10 +502,10 @@ def build_router() -> APIRouter:
     ) -> ExecutionStatusResponse:
         coordinator = _execution_coordinator(request)
         try:
-            coordinator.cancel(job_id, owner=principal.session_id)
+            coordinator.cancel(job_id, owner=_execution_owner(principal))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Execution job not found.") from exc
-        job = coordinator.repository.get_job(job_id, owner=principal.session_id)
+        job = coordinator.repository.get_job(job_id, owner=_execution_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(coordinator.repository, job)
@@ -526,7 +526,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
         repository = _execution_repository(request)
-        if repository.get_job(job_id, owner=principal.session_id) is None:
+        if repository.get_job(job_id, owner=_execution_owner(principal)) is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         cursor = _last_event_cursor(request)
 
@@ -540,12 +540,12 @@ def build_router() -> APIRouter:
                     for event in events:
                         next_sequence = event.sequence
                         yield _execution_sse_line(event)
-                    current = repository.get_job(job_id, owner=principal.session_id)
+                    current = repository.get_job(job_id, owner=_execution_owner(principal))
                     if current is not None and current.status in TerminalExecutionStatus:
                         return
                 else:
                     idle_rounds += 1
-                    current = repository.get_job(job_id, owner=principal.session_id)
+                    current = repository.get_job(job_id, owner=_execution_owner(principal))
                     if current is None:
                         return
                     if current.status in TerminalExecutionStatus:
@@ -1381,6 +1381,11 @@ def _raise_repository_error(operation: str, exc: Exception) -> None:
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"Could not {operation}.",
     ) from exc
+
+
+def _execution_owner(principal: SessionPrincipal) -> str:
+    """Use the durable installation owner for execution, not the expiring session."""
+    return principal.installation_principal_id
 
 
 def _execution_coordinator(request: Request) -> DurableFakeCoordinator:

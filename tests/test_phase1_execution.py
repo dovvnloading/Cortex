@@ -31,14 +31,18 @@ def _repository(tmp_path):
 def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path):
     repository = _repository(tmp_path)
     with repository.connect() as connection:
-        assert connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0] == 2
+        assert connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0] == 3
         tables = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-    assert {"execution_approvals", "execution_supervisor_leases"} <= tables
+    assert {
+        "execution_approvals",
+        "execution_supervisor_leases",
+        "execution_installation_principal",
+    } <= tables
     first, created = repository.create_job(
         job_id="job-1",
         owner="session-a",
