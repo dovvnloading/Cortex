@@ -18,6 +18,9 @@ errors, strict pixel/resource limits, metadata stripping, pinned dependencies, a
 isolated subprocess for the decoder. See the official [Pillow security guidance](https://pillow.readthedocs.io/en/stable/handbook/security.html),
 [Image.open/verify/load reference](https://pillow.readthedocs.io/en/stable/reference/Image.html),
 and [Python support matrix](https://pillow.readthedocs.io/en/stable/installation/python-support.html).
+The repository pins the supported Pillow line as `>=12.3,<12.4`; signed bundle
+hashing and runtime packaging remain a later sandbox gate and are not implied by this
+Python dependency declaration.
 
 ## Decision
 
