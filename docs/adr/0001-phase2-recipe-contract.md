@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Contract and signed-manifest verification implemented and verified; provider enablement remains blocked
+- **Status:** Typed contract, signed-manifest verification, and transport-neutral broker contract implemented and verified; native transport and provider enablement remain blocked
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -54,7 +54,7 @@ This ADR does not authorize:
   byte verification are implemented separately in
   [the signed-manifest ADR](0001-phase2-signed-manifest.md);
 - image codecs, thumbnails, or decompression handling;
-- production broker named-pipe ACL, peer identity, framing, or IPC;
+- native production broker named-pipe ACL, peer-token acquisition, or IPC;
 - artifact copy-in, output validation, atomic publication, or source ownership binding;
 - Wasmtime/WASI, AppContainer/LPAC, Job Object, host process, or any other provider;
 - model prompt/tool exposure, automatic execution, or application lifecycle enablement.
@@ -64,8 +64,9 @@ packaged application remains on the explicitly disabled lifecycle from Phase 1.
 
 ## Required next gates
 
-1. Implement the production broker contract with ACL, peer identity, framing, message
-   limits, and confused-deputy tests.
+1. Complete the native broker adapter: named-pipe DACL, peer-token binding, reviewed
+   key handshake, and connection lifecycle around the verified transport-neutral
+   contract in [the broker ADR](0001-phase2-broker-contract.md).
 2. Implement trusted copy-in/output validation and artifact publication tests,
    including parser fuzzing and source non-overwrite proofs.
 3. Qualify the fixed-function provider inside the OS sandbox and wire it only through
