@@ -1,6 +1,6 @@
 # ADR-0001 Phase 1 approval and restart-supervisor contract
 
-- **Status:** Implemented and verified; production lifecycle/recovery integration is the next bounded stage
+- **Status:** Implemented and verified; production provider enablement remains a separate gate
 - **Parent:** [Phase 1 API/task-tray contract](0001-phase1-api-contract.md)
 - **Scope:** Durable approval state and fake-only startup recovery
 
@@ -55,8 +55,11 @@ Recovery is idempotent: a second pass sees no expired lease and emits no duplica
 recovery event. Terminal jobs are never reclaimed. Shutdown releases the supervisor
 lease after workers have received cancellation.
 
-The supervisor lease is not an OS/process containment primitive. Real process-tree
-reaping remains a later runtime gate backed by the Phase 0 Job Object evidence.
+The supervisor lease is not an OS/process containment primitive. The application
+lifecycle now owns startup/recovery/shutdown through the health-gated control-plane
+contract in [the production lifecycle ADR](0001-phase1-production-lifecycle.md).
+Real provider process-tree reaping remains a separate runtime gate backed by the
+Phase 0 Job Object evidence.
 
 ## API behavior
 

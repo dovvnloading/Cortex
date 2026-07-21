@@ -5,6 +5,7 @@ providers are intentionally absent until later ADR gates are approved.
 """
 
 from .fake import FakeExecutionPlan, FakeExecutionProvider
+from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
 from .repository import (
     ArtifactLimitError,
     ApprovalPolicyError,
@@ -20,7 +21,10 @@ __all__ = [
     "ApprovalTransitionError",
     "ExecutionRepository",
     "ExecutionRepositoryError",
+    "ExecutionLifecycle",
     "FakeExecutionPlan",
     "FakeExecutionProvider",
     "LeaseConflict",
+    "LifecycleSnapshot",
+    "RuntimeHealth",
 ]

@@ -17,6 +17,8 @@ import uvicorn  # noqa: E402
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
+from cortex_backend.execution.coordinator import DurableFakeCoordinator  # noqa: E402
+from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth  # noqa: E402
 from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
@@ -43,6 +45,17 @@ def build_preview_app(
     execution_repository = ExecutionRepository(
         paths.execution_database,
         paths.execution_artifacts,
+    )
+    execution_lifecycle = ExecutionLifecycle(
+        execution_repository,
+        coordinator_factory=lambda repository: DurableFakeCoordinator(
+            repository, auto_recover=False
+        ),
+        health_check=lambda: RuntimeHealth.blocked(
+            code="runtime_unavailable",
+            message="A qualified execution runtime is not enabled in this build.",
+        ),
+        enabled=False,
     )
     database = DatabaseManager(app_paths=paths)
     database.migrate_from_json_if_needed()
@@ -113,6 +126,7 @@ def build_preview_app(
         ollama_host=ollama_host,
         handoff_secret=handoff_secret,
         readiness_check=readiness_check,
+        execution_lifecycle=execution_lifecycle,
         installation_principal_id=execution_repository.installation_principal_id,
     )
     app.state.execution_repository = execution_repository
