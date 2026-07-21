@@ -22,6 +22,7 @@ class DurableFakeCoordinator:
         provider: FakeExecutionProvider | None = None,
         lease_seconds: float = 30.0,
         supervisor_lease_seconds: float = 30.0,
+        auto_recover: bool = True,
     ) -> None:
         if supervisor_lease_seconds <= 0:
             raise ValueError("supervisor_lease_seconds must be positive")
@@ -34,7 +35,8 @@ class DurableFakeCoordinator:
         self._lock = Lock()
         self._threads: dict[str, Thread] = {}
         self._cancel_events: dict[str, Event] = {}
-        self.startup_recover()
+        if auto_recover:
+            self.startup_recover()
 
     def start(
         self,

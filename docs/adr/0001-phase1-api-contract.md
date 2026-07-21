@@ -165,5 +165,6 @@ connection as reconnectable rather than as success or failure.
 
 This contract does not close Phase 1. Fake preview, replay, task tray, recovery,
 approval-decision transport, and installation-principal wiring are implemented.
-Production provider lifecycle integration remains a separate reviewed stage; real
-code execution is still unavailable.
+The production app's control-plane lifecycle and recovery gate are now wired, but
+provider lifecycle integration remains separately reviewed; real code execution is
+still unavailable.

@@ -1,7 +1,7 @@
 # ADR-0001 Phase 1 evidence log
 
 - **Phase:** 1 — durable jobs, artifacts, and UI with a fake executor
-- **Status:** Installation-principal slice complete; overall Phase 1 remains in progress
+- **Status:** Production lifecycle control-plane slice complete; overall Phase 1 remains in progress
 - **Scope:** Durable execution workflow only; no model-generated code, guest
   runtime, recipe provider, or host subprocess is enabled.
 - **Source decision:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
@@ -17,6 +17,7 @@ failures can be exhausted without executing code.
 | --- | --- | --- |
 | Add additive schema/migrations | **Complete (schema v3)** | New execution SQLite schema is isolated behind an injected database path; approval/supervisor tables and the installation-principal row are created additively; version-ahead databases fail closed. |
 | Stable installation principal | **Complete (Phase 1 slice)** | A random 256-bit principal is created atomically in the per-user execution database, validated on every cold load, mapped into short-lived sessions, and reused across repository/app restart. |
+| Production lifecycle/recovery gate | **Complete (control-plane slice)** | `ExecutionLifecycle` gates coordinator construction on runtime health, runs startup recovery once, owns shutdown, redacts failures, and keeps chat readiness available while execution is blocked. The packaged build remains explicitly disabled. |
 | Durable jobs and leases | **Complete (backend slice)** | Lease ownership, expiry, idempotent creation, and stale-lease recovery are covered by repository tests. |
 | Ordered durable events/replay | **Complete (backend slice)** | Append-only sequence numbers and cursor replay survive repository re-instantiation. Terminal state is immutable. |
 | Artifact store and retention | **Complete (backend slice)** | Copy-in, generated-root confinement, SHA-256 verification, size limits, atomic publish, expiry checks, and cleanup are tested. |
@@ -52,6 +53,9 @@ failures can be exhausted without executing code.
 - A v2-to-v3 upgrade binds unambiguous legacy jobs to the newly persisted
   installation principal. If legacy owners share a request key, migration stops
   before rewriting either row so idempotency ambiguity cannot select a job.
+- The production app constructs an explicitly disabled lifecycle; no unavailable
+  or weaker provider is selected as a fallback. A future qualified build must opt
+  in with a passing runtime health callback.
 - Startup recovery rehydrates only fake.v1 payloads and skips pending/denied/expired
   approvals. Unknown profiles or malformed payloads fail with
   `recovery_invalid_payload`.
@@ -94,6 +98,9 @@ failures can be exhausted without executing code.
 14. Installation-principal creation is singleton under concurrent repository
     initialization, malformed persisted identity fails closed, and a restarted
     app can enumerate only the same installation's execution jobs.
+15. Lifecycle health, startup recovery, and shutdown gate execution availability;
+    blocked runtime state never blocks ordinary chat readiness or leaks provider
+    internals.
 
 ## Re-run target
 
@@ -102,6 +109,7 @@ python -m compileall -q backend\\cortex_backend\\execution tests\\test_phase1_ex
 python -m pytest tests/test_phase1_execution.py -q
 python -m pytest tests/test_phase1_execution_api.py -q
 python -m pytest tests/test_phase1_installation_principal.py -q
+python -m pytest tests/test_phase1_execution_lifecycle.py -q
 python -m pytest tests/test_phase1_recovery_contract.py -q
 python -m pytest -q
 python tools/generate_contracts.py
@@ -112,8 +120,9 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** compileall passed; the full Python suite passed
-117 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
+123 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
 typecheck, production build (`tsc -b` + Vite), and all 39 component tests passed.
 Generated OpenAPI/TypeScript contracts are current and `git diff --check` passed.
-Phase 1 cannot close until production lifecycle/recovery integration is separately
-reviewed; this stage does not enable production code execution.
+Phase 1 control-plane lifecycle/recovery is complete; provider implementation,
+broker ACL/framing, external review, and release enablement remain separate gates.
+This stage does not enable production code execution.

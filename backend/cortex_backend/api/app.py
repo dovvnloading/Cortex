@@ -28,6 +28,7 @@ from cortex_backend.repositories.settings import (
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.models import ModelService
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.execution.lifecycle import ExecutionLifecycle
 from cortex_backend.testing.fake_ollama import (
     FakeGenerationEngine,
     FakeOllamaGateway,
@@ -89,6 +90,7 @@ def create_app(
     handoff_secret: str | None = None,
     readiness_check: Callable[[], bool] | None = None,
     execution_coordinator: DurableFakeCoordinator | None = None,
+    execution_lifecycle: ExecutionLifecycle | None = None,
     installation_principal_id: str | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
@@ -104,10 +106,19 @@ def create_app(
         )
     else:
         allowed = tuple(allowed_hosts)
+    if execution_coordinator is not None and execution_lifecycle is not None:
+        raise ValueError("execution coordinator and lifecycle are mutually exclusive")
+    lifecycle_repository = (
+        execution_lifecycle.repository if execution_lifecycle is not None else None
+    )
     repository_principal = (
         execution_coordinator.repository.installation_principal_id
         if execution_coordinator is not None
-        else None
+        else (
+            lifecycle_repository.installation_principal_id
+            if lifecycle_repository is not None
+            else None
+        )
     )
     if (
         installation_principal_id is not None
@@ -129,12 +140,24 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.started_at = datetime.now(timezone.utc)
+        if app.state.execution_lifecycle is not None:
+            lifecycle_snapshot = app.state.execution_lifecycle.start()
+            app.state.execution_coordinator = (
+                app.state.execution_lifecycle.coordinator
+                if lifecycle_snapshot.available
+                else None
+            )
         app.state.ready = True
-        yield
-        app.state.ready = False
-        await app.state.jobs.shutdown()
-        if app.state.execution_coordinator is not None:
-            app.state.execution_coordinator.shutdown()
+        try:
+            yield
+        finally:
+            app.state.ready = False
+            await app.state.jobs.shutdown()
+            if app.state.execution_lifecycle is not None:
+                app.state.execution_lifecycle.stop()
+            elif app.state.execution_coordinator is not None:
+                app.state.execution_coordinator.shutdown()
+            app.state.execution_coordinator = None
 
     app = FastAPI(
         title="Cortex Local API",
@@ -148,6 +171,7 @@ def create_app(
     app.state.dependencies = dependencies or build_demo_dependencies()
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
+    app.state.execution_lifecycle = execution_lifecycle
     app.state.execution_coordinator = execution_coordinator
     app.state.installation_principal_id = manager.installation_principal_id
     app.state.preview = preview
