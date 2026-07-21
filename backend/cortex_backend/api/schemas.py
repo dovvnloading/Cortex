@@ -225,6 +225,7 @@ class ExecutionTaskSummary(APIModel):
     sequence: int
     phase: str | None = None
     message: str | None = None
+    approval_state: ExecutionApprovalState = "not_required"
     can_cancel: bool = False
     created_at: datetime
     updated_at: datetime

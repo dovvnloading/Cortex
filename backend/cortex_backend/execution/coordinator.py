@@ -21,13 +21,20 @@ class DurableFakeCoordinator:
         *,
         provider: FakeExecutionProvider | None = None,
         lease_seconds: float = 30.0,
+        supervisor_lease_seconds: float = 30.0,
     ) -> None:
+        if supervisor_lease_seconds <= 0:
+            raise ValueError("supervisor_lease_seconds must be positive")
         self.repository = repository
         self.provider = provider or FakeExecutionProvider()
         self.lease_seconds = lease_seconds
+        self.supervisor_lease_seconds = supervisor_lease_seconds
+        self._supervisor_owner = f"fake-supervisor-{uuid4().hex}"
+        self._supervisor_lease_active = False
         self._lock = Lock()
         self._threads: dict[str, Thread] = {}
         self._cancel_events: dict[str, Event] = {}
+        self.startup_recover()
 
     def start(
         self,
@@ -48,6 +55,7 @@ class DurableFakeCoordinator:
                 "outcome": selected.outcome,
                 "steps": selected.steps,
                 "step_delay_seconds": selected.step_delay_seconds,
+                "failure_message": selected.failure_message,
             },
         )
         if created:
@@ -98,6 +106,43 @@ class DurableFakeCoordinator:
             event.set()
         for thread in threads:
             thread.join(timeout=timeout)
+        if self._supervisor_lease_active:
+            self.repository.release_supervisor_lease(lease_owner=self._supervisor_owner)
+            self._supervisor_lease_active = False
+
+    def startup_recover(self) -> list[str]:
+        """Claim the single supervisor lease and resume only recoverable fake jobs."""
+        if self._supervisor_lease_active:
+            return []
+        self.repository.claim_supervisor_lease(
+            lease_owner=self._supervisor_owner,
+            ttl_seconds=self.supervisor_lease_seconds,
+        )
+        self._supervisor_lease_active = True
+        recovered = self.repository.recover_expired_leases()
+        self.repository.expire_approvals()
+        for job_id in recovered:
+            job = self.repository.get_job(job_id)
+            if job is None or job.status in TerminalExecutionStatus:
+                continue
+            if job.approval_state in {"pending", "denied", "expired"}:
+                continue
+            try:
+                if job.profile != "fake.v1":
+                    raise ValueError("unsupported recovery profile")
+                plan = self._plan_from_payload(job.payload)
+            except (TypeError, ValueError, KeyError):
+                self.repository.transition(
+                    job_id,
+                    status="failed",
+                    event="failed",
+                    phase="recovery",
+                    data={"message": "Execution recovery payload is invalid."},
+                    error="recovery_invalid_payload",
+                )
+                continue
+            self._launch(job_id, plan)
+        return recovered
 
     def _launch(self, job_id: str, plan: FakeExecutionPlan) -> None:
         with self._lock:
@@ -113,6 +158,19 @@ class DurableFakeCoordinator:
             )
             self._threads[job_id] = thread
             thread.start()
+
+    @staticmethod
+    def _plan_from_payload(payload: Mapping[str, Any]) -> FakeExecutionPlan:
+        if payload.get("provider") != "fake-v1":
+            raise ValueError("unsupported recovery provider")
+        return FakeExecutionPlan(
+            outcome=payload["outcome"],
+            steps=payload["steps"],
+            step_delay_seconds=payload["step_delay_seconds"],
+            failure_message=payload.get(
+                "failure_message", "Deterministic fake execution failed."
+            ),
+        )
 
     def _run(self, job_id: str, plan: FakeExecutionPlan, cancel_event: Event) -> None:
         lease_owner = f"fake-coordinator-{uuid4().hex}"

@@ -10,13 +10,20 @@ from pathlib import Path
 import re
 import sqlite3
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from .models import ExecutionArtifact, ExecutionEvent, ExecutionJob, ExecutionStatus, TerminalExecutionStatus
+from .models import (
+    ExecutionApprovalState,
+    ExecutionArtifact,
+    ExecutionEvent,
+    ExecutionJob,
+    ExecutionStatus,
+    TerminalExecutionStatus,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_EVENT_BYTES = 64 * 1024
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
@@ -27,6 +34,14 @@ class ExecutionRepositoryError(RuntimeError):
 
 class LeaseConflict(ExecutionRepositoryError):
     """Another live coordinator owns the execution lease."""
+
+
+class ApprovalPolicyError(ExecutionRepositoryError):
+    """An approval request violates the profile or transition policy."""
+
+
+class ApprovalTransitionError(ExecutionRepositoryError):
+    """An approval decision is not valid for the current state."""
 
 
 class ArtifactLimitError(ExecutionRepositoryError):
@@ -124,12 +139,39 @@ class ExecutionRepository:
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS execution_approvals (
+                    job_id TEXT PRIMARY KEY REFERENCES execution_jobs(job_id) ON DELETE CASCADE,
+                    state TEXT NOT NULL,
+                    scope_digest TEXT,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    expires_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS execution_supervisor_leases (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    lease_owner TEXT NOT NULL,
+                    lease_expires_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS execution_events_job_sequence
                     ON execution_events(job_id, sequence);
                 CREATE INDEX IF NOT EXISTS execution_jobs_status_updated
                     ON execution_jobs(status, updated_at);
                 """
             )
+            row = connection.execute(
+                "SELECT version FROM execution_schema WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                raise ExecutionRepositoryError("Execution schema version is missing.")
+            current_version = int(row["version"])
+            if current_version > SCHEMA_VERSION:
+                raise ExecutionRepositoryError("Execution schema is newer than this build.")
+            if current_version < SCHEMA_VERSION:
+                connection.execute(
+                    "UPDATE execution_schema SET version = ? WHERE id = 1",
+                    (SCHEMA_VERSION,),
+                )
 
     @staticmethod
     def _now() -> str:
@@ -190,7 +232,13 @@ class ExecutionRepository:
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
+                """
+                SELECT j.*, COALESCE(a.state, 'not_required') AS approval_state
+                FROM execution_jobs j
+                LEFT JOIN execution_approvals a ON a.job_id = j.job_id
+                WHERE j.job_id = ?
+                """,
+                (job_id,),
             ).fetchone()
         if row is None or (owner is not None and row["owner"] != owner):
             return None
@@ -212,9 +260,11 @@ class ExecutionRepository:
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT * FROM execution_jobs
-                WHERE owner = ? {terminal_clause}
-                ORDER BY updated_at DESC, job_id DESC
+                SELECT j.*, COALESCE(a.state, 'not_required') AS approval_state
+                FROM execution_jobs j
+                LEFT JOIN execution_approvals a ON a.job_id = j.job_id
+                WHERE j.owner = ? {terminal_clause.replace('status', 'j.status')}
+                ORDER BY j.updated_at DESC, j.job_id DESC
                 LIMIT ?
                 """,
                 (owner, limit),
@@ -234,6 +284,12 @@ class ExecutionRepository:
     ) -> ExecutionJob:
         now = self._now()
         with self.connect() as connection:
+            # Serialize lifecycle transitions before reading the current
+            # sequence. Workers and cancellation requests may transition the
+            # same job concurrently; without an immediate transaction both
+            # connections can read the same sequence and collide on the
+            # execution_events primary key.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
@@ -244,6 +300,12 @@ class ExecutionRepository:
                 # state is immutable; late callbacks must not append a second
                 # terminal event or overwrite the validated result.
                 return self._job_from_row(row)
+            approval = connection.execute(
+                "SELECT state FROM execution_approvals WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if status in TerminalExecutionStatus and approval is not None and approval["state"] == "pending":
+                raise ApprovalTransitionError("Pending approval cannot reach a terminal state.")
             encoded_result = (
                 json.dumps(dict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 if result is not None
@@ -286,6 +348,151 @@ class ExecutionRepository:
             phase="cancelling",
             data={"message": "Cancellation requested."},
         )
+
+    def get_approval_state(self, job_id: str, *, owner: str | None = None) -> ExecutionApprovalState:
+        job = self.get_job(job_id, owner=owner)
+        if job is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
+        return job.approval_state
+
+    def request_approval(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        scope_digest: str,
+        reason: str,
+        ttl_seconds: float = 300.0,
+    ) -> ExecutionApprovalState:
+        if not scope_digest or not reason:
+            raise ValueError("scope_digest and reason are required")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        job = self.get_job(job_id, owner=owner)
+        if job is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
+        if job.profile == "fake.v1":
+            raise ApprovalPolicyError("fake.v1 does not require approval.")
+        if job.status in TerminalExecutionStatus:
+            raise ApprovalTransitionError("Terminal jobs cannot request approval.")
+        if job.approval_state != "not_required":
+            raise ApprovalTransitionError("Approval is already decided or pending.")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO execution_approvals
+                (job_id, state, scope_digest, reason, created_at, expires_at)
+                VALUES (?, 'pending', ?, ?, ?, ?)
+                """,
+                (job_id, scope_digest, reason, now.isoformat(), expires.isoformat()),
+            )
+            self._append_event_connection(
+                connection,
+                job_id=job_id,
+                event="progress",
+                status=job.status,
+                phase="approval",
+                data={"message": "Approval required.", "approval_state": "pending"},
+                now=now.isoformat(),
+            )
+        return "pending"
+
+    def decide_approval(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        decision: Literal["approved", "denied"],
+    ) -> ExecutionApprovalState:
+        job = self.get_job(job_id, owner=owner)
+        if job is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
+        if job.status in TerminalExecutionStatus:
+            raise ApprovalTransitionError("Terminal jobs cannot change approval.")
+        if job.approval_state != "pending":
+            raise ApprovalTransitionError("Only pending approval can be decided.")
+        now = self._now()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE execution_approvals SET state = ?, decided_at = ? WHERE job_id = ?",
+                (decision, now, job_id),
+            )
+            self._append_event_connection(
+                connection,
+                job_id=job_id,
+                event="progress",
+                status=job.status,
+                phase="approval",
+                data={"message": f"Approval {decision}.", "approval_state": decision},
+                now=now,
+            )
+        return decision
+
+    def expire_approvals(self, *, now: str | None = None) -> list[str]:
+        cutoff = now or self._now()
+        expired: list[str] = []
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT a.job_id, j.status FROM execution_approvals a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.state = 'pending' AND a.expires_at <= ?
+                  AND j.status NOT IN ('succeeded', 'failed', 'cancelled')
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                job_id = str(row["job_id"])
+                connection.execute(
+                    "UPDATE execution_approvals SET state = 'expired', decided_at = ? WHERE job_id = ?",
+                    (cutoff, job_id),
+                )
+                self._append_event_connection(
+                    connection,
+                    job_id=job_id,
+                    event="progress",
+                    status=row["status"],
+                    phase="approval",
+                    data={"message": "Approval expired.", "approval_state": "expired"},
+                    now=cutoff,
+                )
+                expired.append(job_id)
+        return expired
+
+    def claim_supervisor_lease(self, *, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+        if not lease_owner:
+            raise ValueError("lease_owner must be non-empty")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT lease_owner, lease_expires_at FROM execution_supervisor_leases WHERE id = 1"
+            ).fetchone()
+            if row is not None and datetime.fromisoformat(row["lease_expires_at"]) > now and row["lease_owner"] != lease_owner:
+                raise LeaseConflict("Execution recovery supervisor is already running.")
+            connection.execute(
+                """
+                INSERT INTO execution_supervisor_leases (id, lease_owner, lease_expires_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    lease_owner = excluded.lease_owner,
+                    lease_expires_at = excluded.lease_expires_at
+                """,
+                (lease_owner, expires.isoformat()),
+            )
+        return expires.isoformat()
+
+    def release_supervisor_lease(self, *, lease_owner: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM execution_supervisor_leases WHERE id = 1 AND lease_owner = ?",
+                (lease_owner,),
+            )
 
     def events(self, job_id: str, *, after_sequence: int = 0) -> list[ExecutionEvent]:
         if after_sequence < 0:
@@ -544,4 +751,6 @@ class ExecutionRepository:
             updated_at=row["updated_at"],
             error=row["error"],
             result=ExecutionRepository._parse_json(row["result_json"]),
+            payload=ExecutionRepository._parse_json(row["payload_json"]) or {},
+            approval_state=row["approval_state"] if "approval_state" in row.keys() else "not_required",
         )

@@ -176,6 +176,7 @@ export interface ExecutionTaskSummary {
   sequence: number;
   phase?: string | null;
   message?: string | null;
+  approval_state?: "not_required" | "pending" | "approved" | "denied" | "expired";
   can_cancel?: boolean;
   created_at: string;
   updated_at: string;

@@ -16,6 +16,7 @@ from cortex_backend.execution import (
 )
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.fake import FakeExecutionPlan
+from cortex_backend.execution.repository import ApprovalPolicyError, ApprovalTransitionError
 
 
 def _repository(tmp_path):
@@ -28,6 +29,15 @@ def _repository(tmp_path):
 
 def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path):
     repository = _repository(tmp_path)
+    with repository.connect() as connection:
+        assert connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0] == 2
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert {"execution_approvals", "execution_supervisor_leases"} <= tables
     first, created = repository.create_job(
         job_id="job-1",
         owner="session-a",
@@ -190,3 +200,144 @@ def test_fake_coordinator_cancellation_is_terminal_and_ordered(tmp_path):
         assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     finally:
         coordinator.shutdown()
+
+
+def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_path):
+    repository = _repository(tmp_path)
+    fake_job, _ = repository.create_job(
+        job_id="job-approval-fake",
+        owner="session-a",
+        request_id="request-approval-fake",
+        profile="fake.v1",
+        payload={"provider": "fake-v1"},
+    )
+    assert fake_job.approval_state == "not_required"
+    with pytest.raises(ApprovalPolicyError):
+        repository.request_approval(
+            fake_job.job_id,
+            owner="session-a",
+            scope_digest="scope",
+            reason="test",
+        )
+
+    extended, _ = repository.create_job(
+        job_id="job-approval-extended",
+        owner="session-a",
+        request_id="request-approval-extended",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert repository.request_approval(
+        extended.job_id,
+        owner="session-a",
+        scope_digest="scope",
+        reason="test",
+        ttl_seconds=0.01,
+    ) == "pending"
+    assert repository.get_job(extended.job_id).approval_state == "pending"
+    with pytest.raises(ApprovalTransitionError):
+        repository.transition(
+            extended.job_id,
+            status="succeeded",
+            event="completed",
+            phase="completed",
+            data={"value": 42},
+            result={"value": 42},
+        )
+    assert repository.decide_approval(
+        extended.job_id,
+        owner="session-a",
+        decision="approved",
+    ) == "approved"
+    with pytest.raises(ApprovalTransitionError):
+        repository.decide_approval(
+            extended.job_id,
+            owner="session-a",
+            decision="denied",
+        )
+
+    expiring, _ = repository.create_job(
+        job_id="job-approval-expiring",
+        owner="session-a",
+        request_id="request-approval-expiring",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert repository.request_approval(
+        expiring.job_id,
+        owner="session-a",
+        scope_digest="scope",
+        reason="test",
+        ttl_seconds=0.01,
+    ) == "pending"
+    time.sleep(0.03)
+    assert repository.expire_approvals() == [expiring.job_id]
+    assert repository.get_job(expiring.job_id).approval_state == "expired"
+    with pytest.raises(ApprovalTransitionError):
+        repository.decide_approval(
+            expiring.job_id,
+            owner="session-a",
+            decision="denied",
+        )
+
+
+def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-restart",
+        owner="session-a",
+        request_id="request-restart",
+        profile="fake.v1",
+        payload={
+            "provider": "fake-v1",
+            "outcome": "success",
+            "steps": 2,
+            "step_delay_seconds": 0.01,
+            "failure_message": "Deterministic fake execution failed.",
+        },
+    )
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
+    time.sleep(0.03)
+
+    coordinator = DurableFakeCoordinator(repository)
+    try:
+        with pytest.raises(LeaseConflict):
+            DurableFakeCoordinator(repository)
+        finished = coordinator.wait(job.job_id)
+        assert finished.status == "succeeded"
+        events = repository.events(job.job_id)
+        assert [event.event for event in events].count("recovered") == 1
+        assert events[-1].event == "completed"
+        assert coordinator.startup_recover() == []
+    finally:
+        coordinator.shutdown()
+
+
+def test_recovery_supervisor_fails_closed_on_malformed_payload(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-restart-invalid",
+        owner="session-a",
+        request_id="request-restart-invalid",
+        profile="fake.v1",
+        payload={"provider": "host-process"},
+    )
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
+    time.sleep(0.03)
+
+    coordinator = DurableFakeCoordinator(repository)
+    try:
+        failed = repository.get_job(job.job_id)
+        assert failed.status == "failed"
+        assert failed.error == "recovery_invalid_payload"
+        assert repository.events(job.job_id)[-1].event == "failed"
+    finally:
+        coordinator.shutdown()
+
+
+def test_supervisor_lease_expiry_is_reclaimable(tmp_path):
+    repository = _repository(tmp_path)
+    repository.claim_supervisor_lease(lease_owner="dead-supervisor", ttl_seconds=0.01)
+    time.sleep(0.03)
+    repository.claim_supervisor_lease(lease_owner="new-supervisor", ttl_seconds=10)
+    repository.release_supervisor_lease(lease_owner="new-supervisor")
