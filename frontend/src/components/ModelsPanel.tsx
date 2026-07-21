@@ -61,8 +61,14 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck }: Props
         </div>
       )}
       {progress && (
-        <div className="model-progress" role="status" aria-live="polite">
-          <div className="model-progress-heading"><span>{progress.model}</span><span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span></div>
+        <div className="model-progress" role="status" aria-label="Model operation progress" aria-live="polite" aria-busy={busy || undefined}>
+          <div className="model-progress-heading">
+            <span className="model-progress-model">
+              {busy && <span className="loading-spinner model-progress-spinner" aria-hidden="true" />}
+              {progress.model}
+            </span>
+            <span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span>
+          </div>
           <div className="progress-track"><span style={{ width: `${progress.percent ?? 8}%` }} /></div>
           <small>{progress.status}</small>
         </div>
