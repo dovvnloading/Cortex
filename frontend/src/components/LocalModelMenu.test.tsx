@@ -68,6 +68,9 @@ describe("LocalModelMenu", () => {
     const trigger = screen.getByRole("button", { name: "Selected local model: local-chat:7b" });
     trigger.focus();
     await user.keyboard("{ArrowDown}");
+
+    const selectedOption = screen.getByRole("option", { name: "local-chat:7b" });
+    await waitFor(() => expect(selectedOption).toHaveFocus());
     await user.keyboard("{Escape}");
 
     await waitFor(() => expect(trigger).toHaveFocus());
