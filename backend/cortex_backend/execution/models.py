@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
 
@@ -15,6 +15,13 @@ ExecutionStatus = Literal[
     "cancelled",
 ]
 TerminalExecutionStatus = frozenset({"succeeded", "failed", "cancelled"})
+ExecutionApprovalState = Literal[
+    "not_required",
+    "pending",
+    "approved",
+    "denied",
+    "expired",
+]
 ExecutionEventName = Literal[
     "execution.queued",
     "execution.started",
@@ -63,6 +70,8 @@ class ExecutionJob:
     updated_at: str
     error: str | None = None
     result: Mapping[str, Any] | None = None
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    approval_state: ExecutionApprovalState = "not_required"
     lease_owner: str | None = None
     lease_expires_at: str | None = None
 

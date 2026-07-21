@@ -109,8 +109,10 @@ ignored after terminal state is committed.
 ## Approval state
 
 Phase 1 fake jobs use `approval_state="not_required"`; no approval prompt is
-shown. The durable response shape reserves the following states for later
-profiles: `not_required`, `pending`, `approved`, `denied`, and `expired`.
+shown. The repository now persists the response state and enforces the transition
+rules in [the recovery/approval contract](0001-phase1-recovery-approval.md). The
+durable response shape supports `not_required`, `pending`, `approved`, `denied`,
+and `expired` for later profiles.
 Automatic execution must never transition to `pending`; broader capabilities will
 require a separate policy/approval ADR and an explicit user action. The UI must
 render `pending` as an actionable approval card, never as a generic spinner.

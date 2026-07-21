@@ -78,6 +78,7 @@ def test_preview_lifecycle_is_owner_scoped_idempotent_and_replayable(tmp_path):
             time.sleep(0.005)
         assert status.status_code == 200
         assert status.json()["status"] == "succeeded"
+        assert status.json()["approval_state"] == "not_required"
         assert status.json()["result"] == {"provider": "fake-v1", "steps": 3, "value": 42}
         assert "path" not in json.dumps(status.json()).lower()
 
@@ -109,6 +110,7 @@ def test_preview_lifecycle_is_owner_scoped_idempotent_and_replayable(tmp_path):
         )
         assert tasks.status_code == 200
         assert tasks.json()["tasks"][0]["job_id"] == job_id
+        assert tasks.json()["tasks"][0]["approval_state"] == "not_required"
 
 
 def test_preview_api_rejects_foreign_owner_and_cancels_durably(tmp_path):

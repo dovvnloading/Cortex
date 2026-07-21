@@ -1,7 +1,7 @@
 # ADR-0001 Phase 1 evidence log
 
 - **Phase:** 1 — durable jobs, artifacts, and UI with a fake executor
-- **Status:** Injected fake-only API/task-tray slice complete; overall Phase 1 remains in progress
+- **Status:** Approval/recovery backend slice complete; overall Phase 1 remains in progress
 - **Scope:** Durable execution workflow only; no model-generated code, guest
   runtime, recipe provider, or host subprocess is enabled.
 - **Source decision:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
@@ -19,10 +19,10 @@ failures can be exhausted without executing code.
 | Durable jobs and leases | **Complete (backend slice)** | Lease ownership, expiry, idempotent creation, and stale-lease recovery are covered by repository tests. |
 | Ordered durable events/replay | **Complete (backend slice)** | Append-only sequence numbers and cursor replay survive repository re-instantiation. Terminal state is immutable. |
 | Artifact store and retention | **Complete (backend slice)** | Copy-in, generated-root confinement, SHA-256 verification, size limits, atomic publish, expiry checks, and cleanup are tested. |
-| Task tray/accessibility/approvals | **Task tray complete; approvals pending** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, and keyboard Stop action. Approval transitions remain deliberately unimplemented. |
-| Cancellation and recovery | **Complete (backend slice)** | Cooperative fake cancellation, terminal cancellation, lease recovery, and coordinator shutdown are covered; process/runtime cancellation is deferred to later phases. |
+| Task tray/accessibility/approvals | **Task tray and approval persistence complete; approval UX pending** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, keyboard Stop action, and active spinner. Approval state is durable and transition-gated; no approval endpoint/card is exposed for fake-only work. |
+| Cancellation and recovery | **Complete (backend + startup supervisor)** | Cooperative fake cancellation, terminal cancellation, per-job lease recovery, single-instance supervisor exclusion/reclaim, startup rehydration, approval expiry, and malformed-payload fail-closed behavior are covered; process/runtime cancellation is deferred to later phases. |
 | Deterministic fake provider | **Complete (backend slice)** | `fake.v1` emits fixed prepare/progress/completion/failure/cancellation outcomes and never accepts source, paths, network, or host-process controls. |
-| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, and task tray are green. Approval enforcement, restart supervisor wiring, and production lifecycle/recovery integration remain. |
+| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement, and startup supervisor are green. Approval UI/API, installation-principal wiring, and production lifecycle/recovery integration remain. |
 
 ## Cross-check findings
 
@@ -41,6 +41,11 @@ failures can be exhausted without executing code.
 - The task tray is mounted outside route content and polls only when the backend
   advertises the explicit preview capability. Normal app instances do not poll a
   missing execution service.
+- Schema version 2 adds approval and single-instance supervisor tables
+  additively; version-ahead databases fail closed.
+- Startup recovery rehydrates only fake.v1 payloads and skips pending/denied/expired
+  approvals. Unknown profiles or malformed payloads fail with
+  `recovery_invalid_payload`.
 
 ## Phase 1 invariants
 
@@ -58,6 +63,10 @@ failures can be exhausted without executing code.
    append a second terminal event.
 8. Artifact retention is enforced at read time as well as by cleanup, so expiry is
    fail-closed even if the cleanup worker is delayed.
+9. Approval transitions are durable and monotonic; fake.v1 cannot request approval,
+   and pending approval cannot reach a terminal job state.
+10. Only one recovery supervisor can reclaim expired leases; recovery is idempotent
+    and never resumes a previous process or stream.
 
 ## Re-run target
 
@@ -65,6 +74,7 @@ failures can be exhausted without executing code.
 python -m compileall -q backend\\cortex_backend\\execution tests\\test_phase1_execution.py
 python -m pytest tests/test_phase1_execution.py -q
 python -m pytest tests/test_phase1_execution_api.py -q
+python -m pytest tests/test_phase1_recovery_contract.py -q
 python -m pytest -q
 npm.cmd run lint --prefix frontend
 npm.cmd run typecheck --prefix frontend
@@ -73,9 +83,8 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** compileall passed; the full Python suite passed
-102 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend
-lint, typecheck, production build (`tsc -b` + Vite), and all 35 component tests
-passed.
-Phase 1 cannot close until the authenticated approval/restart-supervisor slice is
-implemented and its contract tests pass; this stage does not enable production
-code execution.
+108 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
+typecheck, production build (`tsc -b` + Vite), and all 35 component tests passed.
+Phase 1 cannot close until approval UI/API, installation principal wiring, and
+production lifecycle/recovery integration are separately reviewed; this stage does
+not enable production code execution.
