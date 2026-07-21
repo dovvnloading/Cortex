@@ -6,10 +6,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import secrets
 import sqlite3
+import stat
 from collections.abc import Iterator, Mapping
 from threading import RLock
 from typing import Any, Literal
@@ -31,7 +33,26 @@ MAX_EVENT_BYTES = 64 * 1024
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,99}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _SCHEMA_LOCK = RLock()
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Treat symbolic links and Windows junctions as untrusted path hops."""
+
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
+def _has_reparse_parent(path: Path) -> bool:
+    """Reject a configured root that would traverse a link in an ancestor."""
+
+    try:
+        return any(parent.exists() and _is_reparse_point(parent) for parent in path.parents)
+    except OSError:
+        return True
 
 
 class ExecutionRepositoryError(RuntimeError):
@@ -104,6 +125,8 @@ class ExecutionRepository:
     def _ensure_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_point(self.artifact_root) or _has_reparse_parent(self.artifact_root):
+            raise ExecutionRepositoryError("Artifact root is unavailable.")
         with _SCHEMA_LOCK:
             self._ensure_schema_locked()
 
@@ -766,6 +789,10 @@ class ExecutionRepository:
     ) -> ExecutionArtifact:
         if not _SAFE_NAME.fullmatch(name):
             raise ExecutionRepositoryError("Artifact name is invalid.")
+        if not isinstance(content, bytes):
+            raise ExecutionRepositoryError("Artifact content is invalid.")
+        if not isinstance(mime_type, str) or _SAFE_MIME.fullmatch(mime_type) is None:
+            raise ExecutionRepositoryError("Artifact MIME type is invalid.")
         if len(content) > self.max_artifact_bytes:
             raise ArtifactLimitError("Artifact exceeds the configured size limit.")
         if retention_seconds <= 0:
@@ -774,18 +801,35 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Execution job does not exist.")
         artifact_id = uuid4().hex
         job_root = self.artifact_root / job_id
+        if job_root.exists() and _is_reparse_point(job_root):
+            raise ExecutionRepositoryError("Artifact root is unavailable.")
         job_root.mkdir(parents=True, exist_ok=True)
-        target = (job_root / f"{artifact_id}-{name}").resolve()
         root = self.artifact_root.resolve()
-        if not target.is_relative_to(root):
+        resolved_job_root = job_root.resolve(strict=True)
+        if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
             raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
+        target = job_root / f"{artifact_id}-{name}"
         temporary = target.with_name(f".tmp-{artifact_id}")
-        temporary.write_bytes(content)
         digest = hashlib.sha256(content).hexdigest()
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=retention_seconds)
         try:
-            temporary.replace(target)
+            with temporary.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            try:
+                directory = os.open(str(job_root), os.O_RDONLY)
+            except OSError:
+                directory = None
+            if directory is not None:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory)
             with self.connect() as connection:
                 connection.execute(
                     """
@@ -821,6 +865,33 @@ class ExecutionRepository:
             expires_at=expires.isoformat(),
         )
 
+    def delete_artifact(self, artifact_id: str) -> None:
+        """Remove one unpublished/rolled-back artifact record and file safely."""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT path FROM execution_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+            if row is None:
+                return
+            path = Path(row["path"])
+            root = self.artifact_root.resolve()
+            try:
+                resolved = path.resolve(strict=False)
+            except (OSError, RuntimeError):
+                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+            if not resolved.is_relative_to(root) or _is_reparse_point(path):
+                raise ExecutionRepositoryError("Artifact path is unavailable.")
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
+            connection.execute(
+                "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+
     def read_artifact(self, artifact_id: str) -> bytes:
         with self.connect() as connection:
             row = connection.execute(
@@ -831,10 +902,25 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Artifact does not exist.")
         if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
             raise ExecutionRepositoryError("Artifact retention has expired.")
-        path = Path(row["path"]).resolve()
-        if not path.is_relative_to(self.artifact_root.resolve()) or not path.is_file():
+        original_path = Path(row["path"])
+        if _is_reparse_point(original_path):
             raise ExecutionRepositoryError("Artifact path is unavailable.")
-        content = path.read_bytes()
+        try:
+            path = original_path.resolve(strict=True)
+            info = path.lstat()
+        except (OSError, RuntimeError):
+            raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+        if (
+            not path.is_relative_to(self.artifact_root.resolve())
+            or _is_reparse_point(path)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 1) != 1
+        ):
+            raise ExecutionRepositoryError("Artifact path is unavailable.")
+        try:
+            content = path.read_bytes()
+        except OSError:
+            raise ExecutionRepositoryError("Artifact path is unavailable.") from None
         if hashlib.sha256(content).hexdigest() != row["sha256"]:
             raise ExecutionRepositoryError("Artifact integrity check failed.")
         return content
@@ -848,7 +934,19 @@ class ExecutionRepository:
                 (cutoff,),
             ).fetchall()
             for row in artifacts:
-                Path(row["path"]).unlink(missing_ok=True)
+                path = Path(row["path"])
+                if _is_reparse_point(path):
+                    raise ExecutionRepositoryError("Artifact path is unavailable.")
+                try:
+                    resolved = path.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+                if not resolved.is_relative_to(self.artifact_root.resolve()):
+                    raise ExecutionRepositoryError("Artifact path is unavailable.")
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact cleanup failed.") from None
                 connection.execute(
                     "DELETE FROM execution_artifacts WHERE artifact_id = ?",
                     (row["artifact_id"],),

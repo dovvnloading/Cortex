@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, native broker transport, and signed bundle installation complete; artifact staging, provider, and release gates remain open
+- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, and trusted artifact boundary complete; provider and release gates remain open
 - **Scope:** Provider-independent validation and deterministic trusted primitives only
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -18,7 +18,8 @@
 | Signed bundle installation/update | **Complete (storage-only)** | Digest-named immutable generations, exclusive staging, atomic activation state, chained keyring rotation, explicit rollback authorization, and previous-generation recovery are covered by installer tests. No provider is loaded. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
-| User-artifact copy-in, image decoding, output validation, publication | **Blocked / next gate** | The signed bundle installer copies only its declared bundle files; user-owned artifact snapshotting, codec validation, output publication, and source non-overwrite proofs remain unimplemented. |
+| User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
+| Image decoding and provider-produced image outputs | **Blocked / next gate** | The boundary records safe bytes and metadata only; codecs, decompression, thumbnails, and provider execution remain intentionally unimplemented. |
 | Production sandbox provider and execution route | **Blocked / next gate** | The native pipe is transport-only; no Wasmtime, AppContainer, Job Object, subprocess, lifecycle provider, or production execution route was added. |
 
 ## Security invariants
@@ -55,6 +56,16 @@
 14. The activation pointer is atomically replaced only after the generation is
     verified; keyring updates are signature-chained and rollback/recovery always need
     a separate trusted local decision.
+15. User copy-in requires an owner-bound source grant and never mutates or overwrites
+    the selected source; source identity, size, and timestamps must be stable across
+    the bounded read.
+16. Reparse points, hardlinks, sparse files, devices, ADS/path ambiguity, active
+    content, archives, and non-finite JSON are rejected before artifact publication.
+17. Provider output claims must exactly match the private staging file set; all files
+    are validated before any publication, and publication failure rolls back records
+    while quarantine/cleanup failures surface for supervisor recovery.
+18. Artifact records are opaque IDs; repository read/delete/purge operations remain
+    confined to the configured artifact root and verify the stored SHA-256.
 
 ## Re-run target
 
@@ -64,6 +75,7 @@ python -m pytest tests/test_phase2_manifest.py -q
 python -m pytest tests/test_phase2_broker.py -q
 python -m pytest tests/test_phase2_native_broker.py -q
 python -m pytest tests/test_phase2_bundle_installer.py -q
+python -m pytest tests/test_phase2_artifact_boundary.py -q
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -74,9 +86,9 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
-7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, and the full
-Python suite passed (171 tests total) with one native-platform skip and one pre-existing
-`pytest-asyncio` deprecation warning.
+7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, and 16
+artifact-boundary tests passed; the full Python suite passed (187 tests total) with one
+native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution
 provider is enabled.

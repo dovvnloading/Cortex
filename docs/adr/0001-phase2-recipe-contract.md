@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Typed contract, signed-manifest verification, native broker transport, and signed bundle installation implemented and verified; copy-in/output and provider enablement remain blocked
+- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, and trusted artifact boundary implemented and verified; provider enablement remains blocked
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -54,8 +54,9 @@ This ADR does not authorize:
   verification plus storage installation are implemented separately in
   [the signed-manifest ADR](0001-phase2-signed-manifest.md) and
   [the bundle installation ADR](0001-phase2-bundle-installation.md);
-- image codecs, thumbnails, or decompression handling;
-- artifact copy-in, output validation, atomic publication, or source ownership binding;
+- image decoding, codecs, thumbnails, archive extraction, or provider-produced content
+  handling beyond the
+  trusted [artifact boundary](0001-phase2-artifact-boundary.md);
 - production execution beyond the transport-only
   [native broker adapter](0001-phase2-native-broker.md);
 - Wasmtime/WASI, AppContainer/LPAC, Job Object, host process, or any other provider;
@@ -66,9 +67,7 @@ packaged application remains on the explicitly disabled lifecycle from Phase 1.
 
 ## Required next gates
 
-1. Implement trusted user-artifact copy-in/output validation and artifact publication tests,
-   including parser fuzzing and source non-overwrite proofs.
-2. Qualify the fixed-function provider inside the OS sandbox and wire it only through
+1. Qualify the fixed-function provider inside the OS sandbox and wire it only through
    a passing lifecycle health check after external review.
 
 ## Verification
