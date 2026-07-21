@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract and signed-manifest verification complete; provider and release gates remain open
+- **Status:** Typed contract, signed-manifest verification, and broker contract complete; native provider and release gates remain open
 - **Scope:** Provider-independent validation and deterministic trusted primitives only
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -16,6 +16,8 @@
 | Canonical plan identity | **Complete** | Validated plans expose stable canonical JSON and SHA-256 digests for future idempotency/signature binding. |
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
 | Signed bundle installation/update | **Blocked / next gate** | Verification does not install, load, atomically replace, persist state, rotate keys, or enable a provider. |
+| Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
+| Native named-pipe adapter/DACL/peer-token binding | **Blocked / next gate** | No pipe, security descriptor, token query, key handshake, or executor connection is enabled. |
 | Copy-in, image decoding, output validation, publication | **Blocked / next gate** | No codec or provider path has been enabled; Phase 1 artifact storage remains the only publication mechanism. |
 | Production broker and sandbox provider | **Blocked / next gate** | No named-pipe broker, Wasmtime, AppContainer, Job Object, subprocess, or production execution route was added. |
 
@@ -39,12 +41,18 @@
    SHA-256 before any future installation decision; verification does not load it.
 9. The Phase 1 application lifecycle remains explicitly disabled for production
    execution; this stage cannot make a provider visible by itself.
+10. Frames are bounded, authenticated with direction-specific keys, canonical, and
+    strictly sequenced; replay, reflection, truncation, and malformed headers fail
+    closed.
+11. Peer ACL/identity and durable job ownership are checked outside the wire payload;
+    a principal or job mismatch cannot be used as a confused deputy.
 
 ## Re-run target
 
 ```powershell
 python -m pytest tests/test_phase2_recipe_contract.py -q
 python -m pytest tests/test_phase2_manifest.py -q
+python -m pytest tests/test_phase2_broker.py -q
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -55,7 +63,7 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
-and the full Python suite passed (148 tests total) with one pre-existing
+7 broker-contract tests, and the full Python suite passed (155 tests total) with one pre-existing
 `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution
