@@ -12,6 +12,8 @@ from cortex_backend.services.llm import SynthesisAgent
 class ChatCorrectnessTests(unittest.TestCase):
     def test_generated_new_chat_title_is_normalized(self):
         self.assertEqual(SynthesisAgent.normalize_title('  "New Chat"  '), "New Chat")
+        self.assertEqual(SynthesisAgent.normalize_title("**AI Purpose Explained**"), "AI Purpose Explained")
+        self.assertEqual(SynthesisAgent.normalize_title("### [Cortex planning](https://example.test)"), "Cortex planning")
         self.assertEqual(SynthesisAgent.normalize_title(""), "Untitled Chat")
         self.assertLessEqual(len(SynthesisAgent.normalize_title("x" * 200)), 80)
 

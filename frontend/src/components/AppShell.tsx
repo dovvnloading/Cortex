@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Pencil, Plus, Settings, Trash2 } from "lucide-react";
 import type { ChatSummary, ModelResponse } from "../../../contracts/cortex-api";
+import { displayChatTitle } from "../lib/chatTitle";
 
 type Props = {
   chats: ChatSummary[];
@@ -33,7 +34,7 @@ export function AppShell({
   const isSettings = location.pathname === "/settings";
   const activeTitle = isSettings
     ? "Settings"
-    : chats.find((chat) => chat.id === activeChatId)?.title || "Cortex";
+    : displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title, "Cortex");
 
   const closeSidebarOnCompactLayout = () => {
     if (window.matchMedia("(max-width: 760px)").matches) setSidebarVisible(false);
@@ -96,13 +97,13 @@ export function AppShell({
             {chats.length ? chats.map((chat) => (
               <div className={`chat-list-item ${activeChatId === chat.id && !isSettings ? "chat-list-item-active" : ""}`} key={chat.id}>
                 <button className="chat-list-select" type="button" onClick={() => selectChat(chat.id)} aria-current={activeChatId === chat.id && !isSettings ? "page" : undefined}>
-                  {chat.title || "Untitled chat"}
+                  {displayChatTitle(chat.title)}
                 </button>
                 <div className="chat-list-actions">
-                  <button className="history-action" type="button" aria-label={`Rename ${chat.title || "chat"}`} onClick={() => setRenameTarget(chat)}>
+                  <button className="history-action" type="button" aria-label={`Rename ${displayChatTitle(chat.title)}`} onClick={() => setRenameTarget(chat)}>
                     <Pencil aria-hidden="true" size={13} />
                   </button>
-                  <button className="history-action history-action-danger" type="button" aria-label={`Delete ${chat.title || "chat"}`} onClick={() => setDeleteTarget(chat)}>
+                  <button className="history-action history-action-danger" type="button" aria-label={`Delete ${displayChatTitle(chat.title)}`} onClick={() => setDeleteTarget(chat)}>
                     <Trash2 aria-hidden="true" size={13} />
                   </button>
                 </div>
@@ -127,7 +128,7 @@ function isCompactWindow(): boolean {
 }
 
 function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: () => void; onSave: (id: string, title: string) => Promise<void> }) {
-  const [title, setTitle] = useState(chat.title);
+  const [title, setTitle] = useState(displayChatTitle(chat.title));
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (title.trim()) void onSave(chat.id, title.trim()).then(onClose);
@@ -153,7 +154,7 @@ function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: (
 function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onClose: () => void; onConfirm: () => Promise<void> }) {
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
-  const title = chat.title.trim() || "Untitled chat";
+  const title = displayChatTitle(chat.title);
   const confirmed = confirmation.trim() === title;
 
   useEffect(() => {
