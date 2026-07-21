@@ -284,6 +284,12 @@ class ExecutionRepository:
     ) -> ExecutionJob:
         now = self._now()
         with self.connect() as connection:
+            # Serialize lifecycle transitions before reading the current
+            # sequence. Workers and cancellation requests may transition the
+            # same job concurrently; without an immediate transaction both
+            # connections can read the same sequence and collide on the
+            # execution_events primary key.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
