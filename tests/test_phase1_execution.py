@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import time
@@ -232,7 +233,7 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
         owner="session-a",
         scope_digest="scope",
         reason="test",
-        ttl_seconds=0.01,
+        ttl_seconds=10,
     ) == "pending"
     assert repository.get_job(extended.job_id).approval_state == "pending"
     with pytest.raises(ApprovalTransitionError):
@@ -271,14 +272,92 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
         ttl_seconds=0.01,
     ) == "pending"
     time.sleep(0.03)
-    assert repository.expire_approvals() == [expiring.job_id]
     assert repository.get_job(expiring.job_id).approval_state == "expired"
+    assert repository.get_approval(expiring.job_id).state == "expired"
+    with pytest.raises(ApprovalTransitionError, match="expired"):
+        repository.decide_approval(
+            expiring.job_id,
+            owner="session-a",
+            decision="approved",
+        )
+    expired_job = repository.get_job(expiring.job_id)
+    assert expired_job.approval_state == "expired"
+    assert expired_job.status == "cancelled"
+    assert expired_job.error == "approval_expired"
+    assert repository.expire_approvals() == []
     with pytest.raises(ApprovalTransitionError):
         repository.decide_approval(
             expiring.job_id,
             owner="session-a",
             decision="denied",
         )
+
+    cleanup, _ = repository.create_job(
+        job_id="job-approval-cleanup",
+        owner="session-a",
+        request_id="request-approval-cleanup",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    repository.request_approval(
+        cleanup.job_id,
+        owner="session-a",
+        scope_digest="scope",
+        reason="test cleanup",
+        ttl_seconds=0.01,
+    )
+    time.sleep(0.03)
+    assert repository.expire_approvals() == [cleanup.job_id]
+    cleaned = repository.get_job(cleanup.job_id)
+    assert cleaned.status == "cancelled"
+    assert cleaned.approval_state == "expired"
+    assert cleaned.error == "approval_expired"
+    assert repository.events(cleanup.job_id)[-1].event == "cancelled"
+
+
+def test_concurrent_approval_decisions_commit_exactly_once(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-approval-race",
+        owner="session-a",
+        request_id="request-approval-race",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    repository.request_approval(
+        job.job_id,
+        owner="session-a",
+        scope_digest="immutable-scope",
+        reason="Race the decision boundary.",
+        ttl_seconds=10,
+    )
+
+    def decide(decision):
+        try:
+            return repository.decide_approval(
+                job.job_id,
+                owner="session-a",
+                decision=decision,
+            )
+        except ApprovalTransitionError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(decide, ("approved", "denied")))
+
+    assert outcomes.count("rejected") == 1
+    committed = repository.get_approval(job.job_id).state
+    assert committed in {"approved", "denied"}
+    assert outcomes.count(committed) == 1
+    events = repository.events(job.job_id)
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert [event.data.get("approval_state") for event in events].count(committed) == 1
+    final = repository.get_job(job.job_id)
+    if committed == "denied":
+        assert final.status == "cancelled"
+        assert final.error == "approval_denied"
+    else:
+        assert final.status == "queued"
 
 
 def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(tmp_path):

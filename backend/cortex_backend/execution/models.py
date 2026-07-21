@@ -42,13 +42,6 @@ EXECUTION_EVENT_NAMES: tuple[ExecutionEventName, ...] = (
     "execution.failed",
     "execution.cancelled",
 )
-ExecutionApprovalState = Literal[
-    "not_required",
-    "pending",
-    "approved",
-    "denied",
-    "expired",
-]
 EXECUTION_APPROVAL_STATES: tuple[ExecutionApprovalState, ...] = (
     "not_required",
     "pending",
@@ -56,6 +49,16 @@ EXECUTION_APPROVAL_STATES: tuple[ExecutionApprovalState, ...] = (
     "denied",
     "expired",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionApproval:
+    job_id: str
+    state: ExecutionApprovalState
+    reason: str
+    created_at: str
+    decided_at: str | None = None
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

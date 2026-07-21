@@ -1,7 +1,7 @@
 # ADR-0001 Phase 1 evidence log
 
 - **Phase:** 1 — durable jobs, artifacts, and UI with a fake executor
-- **Status:** Approval/recovery backend slice complete; overall Phase 1 remains in progress
+- **Status:** Approval UI/API slice complete; overall Phase 1 remains in progress
 - **Scope:** Durable execution workflow only; no model-generated code, guest
   runtime, recipe provider, or host subprocess is enabled.
 - **Source decision:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
@@ -19,10 +19,10 @@ failures can be exhausted without executing code.
 | Durable jobs and leases | **Complete (backend slice)** | Lease ownership, expiry, idempotent creation, and stale-lease recovery are covered by repository tests. |
 | Ordered durable events/replay | **Complete (backend slice)** | Append-only sequence numbers and cursor replay survive repository re-instantiation. Terminal state is immutable. |
 | Artifact store and retention | **Complete (backend slice)** | Copy-in, generated-root confinement, SHA-256 verification, size limits, atomic publish, expiry checks, and cleanup are tested. |
-| Task tray/accessibility/approvals | **Task tray and approval persistence complete; approval UX pending** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, keyboard Stop action, and active spinner. Approval state is durable and transition-gated; no approval endpoint/card is exposed for fake-only work. |
+| Task tray/accessibility/approvals | **Complete (Phase 1 slice)** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, keyboard Stop action, active-work spinner, and a non-modal pending-approval card with safe reason/profile/expiry plus Allow once/Deny controls. Decisions are exact-job, owner-scoped, expiry-gated, and never launch a provider. |
 | Cancellation and recovery | **Complete (backend + startup supervisor)** | Cooperative fake cancellation, terminal cancellation, per-job lease recovery, single-instance supervisor exclusion/reclaim, startup rehydration, approval expiry, and malformed-payload fail-closed behavior are covered; process/runtime cancellation is deferred to later phases. |
 | Deterministic fake provider | **Complete (backend slice)** | `fake.v1` emits fixed prepare/progress/completion/failure/cancellation outcomes and never accepts source, paths, network, or host-process controls. |
-| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement, and startup supervisor are green. Approval UI/API, installation-principal wiring, and production lifecycle/recovery integration remain. |
+| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement/UI/API, and startup supervisor are green. Installation-principal wiring and production lifecycle/recovery integration remain. |
 
 ## Cross-check findings
 
@@ -46,6 +46,13 @@ failures can be exhausted without executing code.
 - Startup recovery rehydrates only fake.v1 payloads and skips pending/denied/expired
   approvals. Unknown profiles or malformed payloads fail with
   `recovery_invalid_payload`.
+- Approval status/task reads expose only effective state, safe reason, and expiry.
+  The decision request contains no scope; the server binds it to the persisted
+  owner/job/scope and rechecks expiry in the same immediate transaction.
+- Pending approvals render as non-modal action cards and do not reuse the active
+  work spinner. Failed decisions retain the card and surface a safe toast message.
+- OpenAPI and TypeScript contracts are regenerated from Pydantic models and CI now
+  fails on checked-in contract drift, including the SSE envelope supplement.
 
 ## Phase 1 invariants
 
@@ -67,6 +74,14 @@ failures can be exhausted without executing code.
    and pending approval cannot reach a terminal job state.
 10. Only one recovery supervisor can reclaim expired leases; recovery is idempotent
     and never resumes a previous process or stream.
+11. Approval decisions are owner-scoped and exactly-once. Concurrent allow/deny
+    requests commit one durable result, while a decision at or after expiry can
+    only persist `expired`.
+12. Approval UI never grants reusable authority, submits scope, steals focus, or
+    dispatches a provider; `fake.v1` remains `not_required`.
+13. Denied and expired approvals terminally cancel their inert job with stable
+    `approval_denied`/`approval_expired` diagnostics; no unlaunchable approval job
+    remains queued.
 
 ## Re-run target
 
@@ -76,6 +91,7 @@ python -m pytest tests/test_phase1_execution.py -q
 python -m pytest tests/test_phase1_execution_api.py -q
 python -m pytest tests/test_phase1_recovery_contract.py -q
 python -m pytest -q
+python tools/generate_contracts.py
 npm.cmd run lint --prefix frontend
 npm.cmd run typecheck --prefix frontend
 npm.cmd run build --prefix frontend
@@ -83,8 +99,9 @@ npm.cmd test --prefix frontend -- --run
 ```
 
 **Validation result (2026-07-21):** compileall passed; the full Python suite passed
-108 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
-typecheck, production build (`tsc -b` + Vite), and all 35 component tests passed.
-Phase 1 cannot close until approval UI/API, installation principal wiring, and
-production lifecycle/recovery integration are separately reviewed; this stage does
-not enable production code execution.
+111 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
+typecheck, production build (`tsc -b` + Vite), and all 39 component tests passed.
+Generated OpenAPI/TypeScript contracts are current and `git diff --check` passed.
+Phase 1 cannot close until installation-principal wiring and production
+lifecycle/recovery integration are separately reviewed; this stage does not enable
+production code execution.

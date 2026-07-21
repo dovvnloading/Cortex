@@ -1,6 +1,6 @@
 # ADR-0001 Phase 1 approval and restart-supervisor contract
 
-- **Status:** Contract frozen; implementation next
+- **Status:** Implemented and verified; approval UI/API is the next bounded stage
 - **Parent:** [Phase 1 API/task-tray contract](0001-phase1-api-contract.md)
 - **Scope:** Durable approval state and fake-only startup recovery
 

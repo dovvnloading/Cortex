@@ -38,6 +38,11 @@ jobs:
       - name: Compile application modules
         run: python -m compileall -q main.py backend
 
+      - name: Verify generated API contracts
+        run: |
+          python tools/generate_contracts.py
+          git diff --exit-code -- contracts/openapi.json contracts/cortex-api.ts
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
