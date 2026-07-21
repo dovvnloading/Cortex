@@ -703,7 +703,8 @@ application-data exhaustion.
 An image request such as “make this grayscale and increase contrast” follows this
 path:
 
-1. The attached image is snapshotted and assigned an opaque artifact ID.
+1. The attached image is snapshotted through the trusted artifact boundary and assigned
+   an opaque artifact ID; the source remains untouched.
 2. The model or deterministic request adapter emits a typed `image_transform` plan.
 3. Policy verifies that the user requested transformation of that exact attached
    artifact; no general filesystem grant is inferred.
@@ -714,8 +715,10 @@ path:
    arbitrary filter/plugin name or file path.
 6. The result is re-encoded as a new image. Metadata is stripped by default; preserving
    selected color/orientation metadata must be explicit and sanitized.
-7. The artifact validator decodes the output again, verifies dimensions/type/size,
-   creates a thumbnail in trusted code, and atomically publishes both.
+7. The future artifact validator decodes the output again, verifies dimensions/type/size,
+   creates a thumbnail in trusted code, and atomically publishes both. The current
+   boundary validates bytes, type, size, claims, and hashes but deliberately does not
+   decode images.
 8. The UI presents the new artifact, operation summary, dimensions, size, and download
    action. The source is untouched.
 
@@ -936,12 +939,15 @@ pass without executing code.
 
 ### Phase 2 — signed image recipes and calculator/check primitives
 
-- Release only fixed-function typed operations in the OS sandbox.
-- Validate the complete copy-in/validate/publish path and collect opt-in aggregate
-  reliability metrics, never content.
+- Keep the typed recipe, signed bundle, broker transport, and trusted artifact boundary
+  provider-independent until the sandbox qualification gate passes.
+- The owner-bound copy-in, exact-claim output validation, quarantine, hashing, and
+  atomic publication boundary is implemented; collect opt-in aggregate reliability
+  metrics, never content, after the provider is qualified.
 
-**Exit gate:** parser fuzzing and artifact security review pass; no source overwrite is
-possible.
+**Implementation gate:** parser and artifact-boundary adversarial suites pass; no source
+overwrite is possible. **Release gate:** parser fuzzing, artifact security review, and
+fixed-function provider qualification must pass before any provider is enabled.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

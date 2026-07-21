@@ -21,6 +21,16 @@ from .broker import (
     encode_frame,
     encode_message,
 )
+from .artifact_boundary import (
+    ArtifactBoundary,
+    ArtifactBoundaryError,
+    ArtifactSourceGrant,
+    MAX_ARTIFACT_PATH_CHARS,
+    MAX_OUTPUT_COUNT,
+    OutputClaim,
+    PublishedArtifact,
+    sniff_artifact_mime,
+)
 from .fake import FakeExecutionPlan, FakeExecutionProvider
 from .bundle_installer import (
     BundleInstallError,
@@ -80,6 +90,9 @@ from .repository import (
 
 __all__ = [
     "ArtifactLimitError",
+    "ArtifactBoundary",
+    "ArtifactBoundaryError",
+    "ArtifactSourceGrant",
     "ApprovalPolicyError",
     "ApprovalTransitionError",
     "BrokerAclPolicy",
@@ -108,6 +121,8 @@ __all__ = [
     "ManifestEntry",
     "ManifestState",
     "ManifestVerificationError",
+    "MAX_ARTIFACT_PATH_CHARS",
+    "MAX_OUTPUT_COUNT",
     "MAX_NATIVE_PIPE_NAME_LENGTH",
     "NativeBrokerClient",
     "NativeBrokerClientConfig",
@@ -116,6 +131,8 @@ __all__ = [
     "NativeBrokerServer",
     "NativeBrokerServerConfig",
     "PrimitiveEvaluationError",
+    "OutputClaim",
+    "PublishedArtifact",
     "RecipeValidationError",
     "RuntimeHealth",
     "RollbackAuthorizer",
@@ -129,6 +146,7 @@ __all__ = [
     "parse_calculator",
     "parse_check",
     "parse_image_transform",
+    "sniff_artifact_mime",
     "verify_bundle_files",
     "verify_manifest_signature",
     "parse_keyring_update",
