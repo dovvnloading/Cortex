@@ -16,6 +16,7 @@
 | Canonical plan identity | **Complete** | Validated plans expose stable canonical JSON and SHA-256 digests for future idempotency/signature binding. |
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
 | Signed bundle installation/update | **Complete (storage-only)** | Digest-named immutable generations, exclusive staging, atomic activation state, chained keyring rotation, explicit rollback authorization, and previous-generation recovery are covered by installer tests. No provider is loaded. |
+| Signed worker provenance binding | **Complete (storage-only)** | `verify_active_worker()` rechecks the active signed generation, binds exactly one `image_transform` role to `recipe_worker.exe`, revalidates byte identity, and rejects missing/ambiguous/mismatched/tampered/reparse entries without launching. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
@@ -76,6 +77,9 @@
 21. The sandbox qualification harness never authorizes a provider launch from a
     missing, unsigned, or merely present worker directory; it reports `blocked` and
     never falls back to host-process decoding.
+22. Worker provenance is storage-only: only an installer-validated immutable
+    generation with one exact `image_transform`/`recipe_worker.exe` role and stable
+    byte identity can proceed to a future launcher; no executable is loaded here.
 
 ## Re-run target
 
@@ -87,6 +91,7 @@ python -m pytest tests/test_phase2_native_broker.py -q
 python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m pytest tests/test_phase2_artifact_boundary.py -q
 python -m pytest tests/test_phase2_recipe_provider.py -q
+python -m pytest tests/test_phase2_worker_provenance.py -q
 python -m pytest tests/test_recipe_sandbox_qualification.py -q
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
@@ -100,9 +105,10 @@ npm.cmd test --prefix frontend -- --run
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
 7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, 16
-artifact-boundary tests, 17 recipe-provider tests, and 5 sandbox-qualification tests
+artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, and
+5 sandbox-qualification tests
 passed; the full Python suite
-passed (209 tests total) with one
+passed (215 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution

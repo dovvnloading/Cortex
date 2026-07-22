@@ -67,6 +67,13 @@ from .native_broker import (
     NativeBrokerServerConfig,
     build_pipe_sddl,
 )
+from .worker_provenance import (
+    EXPECTED_WORKER_PATH,
+    VerifiedRecipeWorker,
+    WorkerProvenanceError,
+    verify_active_worker,
+    verify_installed_worker,
+)
 from .recipes import (
     CalculatorPlan,
     CheckPlan,
@@ -155,6 +162,11 @@ __all__ = [
     "PeerIdentity",
     "authorize_message",
     "build_pipe_sddl",
+    "EXPECTED_WORKER_PATH",
+    "VerifiedRecipeWorker",
+    "WorkerProvenanceError",
+    "verify_active_worker",
+    "verify_installed_worker",
     "decode_frame",
     "decode_message",
     "encode_frame",

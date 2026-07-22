@@ -106,9 +106,10 @@ allowlisted transforms, deterministic output hashes, metadata stripping, malform
 active inputs, malformed JPEGs, animated WebP rejection, pixel/decoded-memory/output
 limits, crop bounds, cancellation, stop behavior, and non-raiseable configuration caps.
 
-The next gate is the disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md),
-which currently proves only the existing native isolation/cancellation controls and
-fixed decoder corpus. The actual provider worker must still launch out of process
+The next gate is the [signed worker provenance binding](0001-phase2-worker-provenance.md)
+followed by the disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md).
+The storage boundary now proves only the exact role and immutable bytes; the actual
+provider worker must still launch out of process
 under a signed bundle, AppContainer/LPAC and Job Object controls, restricted
 handles/environment, native broker identity, watchdog, and accounting; run the hostile
 decoder corpus there; then wire it to `ExecutionLifecycle` only after external review.
