@@ -106,7 +106,9 @@ allowlisted transforms, deterministic output hashes, metadata stripping, malform
 active inputs, malformed JPEGs, animated WebP rejection, pixel/decoded-memory/output
 limits, crop bounds, cancellation, stop behavior, and non-raiseable configuration caps.
 
-The next gate is a separate Windows sandbox qualification: launch the provider out of
-process under the signed bundle, AppContainer/LPAC and Job Object controls, restricted
+The next gate is the disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md),
+which currently proves only the existing native isolation/cancellation controls and
+fixed decoder corpus. The actual provider worker must still launch out of process
+under a signed bundle, AppContainer/LPAC and Job Object controls, restricted
 handles/environment, native broker identity, watchdog, and accounting; run the hostile
 decoder corpus there; then wire it to `ExecutionLifecycle` only after external review.

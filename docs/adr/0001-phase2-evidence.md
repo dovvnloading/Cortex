@@ -20,7 +20,8 @@
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / next gate** | The core has no process, AppContainer/LPAC, Job Object, broker, watchdog, or lifecycle route; hostile decoder qualification and external review remain required. |
+| Windows recipe sandbox qualification harness | **Complete (qualification harness; worker gate blocked)** | `recipe_sandbox_qualification.py` composes out-of-process AppContainer isolation and Job Object cancellation with a fixed decoder corpus, then fails closed because the signed `recipe_worker.exe` bundle and trust-root launch verification are not shipped. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The actual provider worker still needs signed provenance, LPAC/AppContainer policy, Job Object resource limits/accounting, broker PID/token binding, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
 
 ## Security invariants
 
@@ -72,6 +73,9 @@
 20. Provider startup requires an external available sandbox health result; dependency
     or codec failure, cancellation, decoder failure, and output metadata/size failure
     leave the provider disabled and return stable categories only.
+21. The sandbox qualification harness never authorizes a provider launch from a
+    missing, unsigned, or merely present worker directory; it reports `blocked` and
+    never falls back to host-process decoding.
 
 ## Re-run target
 
@@ -83,6 +87,8 @@ python -m pytest tests/test_phase2_native_broker.py -q
 python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m pytest tests/test_phase2_artifact_boundary.py -q
 python -m pytest tests/test_phase2_recipe_provider.py -q
+python -m pytest tests/test_recipe_sandbox_qualification.py -q
+python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -94,9 +100,12 @@ npm.cmd test --prefix frontend -- --run
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
 7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, 16
-artifact-boundary tests, and 17 recipe-provider tests passed; the full Python suite
-passed (204 tests total) with one
+artifact-boundary tests, 17 recipe-provider tests, and 5 sandbox-qualification tests
+passed; the full Python suite
+passed (209 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution
-provider is enabled.
+provider is enabled. The sandbox qualification command passed its AppContainer,
+Job Object, cancellation, and fixed decoder checks but returned the expected
+fail-closed `blocked` status because the signed worker bundle is not shipped.
