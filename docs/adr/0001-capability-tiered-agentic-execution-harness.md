@@ -943,13 +943,18 @@ pass without executing code.
   provider-independent until the sandbox qualification gate passes.
 - The owner-bound copy-in, exact-claim output validation, quarantine, hashing, and
   atomic publication boundary is implemented. The fixed-function provider core is
-  qualification-only; collect opt-in aggregate reliability metrics, never content,
-  after the provider is sandbox-qualified.
+  qualification-only. The disposable Windows sandbox qualification harness now
+  composes AppContainer/Job Object controls and a fixed decoder corpus, but the
+  signed worker provenance gate remains blocked; collect opt-in aggregate reliability
+  metrics, never content, only after the provider is sandbox-qualified.
 
-**Implementation gate:** parser, artifact-boundary, and qualification-provider adversarial
-suites pass; no source overwrite is possible. **Release gate:** parser fuzzing, artifact
-security review, hostile decoder corpus, OS sandbox qualification, and fixed-function
-provider lifecycle health must pass before any provider is enabled.
+**Implementation gate:** parser, artifact-boundary, qualification-provider, and
+sandbox-qualification regression suites pass; no source overwrite is possible. The
+qualification harness must remain fail-closed when the signed worker is absent.
+**Release gate:** parser fuzzing, artifact security review, hostile decoder corpus
+executed inside the worker, OS sandbox qualification, signed provenance, broker
+identity, resource/watchdog accounting, external review, and fixed-function provider
+lifecycle health must pass before any provider is enabled.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

@@ -26,6 +26,22 @@ required check that is blocked or fails:
 python tools/execution_spikes/phase0_probe.py --json --job-smoke --ipc-smoke --appcontainer-smoke --guest-language-smoke --cancellation-smoke --wasi-smoke --strict
 ```
 
+## Run the Phase 2 recipe sandbox qualification gate
+
+The recipe harness runs only fixed repository helpers and fixed decoder bytes. It
+does not accept model input and never falls back to host-process decoding:
+
+```powershell
+python tools/execution_spikes/recipe_sandbox_qualification.py --json
+python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
+```
+
+The expected result at this stage is `qualification_status=blocked`: the native
+AppContainer and Job Object controls may pass, but the signed `recipe_worker.exe`
+bundle is not shipped yet. A blocked worker-provenance check is intentional and
+must remain blocking until trust-root verification, native worker identity, and
+resource/watchdog enforcement are implemented.
+
 ## What the probes prove
 
 - `environment`: supported Windows host and interpreter metadata.
@@ -50,6 +66,9 @@ python tools/execution_spikes/phase0_probe.py --json --job-smoke --ipc-smoke --a
 - `containment_cancellation_corpus`: starts a fixed AppContainer launcher that
   creates a native descendant, closes the kill-on-close Job Object, and verifies
   every observed process ID is reaped.
+- `recipe_sandbox_qualification`: composes the native isolation/cancellation
+  controls with the qualification-only decoder corpus and a mandatory signed
+  worker provenance gate; it never authorizes a host-process fallback.
 - `security_review`: records the conditional Phase 0 spike review and residual
   blockers.
 - `pyinstaller_package_preconditions`: all currently known one-folder package
@@ -70,3 +89,6 @@ Phase 0 gates.
 4. Keep package/runtime experiments in a disposable environment and record exact
    versions and hashes in the Phase 0 evidence log.
 5. A blocked result is safer than a green result produced by a weaker fallback.
+6. Do not add the recipe qualification harness or any worker bundle to application
+   imports, model tools, or PyInstaller hidden imports before its release gate is
+   explicitly closed.
