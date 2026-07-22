@@ -33,7 +33,11 @@ _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _CREATE_NO_WINDOW = 0x08000000
 _PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002
+_JOB_OBJECT_LIMIT_JOB_TIME = 0x00000004
 _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+_JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+_JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _TOKEN_IS_APPCONTAINER = 29
 _WAIT_OBJECT_0 = 0
@@ -270,7 +274,21 @@ def _run_child(
     arguments: list[str],
     timeout_ms: int = 5000,
     active_process_limit: int = 1,
+    process_memory_limit_bytes: int | None = None,
+    job_memory_limit_bytes: int | None = None,
+    process_user_time_100ns: int | None = None,
+    job_user_time_100ns: int | None = None,
 ) -> dict[str, Any]:
+    for name, value in (
+        ("process_memory_limit_bytes", process_memory_limit_bytes),
+        ("job_memory_limit_bytes", job_memory_limit_bytes),
+        ("process_user_time_100ns", process_user_time_100ns),
+        ("job_user_time_100ns", job_user_time_100ns),
+    ):
+        if value is not None and (type(value) is not int or not 1 <= value <= 1024**3):
+            raise ValueError(f"{name} is outside the disposable probe bounds")
+    if type(active_process_limit) is not int or not 1 <= active_process_limit <= 64:
+        raise ValueError("active_process_limit is outside the disposable probe bounds")
     stage = "start"
     command_line = subprocess.list2cmdline([executable, *arguments])
     command_buffer = ctypes.create_unicode_buffer(command_line)
@@ -343,6 +361,20 @@ def _run_child(
             _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         )
         limits.basic_limit_information.active_process_limit = active_process_limit
+        if process_memory_limit_bytes is not None:
+            limits.basic_limit_information.limit_flags |= _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            limits.process_memory_limit = process_memory_limit_bytes
+        if job_memory_limit_bytes is not None:
+            limits.basic_limit_information.limit_flags |= _JOB_OBJECT_LIMIT_JOB_MEMORY
+            limits.job_memory_limit = job_memory_limit_bytes
+        if process_user_time_100ns is not None:
+            limits.basic_limit_information.limit_flags |= _JOB_OBJECT_LIMIT_PROCESS_TIME
+            limits.basic_limit_information.per_process_user_time.quad_part = (
+                process_user_time_100ns
+            )
+        if job_user_time_100ns is not None:
+            limits.basic_limit_information.limit_flags |= _JOB_OBJECT_LIMIT_JOB_TIME
+            limits.basic_limit_information.per_job_user_time.quad_part = job_user_time_100ns
         stage = "job-configure"
         if not kernel32.SetInformationJobObject(
             job,
@@ -360,6 +392,7 @@ def _run_child(
         stage = "wait"
         wait_result = kernel32.WaitForSingleObject(process_info.process, timeout_ms)
         timed_out = wait_result == _WAIT_TIMEOUT
+        job_information = _job_extended_info(kernel32, job)
         job_process_ids: list[int] = []
         all_job_processes_reaped: bool | None = None
         reap_seconds: float | None = None
@@ -383,6 +416,7 @@ def _run_child(
             "job_process_ids": job_process_ids,
             "all_job_processes_reaped": all_job_processes_reaped,
             "reap_seconds": reap_seconds,
+            "job_information": job_information,
         }
     except Exception as exc:
         raise RuntimeError(f"{stage}: {exc}") from exc
@@ -423,6 +457,44 @@ def _job_process_ids(kernel32: Any, job: wintypes.HANDLE) -> list[int]:
         ctypes.byref(buffer, 8), ctypes.POINTER(ctypes.c_size_t)
     )
     return [int(ids[index]) for index in range(count)]
+
+
+def _job_extended_info(kernel32: Any, job: wintypes.HANDLE) -> dict[str, int]:
+    """Read bounded Job Object policy/accounting before the handle is closed."""
+
+    query = kernel32.QueryInformationJobObject
+    query.argtypes = [
+        wintypes.HANDLE,
+        wintypes.INT,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    query.restype = wintypes.BOOL
+    info = _ExtendedLimitInformation()
+    returned = wintypes.DWORD()
+    if not query(
+        job,
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        ctypes.byref(returned),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return {
+        "limit_flags": int(info.basic_limit_information.limit_flags),
+        "active_process_limit": int(info.basic_limit_information.active_process_limit),
+        "process_memory_limit": int(info.process_memory_limit),
+        "job_memory_limit": int(info.job_memory_limit),
+        "process_user_time_limit_100ns": int(
+            info.basic_limit_information.per_process_user_time.quad_part
+        ),
+        "job_user_time_limit_100ns": int(
+            info.basic_limit_information.per_job_user_time.quad_part
+        ),
+        "peak_process_memory_used": int(info.peak_process_memory_used),
+        "peak_job_memory_used": int(info.peak_job_memory_used),
+    }
 
 
 def _all_processes_reaped(kernel32: Any, process_ids: list[int]) -> bool:

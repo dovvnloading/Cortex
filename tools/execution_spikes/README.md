@@ -34,6 +34,7 @@ does not accept model input and never falls back to host-process decoding:
 ```powershell
 python tools/execution_spikes/recipe_sandbox_qualification.py --json
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
+python tools/execution_spikes/native_launcher_qualification.py
 ```
 
 The expected result at this stage is `qualification_status=blocked`: the native
@@ -41,6 +42,11 @@ AppContainer and Job Object controls may pass, but the signed `recipe_worker.exe
 bundle is not shipped yet. A blocked worker-provenance check is intentional and
 must remain blocking until trust-root verification, native worker identity, and
 resource/watchdog enforcement are implemented.
+
+The native launcher qualification prints a passing resource-policy subcheck when
+the fixed suspended child receives and reports Job Object CPU/memory/active-process
+limits with no breakaway flags. Its overall exit remains blocked until the signed
+worker package and broker PID/token binding exist.
 
 ## What the probes prove
 
@@ -69,6 +75,9 @@ resource/watchdog enforcement are implemented.
 - `recipe_sandbox_qualification`: composes the native isolation/cancellation
   controls with the qualification-only decoder corpus and a mandatory signed
   worker provenance gate; it never authorizes a host-process fallback.
+- `native_launcher_qualification`: creates only a fixed suspended `findstr.exe`
+  child, applies and queries Job Object resource policy before resume, and reports
+  the signed-worker and broker-binding blockers without launching either.
 - `security_review`: records the conditional Phase 0 spike review and residual
   blockers.
 - `pyinstaller_package_preconditions`: all currently known one-folder package

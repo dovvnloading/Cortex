@@ -946,14 +946,15 @@ pass without executing code.
   qualification-only. The disposable Windows sandbox qualification harness now
   composes AppContainer/Job Object controls and a fixed decoder corpus. Storage-only
   signed worker provenance now binds exactly one image-transform role to the fixed
-  worker entrypoint, but native launch/resource/broker gates remain blocked; collect
-  opt-in aggregate reliability metrics, never content, only after the provider is
-  sandbox-qualified.
+  worker entrypoint, and the disposable launcher now qualifies pre-resume Job Object
+  resource policy. Native worker launch and broker PID/token binding remain blocked;
+  collect opt-in aggregate reliability metrics, never content, only after the
+  provider is sandbox-qualified.
 
 **Implementation gate:** parser, artifact-boundary, qualification-provider,
-worker-provenance, and sandbox-qualification regression suites pass; no source
-overwrite is possible. The qualification harness must remain fail-closed when the
-signed worker is absent.
+worker-provenance, sandbox-qualification, and native-launcher-policy regression
+suites pass; no source overwrite is possible. The qualification harness must remain
+fail-closed when the signed worker is absent.
 **Release gate:** parser fuzzing, artifact security review, hostile decoder corpus
 executed inside the worker, OS sandbox qualification, signed provenance, broker
 identity, resource/watchdog accounting, external review, and fixed-function provider
