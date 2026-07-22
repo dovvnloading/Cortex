@@ -43,7 +43,7 @@ fallback.
 | AppContainer token and zero-capability denials | `appcontainer_smoke.py`, child report `recipe_appcontainer_control` | Required prerequisite; does not prove LPAC policy or provider launch identity |
 | Job Object kill-on-close and tree cancellation | `cancellation_corpus.py`, child report `recipe_cancellation_control` | Required prerequisite; resource limits and accounting remain open |
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
-| Signed worker provenance | Fixed `packaging/recipe-runtime` location and exact `recipe_worker.exe` entrypoint | **Blocked** until packaged trust-root/signature/hash verification exists |
+| Signed worker provenance | Storage-only `verify_active_worker()` role binding plus fixed package precondition | **Storage gate complete; launch remains blocked** until a packaged executable and native launcher exist |
 | Broker identity and framed IPC | Native broker transport tests and ADR | Must be bound to the actual worker PID/token before launch |
 | Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; provider is not exported | No provider can become reachable from the application |
 
