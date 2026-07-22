@@ -22,6 +22,7 @@
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (qualification harness; worker gate blocked)** | `recipe_sandbox_qualification.py` composes out-of-process AppContainer isolation and Job Object cancellation with a fixed decoder corpus, then fails closed because the signed `recipe_worker.exe` bundle and trust-root launch verification are not shipped. |
+| Suspended native launcher/resource policy | **Complete (disposable control spike)** | `native_launcher_qualification.py` creates a fixed suspended AppContainer child, applies and queries active-process, kill-on-close, CPU-time, memory, and no-breakaway Job Object policy before resume; real worker enforcement and broker binding remain blocked. |
 | OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The actual provider worker still needs signed provenance, LPAC/AppContainer policy, Job Object resource limits/accounting, broker PID/token binding, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
 
 ## Security invariants
@@ -80,6 +81,9 @@
 22. Worker provenance is storage-only: only an installer-validated immutable
     generation with one exact `image_transform`/`recipe_worker.exe` role and stable
     byte identity can proceed to a future launcher; no executable is loaded here.
+23. The disposable launcher applies all required Job Object policy before resume,
+    queries the configured limits/accounting, never grants breakaway, and reports
+    the absent worker/broker gates as blocking.
 
 ## Re-run target
 
@@ -92,7 +96,9 @@ python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m pytest tests/test_phase2_artifact_boundary.py -q
 python -m pytest tests/test_phase2_recipe_provider.py -q
 python -m pytest tests/test_phase2_worker_provenance.py -q
+python -m pytest tests/test_native_launcher_qualification.py -q
 python -m pytest tests/test_recipe_sandbox_qualification.py -q
+python tools/execution_spikes/native_launcher_qualification.py
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
@@ -105,10 +111,11 @@ npm.cmd test --prefix frontend -- --run
 
 **Validation result (2026-07-21):** 16 Phase 2 contract tests, 9 signed-manifest tests,
 7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, 16
-artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, and
+artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, 4
+native-launcher tests, and
 5 sandbox-qualification tests
 passed; the full Python suite
-passed (215 tests total) with one
+passed (219 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution

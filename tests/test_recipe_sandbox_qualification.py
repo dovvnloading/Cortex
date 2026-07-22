@@ -91,6 +91,11 @@ def test_report_remains_blocked_when_worker_gate_is_blocked(monkeypatch):
         "_probe_signed_worker_precondition",
         lambda: {"name": "recipe_signed_worker_provenance", "status": "blocked"},
     )
+    monkeypatch.setattr(
+        qualification,
+        "_probe_future_worker_controls",
+        lambda: [{"name": "recipe_native_launcher_policy", "status": "blocked"}],
+    )
 
     report = qualification.build_report()
 

@@ -289,13 +289,22 @@ def _probe_signed_worker_precondition() -> dict[str, Any]:
 
 
 def _probe_future_worker_controls() -> list[dict[str, Any]]:
-    """Expose controls that cannot be claimed by the current fixed helpers."""
+    """Run the fixed launcher policy probe and expose remaining blockers."""
+
+    helper = ROOT / "tools" / "execution_spikes" / "native_launcher_qualification.py"
+    launcher = _run_fixed_helper(
+        helper,
+        "cortex-native-launcher-qualification",
+        30,
+    )
+    launcher["name"] = "recipe_native_launcher_policy"
 
     return [
+        launcher,
         _result(
             "recipe_resource_controls",
             BLOCKED,
-            "Per-worker CPU, memory, breakaway, and accounting enforcement is not implemented; active-process and kill-on-close smoke is only a prerequisite.",
+            "The fixed resource-policy spike reports its configured/queryable limits, but release still requires a real worker launch and external enforcement review.",
             launch_refused=True,
         ),
         _result(
