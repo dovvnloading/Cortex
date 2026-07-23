@@ -30,6 +30,10 @@ multiple image roles, a changed worker, or a reparse/hardlink entry cannot be
 treated as the worker. Stable `WorkerProvenanceError.code` values cross the
 boundary; paths, bytes, OS errors, and signatures never do.
 
+The release signer may declare the remaining one-folder files as inert `resource`
+entries so the installer can enforce an exact dependency tree. Those entries are
+copied and rehashed but are never eligible for worker-role selection.
+
 ## Failure categories
 
 The verifier uses bounded categories including `worker_bundle_unavailable`,

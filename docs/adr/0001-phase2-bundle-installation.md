@@ -31,6 +31,11 @@ digest changes, and source identity changes during the copy. Only declared files
 copied; `manifest.json` is reserved for the canonical signed payload. Staged files
 are flushed before the generation is renamed into the same-volume bundle directory.
 
+One-folder worker dependencies are represented by manifest entries with the inert
+`resource` entrypoint; the installer copies them for exact-tree integrity but never
+selects them as executable roles. Worker-role selection remains the separate
+`verify_active_worker()` provenance check.
+
 Activation is a two-step commit. First, the complete generation is durably written
 and renamed without replacing an existing digest directory. Second, the small
 `state.json` pointer is written to a unique temporary file, flushed, and atomically

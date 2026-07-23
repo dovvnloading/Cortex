@@ -23,11 +23,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 
 MAX_MANIFEST_BYTES = 256 * 1024
-MAX_MANIFEST_ENTRIES = 128
+# A PyInstaller one-folder dependency closure can contain hundreds of ordinary
+# files (DLLs, extension modules, and package metadata). Keep the bound explicit
+# while allowing the signed worker package to describe its complete tree.
+MAX_MANIFEST_ENTRIES = 1024
 MAX_BUNDLE_ENTRY_BYTES = 128 * 1024 * 1024
 _SAFE_KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _SAFE_RECIPE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-_SAFE_BUNDLE_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+# PyInstaller one-folder packages use the ordinary `_internal/` directory and
+# may carry package metadata such as `Lorem ipsum.txt` or timezone names with
+# `+`. These are safe path characters; dot segments and traversal are still
+# rejected explicitly by the validator below.
+_SAFE_BUNDLE_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/+ -]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -57,7 +64,7 @@ class _ManifestModel(BaseModel):
 class ManifestEntry(_ManifestModel):
     recipe_id: str
     bundle_path: str
-    entrypoint: Literal["image_transform", "calculation", "check"]
+    entrypoint: Literal["image_transform", "calculation", "check", "resource"]
     version: str
     size: int = Field(strict=True, ge=1, le=MAX_BUNDLE_ENTRY_BYTES)
     sha256: str
