@@ -70,12 +70,18 @@ from .native_broker import (
 from .native_launcher import (
     BrokerWorkerBinding,
     BrokerWorkerBinder,
+    NativeBrokerIdentityBinder,
     NativeLauncherError,
     NativeProcessFactory,
     NativeSuspendedWorker,
     NativeWorkerLaunchPlan,
     NativeWorkerLauncher,
     NativeWorkerPolicy,
+)
+from .native_win32 import (
+    NativeWin32Error,
+    NativeWin32ProcessFactory,
+    Win32SuspendedWorker,
 )
 from .worker_provenance import (
     EXPECTED_WORKER_PATH,
@@ -149,12 +155,16 @@ __all__ = [
     "NativeBrokerServerConfig",
     "BrokerWorkerBinding",
     "BrokerWorkerBinder",
+    "NativeBrokerIdentityBinder",
     "NativeLauncherError",
     "NativeProcessFactory",
     "NativeSuspendedWorker",
     "NativeWorkerLaunchPlan",
     "NativeWorkerLauncher",
     "NativeWorkerPolicy",
+    "NativeWin32Error",
+    "NativeWin32ProcessFactory",
+    "Win32SuspendedWorker",
     "PrimitiveEvaluationError",
     "OutputClaim",
     "PublishedArtifact",

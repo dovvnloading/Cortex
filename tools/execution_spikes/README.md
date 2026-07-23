@@ -46,7 +46,8 @@ resource/watchdog enforcement are implemented.
 The native launcher qualification prints a passing resource-policy subcheck when
 the fixed suspended child receives and reports Job Object CPU/memory/active-process
 limits with no breakaway flags. Its overall exit remains blocked until the signed
-worker package and broker PID/token binding exist.
+worker package is installed and the worker completes the live authenticated broker
+handshake; launcher-side PID/AppContainer binding is now implemented separately.
 
 The fixed worker protocol/package boundary can be qualified separately on Windows:
 
@@ -93,6 +94,9 @@ provider. The package contract is covered by `tests/test_phase2_worker_protocol.
   launch-plan boundary that revalidates the signed worker and refuses process
   creation until a reviewed native process factory and live broker binder are
   supplied. It does not provide a fallback launcher.
+- `backend/cortex_backend/execution/native_win32.py`: reviewed Windows factory
+  that creates a suspended zero-capability AppContainer child, verifies its token,
+  applies/query-verifies Job Object policy, and cleans up every handle on failure.
 - `worker_protocol`: validates the future worker's bounded request state machine,
   in-order hashed chunks, cancellation, and redacted output contract; it has no
   filesystem, process, or transport capability.

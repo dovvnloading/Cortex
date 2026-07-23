@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 native broker adapter
 
-- **Status:** Implemented and verified; provider enablement remains blocked
+- **Status:** Transport and launcher identity binder implemented and verified; signed-worker end-to-end enablement remains blocked
 - **Parent:** [Phase 2 authenticated broker contract](0001-phase2-broker-contract.md)
 - **Scope:** Windows named-pipe transport, protected DACL, OS peer identity, and
   authenticated session-key establishment
@@ -38,6 +38,14 @@ owner through `authorize_message`. The client never fabricates a server token
 identity; it binds responses only to the expected installation and job owner.
 Any framing, identity, handshake, direction, or authorization failure closes the
 connection and returns only a stable category.
+
+The launcher-side `NativeBrokerIdentityBinder` creates this server only after the
+worker has been created suspended. It sets `expected_process_id` to the actual
+worker PID and allows exactly the worker's AppContainer SID in the protected DACL;
+the broker PID is required to equal the current server process. The binder pins the
+installation principal and durable job for `accept()`, and closes the endpoint on
+resume or cancellation failure. This is the live identity binding seam; the
+signed worker package and worker-side client loop remain separate release gates.
 
 ## Lifecycle and failure contract
 

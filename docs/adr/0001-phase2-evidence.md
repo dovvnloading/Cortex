@@ -24,8 +24,8 @@
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (qualification harness; worker gate blocked)** | `recipe_sandbox_qualification.py` composes out-of-process AppContainer isolation and Job Object cancellation with a fixed decoder corpus, then fails closed because the signed `recipe_worker.exe` bundle and trust-root launch verification are not shipped. |
-| Suspended native launcher/resource policy | **Complete (boundary + disposable control spike)** | `NativeWorkerLauncher` revalidates the signed worker, fixes the broker-only command line, requires both native factory and broker binder, and enforces policy-before-bind-before-resume. `native_launcher_qualification.py` separately proves the queried Job Object policy with a fixed suspended child; concrete worker enforcement and live broker binding remain blocked. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The package/protocol/launch boundary is qualified, but the actual provider worker still needs a signed installed generation, concrete Win32 process factory, native broker loop, LPAC/AppContainer policy, Job Object resource limits/accounting, live broker PID/token binding, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
+| Suspended native launcher/resource policy | **Complete (factory + binder + disposable control spike)** | `NativeWin32ProcessFactory` creates a suspended zero-capability AppContainer child and verifies Job Object policy before resume. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. The fixed qualification helper remains separate evidence. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The package/protocol/launch boundary is qualified, but the actual provider worker still needs a signed installed generation, worker-side broker loop, end-to-end authenticated input/output, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
 
 ## Security invariants
 
@@ -114,11 +114,11 @@ npm.cmd test --prefix frontend -- --run
 **Validation result (2026-07-23):** 16 Phase 2 contract tests, 9 signed-manifest tests,
 7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, 16
 artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, 7
-worker-protocol tests, 11 native-launcher-boundary tests, 4
+worker-protocol tests, 16 native-launcher/factory tests, 4
 native-launcher tests, and
 5 sandbox-qualification tests
 passed; the full Python suite
-passed (237 tests total) with one
+passed (242 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution
