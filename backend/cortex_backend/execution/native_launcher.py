@@ -366,6 +366,10 @@ class NativeWorkerLauncher:
                 binding.pipe_name,
                 "--broker-pid",
                 str(binding.broker_process_id),
+                "--broker-principal",
+                binding.installation_principal_id,
+                "--job-id",
+                binding.job_id,
             ]
         )
         return NativeWorkerLaunchPlan(

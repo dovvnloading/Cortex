@@ -90,6 +90,13 @@ from .worker_provenance import (
     verify_active_worker,
     verify_installed_worker,
 )
+from .worker_runtime import (
+    DEFAULT_MAX_MESSAGES,
+    DEFAULT_WATCHDOG_TIMEOUT_MS,
+    RecipeWorkerBrokerRuntime,
+    WorkerRuntimeError,
+    WorkerRuntimeReport,
+)
 from .recipes import (
     CalculatorPlan,
     CheckPlan,
@@ -195,6 +202,11 @@ __all__ = [
     "WorkerProvenanceError",
     "verify_active_worker",
     "verify_installed_worker",
+    "DEFAULT_MAX_MESSAGES",
+    "DEFAULT_WATCHDOG_TIMEOUT_MS",
+    "RecipeWorkerBrokerRuntime",
+    "WorkerRuntimeError",
+    "WorkerRuntimeReport",
     "decode_frame",
     "decode_message",
     "encode_frame",

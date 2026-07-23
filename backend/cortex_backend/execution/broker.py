@@ -36,7 +36,16 @@ _FORBIDDEN_BODY_KEYS = frozenset(
 )
 
 BrokerDirection = Literal["to_broker", "to_executor"]
-BrokerOperation = Literal["prepare", "start", "cancel", "collect"]
+BrokerOperation = Literal[
+    "prepare",
+    "input_chunk",
+    "input_complete",
+    # Kept for transport-level compatibility; the fixed worker runtime rejects
+    # this legacy operation instead of guessing whether it means input complete.
+    "start",
+    "cancel",
+    "collect",
+]
 IntegrityLevel = Literal["low", "medium", "high", "system"]
 
 

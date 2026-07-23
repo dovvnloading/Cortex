@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 native broker adapter
 
-- **Status:** Transport and launcher identity binder implemented and verified; signed-worker end-to-end enablement remains blocked
+- **Status:** Transport, launcher identity binder, and worker-side client loop implemented and verified; signed-worker end-to-end enablement remains blocked
 - **Parent:** [Phase 2 authenticated broker contract](0001-phase2-broker-contract.md)
 - **Scope:** Windows named-pipe transport, protected DACL, OS peer identity, and
   authenticated session-key establishment
@@ -45,7 +45,10 @@ worker PID and allows exactly the worker's AppContainer SID in the protected DAC
 the broker PID is required to equal the current server process. The binder pins the
 installation principal and durable job for `accept()`, and closes the endpoint on
 resume or cancellation failure. This is the live identity binding seam; the
-signed worker package and worker-side client loop remain separate release gates.
+signed worker package remains a separate release gate. The packaged worker now
+uses `NativeBrokerClient` with the expected broker PID, principal, and exact job
+owner binding. It receives only authenticated `broker.message.v1` commands and
+returns redacted worker acknowledgements, results, output chunks, and errors.
 
 ## Lifecycle and failure contract
 
@@ -74,6 +77,9 @@ decoding and lifecycle enablement remain separate gates.
 deterministic SDDL, X25519/HKDF directional key agreement, malformed-handshake and
 PID-mismatch rejection, direction-violation close, local pipe-name and expected-PID
 validation, native pipe create/close, and OS token identity extraction. The Windows
+worker-loop contract is covered separately by `tests/test_phase2_worker_runtime.py`,
+which uses the same narrow connection surface to exercise authenticated command
+mapping, redacted responses, watchdog, cancellation, and close-on-terminal state.
 API choices follow Microsoft's contracts for
 [CreateNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createnamedpipea),
 [GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid),

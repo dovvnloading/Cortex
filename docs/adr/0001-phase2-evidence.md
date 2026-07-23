@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, and qualification-only provider core complete; OS sandbox/provider and release gates remain open
+- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, and qualification-only provider core complete; OS sandbox/provider and release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -18,14 +18,14 @@
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
 | Signed bundle installation/update | **Complete (storage-only)** | Digest-named immutable generations, exclusive staging, atomic activation state, chained keyring rotation, explicit rollback authorization, and previous-generation recovery are covered by installer tests. No provider is loaded. |
 | Signed worker provenance binding | **Complete (storage-only)** | `verify_active_worker()` rechecks the active signed generation, binds exactly one `image_transform` role to `recipe_worker.exe`, revalidates byte identity, and rejects missing/ambiguous/mismatched/tampered/reparse entries without launching. |
-| Fixed worker protocol and package closure | **Complete (qualification-only)** | `worker_protocol.py` enforces bounded prepare/chunk/complete/cancel/collect state, canonical per-chunk hashes, whole-input claims, redacted output metadata, and no-capability bodies. `packaging/recipe_worker/recipe_worker.spec` builds the fixed `recipe_worker.exe`; the entrypoint exits `78` until native broker wiring exists. |
+| Fixed worker protocol and package closure | **Complete (qualification-only)** | `worker_protocol.py` and `worker_runtime.py` enforce bounded prepare/chunk/complete/cancel/collect state, authenticated envelope identity, concurrent cancellation, redacted output/errors, and no-capability bodies. `packaging/recipe_worker/recipe_worker.spec` builds the fixed `recipe_worker.exe` (Windows build verified 2026-07-23); the entrypoint accepts only the fixed native-broker identity arguments and returns `78` on direct or failed launches. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (qualification harness; worker gate blocked)** | `recipe_sandbox_qualification.py` composes out-of-process AppContainer isolation and Job Object cancellation with a fixed decoder corpus, then fails closed because the signed `recipe_worker.exe` bundle and trust-root launch verification are not shipped. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + disposable control spike)** | `NativeWin32ProcessFactory` creates a suspended zero-capability AppContainer child and verifies Job Object policy before resume. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. The fixed qualification helper remains separate evidence. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The package/protocol/launch boundary is qualified, but the actual provider worker still needs a signed installed generation, worker-side broker loop, end-to-end authenticated input/output, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | The package/protocol/launch boundary and worker-side broker loop are qualified, but the actual provider worker still needs a signed installed generation, end-to-end authenticated input/output through the suspended process, watchdog, hostile decoder execution inside the sandbox, external review, and lifecycle wiring. |
 
 ## Security invariants
 
@@ -117,8 +117,8 @@ artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, 7
 worker-protocol tests, 16 native-launcher/factory tests, 4
 native-launcher tests, and
 5 sandbox-qualification tests
-passed; the full Python suite
-passed (242 tests total) with one
+passed; 9 worker-runtime tests passed; the full Python suite
+passed (251 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution

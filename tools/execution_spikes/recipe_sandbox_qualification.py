@@ -310,7 +310,7 @@ def _probe_future_worker_controls() -> list[dict[str, Any]]:
         _result(
             "recipe_broker_identity",
             BLOCKED,
-            "The native broker transport is qualified separately but is not yet bound to a recipe worker PID and OS token by a launcher.",
+            "The native broker transport and launcher binder are qualified separately; a signed installed worker still needs a real PID/token handshake.",
             launch_refused=True,
         ),
     ]

@@ -1,9 +1,10 @@
 # Recipe worker package
 
 This directory defines the fixed-function worker package boundary. The package
-entrypoint deliberately exits with status `78` until the reviewed native broker
-adapter is added. That refusal is a safety property: a package build must not
-silently become a host-process or stdio execution fallback.
+entrypoint accepts only the reviewed native broker launch shape (protected pipe,
+expected broker PID, installation principal, and exact job ID). Direct launches,
+malformed identity, transport failures, provider failures, and watchdog expiry
+return status `78`; there is no host-process, shell, path, or stdio fallback.
 
 Build it on a supported Windows machine with:
 
@@ -23,4 +24,6 @@ repository. Release packaging must, outside source control:
    be considered.
 
 The native launcher and live broker PID/AppContainer-token binding remain required
-before this package can perform any transform.
+before this package can perform any transform. The worker loop itself is covered
+by `tests/test_phase2_worker_runtime.py`, including in-flight cancellation and
+watchdog cleanup.

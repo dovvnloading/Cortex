@@ -12,6 +12,8 @@ a = Analysis(
     datas=[],
     hiddenimports=[
         "cortex_backend.execution.worker_protocol",
+        "cortex_backend.execution.worker_runtime",
+        "cortex_backend.execution.native_broker",
         "cortex_backend.execution.recipe_provider",
         "PIL",
         "PIL.Image",
