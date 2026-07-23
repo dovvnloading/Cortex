@@ -9,6 +9,7 @@ a live broker binder must be injected before a process can be created.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -16,7 +17,13 @@ import re
 import subprocess
 from typing import Final, Protocol
 
+from .broker import BrokerAclPolicy, BrokerPeerPolicy
 from .bundle_installer import SignedBundleInstaller
+from .native_broker import (
+    NativeBrokerConnection,
+    NativeBrokerServer,
+    NativeBrokerServerConfig,
+)
 from .worker_provenance import (
     EXPECTED_WORKER_PATH,
     VerifiedRecipeWorker,
@@ -28,6 +35,8 @@ from .worker_provenance import (
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
+_SID = re.compile(r"^S-1-[0-9]+(?:-[0-9]+)+$")
+_APPCONTAINER_SID = re.compile(r"^S-1-15-2-(?:[0-9]+-)+[0-9]+$")
 _PIPE = re.compile(r"^\\\\\.\\pipe\\cortex-[A-Za-z0-9._-]{1,200}$")
 _MAX_WORKER_BYTES = 128 * 1024 * 1024
 _JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002
@@ -174,6 +183,97 @@ class BrokerWorkerBinder(Protocol):
     ) -> None:
         """Bind expected PID, token identity, principal, and job ownership."""
 
+    def close_binding(self) -> None:
+        """Close the per-worker broker endpoint during cancellation or failure."""
+
+
+class NativeBrokerIdentityBinder:
+    """Bind one live named-pipe server to a suspended worker identity."""
+
+    def __init__(
+        self,
+        *,
+        allowed_user_sids: frozenset[str],
+        server_factory: Callable[[NativeBrokerServerConfig], NativeBrokerServer] = NativeBrokerServer,
+    ) -> None:
+        if not allowed_user_sids or any(_SID.fullmatch(sid) is None for sid in allowed_user_sids):
+            raise ValueError("allowed user SIDs are invalid")
+        self._allowed_user_sids = frozenset(allowed_user_sids)
+        self._server_factory = server_factory
+        self._server: NativeBrokerServer | None = None
+        self._binding: BrokerWorkerBinding | None = None
+
+    @property
+    def bound(self) -> bool:
+        return self._server is not None and self._binding is not None
+
+    @property
+    def binding(self) -> BrokerWorkerBinding | None:
+        return self._binding
+
+    def bind_worker(
+        self,
+        *,
+        process_id: int,
+        app_container_sid: str,
+        binding: BrokerWorkerBinding,
+    ) -> None:
+        if self.bound:
+            raise NativeLauncherError("native_broker_already_bound")
+        if type(process_id) is not int or process_id <= 0:
+            raise NativeLauncherError("native_worker_identity_invalid")
+        if _APPCONTAINER_SID.fullmatch(app_container_sid) is None:
+            raise NativeLauncherError("native_appcontainer_sid_invalid")
+        if binding.broker_process_id != os.getpid():
+            raise NativeLauncherError("native_broker_process_mismatch")
+        acl = BrokerAclPolicy(
+            allowed_user_sids=self._allowed_user_sids,
+            allowed_app_container_sids=frozenset({app_container_sid}),
+        )
+        peer_policy = BrokerPeerPolicy(
+            acl=acl,
+            expected_process_id=process_id,
+            maximum_integrity="low",
+        )
+        config = NativeBrokerServerConfig(pipe_name=binding.pipe_name, peer_policy=peer_policy)
+        try:
+            server = self._server_factory(config)
+            server.open()
+        except NativeLauncherError:
+            raise
+        except Exception:
+            try:
+                if "server" in locals():
+                    server.close()
+            except Exception:
+                pass
+            raise NativeLauncherError("native_broker_open_failed") from None
+        self._server = server
+        self._binding = binding
+
+    def accept(
+        self,
+        *,
+        owner_for_job: Callable[[str], str | None],
+    ) -> NativeBrokerConnection:
+        if self._server is None or self._binding is None:
+            raise NativeLauncherError("native_broker_not_bound")
+        try:
+            return self._server.accept(
+                expected_principal_id=self._binding.installation_principal_id,
+                owner_for_job=owner_for_job,
+            )
+        except NativeLauncherError:
+            raise
+        except Exception:
+            raise NativeLauncherError("native_broker_accept_failed") from None
+
+    def close_binding(self) -> None:
+        server, self._server = self._server, None
+        self._binding = None
+        if server is not None:
+            server.close()
+
 
 def _revalidate_worker(worker: VerifiedRecipeWorker) -> Path:
     root = worker.bundle_root
@@ -291,6 +391,7 @@ class NativeWorkerLauncher:
             raise NativeLauncherError("native_process_factory_required")
         plan = self.prepare(binding, policy)
         worker: NativeSuspendedWorker | None = None
+        broker_bound = False
         try:
             worker = self._process_factory.create_suspended(plan)
             if type(worker.process_id) is not int or worker.process_id <= 0:
@@ -303,13 +404,22 @@ class NativeWorkerLauncher:
                 app_container_sid=worker.app_container_sid,
                 binding=plan.broker,
             )
+            broker_bound = True
             worker.resume()
             return worker
         except NativeLauncherError:
+            if broker_bound:
+                close_binding = getattr(self._broker_binder, "close_binding", None)
+                if close_binding is not None:
+                    close_binding()
             if worker is not None:
                 worker.close()
             raise
         except Exception:
+            if broker_bound:
+                close_binding = getattr(self._broker_binder, "close_binding", None)
+                if close_binding is not None:
+                    close_binding()
             if worker is not None:
                 worker.close()
             raise NativeLauncherError("native_launch_failed") from None
@@ -318,6 +428,7 @@ class NativeWorkerLauncher:
 __all__ = [
     "BrokerWorkerBinding",
     "BrokerWorkerBinder",
+    "NativeBrokerIdentityBinder",
     "NativeLauncherError",
     "NativeProcessFactory",
     "NativeSuspendedWorker",

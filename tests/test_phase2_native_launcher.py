@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from uuid import uuid4
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -17,6 +18,7 @@ import cortex_backend.execution.native_launcher as launcher_module
 from cortex_backend.execution.bundle_installer import SignedBundleInstaller
 from cortex_backend.execution.native_launcher import (
     BrokerWorkerBinding,
+    NativeBrokerIdentityBinder,
     NativeLauncherError,
     NativeWorkerLaunchPlan,
     NativeWorkerLauncher,
@@ -229,6 +231,47 @@ def test_broker_binding_failure_closes_worker_without_resume(tmp_path: Path):
     assert events == ["create", "policy", "bind", "close"]
 
 
+def test_launcher_closes_live_broker_binding_if_resume_fails(tmp_path: Path):
+    installer = _installer(tmp_path)
+    events: list[str] = []
+
+    class _Worker:
+        process_id = 446
+        app_container_sid = "S-1-15-2-123-456"
+
+        def apply_job_policy(self, policy: NativeWorkerPolicy) -> None:
+            events.append("policy")
+
+        def resume(self) -> None:
+            events.append("resume")
+            raise NativeLauncherError("native_resume_failed")
+
+        def close(self) -> None:
+            events.append("worker-close")
+
+    class _Factory:
+        def create_suspended(self, plan: NativeWorkerLaunchPlan):
+            events.append("create")
+            return _Worker()
+
+    class _Binder:
+        def bind_worker(self, **kwargs):
+            del kwargs
+            events.append("bind")
+
+        def close_binding(self):
+            events.append("broker-close")
+
+    with pytest.raises(NativeLauncherError) as error:
+        NativeWorkerLauncher(
+            installer,
+            process_factory=_Factory(),
+            broker_binder=_Binder(),
+        ).launch(_binding())
+    assert error.value.code == "native_resume_failed"
+    assert events == ["create", "policy", "bind", "resume", "broker-close", "worker-close"]
+
+
 def test_tampered_worker_is_rejected_at_launch_plan_boundary(tmp_path: Path):
     installer = _installer(tmp_path)
     installed = installer.status()
@@ -238,6 +281,111 @@ def test_tampered_worker_is_rejected_at_launch_plan_boundary(tmp_path: Path):
     with pytest.raises(NativeLauncherError) as error:
         NativeWorkerLauncher(installer).prepare(_binding())
     assert error.value.code == "worker_bundle_integrity_failed"
+
+
+def test_native_broker_identity_binder_pins_worker_pid_and_appcontainer_sid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    servers = []
+    accepted = object()
+
+    class _Server:
+        def __init__(self, config):
+            self.config = config
+            self.opened = False
+            self.closed = False
+
+        def open(self):
+            self.opened = True
+
+        def accept(self, *, expected_principal_id, owner_for_job):
+            assert expected_principal_id == "a" * 64
+            assert owner_for_job("job-1") == "owner"
+            return accepted
+
+        def close(self):
+            self.closed = True
+
+    def factory(config):
+        server = _Server(config)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(launcher_module.os, "getpid", lambda: 321)
+    binder = NativeBrokerIdentityBinder(
+        allowed_user_sids=frozenset({"S-1-5-21-1-2-3-4"}),
+        server_factory=factory,
+    )
+    binding = _binding()
+    binder.bind_worker(
+        process_id=446,
+        app_container_sid="S-1-15-2-123-456",
+        binding=binding,
+    )
+
+    assert binder.bound
+    assert binder.binding == binding
+    assert servers[0].config.peer_policy.expected_process_id == 446
+    assert servers[0].config.peer_policy.acl.allowed_app_container_sids == frozenset(
+        {"S-1-15-2-123-456"}
+    )
+    assert binder.accept(owner_for_job=lambda job_id: "owner" if job_id == "job-1" else None) is accepted
+    binder.close_binding()
+    assert not binder.bound
+    assert servers[0].closed
+
+
+def test_native_broker_identity_binder_rejects_pid_or_token_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(launcher_module.os, "getpid", lambda: 321)
+    binder = NativeBrokerIdentityBinder(
+        allowed_user_sids=frozenset({"S-1-5-21-1-2-3-4"}),
+        server_factory=lambda config: object(),
+    )
+    with pytest.raises(NativeLauncherError) as pid_error:
+        binder.bind_worker(
+            process_id=446,
+            app_container_sid="S-1-15-2-123-456",
+            binding=BrokerWorkerBinding(
+                pipe_name=_binding().pipe_name,
+                broker_process_id=322,
+                installation_principal_id="a" * 64,
+                job_id="job-1",
+            ),
+        )
+    assert pid_error.value.code == "native_broker_process_mismatch"
+    with pytest.raises(NativeLauncherError) as sid_error:
+        binder.bind_worker(
+            process_id=446,
+            app_container_sid="S-1-5-21-1-2-3-4",
+            binding=_binding(),
+        )
+    assert sid_error.value.code == "native_appcontainer_sid_invalid"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native broker server requires Windows")
+def test_native_broker_identity_binder_opens_real_protected_server():
+    binding = BrokerWorkerBinding(
+        pipe_name=rf"\\.\pipe\cortex-binder-{uuid4().hex}",
+        broker_process_id=os.getpid(),
+        installation_principal_id="a" * 64,
+        job_id="job-real-binder",
+    )
+    binder = NativeBrokerIdentityBinder(
+        allowed_user_sids=frozenset({"S-1-5-21-100-200-300-400"}),
+    )
+    binder.bind_worker(
+        process_id=os.getpid(),
+        app_container_sid="S-1-15-2-100-200-300-400",
+        binding=binding,
+    )
+    try:
+        assert binder.bound
+        assert binder.binding == binding
+    finally:
+        binder.close_binding()
+    assert not binder.bound
 
 
 def test_non_windows_launch_is_blocked_before_adapters(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

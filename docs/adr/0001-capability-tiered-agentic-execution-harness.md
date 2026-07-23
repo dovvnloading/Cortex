@@ -947,9 +947,10 @@ pass without executing code.
   composes AppContainer/Job Object controls and a fixed decoder corpus. Storage-only
   signed worker provenance now binds exactly one image-transform role to the fixed
   worker entrypoint, and the disposable launcher now qualifies pre-resume Job Object
-  resource policy. Native worker launch and broker PID/token binding remain blocked;
-  collect opt-in aggregate reliability metrics, never content, only after the
-  provider is sandbox-qualified.
+  resource policy. The reviewed Win32 suspended factory and launcher-side broker
+  PID/AppContainer-token binder are now qualified; signed-worker end-to-end broker
+  execution remains blocked. Collect opt-in aggregate reliability metrics, never
+  content, only after the provider is sandbox-qualified.
 
 **Implementation gate:** parser, artifact-boundary, qualification-provider,
 worker-provenance, sandbox-qualification, and native-launcher-policy regression

@@ -22,8 +22,9 @@ The harness is deliberately fail-closed and has independent checks for:
    packaging location;
 5. it reports per-worker CPU/memory/breakaway/accounting controls as blocked until
    the native launcher applies and verifies them; and
-6. it reports broker PID/token binding as blocked until the launcher binds the
-   qualified transport to the actual worker.
+6. it reports end-to-end broker execution as blocked until the launcher binds the
+   qualified transport to a signed worker's actual PID/AppContainer token and the
+   worker completes the authenticated client handshake.
 
 The fourth check is intentionally blocked in this stage. A directory, executable,
 self-reported digest, or unverified manifest cannot authorize a launch. The future
