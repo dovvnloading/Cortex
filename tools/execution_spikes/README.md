@@ -89,6 +89,10 @@ provider. The package contract is covered by `tests/test_phase2_worker_protocol.
 - `native_launcher_qualification`: creates only a fixed suspended `findstr.exe`
   child, applies and queries Job Object resource policy before resume, and reports
   the signed-worker and broker-binding blockers without launching either.
+- `backend/cortex_backend/execution/native_launcher.py`: production-facing
+  launch-plan boundary that revalidates the signed worker and refuses process
+  creation until a reviewed native process factory and live broker binder are
+  supplied. It does not provide a fallback launcher.
 - `worker_protocol`: validates the future worker's bounded request state machine,
   in-order hashed chunks, cancellation, and redacted output contract; it has no
   filesystem, process, or transport capability.

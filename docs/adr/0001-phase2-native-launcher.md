@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 disposable native launcher qualification
 
-- **Status:** Suspended-launch and Job Object policy spike complete; real worker launch blocked
+- **Status:** Launch-plan boundary and policy contract complete; concrete worker launch and live broker binding blocked
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Windows sandbox qualification](0001-phase2-sandbox-qualification.md) and [signed worker provenance](0001-phase2-worker-provenance.md)
@@ -9,7 +9,22 @@
 ## Decision
 
 `tools/execution_spikes/native_launcher_qualification.py` exercises the reviewed
-native construction sequence without accepting a worker path or user input:
+native construction sequence without accepting a worker path or user input. The
+production boundary in `backend/cortex_backend/execution/native_launcher.py` now
+accepts only an installer-verified worker and a trusted `BrokerWorkerBinding`:
+
+1. recheck the active signed generation through `verify_active_worker()`;
+2. revalidate the fixed `recipe_worker.exe` identity, size, link count, and hash
+   immediately before launch planning;
+3. construct a fixed command line containing only the native-broker endpoint and
+   expected broker PID;
+4. require a reviewed native process factory and live broker binder before any
+   process is created; and
+5. enforce the order `create suspended -> apply Job policy -> bind worker PID and
+   AppContainer SID -> resume`.
+
+The disposable qualification helper still exercises the lower-level construction
+sequence with a fixed benign executable:
 
 1. create a unique zero-capability AppContainer profile;
 2. create a fixed `findstr.exe` child suspended with the AppContainer token;
@@ -27,7 +42,9 @@ remain green after this change.
 
 This is qualification evidence for control application, not approval to launch a
 recipe worker. The fixed probe reports `provider_launch_authorized=false` until
-the signed worker package and broker identity gates pass.
+the signed worker package, concrete native process factory, and broker identity
+gates pass. The production launcher boundary also fails closed when either adapter
+is absent; it never falls back to `subprocess`, a shell, stdio, or a weaker sandbox.
 
 ## Evidence and limits
 
@@ -48,6 +65,9 @@ behavior across supported Windows versions, or external launcher review.
 
 - The fixed signed `recipe_worker.exe` package is not shipped at the immutable
   installer generation used by the launcher.
+- The reviewed Win32 process factory that creates the worker AppContainer token,
+  assigns and verifies the Job Object, and exposes a suspended process handle is
+  not implemented yet.
 - The native broker transport is not yet bound to the launched worker PID and OS
   token by a single reviewed launcher transaction.
 - Watchdog progress, output framing, staging ACLs, hostile decoder execution, and
@@ -58,7 +78,11 @@ there is no host-process or weaker-sandbox fallback.
 
 ## Verification
 
-`tests/test_native_launcher_qualification.py` covers non-Windows blocking, report
-fail-closed behavior, and the no-breakaway policy invariant. The full repository
-suite and the existing AppContainer/cancellation corpus are required before this
-spike can be merged.
+`tests/test_phase2_native_launcher.py` covers bounded policy values, no-breakaway
+flags, trusted binding validation, worker revalidation, fixed command-line
+construction, refusal before process creation without a binder, policy/bind/resume
+ordering, cleanup on binding failure, tamper rejection, and non-Windows blocking.
+`tests/test_native_launcher_qualification.py` covers the disposable probe's
+non-Windows blocking, report fail-closed behavior, and no-breakaway invariant. The
+full repository suite and the existing AppContainer/cancellation corpus are
+required before this boundary can be merged.

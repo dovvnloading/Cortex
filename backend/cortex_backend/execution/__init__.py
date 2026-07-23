@@ -67,6 +67,16 @@ from .native_broker import (
     NativeBrokerServerConfig,
     build_pipe_sddl,
 )
+from .native_launcher import (
+    BrokerWorkerBinding,
+    BrokerWorkerBinder,
+    NativeLauncherError,
+    NativeProcessFactory,
+    NativeSuspendedWorker,
+    NativeWorkerLaunchPlan,
+    NativeWorkerLauncher,
+    NativeWorkerPolicy,
+)
 from .worker_provenance import (
     EXPECTED_WORKER_PATH,
     VerifiedRecipeWorker,
@@ -137,6 +147,14 @@ __all__ = [
     "NativeBrokerError",
     "NativeBrokerServer",
     "NativeBrokerServerConfig",
+    "BrokerWorkerBinding",
+    "BrokerWorkerBinder",
+    "NativeLauncherError",
+    "NativeProcessFactory",
+    "NativeSuspendedWorker",
+    "NativeWorkerLaunchPlan",
+    "NativeWorkerLauncher",
+    "NativeWorkerPolicy",
     "PrimitiveEvaluationError",
     "OutputClaim",
     "PublishedArtifact",
