@@ -28,7 +28,9 @@ the authorization step remains a distinct trusted-peer/job-owner check.
 The frame payload is canonical ASCII JSON for `broker.message.v1`:
 
 - direction: `to_broker` or `to_executor`;
-- operation: `prepare`, `start`, `cancel`, or `collect`;
+- operation: `prepare`, `input_chunk`, `input_complete`, `cancel`, or `collect`
+  (`start` remains a transport-compatibility value and is rejected by the fixed
+  worker rather than being guessed as an input operation);
 - bounded request and job identifiers;
 - the 256-bit installation principal; and
 - a bounded body for a later operation-specific schema.

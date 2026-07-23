@@ -192,7 +192,7 @@ def _probe_broker_binding() -> dict[str, Any]:
     return _result(
         "native_launcher_broker_binding",
         BLOCKED,
-        "The native broker transport is qualified separately; a reviewed launcher has not yet bound it to a worker PID and OS token.",
+            "The native broker transport and launcher binder are qualified separately; a signed installed worker still needs a real PID/token handshake.",
         launch_refused=True,
     )
 

@@ -56,9 +56,11 @@ powershell -ExecutionPolicy Bypass -File packaging/build_recipe_worker.ps1
 ```
 
 This produces `dist/recipe-runtime/recipe_worker.exe` and verifies dependency
-closure only. The entrypoint exits with status `78` until the native broker loop is
-implemented; the output is unsigned and must not be installed or launched as a
-provider. The package contract is covered by `tests/test_phase2_worker_protocol.py`.
+closure only. The entrypoint accepts only the fixed native broker identity
+arguments and exits with status `78` for direct or failed launches; the output is
+unsigned and must not be installed or launched as a provider. The package and
+runtime contracts are covered by `tests/test_phase2_worker_protocol.py` and
+`tests/test_phase2_worker_runtime.py`.
 
 ## What the probes prove
 

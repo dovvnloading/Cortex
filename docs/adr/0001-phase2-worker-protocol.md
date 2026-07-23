@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 fixed recipe worker protocol and package boundary
 
-- **Status:** Protocol and packaging qualification complete; native execution blocked
+- **Status:** Protocol, authenticated worker loop, and packaging qualification complete; signed end-to-end execution remains blocked
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Signed worker provenance](0001-phase2-worker-provenance.md), [native broker adapter](0001-phase2-native-broker.md), and [native launcher](0001-phase2-native-launcher.md)
@@ -34,12 +34,15 @@ replayed offsets, identity mismatches, size/digest mismatches, provider failures
 and output offsets fail closed with stable categories. No worker message accepts a
 filesystem path, shell command, executable, network target, token, or model source.
 
-The package entrypoint is intentionally launch-refusing (exit code `78`) until the
-reviewed native broker adapter is wired in. This prevents an unsigned or directly
-started package from becoming a stdio, shell, or host-process fallback. The
-PyInstaller definition and Windows build script qualify dependency closure and the
-fixed `recipe_worker.exe` path only; they do not sign, install, or authorize the
-worker.
+The package entrypoint now accepts exactly the native launcher's fixed argument
+shape: protected pipe name, expected broker PID, installation principal, and job
+ID. It creates only a `NativeBrokerClient`, authenticates the broker session, and
+serves the bounded worker loop. Direct launches, malformed arguments, missing
+broker identity, provider startup failure, transport failure, and message-budget
+exhaustion return the safe refusal status (`78`); there is no stdio, shell, path,
+or host-process fallback. The PyInstaller definition and Windows build script
+qualify dependency closure and the fixed `recipe_worker.exe` path only; they do
+not sign, install, or authorize the worker.
 
 ## Security invariants
 
@@ -61,16 +64,19 @@ worker.
 
 `tests/test_phase2_worker_protocol.py` covers successful in-order streaming and
 collection, malformed operations, replay/order failure, claim mismatch,
-cancellation terminality, and chunk tampering. On the controlled Windows host
-(2026-07-23), the PyInstaller build produced
-`dist/recipe-runtime/recipe_worker.exe` (11,320,824 bytes); direct launch returned
-exit code `78` as required.
+cancellation terminality, and chunk tampering. `tests/test_phase2_worker_runtime.py`
+(9 tests) covers authenticated envelope binding, redacted repairable failures,
+provider failure, message budgets, terminal cleanup, watchdog expiry,
+fixed-entrypoint parsing, and cancellation delivered while a transform is running.
+On the controlled Windows host (2026-07-23), the
+PyInstaller build produced `dist/recipe-runtime/recipe_worker.exe`; direct launch
+without the exact native broker arguments returned exit code `78` as required.
 
 ## Remaining blockers
 
-This ADR does not authorize provider execution. The next stage must replace the
-launch-refusing entrypoint with the reviewed native broker loop, launch the verified
-worker suspended under AppContainer/LPAC and Job Object policy, bind the live broker
-session to the actual worker PID and AppContainer token, and run the hostile decoder
-and cancellation corpus inside that process. Lifecycle/UI enablement remains behind
-those gates and external security review.
+This ADR does not authorize provider execution. The remaining stage must install a
+real signed generation, launch it through the reviewed suspended AppContainer/Job
+Object factory, bind the live broker session to the actual worker PID and
+AppContainer token, and run the hostile decoder/cancellation corpus through that
+packaged process with watchdog and artifact-boundary evidence. Lifecycle/UI
+enablement remains behind those gates and external security review.

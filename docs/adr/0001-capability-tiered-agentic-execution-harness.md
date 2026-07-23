@@ -948,7 +948,8 @@ pass without executing code.
   signed worker provenance now binds exactly one image-transform role to the fixed
   worker entrypoint, and the disposable launcher now qualifies pre-resume Job Object
   resource policy. The reviewed Win32 suspended factory and launcher-side broker
-  PID/AppContainer-token binder are now qualified; signed-worker end-to-end broker
+  PID/AppContainer-token binder are now qualified, and the packaged worker-side
+  authenticated broker loop is implemented; signed-worker end-to-end broker
   execution remains blocked. Collect opt-in aggregate reliability metrics, never
   content, only after the provider is sandbox-qualified.
 

@@ -14,6 +14,7 @@ import binascii
 import hashlib
 import json
 import re
+from threading import RLock
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -34,6 +35,7 @@ MAX_WORKER_OUTPUT_BYTES: Final[int] = MAX_OUTPUT_BYTES
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+WorkerOperation = Literal["prepare", "input_chunk", "input_complete", "cancel", "collect"]
 
 
 class WorkerProtocolError(ValueError):
@@ -112,6 +114,15 @@ class WorkerPrepare(_WorkerModel):
     _request_id = field_validator("request_id")(_safe_id)
     _job_id = field_validator("job_id")(_safe_id)
     _input_sha256 = field_validator("input_sha256")(_safe_hash)
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _wire_plan_arrays(cls, value: Any) -> Any:
+        """Accept canonical JSON arrays while keeping the internal plan immutable."""
+
+        if isinstance(value, dict) and isinstance(value.get("steps"), list):
+            value = {**value, "steps": tuple(value["steps"])}
+        return value
 
 
 class WorkerInputChunk(_WorkerModel):
@@ -246,8 +257,20 @@ class WorkerError(_WorkerModel):
     _code = field_validator("code")(_safe_code)
 
 
+class WorkerAck(_WorkerModel):
+    """Redacted acknowledgement for a command with no result payload."""
+
+    schema_version: Literal["recipe.worker.ack.v1"]
+    request_id: str
+    job_id: str
+    acknowledged_operation: WorkerOperation
+
+    _request_id = field_validator("request_id")(_safe_id)
+    _job_id = field_validator("job_id")(_safe_id)
+
+
 class RecipeWorkerSession:
-    """Bounded state machine used by the future native worker loop.
+    """Bounded state machine used by the authenticated native worker loop.
 
     The session has no filesystem or process capabilities.  A native launcher must
     provide the already-started provider and authenticated transport; this class
@@ -264,105 +287,124 @@ class RecipeWorkerSession:
         self._input = bytearray()
         self._result: RecipeProviderResult | None = None
         self._cancelled = False
+        self._lock = RLock()
 
     @property
     def state(self) -> Literal["idle", "receiving", "running", "complete", "cancelled", "failed"]:
-        return self._state  # type: ignore[return-value]
+        with self._lock:
+            return self._state  # type: ignore[return-value]
 
     def prepare(self, message: WorkerPrepare) -> None:
-        if self._state != "idle":
-            raise WorkerProtocolError("request_state_invalid")
-        self._prepare = message
-        self._input = bytearray()
-        self._result = None
-        self._cancelled = False
-        self._state = "receiving"
+        with self._lock:
+            if self._state != "idle":
+                raise WorkerProtocolError("request_state_invalid")
+            self._prepare = message
+            self._input = bytearray()
+            self._result = None
+            self._cancelled = False
+            self._state = "receiving"
 
     def input_chunk(self, message: WorkerInputChunk) -> None:
-        if self._state != "receiving" or self._prepare is None:
-            raise WorkerProtocolError("request_state_invalid")
-        if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
-            raise WorkerProtocolError("request_identity_mismatch")
-        if message.offset != len(self._input):
-            raise WorkerProtocolError("chunk_out_of_order")
         content = message.decoded()
-        if len(self._input) + len(content) > self._prepare.input_size:
-            raise WorkerProtocolError("input_size_exceeded")
-        self._input.extend(content)
+        with self._lock:
+            if self._state != "receiving" or self._prepare is None:
+                raise WorkerProtocolError("request_state_invalid")
+            if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
+                raise WorkerProtocolError("request_identity_mismatch")
+            if message.offset != len(self._input):
+                raise WorkerProtocolError("chunk_out_of_order")
+            if len(self._input) + len(content) > self._prepare.input_size:
+                raise WorkerProtocolError("input_size_exceeded")
+            self._input.extend(content)
 
     def cancel(self, message: WorkerCancel) -> None:
-        if self._prepare is None or message.request_id != self._prepare.request_id:
-            raise WorkerProtocolError("request_identity_mismatch")
-        if message.job_id != self._prepare.job_id:
-            raise WorkerProtocolError("request_identity_mismatch")
-        if self._state in {"complete", "failed"}:
-            raise WorkerProtocolError("request_state_invalid")
-        self._cancelled = True
-        self._state = "cancelled"
-        self._input.clear()
-        self._result = None
-
-    def complete_input(self, message: WorkerInputComplete) -> WorkerResult:
-        if self._state != "receiving" or self._prepare is None:
-            raise WorkerProtocolError("request_state_invalid")
-        if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
-            raise WorkerProtocolError("request_identity_mismatch")
-        if message.input_size != self._prepare.input_size or message.input_sha256 != self._prepare.input_sha256:
-            raise WorkerProtocolError("input_claim_mismatch")
-        if len(self._input) != self._prepare.input_size:
-            raise WorkerProtocolError("input_size_mismatch")
-        if hashlib.sha256(self._input).hexdigest() != self._prepare.input_sha256:
-            raise WorkerProtocolError("input_hash_mismatch")
-        self._state = "running"
-        try:
-            result = self._provider.transform(
-                self._prepare.plan,
-                bytes(self._input),
-                cancel_check=lambda: self._cancelled,
-            )
-        except RecipeProviderError as error:
-            self._state = "cancelled" if error.code == "cancelled" else "failed"
-            self._input.clear()
-            raise WorkerProtocolError(error.code) from None
-        except Exception:
-            self._state = "failed"
-            self._input.clear()
-            raise WorkerProtocolError("provider_failed") from None
-        if self._cancelled:
+        with self._lock:
+            if self._prepare is None or message.request_id != self._prepare.request_id:
+                raise WorkerProtocolError("request_identity_mismatch")
+            if message.job_id != self._prepare.job_id:
+                raise WorkerProtocolError("request_identity_mismatch")
+            if self._state in {"complete", "failed"}:
+                raise WorkerProtocolError("request_state_invalid")
+            self._cancelled = True
             self._state = "cancelled"
             self._input.clear()
-            raise WorkerProtocolError("cancelled")
-        self._input.clear()
-        self._result = result
-        self._state = "complete"
+            self._result = None
+
+    def _cancel_requested(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def complete_input(self, message: WorkerInputComplete) -> WorkerResult:
+        with self._lock:
+            if self._state != "receiving" or self._prepare is None:
+                raise WorkerProtocolError("request_state_invalid")
+            if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
+                raise WorkerProtocolError("request_identity_mismatch")
+            if message.input_size != self._prepare.input_size or message.input_sha256 != self._prepare.input_sha256:
+                raise WorkerProtocolError("input_claim_mismatch")
+            if len(self._input) != self._prepare.input_size:
+                raise WorkerProtocolError("input_size_mismatch")
+            if hashlib.sha256(self._input).hexdigest() != self._prepare.input_sha256:
+                raise WorkerProtocolError("input_hash_mismatch")
+            prepare = self._prepare
+            content = bytes(self._input)
+            self._state = "running"
+            self._input.clear()
+        try:
+            result = self._provider.transform(
+                prepare.plan,
+                content,
+                cancel_check=self._cancel_requested,
+            )
+        except RecipeProviderError as error:
+            with self._lock:
+                cancelled = self._cancelled or error.code == "cancelled"
+                self._state = "cancelled" if cancelled else "failed"
+                self._input.clear()
+            raise WorkerProtocolError("cancelled" if cancelled else error.code) from None
+        except Exception:
+            with self._lock:
+                cancelled = self._cancelled
+                self._state = "cancelled" if cancelled else "failed"
+                self._input.clear()
+            raise WorkerProtocolError("cancelled" if cancelled else "provider_failed") from None
+        with self._lock:
+            if self._cancelled or self._state == "cancelled":
+                self._state = "cancelled"
+                self._input.clear()
+                raise WorkerProtocolError("cancelled")
+            self._input.clear()
+            self._result = result
+            self._state = "complete"
         return WorkerResult.from_provider(
             result,
-            request_id=self._prepare.request_id,
-            job_id=self._prepare.job_id,
+            request_id=prepare.request_id,
+            job_id=prepare.job_id,
         )
 
     def collect(self, message: WorkerCollect) -> WorkerOutputChunk:
-        if self._state != "complete" or self._prepare is None or self._result is None:
-            raise WorkerProtocolError("request_state_invalid")
-        if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
-            raise WorkerProtocolError("request_identity_mismatch")
-        output = self._result.content
-        if message.offset > len(output):
-            raise WorkerProtocolError("output_offset_invalid")
-        end = min(message.offset + message.max_bytes, len(output))
-        chunk = output[message.offset:end]
-        if not chunk:
-            raise WorkerProtocolError("output_offset_invalid")
-        encoded = base64.urlsafe_b64encode(chunk).decode("ascii").rstrip("=")
-        return WorkerOutputChunk(
-            schema_version="recipe.worker.output_chunk.v1",
-            request_id=message.request_id,
-            job_id=message.job_id,
-            offset=message.offset,
-            data=encoded,
-            sha256=hashlib.sha256(chunk).hexdigest(),
-            final=end == len(output),
-        )
+        with self._lock:
+            if self._state != "complete" or self._prepare is None or self._result is None:
+                raise WorkerProtocolError("request_state_invalid")
+            if message.request_id != self._prepare.request_id or message.job_id != self._prepare.job_id:
+                raise WorkerProtocolError("request_identity_mismatch")
+            output = self._result.content
+            if message.offset > len(output):
+                raise WorkerProtocolError("output_offset_invalid")
+            end = min(message.offset + message.max_bytes, len(output))
+            chunk = output[message.offset:end]
+            if not chunk:
+                raise WorkerProtocolError("output_offset_invalid")
+            encoded = base64.urlsafe_b64encode(chunk).decode("ascii").rstrip("=")
+            return WorkerOutputChunk(
+                schema_version="recipe.worker.output_chunk.v1",
+                request_id=message.request_id,
+                job_id=message.job_id,
+                offset=message.offset,
+                data=encoded,
+                sha256=hashlib.sha256(chunk).hexdigest(),
+                final=end == len(output),
+            )
 
 
 class RecipeWorkerDispatcher:
@@ -383,6 +425,12 @@ class RecipeWorkerDispatcher:
 
     def __init__(self, session: RecipeWorkerSession) -> None:
         self._session = session
+
+    @property
+    def state(self) -> str:
+        """Expose only the bounded session state to the broker loop."""
+
+        return self._session.state
 
     def dispatch(self, operation: str, body: dict[str, Any]) -> WorkerResult | WorkerOutputChunk | None:
         model_type = self._MODELS.get(operation)
@@ -415,10 +463,12 @@ __all__ = [
     "WorkerCancel",
     "WorkerCollect",
     "WorkerError",
+    "WorkerAck",
     "WorkerInputChunk",
     "WorkerInputComplete",
     "WorkerOutputChunk",
     "WorkerPrepare",
     "WorkerProtocolError",
     "WorkerResult",
+    "WorkerOperation",
 ]

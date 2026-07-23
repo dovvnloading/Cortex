@@ -24,7 +24,7 @@ The harness is deliberately fail-closed and has independent checks for:
    the native launcher applies and verifies them; and
 6. it reports end-to-end broker execution as blocked until the launcher binds the
    qualified transport to a signed worker's actual PID/AppContainer token and the
-   worker completes the authenticated client handshake.
+   packaged worker completes the authenticated client handshake and hostile corpus.
 
 The fourth check is intentionally blocked in this stage. A directory, executable,
 self-reported digest, or unverified manifest cannot authorize a launch. The future
@@ -54,8 +54,8 @@ control produces `blocked` or `fail`, and no weaker host-process path is attempt
 
 ## Required future worker qualification
 
-The next implementation must add a signed, pinned worker bundle and a native
-launcher that, per attempt:
+The remaining release gate must install a signed, pinned worker bundle and run the
+existing native launcher/worker loop per attempt:
 
 1. verifies the installed immutable generation and image-worker entrypoint;
 2. creates private staging and grants only the sandbox identity and required

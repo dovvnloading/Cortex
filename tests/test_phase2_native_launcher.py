@@ -129,6 +129,10 @@ def test_prepare_reverifies_active_worker_and_builds_fixed_command_line(tmp_path
             _binding().pipe_name,
             "--broker-pid",
             "321",
+            "--broker-principal",
+            _binding().installation_principal_id,
+            "--job-id",
+            _binding().job_id,
         ]
     ) == plan.command_line
     assert "shell" not in plan.command_line.casefold()

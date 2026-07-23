@@ -16,8 +16,8 @@ accepts only an installer-verified worker and a trusted `BrokerWorkerBinding`:
 1. recheck the active signed generation through `verify_active_worker()`;
 2. revalidate the fixed `recipe_worker.exe` identity, size, link count, and hash
    immediately before launch planning;
-3. construct a fixed command line containing only the native-broker endpoint and
-   expected broker PID;
+3. construct a fixed command line containing only the native-broker endpoint,
+   expected broker PID, installation principal, and job ID;
 4. require a reviewed native process factory and live broker binder before any
    process is created; and
 5. enforce the order `create suspended -> apply Job policy -> bind worker PID and
@@ -83,9 +83,9 @@ behavior across supported Windows versions, or external launcher review.
 - The fixed signed `recipe_worker.exe` bundle is not installed in the immutable
   generation used by the launcher, so no real worker has completed the broker
   handshake yet.
-- The packaged worker loop still exits with its launch-refusing status; the
-  end-to-end authenticated input/output, watchdog, and cancellation path must be
-  wired before provider execution is authorized.
+- The packaged worker loop is now broker-only and fail-closed; the end-to-end
+  authenticated input/output, watchdog, and cancellation path still needs evidence
+  against the signed installed generation before provider execution is authorized.
 - Watchdog progress, output framing, staging ACLs, hostile decoder execution, and
   lifecycle health-gated wiring remain separate release gates.
 
