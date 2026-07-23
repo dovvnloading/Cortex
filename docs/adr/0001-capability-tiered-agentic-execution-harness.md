@@ -949,7 +949,9 @@ pass without executing code.
   worker entrypoint, and the disposable launcher now qualifies pre-resume Job Object
   resource policy. The reviewed Win32 suspended factory and launcher-side broker
   PID/AppContainer-token binder are now qualified, and the packaged worker-side
-  authenticated broker loop is implemented; signed-worker end-to-end broker
+  authenticated broker loop is implemented. The release-only signer now covers the
+  complete one-folder dependency closure with inert resource entries and refuses to
+  produce metadata without an external key; signed-worker end-to-end broker
   execution remains blocked. Collect opt-in aggregate reliability metrics, never
   content, only after the provider is sandbox-qualified.
 

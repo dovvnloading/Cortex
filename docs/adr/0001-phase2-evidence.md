@@ -17,6 +17,7 @@
 | Canonical plan identity | **Complete** | Validated plans expose stable canonical JSON and SHA-256 digests for future idempotency/signature binding. |
 | Signed recipe manifest | **Complete (verification only)** | Ed25519 signature verification uses a pinned key-id allowlist; every declared bundle entry is path-, size-, and SHA-256-verified; monotonic updates and explicit rollback authorization are enforced. |
 | Signed bundle installation/update | **Complete (storage-only)** | Digest-named immutable generations, exclusive staging, atomic activation state, chained keyring rotation, explicit rollback authorization, and previous-generation recovery are covered by installer tests. No provider is loaded. |
+| Signed worker release generation | **Complete (release-only)** | `worker_release.py` and `tools/sign_recipe_worker.py` hash every one-folder file, mark only `recipe_worker.exe` as `image_transform`, classify dependencies as inert `resource` entries, self-verify the Ed25519 signature, reject ambiguous/mutable packages, and never persist private key material. Installation still requires the pinned public trust root. |
 | Signed worker provenance binding | **Complete (storage-only)** | `verify_active_worker()` rechecks the active signed generation, binds exactly one `image_transform` role to `recipe_worker.exe`, revalidates byte identity, and rejects missing/ambiguous/mismatched/tampered/reparse entries without launching. |
 | Fixed worker protocol and package closure | **Complete (qualification-only)** | `worker_protocol.py` and `worker_runtime.py` enforce bounded prepare/chunk/complete/cancel/collect state, authenticated envelope identity, concurrent cancellation, redacted output/errors, and no-capability bodies. `packaging/recipe_worker/recipe_worker.spec` builds the fixed `recipe_worker.exe` (Windows build verified 2026-07-23); the entrypoint accepts only the fixed native-broker identity arguments and returns `78` on direct or failed launches. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
@@ -86,6 +87,9 @@
 23. The disposable launcher applies all required Job Object policy before resume,
     queries the configured limits/accounting, never grants breakaway, and reports
     the absent worker/broker gates as blocking.
+24. Release signing reads an external raw private key only for the signing operation,
+    self-verifies the canonical manifest, rejects reparse/hardlink/mutable package
+    inputs, and never treats a generated manifest as launch authorization.
 
 ## Re-run target
 
@@ -98,6 +102,7 @@ python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m pytest tests/test_phase2_artifact_boundary.py -q
 python -m pytest tests/test_phase2_recipe_provider.py -q
 python -m pytest tests/test_phase2_worker_provenance.py -q
+python -m pytest tests/test_phase2_worker_release.py -q
 python -m pytest tests/test_native_launcher_qualification.py -q
 python -m pytest tests/test_recipe_sandbox_qualification.py -q
 python tools/execution_spikes/native_launcher_qualification.py
@@ -114,14 +119,15 @@ npm.cmd test --prefix frontend -- --run
 **Validation result (2026-07-23):** 16 Phase 2 contract tests, 9 signed-manifest tests,
 7 broker-contract tests, 9 native-broker tests, 7 bundle-installer tests, 16
 artifact-boundary tests, 17 recipe-provider tests, 6 worker-provenance tests, 7
-worker-protocol tests, 16 native-launcher/factory tests, 4
-native-launcher tests, and
-5 sandbox-qualification tests
-passed; 9 worker-runtime tests passed; the full Python suite
-passed (251 tests total) with one
+worker-protocol tests, 7 worker-release tests, 16 native-launcher/factory tests,
+4 native-launcher tests, and 5 sandbox-qualification tests passed; 9 worker-runtime
+tests passed; the full Python suite passed (258 tests total) with one
 native-platform skip and one pre-existing `pytest-asyncio` deprecation warning.
 Frontend lint, typecheck, production build, and all 39 frontend tests passed. Contract
 generation, compileall, and `git diff --check` passed. No production execution
 provider is enabled. The sandbox qualification command passed its AppContainer,
 Job Object, cancellation, and fixed decoder checks but returned the expected
-fail-closed `blocked` status because the signed worker bundle is not shipped.
+fail-closed `blocked` status because the signed worker bundle is not shipped. The
+Windows PyInstaller package built successfully, and an external-key smoke signed and
+verified its complete 822-file closure (one `image_transform` role plus 821 inert
+`resource` entries); no key or signed artifact was retained.

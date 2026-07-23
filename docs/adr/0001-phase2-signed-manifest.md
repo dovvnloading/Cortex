@@ -13,6 +13,11 @@ semantic bundle version, optional rollback target, and a bounded list of entries
 entry pins an opaque recipe id, safe relative bundle path, typed entrypoint, version,
 exact byte size, and lowercase SHA-256 digest.
 
+The `resource` entrypoint is reserved for inert files in a one-folder worker
+dependency closure; it is never a launch role. Exactly one `image_transform` entry at
+the fixed `recipe_worker.exe` path is required by the separate worker-provenance
+boundary.
+
 The signature is Ed25519 over canonical UTF-8 JSON with sorted keys, compact separators,
 and the signature field removed. Verification uses a packaged allowlist of raw 32-byte
 public keys selected by a bounded key id. Unknown or revoked keys are rejected. The
@@ -48,6 +53,23 @@ forms, missing files, symlinked components, size mismatches, and SHA-256 mismatc
 It reads at most the hard per-entry ceiling and never imports, decodes, executes, or
 publishes the bytes. The future provider must load only entries that were verified by
 this manifest; extra files are not implicitly trusted.
+
+## Release signing boundary
+
+`backend/cortex_backend/execution/worker_release.py` and
+`tools/sign_recipe_worker.py` form a release-only signing boundary. They enumerate
+every ordinary file in the built one-folder package, reject reparse points,
+hardlinks, empty/oversized files, source mutation, reserved `manifest.json`, and a
+missing fixed worker, then sign the canonical manifest with an externally supplied
+raw Ed25519 private key. The key is read only for the signing operation and is never
+written to the repository, returned in metadata, or printed. The builder self-verifies
+the resulting signature before returning, while installation still requires the
+independently pinned public-key trust root and `SignedBundleInstaller`.
+
+`packaging/build_recipe_worker.ps1` remains unsigned by default. Supplying all signing
+parameters opts into the release tool; a package is not launch-authorized merely
+because a manifest was generated. No private key, signed production artifact, or
+trust-root update is committed by this ADR stage.
 
 ## Failure contract
 

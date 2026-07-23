@@ -41,8 +41,12 @@ serves the bounded worker loop. Direct launches, malformed arguments, missing
 broker identity, provider startup failure, transport failure, and message-budget
 exhaustion return the safe refusal status (`78`); there is no stdio, shell, path,
 or host-process fallback. The PyInstaller definition and Windows build script
-qualify dependency closure and the fixed `recipe_worker.exe` path only; they do
-not sign, install, or authorize the worker.
+qualify dependency closure and the fixed `recipe_worker.exe` path only. The
+release-only signing tool hashes every ordinary dependency file as an inert
+`resource` manifest entry, assigns the sole `image_transform` role to
+`recipe_worker.exe`, and self-verifies the canonical signature. It does not sign,
+install, or authorize the worker without the external key and pinned public trust
+root.
 
 ## Security invariants
 
@@ -55,10 +59,10 @@ not sign, install, or authorize the worker.
   cancellation or terminal failure.
 - Output metadata is private and content-addressed; publication remains outside the
   worker session.
-- A package build is not a signed bundle. The release pipeline must create the
-  exact `recipe.manifest.v1` entry for `image_transform`/`recipe_worker.exe`, sign
-  it with the pinned key, install it through `SignedBundleInstaller`, and re-run
-  `verify_active_worker()`.
+- A package build is not a signed bundle. The release pipeline must enumerate and
+  sign the complete one-folder closure, install the resulting manifest through
+  `SignedBundleInstaller`, and re-run `verify_active_worker()`; only then may the
+  native launch gates be evaluated.
 
 ## Evidence
 
