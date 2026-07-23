@@ -163,9 +163,11 @@ def _configure() -> _Win32:
         wintypes.DWORD,
         ctypes.POINTER(wintypes.LPVOID),
     ]
-    userenv.CreateAppContainerProfile.restype = wintypes.HRESULT
+    # HRESULT is a signed 32-bit value; wintypes.HRESULT is not exposed by all
+    # supported CPython Windows builds (notably Python 3.11 on CI).
+    userenv.CreateAppContainerProfile.restype = ctypes.c_long
     userenv.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
-    userenv.DeleteAppContainerProfile.restype = wintypes.HRESULT
+    userenv.DeleteAppContainerProfile.restype = ctypes.c_long
     advapi32.OpenProcessToken.argtypes = [
         wintypes.HANDLE,
         wintypes.DWORD,
