@@ -48,6 +48,17 @@ the fixed suspended child receives and reports Job Object CPU/memory/active-proc
 limits with no breakaway flags. Its overall exit remains blocked until the signed
 worker package and broker PID/token binding exist.
 
+The fixed worker protocol/package boundary can be qualified separately on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/build_recipe_worker.ps1
+```
+
+This produces `dist/recipe-runtime/recipe_worker.exe` and verifies dependency
+closure only. The entrypoint exits with status `78` until the native broker loop is
+implemented; the output is unsigned and must not be installed or launched as a
+provider. The package contract is covered by `tests/test_phase2_worker_protocol.py`.
+
 ## What the probes prove
 
 - `environment`: supported Windows host and interpreter metadata.
@@ -78,6 +89,9 @@ worker package and broker PID/token binding exist.
 - `native_launcher_qualification`: creates only a fixed suspended `findstr.exe`
   child, applies and queries Job Object resource policy before resume, and reports
   the signed-worker and broker-binding blockers without launching either.
+- `worker_protocol`: validates the future worker's bounded request state machine,
+  in-order hashed chunks, cancellation, and redacted output contract; it has no
+  filesystem, process, or transport capability.
 - `security_review`: records the conditional Phase 0 spike review and residual
   blockers.
 - `pyinstaller_package_preconditions`: all currently known one-folder package
