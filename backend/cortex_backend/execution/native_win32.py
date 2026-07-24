@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+from pathlib import Path
 import sys
 from typing import Any
 from uuid import uuid4
@@ -35,6 +36,15 @@ _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
 _TOKEN_IS_APPCONTAINER = 29
 _TOKEN_APPCONTAINER_SID = 31
 _TOKEN_QUERY = 0x0008
+_SE_FILE_OBJECT = 1
+_DACL_SECURITY_INFORMATION = 0x00000004
+_TRUSTEE_IS_SID = 0
+_TRUSTEE_IS_UNKNOWN = 0
+_GRANT_ACCESS = 1
+_REVOKE_ACCESS = 4
+_OBJECT_INHERIT_ACE = 0x00000001
+_CONTAINER_INHERIT_ACE = 0x00000002
+_FILE_GENERIC_READ_EXECUTE = 0x001200A9
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 0x102
 _INFINITE = 0xFFFFFFFF
@@ -129,6 +139,25 @@ class _SecurityCapabilities(ctypes.Structure):
     ]
 
 
+class _TrusteeW(ctypes.Structure):
+    _fields_ = [
+        ("multiple_trustee", ctypes.c_void_p),
+        ("multiple_trustee_operation", wintypes.DWORD),
+        ("trustee_form", wintypes.DWORD),
+        ("trustee_type", wintypes.DWORD),
+        ("name", ctypes.c_void_p),
+    ]
+
+
+class _ExplicitAccessW(ctypes.Structure):
+    _fields_ = [
+        ("access_permissions", wintypes.DWORD),
+        ("access_mode", wintypes.DWORD),
+        ("inheritance", wintypes.DWORD),
+        ("trustee", _TrusteeW),
+    ]
+
+
 @dataclass(slots=True)
 class _Win32:
     kernel32: Any
@@ -187,6 +216,34 @@ def _configure() -> _Win32:
         ctypes.POINTER(wintypes.LPWSTR),
     ]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.SetEntriesInAclW.argtypes = [
+        wintypes.DWORD,
+        ctypes.POINTER(_ExplicitAccessW),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.SetEntriesInAclW.restype = wintypes.DWORD
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
 
     kernel32.InitializeProcThreadAttributeList.argtypes = [
         wintypes.LPVOID,
@@ -305,6 +362,98 @@ def _app_container_sid(win: _Win32, process: Any) -> str:
         _close(win, token)
 
 
+def _update_package_read_execute_acl(
+    win: _Win32,
+    package_root: Path,
+    profile_sid: Any,
+    *,
+    access_mode: int,
+) -> None:
+    """Add or remove one fresh AppContainer read/execute ACE.
+
+    User-owned application-data directories are not automatically readable by an
+    AppContainer. The immutable worker generation therefore receives a narrowly
+    scoped ACE for the newly created profile SID before CreateProcessW runs. The
+    existing DACL is merged rather than replaced, and inheritance covers the
+    one-folder dependency closure without granting write, delete, or network
+    capabilities. The ACE is removed when the worker closes.
+    """
+
+    if not package_root.is_dir() or package_root.is_symlink():
+        _raise("native_package_root_invalid")
+    old_dacl = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    new_dacl = ctypes.c_void_p()
+    trustee = _TrusteeW(
+        multiple_trustee=None,
+        multiple_trustee_operation=0,
+        trustee_form=_TRUSTEE_IS_SID,
+        trustee_type=_TRUSTEE_IS_UNKNOWN,
+        name=ctypes.cast(profile_sid, ctypes.c_void_p),
+    )
+    explicit = _ExplicitAccessW(
+        access_permissions=_FILE_GENERIC_READ_EXECUTE if access_mode == _GRANT_ACCESS else 0,
+        access_mode=access_mode,
+        inheritance=_OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE,
+        trustee=trustee,
+    )
+    try:
+        status = win.advapi32.GetNamedSecurityInfoW(
+            str(package_root),
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            ctypes.byref(old_dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if status != 0:
+            _raise("native_package_acl_read_failed")
+        status = win.advapi32.SetEntriesInAclW(
+            1,
+            ctypes.byref(explicit),
+            old_dacl,
+            ctypes.byref(new_dacl),
+        )
+        if status != 0:
+            _raise("native_package_acl_build_failed")
+        status = win.advapi32.SetNamedSecurityInfoW(
+            str(package_root),
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            new_dacl,
+            None,
+        )
+        if status != 0:
+            _raise("native_package_acl_write_failed")
+    finally:
+        if new_dacl.value:
+            win.kernel32.LocalFree(new_dacl)
+        if security_descriptor.value:
+            win.kernel32.LocalFree(security_descriptor)
+
+
+def _grant_package_read_execute(win: _Win32, package_root: Path, profile_sid: Any) -> None:
+    _update_package_read_execute_acl(
+        win,
+        package_root,
+        profile_sid,
+        access_mode=_GRANT_ACCESS,
+    )
+
+
+def _revoke_package_read_execute(win: _Win32, package_root: Path, profile_sid: Any) -> None:
+    _update_package_read_execute_acl(
+        win,
+        package_root,
+        profile_sid,
+        access_mode=_REVOKE_ACCESS,
+    )
+
+
 class Win32SuspendedWorker:
     """Own a suspended worker and its kill-on-close Job Object."""
 
@@ -317,6 +466,8 @@ class Win32SuspendedWorker:
         thread: Any,
         process_id: int,
         app_container_sid: str,
+        package_root: Path,
+        profile_sid: Any,
     ) -> None:
         self._win = win
         self._profile_name = profile_name
@@ -325,6 +476,8 @@ class Win32SuspendedWorker:
         self._job: Any = None
         self._closed = False
         self._resumed = False
+        self._package_root = package_root
+        self._profile_sid = profile_sid
         self.process_id = process_id
         self.app_container_sid = app_container_sid
 
@@ -408,6 +561,12 @@ class Win32SuspendedWorker:
         _close(self._win, self._process)
         self._thread = None
         self._process = None
+        try:
+            _revoke_package_read_execute(self._win, self._package_root, self._profile_sid)
+        except Exception:
+            # The process is already closed; ACL cleanup must not mask the
+            # lifecycle result or prevent profile deletion.
+            pass
         self._win.userenv.DeleteAppContainerProfile(self._profile_name)
 
     def __enter__(self) -> "Win32SuspendedWorker":
@@ -434,6 +593,7 @@ class NativeWin32ProcessFactory:
         attribute_list: wintypes.LPVOID | None = None
         attribute_buffer: ctypes.Array[ctypes.c_char] | None = None
         profile_created = False
+        package_acl_granted = False
         try:
             hr = win.userenv.CreateAppContainerProfile(
                 profile_name,
@@ -446,6 +606,9 @@ class NativeWin32ProcessFactory:
             if hr not in (0, 0x800700B7):
                 _raise("native_profile_create_failed")
             profile_created = True
+            package_root = plan.executable.parent
+            _grant_package_read_execute(win, package_root, profile_sid)
+            package_acl_granted = True
             required = ctypes.c_size_t()
             win.kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(required))
             if not required.value:
@@ -508,6 +671,8 @@ class NativeWin32ProcessFactory:
                 thread=process_info.thread,
                 process_id=int(process_info.process_id),
                 app_container_sid=sid,
+                package_root=package_root,
+                profile_sid=profile_sid,
             )
         except Exception:
             if attribute_list is not None:
@@ -518,6 +683,11 @@ class NativeWin32ProcessFactory:
                 win.kernel32.TerminateProcess(process_info.process, 1)
                 win.kernel32.WaitForSingleObject(process_info.process, 3000)
                 _close(win, process_info.process)
+            if package_acl_granted:
+                try:
+                    _revoke_package_read_execute(win, plan.executable.parent, profile_sid)
+                except Exception:
+                    pass
             if profile_created:
                 win.userenv.DeleteAppContainerProfile(profile_name)
             if isinstance(sys.exc_info()[1], NativeLauncherError):
