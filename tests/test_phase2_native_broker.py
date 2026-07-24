@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
 import os
 import queue
 import secrets
@@ -28,6 +29,7 @@ from cortex_backend.execution.native_broker import (
     _HANDSHAKE_HEADER,
     _HANDSHAKE_HELLO,
     _HANDSHAKE_SERVER,
+    _PipeIO,
     _PROCESS_QUERY_LIMITED_INFORMATION,
     _close_handle,
     _client_handshake,
@@ -230,6 +232,44 @@ def test_connection_closes_on_direction_violation():
         connection.send_message(message)
     assert error.value.code == "native_message_direction_invalid"
     assert closed == [True]
+
+
+def test_pipe_io_waits_for_available_bytes_before_blocking_read():
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.peek_calls = 0
+
+        def PeekNamedPipe(
+            self,
+            _handle: object,
+            _buffer: object,
+            _buffer_size: int,
+            _bytes_read: object,
+            available: object,
+            _bytes_left: object,
+        ) -> bool:
+            self.peek_calls += 1
+            available._obj.value = 0 if self.peek_calls == 1 else 3
+            return True
+
+        def ReadFile(
+            self,
+            _handle: object,
+            buffer: object,
+            _size: int,
+            count: object,
+            _overlapped: object,
+        ) -> bool:
+            payload = b"abc"
+            ctypes.memmove(buffer, payload, len(payload))
+            count._obj.value = len(payload)
+            return True
+
+    kernel32 = FakeKernel32()
+    pipe = _PipeIO(type("Win", (), {"kernel32": kernel32})(), object())
+
+    assert pipe.read(16) == b"abc"
+    assert kernel32.peek_calls == 2
 
 
 def test_native_configs_require_local_pipe_and_expected_process_binding():

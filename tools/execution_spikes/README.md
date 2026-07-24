@@ -79,11 +79,14 @@ It accepts no user files, model text, commands, or production trust material.
 verification can take several minutes on Windows; the protocol timeout applies
 after launch and is fail-closed.
 
-The current evidence result is intentionally blocked at the provider transform:
+The current evidence result passes the packaged provider transform:
 signed installation, provenance, AppContainer/job identity binding, broker
-handshake, `prepare`, and `input_chunk` pass, while `input_complete` times out
-inside the packaged provider. The harness reports `worker_response_timeout`,
-cleans up boundedly, and never reports a green result for this partial run.
+handshake, `prepare`, `input_chunk`, `input_complete`, and `collect_output` all
+complete through the authenticated broker. The native read path polls
+`PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`, keeping the worker's
+cancellation reader live without starving the provider transform. The harness
+still does not close the remaining watchdog/hostile-decoder, external-review, or
+production-lifecycle release gates.
 
 ## What the probes prove
 

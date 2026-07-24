@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and qualification-only provider core complete; the packaged provider transform and OS sandbox release gates remain open
+- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged provider transform qualification complete; watchdog/hostile-decoder evidence, external review, and lifecycle release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -24,9 +24,9 @@
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
-| Windows recipe sandbox qualification harness | **Complete (signed launch/broker; provider transform blocked)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the packaged protocol. The fixed corpus passes through `input_chunk`; the provider `input_complete` transform times out and the harness fails closed. |
+| Windows recipe sandbox qualification harness | **Complete (signed launch/broker/provider transform)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG grayscale corpus through `collect_output`. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, and `input_chunk` are live-qualified. The actual provider transform still needs to complete inside the packaged worker, followed by watchdog/hostile-decoder evidence, external review, and lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, and `collect_output` are live-qualified inside the packaged worker. The remaining gate is watchdog/cancellation and hostile-decoder evidence, external review, and production lifecycle wiring. |
 
 ## Security invariants
 
@@ -93,6 +93,9 @@
 25. The native launcher grants only a per-profile inherited read/execute ACE on the
     verified package root, removes that ACE during worker cleanup, and never grants
     package write/delete access; a qualification timeout is always a blocked result.
+26. Native broker reads poll bounded pipe availability before synchronous reads so a
+    cancellation reader cannot starve the provider transform; pipe errors still fail
+    closed and do not bypass framing, authentication, or sequence checks.
 
 ## Re-run target
 
@@ -137,11 +140,13 @@ verified its complete 822-file closure (one `image_transform` role plus 821 iner
 `resource` entries); no key or signed artifact was retained.
 
 **Signed worker qualification result (2026-07-24):** The disposable
-`recipe_worker_e2e_qualification.py --json --timeout-seconds 5` run passed
+`recipe_worker_e2e_qualification.py --json --timeout-seconds 5 --strict` run passed
 ephemeral signing/installation, active provenance verification, AppContainer/job
-policy and identity binding, authenticated broker handshake, `prepare`, and
-`input_chunk`. It blocked at `input_complete` with `worker_response_timeout` while
-the packaged provider transform remained inside the worker. Bounded cleanup closed
-the broker, binder, worker, and profile; no `recipe_worker.exe` process remained.
-This is evidence for the launch/protocol boundary only and does not close the
-provider or production lifecycle release gate.
+policy and identity binding, authenticated broker handshake, `prepare`,
+`input_chunk`, `input_complete`, and `collect_output`. The transport fix polls
+`PeekNamedPipe` with a 5 ms bounded wait before synchronous reads, preventing the
+worker's cancellation reader from starving the provider transform. Bounded cleanup
+closed the broker, binder, worker, and profile; no `recipe_worker.exe` process
+remained. This closes the packaged provider-transform qualification gate but does
+not close the remaining watchdog/hostile-decoder, external-review, or lifecycle
+release gates.
