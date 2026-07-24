@@ -21,6 +21,7 @@ import re
 import secrets
 import struct
 import sys
+from time import sleep
 from typing import Any, Callable, Literal
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -249,6 +250,15 @@ def _load_win32() -> _Win32:
         ctypes.c_void_p,
     ]
     kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.PeekNamedPipe.restype = wintypes.BOOL
     kernel32.WriteFile.argtypes = [
         wintypes.HANDLE,
         ctypes.c_void_p,
@@ -459,6 +469,22 @@ class _PipeIO:
     def read(self, size: int) -> bytes:
         if size <= 0 or size > 256 * 1024:
             raise NativeBrokerError("native_pipe_read_invalid")
+        # ReadFile is synchronous. Polling availability first keeps a broker
+        # reader thread cancellation-live while a packaged provider transforms.
+        available = wintypes.DWORD()
+        while True:
+            if not self._win.kernel32.PeekNamedPipe(
+                self._handle,
+                None,
+                0,
+                None,
+                ctypes.byref(available),
+                None,
+            ):
+                raise _pipe_error(ctypes.get_last_error())
+            if available.value:
+                break
+            sleep(0.005)
         buffer = ctypes.create_string_buffer(size)
         count = wintypes.DWORD()
         if not self._win.kernel32.ReadFile(
