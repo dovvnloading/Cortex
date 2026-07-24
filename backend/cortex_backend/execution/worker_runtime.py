@@ -254,17 +254,21 @@ class RecipeWorkerBrokerRuntime:
             if not isinstance(health, RuntimeHealth) or not health.available:
                 raise WorkerRuntimeError("provider_unavailable")
             dispatcher = RecipeWorkerDispatcher(RecipeWorkerSession(provider))
-            receiver = Thread(
-                target=self._receive_loop,
-                args=(self._connection, incoming, receiver_stop),
-                name="cortex-worker-broker-reader",
-                daemon=True,
-            )
-            receiver.start()
             pending_collect: BrokerMessage | None = None
             cancel_acknowledged = False
             active_request: BrokerMessage | None = None
             transform_started_at = 0.0
+
+            def start_receiver() -> None:
+                nonlocal receiver
+                if receiver is None:
+                    receiver = Thread(
+                        target=self._receive_loop,
+                        args=(self._connection, incoming, receiver_stop),
+                        name="cortex-worker-broker-reader",
+                        daemon=True,
+                    )
+                    receiver.start()
 
             while processed < self._max_messages:
                 if (
@@ -306,6 +310,11 @@ class RecipeWorkerBrokerRuntime:
                     )
                     terminal = "failed"
                     return WorkerRuntimeReport(processed, terminal)
+                if receiver is None:
+                    try:
+                        incoming.put(self._connection.receive_message())
+                    except Exception:
+                        incoming.put(WorkerRuntimeError("broker_receive_failed"))
                 try:
                     request = incoming.get(timeout=0.05)
                 except Empty:
@@ -398,6 +407,7 @@ class RecipeWorkerBrokerRuntime:
                     self._validate_envelope(request)
                     active_request = request
                     transform_started_at = monotonic()
+                    start_receiver()
                     completion_thread = Thread(
                         target=self._dispatch_completion,
                         args=(dispatcher, request, completion),

@@ -62,6 +62,29 @@ unsigned and must not be installed or launched as a provider. The package and
 runtime contracts are covered by `tests/test_phase2_worker_protocol.py` and
 `tests/test_phase2_worker_runtime.py`.
 
+The signed worker/AppContainer/broker qualification gate is a separate,
+disposable end-to-end check:
+
+```powershell
+python tools/execution_spikes/recipe_worker_e2e_qualification.py --json
+python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
+```
+
+It creates an in-memory ephemeral Ed25519 trust root, signs the already-built
+one-folder package, installs one immutable generation, verifies provenance,
+launches the worker through the native AppContainer/job-policy factory, and
+exercises only the fixed 4x3 PNG grayscale corpus over the authenticated broker.
+It accepts no user files, model text, commands, or production trust material.
+`--strict` returns exit code `2` unless every stage passes. Full package closure
+verification can take several minutes on Windows; the protocol timeout applies
+after launch and is fail-closed.
+
+The current evidence result is intentionally blocked at the provider transform:
+signed installation, provenance, AppContainer/job identity binding, broker
+handshake, `prepare`, and `input_chunk` pass, while `input_complete` times out
+inside the packaged provider. The harness reports `worker_response_timeout`,
+cleans up boundedly, and never reports a green result for this partial run.
+
 ## What the probes prove
 
 - `environment`: supported Windows host and interpreter metadata.
@@ -92,6 +115,10 @@ runtime contracts are covered by `tests/test_phase2_worker_protocol.py` and
 - `native_launcher_qualification`: creates only a fixed suspended `findstr.exe`
   child, applies and queries Job Object resource policy before resume, and reports
   the signed-worker and broker-binding blockers without launching either.
+- `recipe_worker_e2e_qualification`: signs and installs a disposable worker
+  generation, proves the live native broker identity boundary, and runs the fixed
+  packaged-worker protocol corpus; any provider or cleanup timeout remains
+  blocking.
 - `backend/cortex_backend/execution/native_launcher.py`: production-facing
   launch-plan boundary that revalidates the signed worker and refuses process
   creation until a reviewed native process factory and live broker binder are

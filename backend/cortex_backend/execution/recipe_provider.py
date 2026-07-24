@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
+from importlib import import_module
 import math
 import re
 from threading import RLock
@@ -140,8 +141,16 @@ def _pillow_health() -> tuple[bool, str, str]:
     if Image is None or ImageEnhance is None or ImageFile is None or PIL is None:
         return False, "recipe_dependency_missing", "The image recipe dependency is unavailable."
     try:
-        Image.init()
-        supported = set(Image.registered_extensions().values())
+        # Avoid Pillow's global ``Image.init``: it imports every optional codec
+        # (including heavyweight/stub integrations) and can block indefinitely
+        # inside the low-capability worker. Load only the fixed formats.
+        for plugin in ("PngImagePlugin", "JpegImagePlugin", "WebPImagePlugin"):
+            import_module(f"PIL.{plugin}")
+        # The explicit imports populate the extension table. Mark Pillow's
+        # plugin registry initialized so Image.open() cannot fall back to its
+        # broad optional-plugin scan during the first request.
+        supported = set(Image.EXTENSION.values())
+        Image._initialized = 2
     except Exception:
         return False, "recipe_codec_unavailable", "The required image codecs are unavailable."
     if not {"PNG", "JPEG", "WEBP"}.issubset(supported):

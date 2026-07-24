@@ -205,11 +205,34 @@ def test_provider_health_blocks_missing_dependency_or_codec(monkeypatch):
     assert not provider.enabled
 
     monkeypatch.undo()
-    monkeypatch.setattr(provider_module.Image, "registered_extensions", lambda: {".png": "PNG"})
+    monkeypatch.setattr(provider_module.Image, "EXTENSION", {".png": "PNG"})
     unavailable = provider.start(RuntimeHealth.ready("test sandbox attestation"))
     assert not unavailable.available
     assert unavailable.code == "recipe_codec_unavailable"
     assert not provider.enabled
+
+
+def test_provider_health_loads_only_allowlisted_codec_plugins(monkeypatch):
+    imported: list[str] = []
+
+    def import_plugin(name: str):
+        imported.append(name)
+        return object()
+
+    monkeypatch.setattr(provider_module, "import_module", import_plugin)
+    monkeypatch.setattr(
+        provider_module.Image,
+        "EXTENSION",
+        {".png": "PNG", ".jpg": "JPEG", ".webp": "WEBP"},
+    )
+    available, code, _message = provider_module._pillow_health()
+    assert available is True
+    assert code == "ready"
+    assert imported == [
+        "PIL.PngImagePlugin",
+        "PIL.JpegImagePlugin",
+        "PIL.WebPImagePlugin",
+    ]
 
 
 def test_provider_rejects_input_before_decoder_when_encoded_limit_is_exceeded():
