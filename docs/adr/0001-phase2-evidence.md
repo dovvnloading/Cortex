@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; parser fuzzing, resource/watchdog accounting, artifact security review, external review, and lifecycle release gates remain open
+- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; resource/watchdog accounting, artifact security review, external review, and lifecycle release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -12,6 +12,7 @@
 | Deliverable | Status | Evidence |
 | --- | --- | --- |
 | Versioned image transform schema | **Complete (contract only)** | `artifact.transform.v1` allows only bounded grayscale, contrast, brightness, crop, resize, and rotate steps with PNG/JPEG/WebP output. |
+| Deterministic parser-fuzz qualification | **Complete (qualification-only)** | `recipe_parser_fuzz.py --iterations 2000 --seed 20260728 --json --strict` generated bounded mutations across image, calculator, and check parsers: 158 accepted, 1,842 rejected, zero unexpected exceptions; error text remained stable and redacted. |
 | Opaque artifact binding | **Complete (validation only)** | Artifact IDs are bounded opaque identifiers; paths, source text, plugin names, and model-selected output names are rejected or absent. |
 | Calculator/check primitives | **Complete (trusted pure helpers)** | Decimal-only calculator operations and explicit comparisons are deterministic, bounded, and have no I/O or code execution surface. |
 | Canonical plan identity | **Complete** | Validated plans expose stable canonical JSON and SHA-256 digests for future idempotency/signature binding. |
@@ -26,7 +27,7 @@
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, and in-flight cancellation acknowledgement are live-qualified inside the packaged worker. The remaining gate is parser fuzzing, artifact security review, resource/watchdog accounting, external review, and production lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, and in-flight cancellation acknowledgement are live-qualified inside the packaged worker. The remaining gate is artifact security review, resource/watchdog accounting, external review, and production lifecycle wiring. |
 
 ## Security invariants
 
@@ -99,6 +100,9 @@
 27. Hostile decoder bytes are rejected inside the signed worker, and cancellation is
     sent only after `input_complete` over the authenticated broker; a missing or
     ambiguous terminal response remains a blocked qualification result.
+28. Typed parser fuzzing uses a fixed seed, bounded iteration count, bounded payload
+    depth, and stable redacted error categories; an unexpected exception or budget
+    violation is a blocked qualification result.
 
 ## Re-run target
 
@@ -117,6 +121,7 @@ python -m pytest tests/test_recipe_sandbox_qualification.py -q
 python tools/execution_spikes/native_launcher_qualification.py
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
+python tools/execution_spikes/recipe_parser_fuzz.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -150,9 +155,9 @@ policy and identity binding, authenticated broker handshake, `prepare`,
 `PeekNamedPipe` with a 5 ms bounded wait before synchronous reads, preventing the
 worker's cancellation reader from starving the provider transform. Bounded cleanup
 closed the broker, binder, worker, and profile; no `recipe_worker.exe` process
-remained. This closes the packaged provider-transform qualification gate but does
-not close the remaining watchdog/hostile-decoder, external-review, or lifecycle
-release gates.
+remained. At that stage this closed only the packaged provider-transform
+qualification gate; hostile-decoder, watchdog, external-review, and lifecycle
+release evidence was still pending.
 
 **Packaged hostile/cancellation qualification result (2026-07-28):** The full
 `recipe_worker_e2e_qualification.py --json --timeout-seconds 10 --strict` run
@@ -164,5 +169,16 @@ disposable worker; the run reported no worker process or binding cleanup
 residue. The optional `--case cancellation` path reproduces the cancellation
 gate in isolation. These results close the packaged hostile-decoder and
 cancellation qualification evidence, but do not enable the provider or close
-parser fuzzing, resource/watchdog accounting, artifact security review,
-external review, or production lifecycle health gates.
+resource/watchdog accounting, artifact security review, external review, or
+production lifecycle health gates.
+
+**Parser fuzz qualification result (2026-07-28):** The deterministic
+`recipe_parser_fuzz.py --iterations 2000 --seed 20260728 --json --strict` run
+completed with 158 accepted payloads, 1,842 stable validation rejections, and
+zero unexpected exceptions. It exercised bounded mutations across all three
+typed parsers, including unknown fields, malformed operations, non-mapping
+values, oversized payloads, control/unicode text, and invalid optional values.
+The corpus exposed and the parser fixed an uncaught `None` tolerance validator
+failure for `check.v1`/`is_close`; the regression suite now locks that behavior
+to `invalid_check`. Resource/watchdog accounting, artifact security review,
+external review, and production lifecycle health remain open.

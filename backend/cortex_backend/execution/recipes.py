@@ -70,6 +70,12 @@ def _bounded_decimal(value: Decimal) -> Decimal:
     return value
 
 
+def _bounded_optional_decimal(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return _bounded_decimal(value)
+
+
 def _coerce_decimal(value: Any) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise ValueError("decimal must be an integer, string, or Decimal")
@@ -217,7 +223,7 @@ class CheckPlan(_StrictModel):
     )
     _left = field_validator("left")(_bounded_decimal)
     _right = field_validator("right")(_bounded_decimal)
-    _tolerance = field_validator("tolerance")(_bounded_decimal)
+    _tolerance = field_validator("tolerance")(_bounded_optional_decimal)
 
     @model_validator(mode="after")
     def _validate_tolerance(self) -> "CheckPlan":

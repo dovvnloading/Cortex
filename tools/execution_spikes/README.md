@@ -89,8 +89,28 @@ handshake, normal `collect_output`, hostile decoder rejection for truncated PNG
 and active SVG bytes, and an in-flight `cancel_ack` after `input_complete`. The
 native read path polls `PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`,
 keeping the worker's cancellation reader live without starving the provider
-transform. Parser fuzzing, resource/watchdog accounting, artifact security review,
-external review, and production-lifecycle release gates remain open.
+transform. Resource/watchdog accounting, artifact security review, external review,
+and production-lifecycle release gates remain open; parser-fuzz evidence is
+qualified below.
+
+## Run the typed parser fuzz qualification
+
+The parser probe is deterministic and bounded; it never executes a recipe or
+accepts model/user input:
+
+```powershell
+python tools/execution_spikes/recipe_parser_fuzz.py --json
+python tools/execution_spikes/recipe_parser_fuzz.py --iterations 2000 --seed 20260728 --json --strict
+```
+
+The fixed corpus mutates image, calculator, and check payloads, including
+unknown fields, malformed operations, non-mapping values, oversized payloads,
+control/unicode text, and invalid optional values. A green result requires only
+typed models or stable redacted `RecipeValidationError` categories; unexpected
+exceptions, unbounded budgets, or canonicalization failures return exit code 2.
+The current evidence is 158 accepted payloads, 1,842 rejections, and zero
+unexpected exceptions. This closes parser-fuzz evidence only; resource/watchdog,
+artifact-security, external-review, and production-lifecycle gates remain open.
 
 ## What the probes prove
 
