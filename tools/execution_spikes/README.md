@@ -114,6 +114,13 @@ reaping. This is
 qualification-only evidence; signed-worker enforcement, external review, and
 production lifecycle wiring remain blocked.
 
+The release/lifecycle composition preflight is covered by the backend boundary
+`RecipeRuntimeReleaseGate` and `tests/test_phase2_release_gate.py`. It is a
+read-only health callback candidate: it rechecks active worker provenance,
+requires the native process-factory and broker-binder shapes, and requires an
+explicit external-review result. It never starts a process or enables a provider;
+without an approved review record it remains blocked.
+
 ## Run the typed parser fuzz qualification
 
 The parser probe is deterministic and bounded; it never executes a recipe or

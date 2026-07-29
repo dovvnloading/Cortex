@@ -132,6 +132,12 @@ from .resource_accounting import (
     ResourceSample,
     ResourceUsage,
 )
+from .release_gate import (
+    ExternalReviewProbe,
+    RecipeRuntimeReleaseGate,
+    ReleaseGateCheck,
+    ReleaseGateSnapshot,
+)
 
 __all__ = [
     "ArtifactLimitError",
@@ -235,6 +241,10 @@ __all__ = [
     "ResourceGovernor",
     "ResourceSample",
     "ResourceUsage",
+    "ExternalReviewProbe",
+    "RecipeRuntimeReleaseGate",
+    "ReleaseGateCheck",
+    "ReleaseGateSnapshot",
     "decode_frame",
     "decode_message",
     "encode_frame",

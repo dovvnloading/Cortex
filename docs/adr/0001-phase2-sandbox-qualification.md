@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 Windows recipe sandbox qualification
 
-- **Status:** Qualification harness implemented; signed provider worker and release gate blocked
+- **Status:** Qualification harness and release/lifecycle preflight implemented; signed provider worker and release gate blocked
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 recipe provider core](0001-phase2-recipe-provider.md), [signed bundle installation](0001-phase2-bundle-installation.md), [native broker adapter](0001-phase2-native-broker.md), and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -49,7 +49,7 @@ fallback.
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
 | Signed worker provenance | Storage-only `verify_active_worker()` role binding plus fixed package precondition | **Storage gate complete; launch remains blocked** until a packaged executable and native launcher exist |
 | Broker identity and framed IPC | Native broker transport tests and ADR | Must be bound to the actual worker PID/token before launch |
-| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; provider is not exported | No provider can become reachable from the application |
+| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `RecipeRuntimeReleaseGate` composes the mandatory health checks without mutating lifecycle state | No provider can become reachable from the application |
 
 No single green smoke result closes the gate. A missing, failed, or unverified
 control produces `blocked` or `fail`, and no weaker host-process path is attempted.
@@ -89,6 +89,11 @@ package is not shipped. This is the expected result for the current stage.
 Regression coverage is in `tests/test_recipe_sandbox_qualification.py`, including
 missing/unsigned worker refusal, helper timeout/evidence failure, and the invariant
 that a blocked worker gate never authorizes provider launch.
+
+The release/lifecycle composition stage is covered separately by
+`tests/test_phase2_release_gate.py`. It rechecks active worker provenance, requires
+both native adapter shapes and an explicit external-review result, and asserts that
+preflight never creates a process, binds a broker, or enables a provider.
 
 ## Consequences
 
