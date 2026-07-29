@@ -61,14 +61,14 @@ function renderChat(api: CortexApi, threadId = "thread-a") {
 describe("ChatPage composer integration", () => {
   afterEach(() => window.sessionStorage.clear());
 
-  it("turns a blank conversation into a useful starting surface", async () => {
-    const user = userEvent.setup();
+  it("keeps a blank conversation free of preset prompt suggestions", async () => {
     renderChat(chatApi());
 
     await screen.findByRole("heading", { name: "New thread" });
-    await user.click(screen.getByRole("button", { name: /Think through a decision/i }));
 
-    expect(screen.getByLabelText("Message Cortex")).toHaveValue("Help me think through a decision step by step.");
+    expect(screen.queryByText("Think through a decision")).not.toBeInTheDocument();
+    expect(screen.queryByText("Check a calculation")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
   });
 
   it("retains the exact draft if generation acceptance fails", async () => {
