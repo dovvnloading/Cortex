@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 signed recipe manifest and rollback gate
 
-- **Status:** Implemented and verified; the storage installer is complete and provider enablement remains blocked
+- **Status:** Implemented and verified as a storage/qualification boundary; provider exposure remains an explicit product-integration decision
 - **Parent:** [Phase 2 typed recipe contract](0001-phase2-recipe-contract.md)
 - **Scope:** Canonical Ed25519 manifest signatures, pinned bundle bytes, monotonic
   update policy, and explicit rollback authorization

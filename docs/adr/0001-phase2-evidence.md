@@ -10,6 +10,11 @@
 - **Qualification ADR:** [Phase 2 packaged worker release qualification](0001-phase2-worker-release-qualification.md)
 - **Review ADR:** [Phase 2 external release-review attestation](0001-phase2-external-review-attestation.md)
 
+> This file is a historical qualification record, not a list of open tasks. The
+> current product sequence is maintained in [the open-source execution plan](../OPEN_SOURCE_EXECUTION_PLAN.md).
+> Older paragraphs may use `blocked` for a fail-closed result observed at that time;
+> the current status is the header and stage checklist above.
+
 ## Stage checklist
 
 | Deliverable | Status | Evidence |
@@ -38,7 +43,7 @@
 | OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, watchdog tree reaping, and the durable packaged-worker coordinator run are qualified. Official-release review/signing remains optional hardening. |
 | Explicit qualification-profile lifecycle wiring | **Complete (local/CI composition; default-off in the app)** | `build_execution_lifecycle()` accepts only exact `disabled`/`qualification` selection, requires a qualification release gate, coordinator factory, and provider-health probe, and composes them in a fail-closed order. `Cortex_Preview.build_preview_app` exposes this only as an explicit injection; the normal app supplies no profile or controls. |
 | Durable recipe coordinator/request, attachment staging, and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/attachments` creates an idempotent owner-scoped `attachment.stage.v1` record through `ArtifactBoundary.stage_bytes`; `POST /api/v1/execution/recipe/image` consumes its opaque artifact ID after a ready `qualification` lifecycle. `build_native_recipe_coordinator_factory` binds a fresh signed/native launcher/broker/client attempt per job without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, `tests/test_phase2_attachment_staging.py`, `tests/test_phase2_native_recipe_attempt.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, native-composition, and lifecycle paths. |
-| Durable packaged-worker coordinator qualification | **Complete (local + hosted CI; default-off)** | `recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300` passed on Windows using an in-memory ephemeral signing key and a disposable immutable installer generation. The single coordinator corpus staged a PNG attachment, completed a real signed/native transform, verified digest/MIME/size and atomic publication, rejected a foreign owner, expired and purged a one-second artifact, cancelled an in-flight transform with no result artifact, and verified native worker/process and temporary-root cleanup. Final Quality run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650), job [90627154917](https://github.com/dovvnloading/Cortex/actions/runs/30466976650/job/90627154917), passed on commit `0c7b350` in 4m15s after the packaged worker release qualification. |
+| Durable packaged-worker coordinator qualification | **Complete (local + hosted CI; default-off)** | `recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300` passed on Windows using an in-memory ephemeral signing key and a disposable immutable installer generation. The single coordinator corpus staged a PNG attachment, completed a real signed/native transform, verified digest/MIME/size and atomic publication, rejected a foreign owner, expired and purged a one-second artifact, cancelled an in-flight transform with no result artifact, and verified native worker/process and temporary-root cleanup. Final Quality run [30467455657](https://github.com/dovvnloading/Cortex/actions/runs/30467455657), job [90628811567](https://github.com/dovvnloading/Cortex/actions/runs/30467455657/job/90628811567), passed on commit `c022f51` in 4m12s after the packaged worker release qualification. |
 
 ## Security invariants
 
@@ -346,6 +351,7 @@ publication, rejected a foreign-owner request before worker launch, expired and
 purged a one-second attachment, cancelled an in-flight resize transform with no
 published result, and verified native process plus temporary workspace cleanup.
 The probe remains qualification-only and does not enable the normal application;
-hosted Quality CI run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
-and job [90627154917](https://github.com/dovvnloading/Cortex/actions/runs/30466976650/job/90627154917)
-passed the same gate on commit `0c7b350` in 4m15s.
+hosted Quality CI run [30467455657](https://github.com/dovvnloading/Cortex/actions/runs/30467455657)
+and job [90628811567](https://github.com/dovvnloading/Cortex/actions/runs/30467455657/job/90628811567)
+passed the same gate on commit `c022f51` in 4m12s. PR #64 containing this
+qualification slice is now merged.

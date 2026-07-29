@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 disposable native launcher qualification
 
-- **Status:** Win32 suspended factory and broker identity binder qualified; signed-worker end-to-end execution remains blocked
+- **Status:** Win32 suspended factory, broker identity binder, and signed-worker end-to-end qualification complete; official release trust is optional hardening
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Windows sandbox qualification](0001-phase2-sandbox-qualification.md) and [signed worker provenance](0001-phase2-worker-provenance.md)

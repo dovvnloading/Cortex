@@ -163,8 +163,8 @@ connection as reconnectable rather than as success or failure.
    allow, sensitive scope/payload data is redacted, and the actionable card is
    keyboard-native without taking focus.
 
-This contract does not close Phase 1. Fake preview, replay, task tray, recovery,
-approval-decision transport, and installation-principal wiring are implemented.
-The production app's control-plane lifecycle and recovery gate are now wired, but
-provider lifecycle integration remains separately reviewed; real code execution is
-still unavailable.
+This contract closes the Phase 1 control-plane slice. Fake preview, replay, task
+tray, recovery, approval-decision transport, installation-principal wiring, and
+the production app's lifecycle/recovery gate are implemented. Real provider
+execution remains a later, separately qualified capability and is intentionally
+unavailable through this fake-only contract.

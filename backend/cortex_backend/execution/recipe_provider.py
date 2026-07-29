@@ -1,10 +1,11 @@
-"""Qualification-only fixed-function image recipe provider.
+"""Fixed-function image recipe provider.
 
 This module is a bounded transform core, not an execution route.  It accepts
 validated ``ImageTransformPlan`` objects and immutable bytes, never paths or
 model source, and returns a new encoded image only after decoding and
-re-validating the result.  The provider starts only after an external sandbox
-health result is available; no application lifecycle imports this module yet.
+re-validating the result. The provider starts only after a caller supplies a
+health result. The normal local runtime invokes it inside a short-lived worker
+process; the qualification profile may supply a stricter external health gate.
 """
 
 from __future__ import annotations
@@ -368,7 +369,7 @@ def _encode_verified(
 
 
 class RecipeImageProvider:
-    """Fixed-function image provider that remains disabled until sandbox health passes."""
+    """Fixed-function image provider that remains disabled until health passes."""
 
     def __init__(self, limits: RecipeProviderLimits | None = None) -> None:
         self.limits = limits or RecipeProviderLimits()

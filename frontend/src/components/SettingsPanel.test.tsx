@@ -108,4 +108,47 @@ describe("SettingsPanel", () => {
     expect(screen.getByRole("status", { name: "Model operation progress" })).toHaveAttribute("aria-busy", "true");
     expect(container.querySelector(".model-progress-spinner")).toBeInTheDocument();
   });
+
+  it("lets a user turn automatic safe computation off", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    const settings: CortexSettings = {
+      models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" },
+      execution: { automatic_compute: true },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: ["local-chat:7b"],
+      models: [{ name: "local-chat:7b" }],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={onSave}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const toggle = screen.getByRole("checkbox", { name: "Use safe computation automatically" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      execution: { automatic_compute: false },
+    }));
+  });
 });

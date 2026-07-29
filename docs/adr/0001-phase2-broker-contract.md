@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 authenticated broker contract
 
-- **Status:** Contract implemented and verified; native transport/provider enablement remains blocked
+- **Status:** Contract implemented and verified; the qualification profile consumes it and the normal app remains default-off
 - **Parent:** [Phase 2 signed-manifest gate](0001-phase2-signed-manifest.md)
 - **Scope:** Bounded authenticated frames, canonical broker messages, direction keys,
   peer ACL/identity policy, and installation/job ownership authorization

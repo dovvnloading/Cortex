@@ -23,6 +23,11 @@ from cortex_backend.execution.recipes import (
     RecipeValidationError,
     parse_image_transform,
 )
+from cortex_backend.execution.scratch_compute import (
+    SCRATCH_COMPUTE_PROFILE,
+    ScratchComputeError,
+    validate_scratch_expression,
+)
 
 
 class APIModel(BaseModel):
@@ -54,6 +59,8 @@ class SystemResponse(APIModel):
     preview: bool = True
     session_required: bool = True
     execution_preview_available: bool = False
+    scratch_compute_available: bool = False
+    image_transform_available: bool = False
     started_at: datetime
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_setup_url: str = "https://ollama.com/download"
@@ -210,6 +217,26 @@ class ExecutionPreviewRequest(APIModel):
     step_delay_seconds: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+class ScratchComputeRequest(APIModel):
+    """One bounded expression, never Python source or a shell command."""
+
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    expression: str = Field(min_length=1, max_length=512, strict=True)
+
+    @field_validator("expression")
+    @classmethod
+    def _safe_expression(cls, value: str) -> str:
+        try:
+            return validate_scratch_expression(value)
+        except ScratchComputeError:
+            raise ValueError("safe computation expression is invalid") from None
+
+
 class RecipeImageTransformRequest(APIModel):
     """Explicit request for one qualified, fixed-function image transform.
 
@@ -293,6 +320,14 @@ class ExecutionAccepted(APIModel):
     job_id: str
     request_id: str
     profile: Literal["fake.v1"]
+    status: ExecutionStatus
+    sequence: int
+
+
+class ScratchComputeAccepted(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal[SCRATCH_COMPUTE_PROFILE]
     status: ExecutionStatus
     sequence: int
 

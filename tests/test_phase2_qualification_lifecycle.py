@@ -37,6 +37,7 @@ def _gate(tmp_path, *, profile: str = "qualification") -> RecipeRuntimeReleaseGa
 def test_profile_parser_is_exact_and_defaults_to_disabled():
     assert parse_execution_profile(None) == "disabled"
     assert parse_execution_profile("disabled") == "disabled"
+    assert parse_execution_profile("local") == "local"
     assert parse_execution_profile("qualification") == "qualification"
     with pytest.raises(QualificationProfileError) as error:
         parse_execution_profile(" Qualification ")
@@ -56,13 +57,13 @@ def test_disabled_profile_never_calls_health_or_coordinator(tmp_path):
     assert calls == []
 
 
-def test_preview_builder_remains_disabled_without_explicit_profile(tmp_path):
+def test_preview_builder_uses_the_checked_in_local_profile_by_default(tmp_path):
     from Cortex_Preview import build_preview_app
 
     app = build_preview_app(data_dir=tmp_path / "app-data", serve_frontend=False)
 
-    assert app.state.execution_lifecycle.profile == "disabled"
-    assert app.state.execution_lifecycle.snapshot.state == "disabled"
+    assert app.state.execution_lifecycle.profile == "local"
+    assert app.state.execution_lifecycle.snapshot.state == "stopped"
 
 
 def test_qualification_without_controls_is_blocked_without_factory_call(tmp_path):

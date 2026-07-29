@@ -291,6 +291,23 @@ a { color: inherit; text-decoration: none; }
 .chat-empty-state p { max-width: 420px; margin: 8px 0 0; font-size: 0.88rem; line-height: 1.55; }
 .input-container { position: relative; flex: 0 0 auto; width: 100%; padding: 16px max(20px, calc((100% - 900px) / 2)) max(18px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--input) 96%, var(--bg)); }
 .composer-area, .composer { width: 100%; }
+.image-transform { width: 100%; margin: 0 0 8px; }
+.image-transform-trigger { display: inline-flex; align-items: center; min-height: 30px; gap: 7px; border: 1px solid transparent; border-radius: 9px; padding: 0 8px; background: transparent; color: var(--text-muted); font-size: 0.74rem; font-weight: 650; }
+.image-transform-trigger:hover { border-color: var(--line-strong); background: var(--surface-soft); color: var(--accent); }
+.image-transform-card { display: grid; gap: 13px; margin-bottom: 9px; border: 1px solid var(--line-strong); border-radius: 14px; padding: 14px; background: var(--surface-raised); box-shadow: 0 8px 24px rgba(43, 35, 28, 0.08); }
+.image-transform-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.image-transform-heading > div { display: grid; gap: 3px; }
+.image-transform-heading strong { color: var(--text); font-size: 0.85rem; }
+.image-transform-heading span { color: var(--text-muted); font-size: 0.74rem; line-height: 1.4; }
+.image-transform-controls { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(145px, 0.8fr) minmax(105px, 0.45fr); gap: 10px; }
+.image-transform-controls .field-label { gap: 6px; font-size: 0.73rem; }
+.image-transform-controls input[type="file"] { max-width: 100%; padding: 7px; font-size: 0.72rem; }
+.image-transform-preview, .image-transform-result { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.image-transform-preview img, .image-transform-result img { display: block; max-width: min(100%, 250px); max-height: 170px; border-radius: 8px; object-fit: contain; background: var(--surface); }
+.image-transform-status { display: flex; align-items: center; min-width: 0; gap: 8px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, var(--surface-soft)); color: var(--accent); font-size: 0.77rem; }
+.image-transform-status > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-transform-stop { min-height: 29px; padding: 0 8px; }
+.image-transform-actions { display: flex; justify-content: flex-end; }
 .composer-surface { display: grid; grid-template-columns: minmax(0, 1fr) 42px; grid-template-rows: minmax(52px, auto) 30px; column-gap: 11px; width: 100%; padding: 7px 8px 7px 16px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--surface); box-shadow: 0 2px 10px rgba(43, 35, 28, 0.035); transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease; }
 .composer-surface:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 4px 14px rgba(43, 35, 28, 0.055); }
 .composer-surface textarea { grid-column: 1; grid-row: 1; display: block; width: 100%; min-height: 52px; max-height: 188px; resize: none; border: 0; outline: 0; padding: 10px 0 6px; background: transparent; color: var(--text); line-height: 1.5; scrollbar-gutter: stable; }
@@ -475,6 +492,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   .composer-surface { grid-template-columns: minmax(0, 1fr) 40px; grid-template-rows: minmax(48px, auto) 29px; border-radius: 16px; padding: 6px 7px 6px 13px; }
   .composer-surface textarea { min-height: 48px; padding-top: 8px; }
   .composer-primary-control { width: 40px; height: 40px; border-radius: 11px; }
+  .image-transform-controls { grid-template-columns: 1fr; }
   .composer-phase-ready .composer-status { display: none; }
   .composer-error { align-items: flex-start; flex-direction: column; gap: 6px; }
   .composer-error-actions { align-self: flex-end; }

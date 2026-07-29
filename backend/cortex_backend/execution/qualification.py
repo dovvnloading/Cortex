@@ -1,20 +1,21 @@
-"""Explicit local qualification-profile lifecycle composition.
+"""Explicit execution-profile lifecycle composition.
 
-The normal Cortex application does not construct a runnable recipe lifecycle.
-This module provides the deliberate development/CI seam for callers that have
-already built the fixed worker, installed it with disposable qualification
-trust, and supplied a coordinator that owns the worker boundary.
+The normal application selects the checked-in ``local`` profile, which builds
+the small process-backed scratch and fixed-image workers. ``qualification``
+remains a deliberate development/CI seam for callers that have already built
+the signed native worker and supplied its release controls.
 
-The profile is intentionally narrower than an official release profile:
+The profiles are intentionally distinct:
 
-* ``disabled`` is the default and never calls a health probe or coordinator;
-* ``qualification`` requires the qualification release gate, an injected
-  coordinator factory, and a provider-health probe; and
-* missing or malformed qualification wiring becomes a blocked lifecycle, not a
-  host-process fallback or an implicitly enabled provider.
+* ``disabled`` never calls a health probe or coordinator;
+* ``local`` has no external signer, reviewer, or broker requirement; and
+* ``qualification`` requires its release gate, injected coordinator factory,
+  and provider-health probe.
 
-This module does not create a process, bind a broker, load a provider, or read a
-worker path. Those actions remain responsibilities of the injected controls.
+Missing or malformed qualification wiring becomes a blocked lifecycle, not a
+host-process fallback. The qualification helpers themselves do not create a
+process, bind a broker, load a provider, or read a worker path; the local
+profile owns its checked-in worker composition separately.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from .release_gate import RecipeRuntimeReleaseGate
 from .repository import ExecutionRepository
 
 
-ExecutionProfile = Literal["disabled", "qualification"]
+ExecutionProfile = Literal["disabled", "local", "qualification"]
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 
@@ -162,6 +163,8 @@ def parse_execution_profile(value: str | None) -> ExecutionProfile:
         return "disabled"
     if value == "disabled":
         return "disabled"
+    if value == "local":
+        return "local"
     if value == "qualification":
         return "qualification"
     raise QualificationProfileError("execution_profile_invalid")
@@ -183,6 +186,17 @@ def _qualification_configuration_health() -> RuntimeHealth:
         code="qualification_configuration_missing",
         message="The local qualification runtime is not configured.",
     )
+
+
+def _local_health() -> RuntimeHealth:
+    """The local profile always retains its safe-compute fallback.
+
+    Image support performs a second dependency probe in the local coordinator.
+    A missing optional image codec therefore disables only image transforms,
+    never normal chat or safe computation.
+    """
+
+    return RuntimeHealth.ready("Local safe-compute runtime is ready.")
 
 
 def _qualification_health(config: QualificationLifecycleConfig) -> RuntimeHealth:
@@ -228,9 +242,11 @@ def build_execution_lifecycle(
     """Build the only supported local profile boundary.
 
     ``profile=None`` and ``profile="disabled"`` construct the same inert
-    lifecycle. Selecting ``qualification`` is explicit and still fails closed
-    when its controls are absent or unhealthy. The returned lifecycle carries a
-    safe profile label for diagnostics.
+    lifecycle. ``local`` starts the checked-in bounded worker profiles with no
+    external signing or reviewer service. Selecting ``qualification`` remains
+    explicit and still fails closed when its additional controls are absent or
+    unhealthy. The returned lifecycle carries a safe profile label for
+    diagnostics.
     """
 
     selected = parse_execution_profile(profile)
@@ -243,6 +259,21 @@ def build_execution_lifecycle(
             health_check=_disabled_health,
             enabled=False,
             profile="disabled",
+        )
+
+    if selected == "local":
+        if qualification is not None:
+            raise QualificationProfileError("qualification_config_with_local_profile")
+        # Import only when the normal local profile is requested. The disabled
+        # and qualification seams stay lightweight for documentation and CI.
+        from .local_runtime import LocalExecutionCoordinator
+
+        return ExecutionLifecycle(
+            repository,
+            coordinator_factory=lambda target: LocalExecutionCoordinator(target),
+            health_check=_local_health,
+            enabled=True,
+            profile="local",
         )
 
     if qualification is None:

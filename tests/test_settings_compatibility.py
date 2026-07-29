@@ -33,6 +33,7 @@ class TypedSettingsTests(unittest.TestCase):
         self.assertEqual(settings.generation.temperature, 0.7)
         self.assertEqual(settings.generation.num_ctx, 4096)
         self.assertEqual(settings.generation.seed, -1)
+        self.assertTrue(settings.execution.automatic_compute)
         self.assertTrue(settings.memory.enabled)
         self.assertFalse(settings.translation.enabled)
         self.assertEqual(settings.translation.target_language, "Spanish")

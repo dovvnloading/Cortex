@@ -16,6 +16,10 @@ the user's installed browser.
 - Persistent SQLite conversations and atomic JSON permanent memory.
 - Validated settings, local model inventory and pull progress, and optional
   translation.
+- Safe local computation for explicit arithmetic requests, with a user setting
+  to disable automatic verification.
+- User-requested PNG, JPEG, and WebP transformations with visible progress,
+  Stop, and a local result download.
 - Loopback-only API authentication with one-time native-window bootstrap tokens.
 - Windows one-folder packaging with the frontend bundled and no Node.js or
   system Python required at runtime.
@@ -39,6 +43,10 @@ assets/                  prompt assets used by the model boundary
 packaging/               Windows PyInstaller build
 tests/                   headless Python and browser-facing tests
 ```
+
+The current open-source execution scope and remaining product stages are tracked in
+the [open-source execution plan](docs/OPEN_SOURCE_EXECUTION_PLAN.md). The larger
+capability ADR is technical reference; it is not a list of additional TODO items.
 
 The supported runtime is Windows. The embedded window uses the WebView2 Runtime,
 not Edge, Chrome, or their user profiles. User data remains in the existing location:

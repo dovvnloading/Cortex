@@ -12,6 +12,8 @@ import type {
   ExecutionTaskListResponse,
   RecipeImageTransformAccepted,
   RecipeImageTransformRequest,
+  ScratchComputeAccepted,
+  ScratchComputeRequest,
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
@@ -248,6 +250,17 @@ export class CortexApi {
     return this.request<ExecutionTaskListResponse>(`/execution/tasks${query ? `?${query}` : ""}`);
   }
 
+  executionStatus(jobId: string): Promise<ExecutionStatusResponse> {
+    return this.request<ExecutionStatusResponse>(`/execution/${encodeURIComponent(jobId)}`);
+  }
+
+  startScratchCompute(payload: ScratchComputeRequest): Promise<ScratchComputeAccepted> {
+    return this.request<ScratchComputeAccepted>("/execution/scratch", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
   startRecipeImageTransform(
     payload: RecipeImageTransformRequest,
   ): Promise<RecipeImageTransformAccepted> {
@@ -262,6 +275,16 @@ export class CortexApi {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  async downloadExecutionArtifact(artifactId: string): Promise<Response> {
+    const response = await this.fetcher(
+      `${this.baseUrl}/execution/artifacts/${encodeURIComponent(artifactId)}`,
+      { headers: this.authHeaders() },
+    );
+    if (response.status === 401) this.clearSession();
+    if (!response.ok) throw new ApiError(response.status, await this.errorDetail(response));
+    return response;
   }
 
   cancelExecution(jobId: string): Promise<ExecutionStatusResponse> {

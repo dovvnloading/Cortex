@@ -45,6 +45,12 @@ class GenerationSettings(_SettingsModel):
     system_instructions: str = Field(default="", max_length=1800)
 
 
+class ExecutionSettings(_SettingsModel):
+    """Small, user-visible controls for the bounded local execution tools."""
+
+    automatic_compute: bool = True
+
+
 class MemorySettings(_SettingsModel):
     enabled: bool = True
 
@@ -71,6 +77,7 @@ class CortexSettings(_SettingsModel):
     onboarding: OnboardingSettings = Field(default_factory=OnboardingSettings)
     models: ModelSettings = Field(default_factory=ModelSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
+    execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     translation: TranslationSettings = Field(default_factory=TranslationSettings)
     suggestions: SuggestionSettings = Field(default_factory=SuggestionSettings)

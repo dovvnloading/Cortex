@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from cortex_backend.core.generation import ConnectionResult, GenerationSnapshot
 from cortex_backend.services.chat import (
@@ -35,12 +35,17 @@ from cortex_backend.execution.attachment_staging import (
     AttachmentStagingError,
     AttachmentStagingService,
 )
+from cortex_backend.execution.artifact_boundary import ArtifactBoundary
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
-    RecipeExecutionCoordinator,
     RecipeExecutionError,
     RecipeImageRequest,
+)
+from cortex_backend.execution.scratch_compute import (
+    ScratchComputeError,
+    ScratchComputeRequest as ScratchExecutionRequest,
+    extract_automatic_expression,
 )
 from cortex_backend.execution.repository import (
     ApprovalPolicyError,
@@ -65,6 +70,8 @@ from .schemas import (
     ExecutionPreviewRequest,
     RecipeImageTransformAccepted,
     RecipeImageTransformRequest,
+    ScratchComputeAccepted,
+    ScratchComputeRequest,
     ExecutionSSEEvent,
     ExecutionStatusResponse,
     ExecutionTaskListResponse,
@@ -93,6 +100,9 @@ from .schemas import (
     SystemResponse,
 )
 from .security import SessionPrincipal, SessionSecurityError
+
+
+DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
 
 
 def build_router() -> APIRouter:
@@ -155,11 +165,29 @@ def build_router() -> APIRouter:
     def system(
         request: Request, _: SessionPrincipal = Depends(require_session)
     ) -> SystemResponse:
+        coordinator = request.app.state.execution_coordinator
         return SystemResponse(
             preview=request.app.state.preview,
             execution_preview_available=(
                 request.app.state.preview
-                and request.app.state.execution_coordinator is not None
+                and coordinator is not None
+            ),
+            scratch_compute_available=bool(
+                request.app.state.preview
+                and getattr(
+                    coordinator,
+                    "scratch_available",
+                    False,
+                )
+            ),
+            image_transform_available=bool(
+                request.app.state.preview
+                and coordinator is not None
+                and getattr(
+                    coordinator,
+                    "image_transform_available",
+                    callable(getattr(coordinator, "start_image_transform", None)),
+                )
             ),
             started_at=request.app.state.started_at,
             ollama_host=request.app.state.ollama_host,
@@ -446,6 +474,42 @@ def build_router() -> APIRouter:
         )
 
     @router.post(
+        "/execution/scratch",
+        response_model=ScratchComputeAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_scratch_compute(
+        request: Request,
+        payload: ScratchComputeRequest,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ScratchComputeAccepted:
+        """Start one bounded calculation in the local worker profile."""
+
+        coordinator = _scratch_coordinator(request)
+        try:
+            job = coordinator.start_scratch(
+                ScratchExecutionRequest(
+                    owner=_execution_owner(principal),
+                    request_id=payload.request_id,
+                    expression=payload.expression,
+                )
+            )
+        except ScratchComputeError as exc:
+            _raise_scratch_request_error(exc)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Safe computation request is invalid.",
+            ) from exc
+        return ScratchComputeAccepted(
+            job_id=job.job_id,
+            request_id=job.request_id,
+            profile="scratch.auto.v1",
+            status=job.status,
+            sequence=job.sequence,
+        )
+
+    @router.post(
         "/execution/recipe/image",
         response_model=RecipeImageTransformAccepted,
         status_code=status.HTTP_202_ACCEPTED,
@@ -538,6 +602,44 @@ def build_router() -> APIRouter:
             size=artifact.size,
             sha256=artifact.sha256,
             expires_at=datetime.fromisoformat(artifact.expires_at),
+        )
+
+    @router.get("/execution/artifacts/{artifact_id}")
+    def download_execution_artifact(
+        artifact_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> Response:
+        """Return one owner-scoped, integrity-checked result artifact.
+
+        The UI receives bytes only after the repository re-checks retention,
+        location, size, and digest.  Neither the artifact path nor the source
+        filename is exposed to the browser.
+        """
+
+        repository = _execution_repository(request)
+        artifact = repository.get_artifact(
+            artifact_id,
+            owner=_execution_owner(principal),
+        )
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Execution artifact is unavailable.")
+        try:
+            content = repository.read_artifact(artifact.artifact_id)
+        except ExecutionRepositoryError:
+            raise HTTPException(status_code=404, detail="Execution artifact is unavailable.") from None
+        suffix = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+        }.get(artifact.mime_type, "bin")
+        return Response(
+            content=content,
+            media_type=artifact.mime_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="cortex-result.{suffix}"',
+            },
         )
 
     @router.get("/execution/tasks", response_model=ExecutionTaskListResponse)
@@ -1136,11 +1238,19 @@ async def _start_generation_job(
     settings = _load_settings(deps)
     job_id = uuid4().hex
     generation_payload = payload.model_copy(update={"thread_id": thread_id})
+    compute_observation = await _automatic_compute_observation(
+        request,
+        principal,
+        settings,
+        generation_payload,
+        job_id,
+    )
     generation_snapshot = _generation_snapshot(
         job_id,
         generation_payload,
         settings,
         deps.models.list_installed(),
+        compute_observation=compute_observation,
     )
 
     user_message_id: str | None = None
@@ -1266,6 +1376,66 @@ async def _start_generation_job(
     return snapshot, user_message_id
 
 
+async def _automatic_compute_observation(
+    request: Request,
+    principal: SessionPrincipal,
+    settings: CortexSettings,
+    payload: GenerationRequest,
+    generation_job_id: str,
+) -> str | None:
+    """Run an explicit arithmetic request before generation when it is useful.
+
+    This is intentionally conservative: normal prose is never turned into a
+    program.  If the local worker is unavailable, slow, cancelled, or rejects
+    the expression, ordinary chat proceeds without a hidden retry loop.
+    """
+
+    if not settings.execution.automatic_compute:
+        return None
+    expression = extract_automatic_expression(payload.user_input)
+    if expression is None:
+        return None
+    coordinator = getattr(request.app.state, "execution_coordinator", None)
+    if (
+        coordinator is None
+        or not getattr(coordinator, "scratch_available", False)
+        or not callable(getattr(coordinator, "start_scratch", None))
+        or not callable(getattr(coordinator, "wait", None))
+    ):
+        return None
+    try:
+        job = await asyncio.to_thread(
+            coordinator.start_scratch,
+            ScratchExecutionRequest(
+                owner=_execution_owner(principal),
+                request_id=f"auto-{generation_job_id}",
+                expression=expression,
+            ),
+        )
+        completed = await asyncio.to_thread(
+            coordinator.wait,
+            job.job_id,
+            timeout=DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS,
+        )
+    except (ScratchComputeError, TimeoutError, TypeError, ValueError):
+        return None
+    except Exception as exc:
+        logging.getLogger("cortex.execution").warning(
+            "Automatic safe computation was unavailable (%s).", type(exc).__name__
+        )
+        return None
+    if completed.status != "succeeded" or not isinstance(completed.result, Mapping):
+        return None
+    value = completed.result.get("value")
+    if not isinstance(value, str) or not value or len(value) > 128:
+        return None
+    return (
+        "A local safe-compute worker verified this exact arithmetic result: "
+        f"{expression} = {value}. Treat it as a reliable fact, explain it plainly, "
+        "and do not claim to have run any other code."
+    )
+
+
 def _chunks(value: str, size: int = 80):
     for start in range(0, len(value), size):
         yield value[start : start + size]
@@ -1378,6 +1548,8 @@ def _generation_snapshot(
     payload: GenerationRequest,
     settings: CortexSettings,
     installed_models: tuple[str, ...],
+    *,
+    compute_observation: str | None = None,
 ) -> GenerationSnapshot:
     chat_model = _selected_local_model(settings.models.chat, installed_models)
     if chat_model is None:
@@ -1394,6 +1566,13 @@ def _generation_snapshot(
         raise ChatDomainError(
             "Choose or install a local translation model before enabling translation."
         )
+    instructions = settings.generation.system_instructions or None
+    if compute_observation:
+        instructions = (
+            f"{instructions}\n\n{compute_observation}"
+            if instructions
+            else compute_observation
+        )
     return GenerationSnapshot(
         job_id=job_id,
         thread_id=payload.thread_id or "",
@@ -1409,7 +1588,7 @@ def _generation_snapshot(
         memories_enabled=settings.memory.enabled,
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
-        user_system_instructions=settings.generation.system_instructions or None,
+        user_system_instructions=instructions,
     )
 
 
@@ -1522,14 +1701,13 @@ def _fake_execution_coordinator(request: Request) -> DurableFakeCoordinator:
     return coordinator
 
 
-def _recipe_coordinator(request: Request) -> RecipeExecutionCoordinator:
-    """Expose recipes only from a ready, explicit qualification lifecycle."""
+def _recipe_coordinator(request: Request):
+    """Expose a ready fixed-image profile without granting general execution."""
 
     lifecycle = getattr(request.app.state, "execution_lifecycle", None)
     if (
         not request.app.state.preview
         or lifecycle is None
-        or getattr(lifecycle, "profile", None) != "qualification"
         or not getattr(getattr(lifecycle, "snapshot", None), "available", False)
     ):
         raise HTTPException(
@@ -1537,10 +1715,30 @@ def _recipe_coordinator(request: Request) -> RecipeExecutionCoordinator:
             detail="Recipe execution is unavailable.",
         )
     coordinator = getattr(lifecycle, "coordinator", None)
-    if not isinstance(coordinator, RecipeExecutionCoordinator):
+    if (
+        coordinator is None
+        or not callable(getattr(coordinator, "start_image_transform", None))
+        or not isinstance(getattr(coordinator, "artifact_boundary", None), ArtifactBoundary)
+        or not getattr(coordinator, "image_transform_available", True)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Recipe execution is unavailable.",
+        )
+    return coordinator
+
+
+def _scratch_coordinator(request: Request):
+    """Require the narrow local safe-compute capability explicitly."""
+
+    coordinator = _execution_runtime(request)
+    if (
+        not getattr(coordinator, "scratch_available", False)
+        or not callable(getattr(coordinator, "start_scratch", None))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Safe computation is unavailable.",
         )
     return coordinator
 
@@ -1561,6 +1759,20 @@ def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail="Recipe request could not be accepted safely.",
+    ) from exc
+
+
+def _raise_scratch_request_error(exc: ScratchComputeError) -> None:
+    """Map scratch errors without exposing input or worker details."""
+
+    if exc.code == "request_conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Safe computation request conflicts with an existing request.",
+        ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="Safe computation request could not be accepted safely.",
     ) from exc
 
 

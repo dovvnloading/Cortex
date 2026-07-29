@@ -86,6 +86,6 @@ Phase 0 Job Object evidence.
 7. Owner-scoped API responses expose approval state but never lease-owner,
    supervisor-token, payload, or path fields.
 
-This contract keeps the Phase 1 gate closed until these tests pass and the evidence
-log is updated. It does not authorize Wasmtime, host subprocesses, workspace, or
-network execution.
+These tests and the evidence log close the Phase 1 control-plane gate. This contract
+does not authorize Wasmtime, host subprocesses, workspace, or network execution;
+those are later capabilities with their own focused qualification work.

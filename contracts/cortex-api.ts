@@ -89,6 +89,7 @@ export interface CortexSettings {
   onboarding?: OnboardingSettings;
   models?: ModelSettings;
   generation?: GenerationSettings;
+  execution?: ExecutionSettings;
   memory?: MemorySettings;
   translation?: TranslationSettings;
   suggestions?: SuggestionSettings;
@@ -136,6 +137,10 @@ export interface ExecutionPreviewRequest {
   outcome?: "success" | "failure";
   steps?: number;
   step_delay_seconds?: number;
+}
+
+export interface ExecutionSettings {
+  automatic_compute?: boolean;
 }
 
 export interface ExecutionStatusResponse {
@@ -330,6 +335,19 @@ export interface SSEEvent {
   data?: Record<string, unknown>;
 }
 
+export interface ScratchComputeAccepted {
+  job_id: string;
+  request_id: string;
+  profile: "scratch.auto.v1";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  sequence: number;
+}
+
+export interface ScratchComputeRequest {
+  request_id: string;
+  expression: string;
+}
+
 export interface SessionExchangeRequest {
   bootstrap_token: string;
 }
@@ -377,6 +395,8 @@ export interface SystemResponse {
   preview?: boolean;
   session_required?: boolean;
   execution_preview_available?: boolean;
+  scratch_compute_available?: boolean;
+  image_transform_available?: boolean;
   started_at: string;
   ollama_host?: string;
   ollama_setup_url?: string;

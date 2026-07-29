@@ -91,8 +91,9 @@ packaged worker release qualification.
 
 ## Next stage
 
-Hosted Quality CI run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
-and job [90627154917](https://github.com/dovvnloading/Cortex/actions/runs/30466976650/job/90627154917)
-passed the coordinator gate on commit `0c7b350`. The immediate remaining action
-is review/merge of PR #64; the application remains disabled unless an explicit
-caller injects a ready qualification profile.
+Hosted Quality CI run [30467455657](https://github.com/dovvnloading/Cortex/actions/runs/30467455657)
+and job [90628811567](https://github.com/dovvnloading/Cortex/actions/runs/30467455657/job/90628811567)
+passed the coordinator gate on merged PR #64. This stage is complete. The
+application remains disabled unless an explicit caller injects a ready
+qualification profile; that default-off behavior is intentional until the normal
+user-facing recipe flow is wired.

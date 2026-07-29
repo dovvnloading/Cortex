@@ -1,10 +1,10 @@
 """Durable execution primitives and provider-independent safety contracts.
 
-Only deterministic contracts, the storage-only signed bundle installer, the
-reviewed broker transports, the explicit local qualification composition, and the
-internal qualified recipe coordinator are exposed in this phase. Native transport
-and bundle storage never load a provider; the normal application remains
-default-off until a later application-integration decision.
+The package exposes deterministic contracts, the storage-only signed bundle
+installer, reviewed broker transports, an optional qualification composition,
+and the normal process-backed local runtime. Native transport and bundle storage
+never load a provider; the normal application uses only the checked-in bounded
+local profiles unless a caller explicitly selects qualification wiring.
 """
 
 from .broker import (
@@ -54,6 +54,7 @@ from .bundle_installer import (
     verify_keyring_update,
 )
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
+from .local_runtime import LocalExecutionCoordinator, LocalRecipeWorkerAttempt
 from .qualification import (
     CoordinatorFactory,
     ExecutionProfile,
@@ -161,6 +162,16 @@ from .recipe_coordinator import (
     RecipeWorkerConnection,
     RecipeWorkerOutput,
 )
+from .scratch_compute import (
+    SCRATCH_COMPUTE_PROFILE,
+    SCRATCH_PAYLOAD_SCHEMA,
+    SCRATCH_RESULT_SCHEMA,
+    ScratchComputeError,
+    ScratchComputeRequest,
+    ScratchComputeResult,
+    evaluate_scratch_expression,
+    extract_automatic_expression,
+)
 from .resource_accounting import (
     MAX_CONSOLE_BYTES,
     MAX_COUNTER,
@@ -241,6 +252,8 @@ __all__ = [
     "RecipeWorkerConnection",
     "RecipeWorkerOutput",
     "ExecutionLifecycle",
+    "LocalExecutionCoordinator",
+    "LocalRecipeWorkerAttempt",
     "ExecutionProfile",
     "CoordinatorFactory",
     "build_recipe_coordinator_factory",
@@ -286,6 +299,14 @@ __all__ = [
     "PublishedArtifact",
     "RecipeValidationError",
     "RuntimeHealth",
+    "SCRATCH_COMPUTE_PROFILE",
+    "SCRATCH_PAYLOAD_SCHEMA",
+    "SCRATCH_RESULT_SCHEMA",
+    "ScratchComputeError",
+    "ScratchComputeRequest",
+    "ScratchComputeResult",
+    "evaluate_scratch_expression",
+    "extract_automatic_expression",
     "ProviderHealthProbe",
     "QualificationLifecycleConfig",
     "QualificationProfileError",

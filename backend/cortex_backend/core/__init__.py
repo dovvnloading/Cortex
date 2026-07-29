@@ -13,6 +13,7 @@ from .generation import (
 from .settings import (
     AppearanceSettings,
     CortexSettings,
+    ExecutionSettings,
     GenerationSettings,
     MemorySettings,
     ModelSettings,
@@ -28,6 +29,7 @@ __all__ = [
     "ConnectionStatus",
     "AppearanceSettings",
     "CortexSettings",
+    "ExecutionSettings",
     "GenerationResult",
     "GenerationSnapshot",
     "GenerationSettings",

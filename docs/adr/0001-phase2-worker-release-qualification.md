@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 packaged worker release qualification
 
-- **Status:** CI qualification implemented; production signed release remains blocked
+- **Status:** CI qualification complete; production-signed packaging is optional official-release hardening
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [signed worker provenance](0001-phase2-worker-provenance.md), [native launcher](0001-phase2-native-launcher.md), [native broker](0001-phase2-native-broker.md), and [release/lifecycle preflight](0001-phase2-release-lifecycle-gate.md)

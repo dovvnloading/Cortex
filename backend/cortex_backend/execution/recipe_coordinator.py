@@ -10,7 +10,7 @@ the complete result has been validated.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import base64
 from dataclasses import dataclass
 from hashlib import sha256
@@ -656,7 +656,19 @@ class RecipeExecutionCoordinator:
         self._supervisor_lease_active = True
         recovered = self.repository.recover_expired_leases()
         self.repository.expire_approvals()
-        for job_id in recovered:
+        self.recover_jobs(recovered)
+        return recovered
+
+    def recover_jobs(self, recovered_job_ids: Iterable[str]) -> None:
+        """Resume only recipe jobs after a lifecycle owner reclaimed leases.
+
+        The normal qualification lifecycle owns its supervisor lease itself.
+        A local composite runtime can instead claim that lease once and pass
+        the recovered IDs here, avoiding two independent supervisors racing
+        over the same durable store.
+        """
+
+        for job_id in recovered_job_ids:
             job = self.repository.get_job(job_id)
             if job is None or job.status in TerminalExecutionStatus:
                 continue
@@ -683,7 +695,6 @@ class RecipeExecutionCoordinator:
                 self._fail_recovery(job_id, "recovery_invalid_payload")
                 continue
             self._launch(job_id, request)
-        return recovered
 
     def _fail_recovery(self, job_id: str, code: str) -> None:
         try:
