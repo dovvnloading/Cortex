@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -29,6 +31,10 @@ from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.fake import FakeExecutionPlan
+from cortex_backend.execution.attachment_staging import (
+    AttachmentStagingError,
+    AttachmentStagingService,
+)
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
@@ -52,6 +58,8 @@ from .schemas import (
     ClearMemoryRequest,
     CreateChatRequest,
     DiagnosticsResponse,
+    AttachmentStageAccepted,
+    AttachmentStageRequest,
     ExecutionAccepted,
     ExecutionApprovalDecisionRequest,
     ExecutionPreviewRequest,
@@ -479,6 +487,57 @@ def build_router() -> APIRouter:
             profile=RECIPE_IMAGE_PROFILE,
             status=job.status,
             sequence=job.sequence,
+        )
+
+    @router.post(
+        "/execution/attachments",
+        response_model=AttachmentStageAccepted,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def stage_attachment(
+        request: Request,
+        payload: AttachmentStageRequest,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> AttachmentStageAccepted:
+        """Stage one bounded attachment for a qualified recipe request.
+
+        The route accepts only a bounded base64 envelope.  Decoded bytes pass
+        through the same owner-scoped artifact boundary used by recipe output;
+        no caller path, filename, or executable instruction is accepted.
+        """
+
+        coordinator = _recipe_coordinator(request)
+        try:
+            content = base64.b64decode(payload.content_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Attachment payload is invalid.",
+            ) from None
+        try:
+            staged = AttachmentStagingService(
+                coordinator.repository,
+                coordinator.artifact_boundary,
+            ).stage(
+                owner=_execution_owner(principal),
+                request_id=payload.request_id,
+                content=content,
+                retention_seconds=payload.retention_seconds,
+            )
+        except AttachmentStagingError as exc:
+            _raise_attachment_staging_error(exc)
+        artifact = staged.artifact
+        return AttachmentStageAccepted(
+            job_id=staged.job.job_id,
+            request_id=staged.job.request_id,
+            profile="attachment.stage.v1",
+            status="succeeded",
+            sequence=staged.job.sequence,
+            artifact_id=artifact.artifact_id,
+            mime_type=artifact.mime_type,
+            size=artifact.size,
+            sha256=artifact.sha256,
+            expires_at=datetime.fromisoformat(artifact.expires_at),
         )
 
     @router.get("/execution/tasks", response_model=ExecutionTaskListResponse)
@@ -1502,6 +1561,30 @@ def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail="Recipe request could not be accepted safely.",
+    ) from exc
+
+
+def _raise_attachment_staging_error(exc: AttachmentStagingError) -> None:
+    """Map attachment stage categories to stable, non-sensitive responses."""
+
+    if exc.code == "request_conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attachment request conflicts with an existing request.",
+        ) from exc
+    if exc.code == "attachment_in_progress":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attachment request is already in progress.",
+        ) from exc
+    if exc.code in {"attachment_artifact_unavailable", "attachment_failed"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attachment request is no longer available.",
+        ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="Attachment could not be staged safely.",
     ) from exc
 
 

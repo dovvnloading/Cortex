@@ -84,6 +84,100 @@
         "title": "AppearanceSettings",
         "type": "object"
       },
+      "AttachmentStageAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "mime_type": {
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "profile": {
+            "const": "attachment.stage.v1",
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "const": "succeeded",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence",
+          "artifact_id",
+          "mime_type",
+          "size",
+          "sha256",
+          "expires_at"
+        ],
+        "title": "AttachmentStageAccepted",
+        "type": "object"
+      },
+      "AttachmentStageRequest": {
+        "additionalProperties": false,
+        "description": "Bounded base64 envelope for a user attachment.\n\nThe service decodes and MIME-sniffs the bytes before an artifact is\npublished.  The encoded payload is never written to the durable job.",
+        "properties": {
+          "content_base64": {
+            "maxLength": 14680064,
+            "minLength": 4,
+            "title": "Content Base64",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retention_seconds": {
+            "default": 86400,
+            "maximum": 2592000.0,
+            "minimum": 1.0,
+            "title": "Retention Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "content_base64"
+        ],
+        "title": "AttachmentStageRequest",
+        "type": "object"
+      },
       "BrightnessStep": {
         "additionalProperties": false,
         "properties": {
@@ -2523,6 +2617,45 @@
           }
         },
         "summary": "Diagnostics"
+      }
+    },
+    "/api/v1/execution/attachments": {
+      "post": {
+        "description": "Stage one bounded attachment for a qualified recipe request.\n\nThe route accepts only a bounded base64 envelope.  Decoded bytes pass\nthrough the same owner-scoped artifact boundary used by recipe output;\nno caller path, filename, or executable instruction is accepted.",
+        "operationId": "stage_attachment_api_v1_execution_attachments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachmentStageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentStageAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stage Attachment"
       }
     },
     "/api/v1/execution/preview/fake": {

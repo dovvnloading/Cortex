@@ -97,4 +97,34 @@ describe("CortexApi", () => {
     const request = fetcher.mock.calls[0]?.[1] as RequestInit;
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
   });
+
+  it("stages a bounded attachment through the qualification route", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      job_id: "attachment-job",
+      request_id: "attachment-request",
+      profile: "attachment.stage.v1",
+      status: "succeeded",
+      sequence: 1,
+      artifact_id: "artifact-1",
+      mime_type: "image/png",
+      size: 4,
+      sha256: "a".repeat(64),
+      expires_at: "2026-07-20T00:00:00Z",
+    }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    const api = new CortexApi("/api/v1", fetcher);
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+
+    await api.stageAttachment({
+      request_id: "attachment-request",
+      content_base64: "iVBORw==",
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/execution/attachments",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ request_id: "attachment-request", content_base64: "iVBORw==" }),
+      }),
+    );
+  });
 });

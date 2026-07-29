@@ -14,6 +14,10 @@ from cortex_backend.execution.recipe_coordinator import (
     DEFAULT_RECIPE_RETENTION_SECONDS,
     MAX_RECIPE_RETENTION_SECONDS,
 )
+from cortex_backend.execution.attachment_staging import (
+    DEFAULT_ATTACHMENT_RETENTION_SECONDS,
+    MAX_ATTACHMENT_RETENTION_SECONDS,
+)
 from cortex_backend.execution.recipes import (
     ImageTransformPlan,
     RecipeValidationError,
@@ -254,6 +258,37 @@ class RecipeImageTransformRequest(APIModel):
         return self
 
 
+# The default repository ceiling is 10 MiB.  This request ceiling includes
+# base64 overhead while the service applies the configured byte ceiling again.
+MAX_ATTACHMENT_BASE64_LENGTH = 14 * 1024 * 1024
+
+
+class AttachmentStageRequest(APIModel):
+    """Bounded base64 envelope for a user attachment.
+
+    The service decodes and MIME-sniffs the bytes before an artifact is
+    published.  The encoded payload is never written to the durable job.
+    """
+
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    content_base64: str = Field(
+        min_length=4,
+        max_length=MAX_ATTACHMENT_BASE64_LENGTH,
+        strict=True,
+    )
+    retention_seconds: int = Field(
+        default=DEFAULT_ATTACHMENT_RETENTION_SECONDS,
+        ge=1,
+        le=MAX_ATTACHMENT_RETENTION_SECONDS,
+        strict=True,
+    )
+
+
 class ExecutionAccepted(APIModel):
     job_id: str
     request_id: str
@@ -268,6 +303,19 @@ class RecipeImageTransformAccepted(APIModel):
     profile: Literal["recipe.image.v1"]
     status: ExecutionStatus
     sequence: int
+
+
+class AttachmentStageAccepted(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal["attachment.stage.v1"]
+    status: Literal["succeeded"]
+    sequence: int
+    artifact_id: str
+    mime_type: str
+    size: int
+    sha256: str
+    expires_at: datetime
 
 
 class ExecutionApprovalDecisionRequest(APIModel):

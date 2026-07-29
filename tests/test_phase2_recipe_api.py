@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import base64
 import hashlib
 from threading import Event
 import time
@@ -134,6 +135,15 @@ def test_recipe_route_requires_ready_qualification_and_preserves_default_off(tmp
         )
         assert response.status_code == 404
         assert "path" not in response.text.lower()
+        attachment = client.post(
+            "/api/v1/execution/attachments",
+            headers=headers,
+            json={
+                "request_id": "api-attachment",
+                "content_base64": base64.b64encode(_image_bytes()).decode("ascii"),
+            },
+        )
+        assert attachment.status_code == 404
 
 
 def test_recipe_route_is_owner_scoped_idempotent_and_reaches_existing_execution_surface(tmp_path):
@@ -188,6 +198,48 @@ def test_recipe_route_is_owner_scoped_idempotent_and_reaches_existing_execution_
         )
         assert tasks.status_code == 200
         assert tasks.json()["tasks"][0]["profile"] == "recipe.image.v1"
+
+
+def test_attachment_stage_is_bounded_idempotent_and_returns_opaque_artifact(tmp_path):
+    app, _artifact_id = _app(tmp_path)
+    encoded = base64.b64encode(_image_bytes()).decode("ascii")
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/execution/attachments",
+            headers=headers,
+            json={"request_id": "api-attachment", "content_base64": encoded},
+        )
+        assert accepted.status_code == 201
+        body = accepted.json()
+        assert body["profile"] == "attachment.stage.v1"
+        assert body["status"] == "succeeded"
+        assert body["mime_type"] == "image/png"
+        assert body["artifact_id"]
+        assert "path" not in accepted.text.lower()
+        assert encoded not in str(app.state.execution_lifecycle.repository.get_job(body["job_id"]).payload)
+
+        duplicate = client.post(
+            "/api/v1/execution/attachments",
+            headers=headers,
+            json={"request_id": "api-attachment", "content_base64": encoded},
+        )
+        assert duplicate.status_code == 201
+        assert duplicate.json()["artifact_id"] == body["artifact_id"]
+
+        conflict = client.post(
+            "/api/v1/execution/attachments",
+            headers=headers,
+            json={"request_id": "api-attachment", "content_base64": base64.b64encode(b"other").decode("ascii")},
+        )
+        assert conflict.status_code == 409
+
+        malformed = client.post(
+            "/api/v1/execution/attachments",
+            headers=headers,
+            json={"request_id": "api-malformed", "content_base64": "not-base64!"},
+        )
+        assert malformed.status_code == 422
 
 
 def test_recipe_route_rejects_mismatched_plan_and_foreign_artifact_without_leaks(tmp_path):

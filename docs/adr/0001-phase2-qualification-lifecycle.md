@@ -34,10 +34,15 @@ source application remain `disabled` by default. The helper
 `build_recipe_coordinator_factory` now binds an injected, already-qualified
 worker-attempt factory to the lifecycle-owned repository; it does not discover a
 package, launch a process, bind a broker, or provide a host fallback. The
-qualification-only recipe API route consumes an opaque, already-staged artifact
-ID and remains unavailable unless this lifecycle is ready. Attachment staging,
-automatic model tool selection, worker-package discovery, and persistent
-signing/trust material remain separate gates.
+qualification-only recipe API route consumes an opaque artifact ID and remains
+unavailable unless this lifecycle is ready. The companion
+`POST /api/v1/execution/attachments` route uses the same ready lifecycle and
+stages bounded bytes through the trusted artifact boundary; it does not discover
+paths or accept executable content. `build_native_recipe_coordinator_factory`
+provides the explicit signed/native attempt composition when callers supply the
+installer, allowed user SIDs, and reviewed process-factory factory. Automatic
+model tool selection, worker-package discovery, and persistent signing/trust
+material remain separate gates.
 
 ## Failure and recovery behavior
 
@@ -59,12 +64,14 @@ qualification code without an outside reviewer, production signing key, or
 trusted release root. The normal application cannot be enabled accidentally by
 importing the provider or setting an implicit default.
 
-The recipe-specific coordinator/request and artifact-publication path plus its
-typed qualification-only API surface are now implemented behind this lifecycle
+The recipe-specific coordinator/request, trusted attachment staging, native
+attempt composition, and artifact-publication path plus their typed
+qualification-only API surfaces are now implemented behind this lifecycle
 boundary. It preserves the same release gate, native launcher, broker identity,
-resource/watchdog, and trusted artifact controls. The next slice is trusted
-attachment staging and binding the real signed/native broker worker into the
-attempt factory; it must remain default-off in the application.
+resource/watchdog, and trusted artifact controls. The next slice is an
+end-to-end durable-coordinator run against the packaged signed worker, including
+cancellation, retention, publication, and native cleanup; it must remain
+default-off in the application.
 
 ## Verification
 
@@ -72,5 +79,6 @@ attempt factory; it must remain default-off in the application.
 default-off behavior, missing configuration, official-gate rejection, blocked
 health ordering, provider-health composition, coordinator startup, profile
 diagnostics, clean stop, and repository-bound worker-attempt factory wiring.
-`tests/test_phase2_recipe_api.py` covers the route's ready-lifecycle gate and
-owner/idempotency/error behavior.
+`tests/test_phase2_recipe_api.py` covers both routes' ready-lifecycle gates and
+owner/idempotency/error behavior. `tests/test_phase2_native_recipe_attempt.py`
+covers explicit native composition without launch during configuration.

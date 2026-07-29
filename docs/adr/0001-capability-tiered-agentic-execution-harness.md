@@ -1000,11 +1000,16 @@ timeouts; this is the open-source qualification evidence and does not need
 production trust material. Explicit lifecycle composition for
 `release_profile="qualification"` is now available through the documented
 local/CI-only builder; the application remains default-off. The durable recipe
-coordinator, typed `POST /api/v1/execution/recipe/image` request surface, and
-generated TypeScript client method are available only after that lifecycle is
-ready and consume an opaque artifact ID staged by a separate trusted boundary.
-The next core slice is trusted attachment staging and binding the real
-signed/native broker worker into the injected attempt factory. The separate
+coordinator, typed `POST /api/v1/execution/recipe/image` request surface,
+qualification-only `POST /api/v1/execution/attachments` staging surface, and
+generated TypeScript client methods are available only after that lifecycle is
+ready. Attachment staging stores only bounded, MIME-sniffed bytes behind an
+opaque artifact ID. `build_native_recipe_coordinator_factory` composes a fresh
+signed/native launcher, broker binder, protected pipe identity, and authenticated
+client for each recipe job; it requires an explicit reviewed process-factory
+injection and never falls back to a host process. The next core slice is an
+end-to-end durable-coordinator run through the packaged signed worker, including
+cancellation, retention, atomic publication, and native cleanup. The separate
 `recipe.release-review.v1` verifier is available as optional release hardening;
 it remains observation-only and no approval record or production trust material
 is committed.

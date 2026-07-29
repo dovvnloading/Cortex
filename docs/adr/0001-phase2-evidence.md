@@ -26,7 +26,7 @@
 | Fixed worker protocol and package closure | **Complete (qualification-only)** | `worker_protocol.py` and `worker_runtime.py` enforce bounded prepare/chunk/complete/cancel/collect state, authenticated envelope identity, concurrent cancellation, redacted output/errors, and no-capability bodies. `packaging/recipe_worker/recipe_worker.spec` builds the fixed `recipe_worker.exe` (Windows build verified 2026-07-23); the entrypoint accepts only the fixed native-broker identity arguments and returns `78` on direct or failed launches. |
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
-| User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
+| User-artifact copy-in, byte staging, output validation, and publication | **Complete (qualification boundary)** | Explicit owner/turn grants and bounded in-memory attachment staging, stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py` and `tests/test_phase2_attachment_staging.py`. |
 | Deterministic artifact security review | **Complete (qualification-only)** | `artifact_security_review.py --json --strict` passed the fixed 12-case disposable corpus (`artifact-boundary-review.v1`, digest `a748cc9f0a514c8d`): owner/path binding, link/hardlink rejection, active/non-finite content, exact claims/quarantine, rollback, and repository size integrity. Missing link primitives remain blocked. |
 | Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. The explicit local/qualification lifecycle composition now consumes this evidence; external review is not required for this open-source path. |
 | Release/lifecycle health preflight | **Complete (official + qualification profiles)** | `RecipeRuntimeReleaseGate` defaults to `release_profile="official"` and requires the reviewed native process factory, live broker binder, and external-review result. An explicit `release_profile="qualification"` records `qualification_profile` and omits only the optional outside-review requirement for local/CI development; it performs no launch, broker bind, provider load, or lifecycle mutation. |
@@ -35,9 +35,9 @@
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, and checks cancellation. The provider remains separate from the API; the typed coordinator route is qualification-only and default-off. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The explicit lifecycle composition, durable recipe coordinator/publication path, and typed qualification-only API are wired behind injection; attachment staging and the real attempt-factory binding remain the next gate. Official-release review/signing remains optional hardening. |
+| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The explicit lifecycle composition, durable recipe coordinator/publication path, typed qualification-only API, trusted attachment staging, and per-job signed/native attempt factory are wired behind injection; the next gate is a durable-coordinator run through the packaged worker. Official-release review/signing remains optional hardening. |
 | Explicit qualification-profile lifecycle wiring | **Complete (local/CI composition; default-off in the app)** | `build_execution_lifecycle()` accepts only exact `disabled`/`qualification` selection, requires a qualification release gate, coordinator factory, and provider-health probe, and composes them in a fail-closed order. `Cortex_Preview.build_preview_app` exposes this only as an explicit injection; the normal app supplies no profile or controls. |
-| Durable recipe coordinator/request and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/recipe/image` accepts only a typed plan plus an owner-scoped, already-staged artifact ID after a ready `qualification` lifecycle. `build_recipe_coordinator_factory` binds an injected worker-attempt factory without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, and lifecycle paths. |
+| Durable recipe coordinator/request, attachment staging, and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/attachments` creates an idempotent owner-scoped `attachment.stage.v1` record through `ArtifactBoundary.stage_bytes`; `POST /api/v1/execution/recipe/image` consumes its opaque artifact ID after a ready `qualification` lifecycle. `build_native_recipe_coordinator_factory` binds a fresh signed/native launcher/broker/client attempt per job without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, `tests/test_phase2_attachment_staging.py`, `tests/test_phase2_native_recipe_attempt.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, native-composition, and lifecycle paths. |
 
 ## Security invariants
 
@@ -83,41 +83,44 @@
     while quarantine/cleanup failures surface for supervisor recovery.
 18. Artifact records are opaque IDs; repository read/delete/purge operations remain
     confined to the configured artifact root and verify the stored SHA-256.
-19. The fixed-function provider accepts only immutable bytes and parsed plans, uses an
+19. Attachment staging accepts only bounded bytes through the trusted boundary;
+    durable records contain no base64 payload, source path, filename, or command.
+    Matching retries revalidate the artifact and changed retries conflict.
+20. The fixed-function provider accepts only immutable bytes and parsed plans, uses an
     independent format allowlist, treats decoder warnings as errors, rejects multiple
     frames, enforces hard byte/pixel/dimension/memory/step caps, and revalidates output.
-20. Provider startup requires an external available sandbox health result; dependency
+21. Provider startup requires an external available sandbox health result; dependency
     or codec failure, cancellation, decoder failure, and output metadata/size failure
     leave the provider disabled and return stable categories only.
-21. The sandbox qualification harness never authorizes a provider launch from a
+22. The sandbox qualification harness never authorizes a provider launch from a
     missing, unsigned, or merely present worker directory; it reports `blocked` and
     never falls back to host-process decoding.
-22. Worker provenance is storage-only: only an installer-validated immutable
+23. Worker provenance is storage-only: only an installer-validated immutable
     generation with one exact `image_transform`/`recipe_worker.exe` role and stable
     byte identity can proceed to a future launcher; no executable is loaded here.
-23. The disposable launcher applies all required Job Object policy before resume,
+24. The disposable launcher applies all required Job Object policy before resume,
     queries configured limits plus actual CPU, memory, process, and I/O accounting,
     never grants breakaway, and reports the absent worker/broker gates as blocking.
-24. Release signing reads an external raw private key only for the signing operation,
+25. Release signing reads an external raw private key only for the signing operation,
     self-verifies the canonical manifest, rejects reparse/hardlink/mutable package
     inputs, and never treats a generated manifest as launch authorization.
-25. The native launcher grants only a per-profile inherited read/execute ACE on the
+26. The native launcher grants only a per-profile inherited read/execute ACE on the
     verified package root, removes that ACE during worker cleanup, and never grants
     package write/delete access; a qualification timeout is always a blocked result.
-26. Native broker reads poll bounded pipe availability before synchronous reads so a
+27. Native broker reads poll bounded pipe availability before synchronous reads so a
     cancellation reader cannot starve the provider transform; pipe errors still fail
     closed and do not bypass framing, authentication, or sequence checks.
-27. Hostile decoder bytes are rejected inside the signed worker, and cancellation is
+28. Hostile decoder bytes are rejected inside the signed worker, and cancellation is
     sent only after `input_complete` over the authenticated broker; a missing or
     ambiguous terminal response remains a blocked qualification result.
-28. Typed parser fuzzing uses a fixed seed, bounded iteration count, bounded payload
+29. Typed parser fuzzing uses a fixed seed, bounded iteration count, bounded payload
     depth, and stable redacted error categories; an unexpected exception or budget
     violation is a blocked qualification result.
-29. Artifact security qualification uses fixed bytes and a disposable temporary root;
+30. Artifact security qualification uses fixed bytes and a disposable temporary root;
     it checks owner/path binding, active-content and numeric safety, link rejection,
     exact claims, quarantine, rollback, and stored-size integrity. The probe accepts
     no user/model input and reports an unavailable required link primitive as blocked.
-30. Resource budgets are immutable and bounded; watchdog clocks must be finite and
+31. Resource budgets are immutable and bounded; watchdog clocks must be finite and
     monotonic; cumulative CPU, memory, byte, and message samples cannot regress;
     limit precedence is stable; and a terminal result without required accounting
     remains unavailable rather than being reported as a green qualification.
@@ -131,10 +134,12 @@ python -m pytest tests/test_phase2_broker.py -q
 python -m pytest tests/test_phase2_native_broker.py -q
 python -m pytest tests/test_phase2_bundle_installer.py -q
 python -m pytest tests/test_phase2_artifact_boundary.py -q
+python -m pytest tests/test_phase2_attachment_staging.py -q
 python -m pytest tests/test_phase2_recipe_provider.py -q
 python -m pytest tests/test_phase2_worker_provenance.py -q
 python -m pytest tests/test_phase2_worker_release.py -q
 python -m pytest tests/test_native_launcher_qualification.py -q
+python -m pytest tests/test_phase2_native_recipe_attempt.py -q
 python -m pytest tests/test_recipe_sandbox_qualification.py -q
 python tools/execution_spikes/native_launcher_qualification.py
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
@@ -312,5 +317,19 @@ production build passed, generated OpenAPI/TypeScript contracts were refreshed,
 `compileall` passed, and `git diff --check` passed. The new
 `build_recipe_coordinator_factory` binds only an injected worker-attempt factory
 to the lifecycle-owned repository; it creates no process, broker, provider, or
-host fallback. Attachment staging and real signed/native attempt binding remain
-the next planned slice.
+host fallback.
+
+**Attachment/native composition stage verification (2026-07-29):** The trusted
+byte boundary now exposes `ArtifactBoundary.stage_bytes`, and the qualification
+API adds an idempotent owner-scoped `attachment.stage.v1` route with a bounded
+base64 envelope. The stage service persists only digest/size/MIME/retention,
+revalidates matching retries, rejects changed retries, and never returns a path
+or payload. The native composition adds a fresh signed launcher, broker binder,
+pipe identity, authenticated client, and bounded cleanup scope per recipe job;
+the explicit coordinator helper requires a reviewed process-factory injection
+and creates no process during configuration. Focused verification passed 52
+tests across artifact boundary, attachment staging, native composition, API,
+and launcher suites; the qualification route remains unavailable in the normal
+default-off app. The next gate is an end-to-end durable-coordinator run through
+the packaged signed worker, including cancellation, retention, publication, and
+native cleanup.
