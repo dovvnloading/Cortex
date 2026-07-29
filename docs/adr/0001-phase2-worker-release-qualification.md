@@ -23,6 +23,13 @@ unsigned qualification artifact; the ephemeral signature is discarded with the
 temporary store. A green run therefore proves the packaged boundary on the
 runner, not production release authorization.
 
+Quality CI follows this worker-level corpus with
+`tools/execution_spikes/recipe_coordinator_e2e_qualification.py`. That separate
+probe composes the same freshly installed generation through the durable
+coordinator and verifies owner-scoped attachment staging, publication,
+retention, cancellation, and native cleanup; it does not add a second provider
+or trust root.
+
 ## Bounded execution
 
 The package build has a 15-minute step timeout and the end-to-end qualification

@@ -109,6 +109,7 @@ default-off; the explicit qualification profile is now a deliberate, injected
 lifecycle composition rather than an application default. Official production
 readiness, signing, and external review are separate optional maintainer concerns
 and are not prerequisites for open-source development. The recipe
-coordinator/request path and typed qualification-only API are implemented behind
-this boundary; the next implementation slice is trusted attachment staging and
-binding the real qualified attempt factory.
+coordinator/request path, trusted attachment staging, and qualified native
+attempt factory are implemented behind this boundary. The durable packaged
+worker coordinator corpus now provides the next composite evidence gate while
+the normal application remains default-off.

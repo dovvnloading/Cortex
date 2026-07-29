@@ -120,9 +120,14 @@ health-gated builder. The durable recipe coordinator binds that worker contract
 to owner-scoped staged artifacts and atomic publication, and the typed API route
 is available only after the lifecycle is ready. Trusted attachment staging and
 signed/native attempt composition are now present behind that same lifecycle.
-The next gate is an end-to-end durable coordinator run through the packaged
-worker: the provider must launch out of process, complete a staged transform,
-cancel in flight, and prove retention, publication, and native cleanup. It must
-never fall back to a host process or in-process execution.
+The packaged-worker coordinator gate is now implemented by
+`tools/execution_spikes/recipe_coordinator_e2e_qualification.py`. Its strict
+Windows corpus launches the provider out of process, completes a staged
+transform, rejects a foreign owner, expires and purges a short-retention
+attachment, cancels in flight, verifies atomic publication, and proves native
+cleanup. It never falls back to a host process or in-process execution. Hosted
+Quality run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
+passed this gate on commit `0c7b350`; the immediate remaining action is review
+and merge.
 External review and production signing remain optional official-release
 hardening.

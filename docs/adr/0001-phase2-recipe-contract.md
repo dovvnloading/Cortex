@@ -69,15 +69,16 @@ profile is now deliberately composable through an explicit injected lifecycle
 builder. Outside review and production trust are optional official-release
 hardening, not open-source prerequisites.
 
-## Required next gates
+## Required next gate
 
-1. Add trusted attachment staging and bind the real signed/native broker worker
-   into the injected attempt factory behind the passing lifecycle health check.
-   The qualification-only request surface and implemented coordinator are
-   documented in [the coordinator ADR](0001-phase2-recipe-coordinator.md); the
-   lifecycle builder intentionally does not create processes or discover
-   artifacts. Official prebuilt releases may add external review and production
-   trust as optional hardening.
+The trusted attachment boundary, signed/native attempt factory, and durable
+packaged-worker coordinator qualification are implemented behind the passing
+lifecycle health check. Hosted Quality run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
+passed `recipe_coordinator_e2e_qualification.py` on commit `0c7b350`; the
+immediate remaining action is review and merge. The lifecycle builder still
+intentionally does not create processes or discover artifacts. Official
+prebuilt releases may add external review and production trust as optional
+hardening.
 
 ## Verification
 
