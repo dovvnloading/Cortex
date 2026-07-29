@@ -68,25 +68,29 @@ disposable end-to-end check:
 ```powershell
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
+# Optional: rerun one release-gate case in isolation.
+python tools/execution_spikes/recipe_worker_e2e_qualification.py --case cancellation --json --strict
 ```
 
 It creates an in-memory ephemeral Ed25519 trust root, signs the already-built
 one-folder package, installs one immutable generation, verifies provenance,
 launches the worker through the native AppContainer/job-policy factory, and
-exercises only the fixed 4x3 PNG grayscale corpus over the authenticated broker.
-It accepts no user files, model text, commands, or production trust material.
-`--strict` returns exit code `2` unless every stage passes. Full package closure
-verification can take several minutes on Windows; the protocol timeout applies
-after launch and is fail-closed.
+exercises a fixed PNG transform, truncated-PNG and active-SVG hostile decoder
+cases, and an in-flight eight-step cancellation corpus over the authenticated
+broker. It accepts no user files, model text, commands, or production trust
+material. `--strict` returns exit code `2` unless every selected stage passes.
+Use `--case` to rerun one case during diagnosis; the default runs the full
+corpus. Full package closure verification can take several minutes on Windows;
+the protocol timeout applies after launch and is fail-closed.
 
-The current evidence result passes the packaged provider transform:
+The current evidence result passes the complete packaged-worker corpus:
 signed installation, provenance, AppContainer/job identity binding, broker
-handshake, `prepare`, `input_chunk`, `input_complete`, and `collect_output` all
-complete through the authenticated broker. The native read path polls
-`PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`, keeping the worker's
-cancellation reader live without starving the provider transform. The harness
-still does not close the remaining watchdog/hostile-decoder, external-review, or
-production-lifecycle release gates.
+handshake, normal `collect_output`, hostile decoder rejection for truncated PNG
+and active SVG bytes, and an in-flight `cancel_ack` after `input_complete`. The
+native read path polls `PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`,
+keeping the worker's cancellation reader live without starving the provider
+transform. Parser fuzzing, resource/watchdog accounting, artifact security review,
+external review, and production-lifecycle release gates remain open.
 
 ## What the probes prove
 
