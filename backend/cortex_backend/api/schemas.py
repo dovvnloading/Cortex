@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cortex_backend.core.generation import ConnectionResult
 from cortex_backend.core.settings import CortexSettings
+from cortex_backend.execution.recipe_coordinator import (
+    DEFAULT_RECIPE_RETENTION_SECONDS,
+    MAX_RECIPE_RETENTION_SECONDS,
+)
+from cortex_backend.execution.recipes import (
+    ImageTransformPlan,
+    RecipeValidationError,
+    parse_image_transform,
+)
 
 
 class APIModel(BaseModel):
@@ -196,10 +206,66 @@ class ExecutionPreviewRequest(APIModel):
     step_delay_seconds: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+class RecipeImageTransformRequest(APIModel):
+    """Explicit request for one qualified, fixed-function image transform.
+
+    The source artifact must already have been copied into the owner-scoped
+    artifact store by a trusted attachment boundary. The API accepts only the
+    opaque artifact ID and the typed recipe plan; it never accepts a path or
+    executable instruction.
+    """
+
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    source_artifact_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    plan: ImageTransformPlan
+    retention_seconds: int = Field(
+        default=DEFAULT_RECIPE_RETENTION_SECONDS,
+        ge=1,
+        le=MAX_RECIPE_RETENTION_SECONDS,
+        strict=True,
+    )
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _parse_json_plan(cls, value: object) -> ImageTransformPlan:
+        if isinstance(value, ImageTransformPlan):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("typed image plan is invalid")
+        try:
+            return parse_image_transform(value)
+        except RecipeValidationError:
+            raise ValueError("typed image plan is invalid") from None
+
+    @model_validator(mode="after")
+    def _bind_plan_to_source(self) -> "RecipeImageTransformRequest":
+        if self.plan.input_artifact_id != self.source_artifact_id:
+            raise ValueError("source artifact and plan input must match")
+        return self
+
+
 class ExecutionAccepted(APIModel):
     job_id: str
     request_id: str
     profile: Literal["fake.v1"]
+    status: ExecutionStatus
+    sequence: int
+
+
+class RecipeImageTransformAccepted(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal["recipe.image.v1"]
     status: ExecutionStatus
     sequence: int
 

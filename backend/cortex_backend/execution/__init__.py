@@ -51,6 +51,7 @@ from .qualification import (
     QualificationLifecycleConfig,
     QualificationProfileError,
     build_execution_lifecycle,
+    build_recipe_coordinator_factory,
     parse_execution_profile,
 )
 from .manifest import (
@@ -218,6 +219,7 @@ __all__ = [
     "ExecutionLifecycle",
     "ExecutionProfile",
     "CoordinatorFactory",
+    "build_recipe_coordinator_factory",
     "CalculatorPlan",
     "CheckPlan",
     "FakeExecutionPlan",

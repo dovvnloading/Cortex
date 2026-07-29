@@ -32,12 +32,12 @@
 | Release/lifecycle health preflight | **Complete (official + qualification profiles)** | `RecipeRuntimeReleaseGate` defaults to `release_profile="official"` and requires the reviewed native process factory, live broker binder, and external-review result. An explicit `release_profile="qualification"` records `qualification_profile` and omits only the optional outside-review requirement for local/CI development; it performs no launch, broker bind, provider load, or lifecycle mutation. |
 | Packaged worker release qualification | **Complete (CI qualification-only)** | Quality CI builds the unsigned fixed one-folder worker, signs it only with an in-memory ephemeral key, installs/reverifies the immutable generation, and runs the live AppContainer/Job Object/broker/hostile/cancellation corpus with bounded 15/20-minute steps. Production trust material and provider enablement remain excluded. |
 | External release-review attestation | **Complete (optional official-release hardening)** | `recipe.release-review.v1`, an independent pinned review key root, exact release/bundle/worker-key/launcher/threat-model binding, bounded freshness, and redacted `RuntimeHealth` adaptation are implemented and adversarially tested. It is not required to build, test, or use the open-source qualification profile. |
-| Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, and checks cancellation. The provider request route remains separate and default-off. |
+| Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, and checks cancellation. The provider remains separate from the API; the typed coordinator route is qualification-only and default-off. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The explicit lifecycle composition and internal recipe coordinator/publication path are now wired behind injection; UI/API exposure remains separate and default-off. Official-release review/signing remains optional hardening. |
+| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The explicit lifecycle composition, durable recipe coordinator/publication path, and typed qualification-only API are wired behind injection; attachment staging and the real attempt-factory binding remain the next gate. Official-release review/signing remains optional hardening. |
 | Explicit qualification-profile lifecycle wiring | **Complete (local/CI composition; default-off in the app)** | `build_execution_lifecycle()` accepts only exact `disabled`/`qualification` selection, requires a qualification release gate, coordinator factory, and provider-health probe, and composes them in a fail-closed order. `Cortex_Preview.build_preview_app` exposes this only as an explicit injection; the normal app supplies no profile or controls. |
-| Durable recipe coordinator/request and artifact publication | **Complete (internal qualification composition; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `tests/test_phase2_recipe_coordinator.py` covers the hostile and cancellation paths. |
+| Durable recipe coordinator/request and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/recipe/image` accepts only a typed plan plus an owner-scoped, already-staged artifact ID after a ready `qualification` lifecycle. `build_recipe_coordinator_factory` binds an injected worker-attempt factory without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, and lifecycle paths. |
 
 ## Security invariants
 
@@ -295,6 +295,22 @@ qualification. The release gate exposes an explicit
 profile only when a caller injects the qualification gate, coordinator, and
 provider-health probe. The normal application remains default-off. The durable
 recipe-specific coordinator/request and artifact-publication path is now
-implemented as an internal qualification composition; no outside reviewer or
-production key was required for it. The next core slice is the explicit UI/API
-request surface and qualified worker-attempt factory wiring.
+implemented as an explicit qualification-only API surface with a typed
+TypeScript client method; no outside reviewer or production key was required for
+it. The next core slice is trusted attachment staging and binding the real
+signed/native broker worker into the injected attempt factory.
+
+**Qualification API stage verification (2026-07-29):** The explicit
+`POST /api/v1/execution/recipe/image` surface is available only from a ready
+`qualification` lifecycle and accepts a strict typed plan plus an opaque,
+owner-scoped artifact ID. The API regression set passed 22 tests, including
+default-off/blocked exposure, JSON-array plan parsing, owner isolation,
+idempotency/conflict responses, redacted failures, and the shared status/task
+surface. The full Python suite passed **329 tests with 1 expected Windows
+skip**; the frontend suite passed **40 tests**, lint and typecheck passed, the
+production build passed, generated OpenAPI/TypeScript contracts were refreshed,
+`compileall` passed, and `git diff --check` passed. The new
+`build_recipe_coordinator_factory` binds only an injected worker-attempt factory
+to the lifecycle-owned repository; it creates no process, broker, provider, or
+host fallback. Attachment staging and real signed/native attempt binding remain
+the next planned slice.

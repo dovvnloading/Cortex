@@ -24,7 +24,12 @@ import re
 from collections.abc import Callable
 from typing import Literal
 
+from .artifact_boundary import ArtifactBoundary
 from .lifecycle import ExecutionLifecycle, LifecycleCoordinator, RuntimeHealth
+from .recipe_coordinator import (
+    RecipeExecutionCoordinator,
+    RecipeWorkerAttemptFactory,
+)
 from .release_gate import RecipeRuntimeReleaseGate
 from .repository import ExecutionRepository
 
@@ -45,6 +50,50 @@ class QualificationProfileError(ValueError):
 
 ProviderHealthProbe = Callable[[RuntimeHealth], RuntimeHealth]
 CoordinatorFactory = Callable[[ExecutionRepository], LifecycleCoordinator]
+
+
+def build_recipe_coordinator_factory(
+    worker_attempt_factory: RecipeWorkerAttemptFactory,
+    *,
+    artifact_boundary_factory: Callable[[ExecutionRepository], ArtifactBoundary] | None = None,
+    lease_seconds: float = 30.0,
+    supervisor_lease_seconds: float = 30.0,
+) -> CoordinatorFactory:
+    """Bind a qualified worker-attempt seam to the durable recipe coordinator.
+
+    The caller must provide the already-qualified attempt factory. This helper
+    does not launch a process, bind a broker, load a provider, or fall back to
+    host execution. It only creates a coordinator for the repository supplied
+    by :class:`ExecutionLifecycle`, keeping lifecycle ownership explicit.
+    """
+
+    if not callable(worker_attempt_factory):
+        raise TypeError("worker_attempt_factory must be callable")
+    if artifact_boundary_factory is not None and not callable(artifact_boundary_factory):
+        raise TypeError("artifact_boundary_factory must be callable")
+    if lease_seconds <= 0 or supervisor_lease_seconds <= 0:
+        raise ValueError("lease durations must be positive")
+
+    def factory(repository: ExecutionRepository) -> LifecycleCoordinator:
+        artifact_boundary = (
+            artifact_boundary_factory(repository)
+            if artifact_boundary_factory is not None
+            else None
+        )
+        if artifact_boundary is not None and not isinstance(artifact_boundary, ArtifactBoundary):
+            raise TypeError("artifact_boundary_factory returned an invalid boundary")
+        if artifact_boundary is not None and artifact_boundary.repository is not repository:
+            raise ValueError("artifact boundary repository mismatch")
+        return RecipeExecutionCoordinator(
+            repository,
+            worker_attempt_factory,
+            artifact_boundary=artifact_boundary,
+            lease_seconds=lease_seconds,
+            supervisor_lease_seconds=supervisor_lease_seconds,
+            auto_recover=False,
+        )
+
+    return factory
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,5 +229,6 @@ __all__ = [
     "QualificationLifecycleConfig",
     "QualificationProfileError",
     "build_execution_lifecycle",
+    "build_recipe_coordinator_factory",
     "parse_execution_profile",
 ]

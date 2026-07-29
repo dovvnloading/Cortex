@@ -64,4 +64,37 @@ describe("CortexApi", () => {
     const request = fetcher.mock.calls[0]?.[1] as RequestInit;
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
   });
+
+  it("starts a typed recipe request on the explicit qualification route", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      job_id: "recipe-job",
+      request_id: "recipe-request",
+      profile: "recipe.image.v1",
+      status: "queued",
+      sequence: 1,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    const api = new CortexApi("/api/v1", fetcher);
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+
+    await api.startRecipeImageTransform({
+      request_id: "recipe-request",
+      source_artifact_id: "artifact-1",
+      plan: {
+        schema_version: "artifact.transform.v1",
+        input_artifact_id: "artifact-1",
+        steps: [{ op: "grayscale" }],
+        output_format: "png",
+      },
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/execution/recipe/image",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"source_artifact_id":"artifact-1"'),
+      }),
+    );
+    const request = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
+  });
 });

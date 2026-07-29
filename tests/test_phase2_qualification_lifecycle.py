@@ -10,6 +10,7 @@ from cortex_backend.execution.qualification import (
     QualificationLifecycleConfig,
     QualificationProfileError,
     build_execution_lifecycle,
+    build_recipe_coordinator_factory,
     parse_execution_profile,
 )
 from cortex_backend.execution.bundle_installer import SignedBundleInstaller
@@ -141,3 +142,22 @@ def test_qualification_profile_composes_gate_provider_health_and_lifecycle(tmp_p
     assert provider_inputs == ["ready"]
     assert factory_calls == [True]
     assert lifecycle.stop().state == "stopped"
+
+
+def test_recipe_factory_keeps_worker_attempt_injection_explicit_and_repository_bound(tmp_path):
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    worker_calls: list[object] = []
+
+    def worker_attempt_factory(job):
+        worker_calls.append(job)
+        return object()
+
+    factory = build_recipe_coordinator_factory(worker_attempt_factory)
+    assert worker_calls == []
+
+    coordinator = factory(repository)
+    assert coordinator.repository is repository
+    assert coordinator.worker_factory is worker_attempt_factory
+    assert coordinator.artifact_boundary.repository is repository
+    coordinator.shutdown()
+    assert worker_calls == []

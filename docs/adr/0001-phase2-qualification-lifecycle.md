@@ -1,6 +1,8 @@
 # ADR-0001 Phase 2 explicit qualification-profile lifecycle
 
-- **Status:** Implemented as a local/CI lifecycle composition boundary; the internal recipe coordinator is now available behind it and application exposure remains separate
+- **Status:** Implemented as a local/CI lifecycle composition boundary; the
+  qualification-only recipe API is now available behind it and the application
+  remains default-off
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 release/lifecycle preflight](0001-phase2-release-lifecycle-gate.md), [recipe provider](0001-phase2-recipe-provider.md), and [Phase 1 lifecycle](0001-phase1-production-lifecycle.md)
@@ -28,10 +30,14 @@ safe profile label `qualification` for diagnostics.
 
 `Cortex_Preview.build_preview_app` accepts the explicit profile/configuration as
 an injection point. Its normal call site supplies neither, so the packaged and
-source application remain `disabled` by default. This stage does not add a
-recipe API route, automatic model tool selection, worker-package discovery, or
-persistent signing/trust material. A caller must deliberately provide those
-qualified controls in local/CI code.
+source application remain `disabled` by default. The helper
+`build_recipe_coordinator_factory` now binds an injected, already-qualified
+worker-attempt factory to the lifecycle-owned repository; it does not discover a
+package, launch a process, bind a broker, or provide a host fallback. The
+qualification-only recipe API route consumes an opaque, already-staged artifact
+ID and remains unavailable unless this lifecycle is ready. Attachment staging,
+automatic model tool selection, worker-package discovery, and persistent
+signing/trust material remain separate gates.
 
 ## Failure and recovery behavior
 
@@ -53,15 +59,18 @@ qualification code without an outside reviewer, production signing key, or
 trusted release root. The normal application cannot be enabled accidentally by
 importing the provider or setting an implicit default.
 
-The internal recipe-specific coordinator/request and artifact-publication path is
-now implemented behind this lifecycle boundary. It preserves the same release
-gate, native launcher, broker identity, resource/watchdog, and trusted artifact
-controls. The next slice is the explicit UI/API request surface and qualified
-worker-attempt factory wiring; it must remain default-off in the application.
+The recipe-specific coordinator/request and artifact-publication path plus its
+typed qualification-only API surface are now implemented behind this lifecycle
+boundary. It preserves the same release gate, native launcher, broker identity,
+resource/watchdog, and trusted artifact controls. The next slice is trusted
+attachment staging and binding the real signed/native broker worker into the
+attempt factory; it must remain default-off in the application.
 
 ## Verification
 
 `tests/test_phase2_qualification_lifecycle.py` covers exact profile parsing,
 default-off behavior, missing configuration, official-gate rejection, blocked
 health ordering, provider-health composition, coordinator startup, profile
-diagnostics, and clean stop.
+diagnostics, clean stop, and repository-bound worker-attempt factory wiring.
+`tests/test_phase2_recipe_api.py` covers the route's ready-lifecycle gate and
+owner/idempotency/error behavior.

@@ -30,6 +30,12 @@ from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.fake import FakeExecutionPlan
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
+from cortex_backend.execution.recipe_coordinator import (
+    RECIPE_IMAGE_PROFILE,
+    RecipeExecutionCoordinator,
+    RecipeExecutionError,
+    RecipeImageRequest,
+)
 from cortex_backend.execution.repository import (
     ApprovalPolicyError,
     ApprovalTransitionError,
@@ -49,6 +55,8 @@ from .schemas import (
     ExecutionAccepted,
     ExecutionApprovalDecisionRequest,
     ExecutionPreviewRequest,
+    RecipeImageTransformAccepted,
+    RecipeImageTransformRequest,
     ExecutionSSEEvent,
     ExecutionStatusResponse,
     ExecutionTaskListResponse,
@@ -408,7 +416,7 @@ def build_router() -> APIRouter:
         payload: ExecutionPreviewRequest,
         principal: SessionPrincipal = Depends(require_session),
     ) -> ExecutionAccepted:
-        coordinator = _execution_coordinator(request)
+        coordinator = _fake_execution_coordinator(request)
         try:
             job = coordinator.start(
                 owner=_execution_owner(principal),
@@ -425,6 +433,50 @@ def build_router() -> APIRouter:
             job_id=job.job_id,
             request_id=job.request_id,
             profile="fake.v1",
+            status=job.status,
+            sequence=job.sequence,
+        )
+
+    @router.post(
+        "/execution/recipe/image",
+        response_model=RecipeImageTransformAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_recipe_image_transform(
+        request: Request,
+        payload: RecipeImageTransformRequest,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> RecipeImageTransformAccepted:
+        """Start one explicitly qualified, owner-scoped image recipe.
+
+        The route is intentionally unavailable unless the app was built with
+        the explicit qualification lifecycle and that lifecycle completed its
+        health-gated startup. Attachment staging is a separate trusted boundary;
+        callers provide only its opaque artifact identifier here.
+        """
+
+        coordinator = _recipe_coordinator(request)
+        try:
+            job = coordinator.start_image_transform(
+                RecipeImageRequest(
+                    owner=_execution_owner(principal),
+                    request_id=payload.request_id,
+                    source_artifact_id=payload.source_artifact_id,
+                    plan=payload.plan,
+                    retention_seconds=payload.retention_seconds,
+                )
+            )
+        except RecipeExecutionError as exc:
+            _raise_recipe_request_error(exc)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Recipe request is invalid.",
+            ) from exc
+        return RecipeImageTransformAccepted(
+            job_id=job.job_id,
+            request_id=job.request_id,
+            profile=RECIPE_IMAGE_PROFILE,
             status=job.status,
             sequence=job.sequence,
         )
@@ -500,7 +552,7 @@ def build_router() -> APIRouter:
         request: Request,
         principal: SessionPrincipal = Depends(require_session),
     ) -> ExecutionStatusResponse:
-        coordinator = _execution_coordinator(request)
+        coordinator = _execution_runtime(request)
         try:
             coordinator.cancel(job_id, owner=_execution_owner(principal))
         except ValueError as exc:
@@ -1388,8 +1440,8 @@ def _execution_owner(principal: SessionPrincipal) -> str:
     return principal.installation_principal_id
 
 
-def _execution_coordinator(request: Request) -> DurableFakeCoordinator:
-    """Require the explicitly injected fake-only preview coordinator."""
+def _execution_runtime(request: Request):
+    """Require an explicitly enabled execution runtime for shared job routes."""
     coordinator = getattr(request.app.state, "execution_coordinator", None)
     if not request.app.state.preview or coordinator is None:
         raise HTTPException(
@@ -1399,8 +1451,62 @@ def _execution_coordinator(request: Request) -> DurableFakeCoordinator:
     return coordinator
 
 
+def _fake_execution_coordinator(request: Request) -> DurableFakeCoordinator:
+    """Keep the deterministic preview route separate from recipe execution."""
+
+    coordinator = _execution_runtime(request)
+    if not isinstance(coordinator, DurableFakeCoordinator):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution preview is unavailable.",
+        )
+    return coordinator
+
+
+def _recipe_coordinator(request: Request) -> RecipeExecutionCoordinator:
+    """Expose recipes only from a ready, explicit qualification lifecycle."""
+
+    lifecycle = getattr(request.app.state, "execution_lifecycle", None)
+    if (
+        not request.app.state.preview
+        or lifecycle is None
+        or getattr(lifecycle, "profile", None) != "qualification"
+        or not getattr(getattr(lifecycle, "snapshot", None), "available", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recipe execution is unavailable.",
+        )
+    coordinator = getattr(lifecycle, "coordinator", None)
+    if not isinstance(coordinator, RecipeExecutionCoordinator):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recipe execution is unavailable.",
+        )
+    return coordinator
+
+
+def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
+    """Map internal recipe categories to stable, non-sensitive HTTP responses."""
+
+    if exc.code == "request_conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recipe request conflicts with an existing request.",
+        ) from exc
+    if exc.code == "input_artifact_unavailable":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source artifact is unavailable.",
+        ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="Recipe request could not be accepted safely.",
+    ) from exc
+
+
 def _execution_repository(request: Request):
-    return _execution_coordinator(request).repository
+    return _execution_runtime(request).repository
 
 
 def _execution_latest_event(

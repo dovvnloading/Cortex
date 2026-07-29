@@ -8,6 +8,8 @@ import type {
   ExecutionApprovalDecisionRequest,
   ExecutionStatusResponse,
   ExecutionTaskListResponse,
+  RecipeImageTransformAccepted,
+  RecipeImageTransformRequest,
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
@@ -242,6 +244,15 @@ export class CortexApi {
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     const query = params.toString();
     return this.request<ExecutionTaskListResponse>(`/execution/tasks${query ? `?${query}` : ""}`);
+  }
+
+  startRecipeImageTransform(
+    payload: RecipeImageTransformRequest,
+  ): Promise<RecipeImageTransformAccepted> {
+    return this.request<RecipeImageTransformAccepted>("/execution/recipe/image", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   }
 
   cancelExecution(jobId: string): Promise<ExecutionStatusResponse> {

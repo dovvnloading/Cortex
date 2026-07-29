@@ -16,6 +16,11 @@ export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
 
+export interface BrightnessStep {
+  op: "brightness";
+  factor: number | string;
+}
+
 export interface ChatMessage {
   id?: string | null;
   role: "user" | "assistant" | "system";
@@ -53,6 +58,11 @@ export interface ConnectionResult {
   optional_missing_models?: Array<string>;
 }
 
+export interface ContrastStep {
+  op: "contrast";
+  factor: number | string;
+}
+
 export interface CortexSettings {
   schema_version?: 1;
   revision?: number;
@@ -67,6 +77,14 @@ export interface CortexSettings {
 
 export interface CreateChatRequest {
   title?: string;
+}
+
+export interface CropStep {
+  op: "crop";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface DiagnosticsResponse {
@@ -163,6 +181,10 @@ export interface GenerationSettings {
   system_instructions?: string;
 }
 
+export interface GrayscaleStep {
+  op: "grayscale";
+}
+
 export interface HTTPValidationError {
   detail?: Array<ValidationError>;
 }
@@ -174,6 +196,14 @@ export interface HandoffResponse {
 
 export interface HealthResponse {
   status?: "ok";
+}
+
+export interface ImageTransformPlan {
+  schema_version: "artifact.transform.v1";
+  input_artifact_id: string;
+  steps: Array<GrayscaleStep | ContrastStep | BrightnessStep | CropStep | ResizeStep | RotateStep>;
+  output_format: "png" | "jpeg" | "webp";
+  strip_metadata?: true;
 }
 
 export interface InstalledModel {
@@ -232,6 +262,21 @@ export interface OnboardingSettings {
   agreement_accepted?: boolean;
 }
 
+export interface RecipeImageTransformAccepted {
+  job_id: string;
+  request_id: string;
+  profile: "recipe.image.v1";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  sequence: number;
+}
+
+export interface RecipeImageTransformRequest {
+  request_id: string;
+  source_artifact_id: string;
+  plan: ImageTransformPlan;
+  retention_seconds?: number;
+}
+
 export interface RegenerationRequest {
   request_id?: string | null;
   message_id: string;
@@ -244,6 +289,17 @@ export interface RenameChatRequest {
 
 export interface ReplaceMemoryRequest {
   memos: Array<string>;
+}
+
+export interface ResizeStep {
+  op: "resize";
+  width: number;
+  height: number;
+}
+
+export interface RotateStep {
+  op: "rotate";
+  degrees: 90 | 180 | 270;
 }
 
 export interface SSEEvent {
