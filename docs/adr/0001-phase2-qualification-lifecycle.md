@@ -68,10 +68,11 @@ The recipe-specific coordinator/request, trusted attachment staging, native
 attempt composition, and artifact-publication path plus their typed
 qualification-only API surfaces are now implemented behind this lifecycle
 boundary. It preserves the same release gate, native launcher, broker identity,
-resource/watchdog, and trusted artifact controls. The next slice is an
-end-to-end durable-coordinator run against the packaged signed worker, including
-cancellation, retention, publication, and native cleanup; it must remain
-default-off in the application.
+resource/watchdog, and trusted artifact controls. The durable-coordinator run
+against the packaged signed worker is now implemented as a separate strict
+qualification probe; it exercises cancellation, retention, publication,
+owner-isolation, and native cleanup while remaining default-off in the
+application.
 
 ## Verification
 
@@ -82,3 +83,14 @@ diagnostics, clean stop, and repository-bound worker-attempt factory wiring.
 `tests/test_phase2_recipe_api.py` covers both routes' ready-lifecycle gates and
 owner/idempotency/error behavior. `tests/test_phase2_native_recipe_attempt.py`
 covers explicit native composition without launch during configuration.
+The packaged-worker coordinator gate is
+`tools/execution_spikes/recipe_coordinator_e2e_qualification.py`; its local
+Windows run passed the transform, owner-isolation, retention, cancellation,
+atomic-publication, and native-cleanup cases. Quality CI runs it after the
+packaged worker release qualification.
+
+## Next stage
+
+Run the hosted Quality CI job on the stacked PR and record its immutable commit
+and job URL in the Phase 2 evidence log. The application remains disabled unless
+an explicit caller injects a ready qualification profile.

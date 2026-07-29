@@ -84,7 +84,7 @@ On the controlled Windows host (2026-07-23), the
 PyInstaller build produced `dist/recipe-runtime/recipe_worker.exe`; direct launch
 without the exact native broker arguments returned exit code `78` as required.
 
-## Remaining qualification gate
+## Coordinator qualification gate
 
 The durable coordinator now has an explicit native attempt factory that installs
 no fallback transport: each job creates a fresh pipe/broker identity, launches a
@@ -94,9 +94,15 @@ and closes the client, broker, and process tree on failure or cancellation.
 Attachment staging is likewise available only through the owner-scoped artifact
 boundary and qualification lifecycle.
 
+The strict coordinator qualification probe now runs the durable path through the
+packaged process as a separate Windows-only gate. It stages an attachment,
+completes a typed transform, rejects a foreign owner, proves retention expiry,
+cancels an in-flight transform, checks atomic publication/no-result cleanup, and
+verifies native process teardown. The existing worker probe continues to own the
+hostile decoder corpus; the coordinator probe composes that same signed worker
+without duplicating provider authority.
+
 This ADR still does not authorize the normal application to execute providers.
-The next gate must run the full hostile decoder/cancellation corpus through the
-durable coordinator using that packaged process and verify retention, atomic
-publication, and cleanup. Lifecycle/UI enablement remains behind those gates;
-external security review and production trust remain optional official-release
-hardening.
+Quality CI runs both qualification probes with bounded timeouts; lifecycle/UI
+enablement remains behind the explicit qualification profile, and external
+security review and production trust remain optional official-release hardening.

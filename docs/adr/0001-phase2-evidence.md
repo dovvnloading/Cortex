@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Open-source qualification track complete through the fixed-function worker boundary; optional official-release hardening is separate
+- **Status:** Open-source qualification track complete through the durable packaged-worker coordinator boundary; optional official-release hardening is separate
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -35,9 +35,10 @@
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, and checks cancellation. The provider remains separate from the API; the typed coordinator route is qualification-only and default-off. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The explicit lifecycle composition, durable recipe coordinator/publication path, typed qualification-only API, trusted attachment staging, and per-job signed/native attempt factory are wired behind injection; the next gate is a durable-coordinator run through the packaged worker. Official-release review/signing remains optional hardening. |
+| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, watchdog tree reaping, and the durable packaged-worker coordinator run are qualified. Official-release review/signing remains optional hardening. |
 | Explicit qualification-profile lifecycle wiring | **Complete (local/CI composition; default-off in the app)** | `build_execution_lifecycle()` accepts only exact `disabled`/`qualification` selection, requires a qualification release gate, coordinator factory, and provider-health probe, and composes them in a fail-closed order. `Cortex_Preview.build_preview_app` exposes this only as an explicit injection; the normal app supplies no profile or controls. |
 | Durable recipe coordinator/request, attachment staging, and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/attachments` creates an idempotent owner-scoped `attachment.stage.v1` record through `ArtifactBoundary.stage_bytes`; `POST /api/v1/execution/recipe/image` consumes its opaque artifact ID after a ready `qualification` lifecycle. `build_native_recipe_coordinator_factory` binds a fresh signed/native launcher/broker/client attempt per job without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, `tests/test_phase2_attachment_staging.py`, `tests/test_phase2_native_recipe_attempt.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, native-composition, and lifecycle paths. |
+| Durable packaged-worker coordinator qualification | **Complete (local; hosted CI gate added)** | `recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300` passed on Windows using an in-memory ephemeral signing key and a disposable immutable installer generation. The single coordinator corpus staged a PNG attachment, completed a real signed/native transform, verified digest/MIME/size and atomic publication, rejected a foreign owner, expired and purged a one-second artifact, cancelled an in-flight transform with no result artifact, and verified native worker/process and temporary-root cleanup. The strict Quality workflow step runs the same gate after packaged worker release qualification; the hosted commit/job URL is recorded after this PR's CI completes. |
 
 ## Security invariants
 
@@ -144,6 +145,7 @@ python -m pytest tests/test_recipe_sandbox_qualification.py -q
 python tools/execution_spikes/native_launcher_qualification.py
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
+python tools/execution_spikes/recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300
 python tools/execution_spikes/recipe_parser_fuzz.py --json --strict
 python tools/execution_spikes/artifact_security_review.py --json --strict
 python tools/execution_spikes/resource_watchdog_qualification.py --json --strict
@@ -302,8 +304,9 @@ provider-health probe. The normal application remains default-off. The durable
 recipe-specific coordinator/request and artifact-publication path is now
 implemented as an explicit qualification-only API surface with a typed
 TypeScript client method; no outside reviewer or production key was required for
-it. The next core slice is trusted attachment staging and binding the real
-signed/native broker worker into the injected attempt factory.
+it. Trusted attachment staging and binding the real signed/native broker worker
+into the injected attempt factory are now complete; the durable packaged-worker
+coordinator qualification is the hosted CI gate for this stage.
 
 **Qualification API stage verification (2026-07-29):** The explicit
 `POST /api/v1/execution/recipe/image` surface is available only from a ready
@@ -330,6 +333,17 @@ the explicit coordinator helper requires a reviewed process-factory injection
 and creates no process during configuration. Focused verification passed 52
 tests across artifact boundary, attachment staging, native composition, API,
 and launcher suites; the qualification route remains unavailable in the normal
-default-off app. The next gate is an end-to-end durable-coordinator run through
-the packaged signed worker, including cancellation, retention, publication, and
-native cleanup.
+default-off app. The next evidence step is hosted Quality CI verification of the
+durable packaged-worker coordinator gate.
+
+**Durable packaged-worker coordinator qualification result (2026-07-29):** The
+strict Windows probe
+`recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300`
+passed locally using only an in-memory ephemeral Ed25519 key and a disposable
+installer store. In one coordinator instance it staged a fixed PNG attachment,
+completed a signed/native transform with digest/MIME/size checks and atomic
+publication, rejected a foreign-owner request before worker launch, expired and
+purged a one-second attachment, cancelled an in-flight resize transform with no
+published result, and verified native process plus temporary workspace cleanup.
+The probe remains qualification-only and does not enable the normal application;
+hosted Quality CI now runs it after the packaged worker release qualification.

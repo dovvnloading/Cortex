@@ -2,7 +2,8 @@
 
 - **Status:** Implemented and verified behind an explicit qualification-only
   API boundary, including trusted attachment staging and signed/native attempt
-  composition; the normal application remains default-off
+  composition and a durable packaged-worker qualification corpus; the normal
+  application remains default-off
 - **Phase:** 2 - fixed-function image recipe
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [typed recipe contract](0001-phase2-recipe-contract.md),
@@ -136,13 +137,22 @@ composition, and bounded cleanup. The generated OpenAPI and TypeScript
 contracts include both typed envelopes, and `frontend/src/api/client.ts`
 exposes the qualification routes without enabling them in the UI by default.
 
+The qualification-only packaged-worker gate is
+`tools/execution_spikes/recipe_coordinator_e2e_qualification.py`. It signs the
+already-built one-folder worker with an in-memory ephemeral key, installs one
+disposable immutable generation, stages a PNG through `AttachmentStagingService`,
+and drives the real `RecipeExecutionCoordinator` through the native
+AppContainer/broker/client attempt. Its strict corpus verifies successful
+publication and digest/MIME/size binding, foreign-owner rejection, retention
+expiry and purge, in-flight cancellation with no result artifact, absence of
+temporary publication directories, and complete native process cleanup. The
+probe is Windows-only, bounded, redacted, and has no host-process fallback.
+
 ## Next stage
 
-The next implementation decision is an end-to-end qualification run through the
-durable coordinator using the packaged signed worker: stage an attachment,
-launch/bind the native attempt, exercise transform and cancellation, and verify
-retention, owner isolation, atomic publication, and complete native cleanup.
-That run must preserve this API/coordinator contract and keep the normal
-application default-off. No external reviewer or production key is required to
-continue the open-source qualification path; production trust remains optional
-release hardening.
+The coordinator implementation gate is complete. The immediate next stage is
+hosted Quality CI verification of the strict packaged-worker coordinator probe,
+followed by review/merge of the stacked PR. That stage must preserve this
+API/coordinator contract and keep the normal application default-off. No
+external reviewer or production key is required for the open-source
+qualification path; production trust remains optional release hardening.

@@ -82,19 +82,18 @@ The fixed probe and watchdog corpus do not yet prove enforcement against a real
 signed recipe worker, resource-exhaustion behavior across supported Windows
 versions, or external launcher review.
 
-## Remaining blockers
+## Remaining release-hardening boundaries
 
-- The fixed signed `recipe_worker.exe` package is not shipped at the immutable
-  installer generation used by the launcher.
-- The fixed signed `recipe_worker.exe` bundle is not installed in the immutable
-  generation used by the launcher, so no real worker has completed the broker
-  handshake yet.
-- The packaged worker loop is now broker-only and fail-closed; the disposable
-  signed-worker qualification covers authenticated input/output, hostile decoder,
-  and cancellation cases, but the immutable production generation is not shipped
-  at the launcher path.
-- Real signed-worker resource enforcement, external security review, and lifecycle
-  health-gated wiring remain separate release gates.
+- The open-source qualification path uses a disposable ephemeral signing key and
+  temporary immutable installer generation; a production signed package and
+  pinned trust root are still optional official-release material.
+- External security review and release-specific resource/enforcement review remain
+  separate official-release gates.
+
+The disposable signed-worker qualification and the strict durable-coordinator
+qualification now prove a real broker handshake and native process lifecycle on
+Windows. Missing or unverifiable worker material still blocks the profile; there
+is no host-process or weaker-sandbox fallback.
 
 If any control is missing or cannot be verified, the provider remains unavailable;
 there is no host-process or weaker-sandbox fallback.

@@ -69,15 +69,15 @@ profile is now deliberately composable through an explicit injected lifecycle
 builder. Outside review and production trust are optional official-release
 hardening, not open-source prerequisites.
 
-## Required next gates
+## Required next gate
 
-1. Add trusted attachment staging and bind the real signed/native broker worker
-   into the injected attempt factory behind the passing lifecycle health check.
-   The qualification-only request surface and implemented coordinator are
-   documented in [the coordinator ADR](0001-phase2-recipe-coordinator.md); the
-   lifecycle builder intentionally does not create processes or discover
-   artifacts. Official prebuilt releases may add external review and production
-   trust as optional hardening.
+The trusted attachment boundary, signed/native attempt factory, and durable
+packaged-worker coordinator qualification are implemented behind the passing
+lifecycle health check. The immediate remaining gate is hosted Quality CI
+verification of `recipe_coordinator_e2e_qualification.py`; the lifecycle builder
+still intentionally does not create processes or discover artifacts. Official
+prebuilt releases may add external review and production trust as optional
+hardening.
 
 ## Verification
 

@@ -1007,12 +1007,15 @@ ready. Attachment staging stores only bounded, MIME-sniffed bytes behind an
 opaque artifact ID. `build_native_recipe_coordinator_factory` composes a fresh
 signed/native launcher, broker binder, protected pipe identity, and authenticated
 client for each recipe job; it requires an explicit reviewed process-factory
-injection and never falls back to a host process. The next core slice is an
-end-to-end durable-coordinator run through the packaged signed worker, including
-cancellation, retention, atomic publication, and native cleanup. The separate
-`recipe.release-review.v1` verifier is available as optional release hardening;
-it remains observation-only and no approval record or production trust material
-is committed.
+injection and never falls back to a host process. The durable-coordinator
+packaged-worker slice is now implemented as the strict Windows-only
+`recipe_coordinator_e2e_qualification.py` gate. It stages an attachment, runs
+the real signed/native coordinator, verifies owner isolation, retention expiry,
+cancellation, atomic publication, and complete native cleanup, and never falls
+back to a host process. Quality CI runs it after the existing worker release
+qualification. The separate `recipe.release-review.v1` verifier is available as
+optional release hardening; it remains observation-only and no approval record or
+production trust material is committed.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

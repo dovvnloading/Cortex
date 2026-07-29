@@ -86,6 +86,11 @@ jobs:
         timeout-minutes: 20
         run: python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
 
+      - name: Run durable recipe coordinator qualification
+        shell: pwsh
+        timeout-minutes: 35
+        run: python tools/execution_spikes/recipe_coordinator_e2e_qualification.py --json --strict
+
       - name: Prepare signed WebView2 bootstrapper
         shell: pwsh
         run: ./packaging/prepare_webview2.ps1
