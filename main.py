@@ -138,12 +138,20 @@ def _desktop_url(port: int, token: str) -> str:
 
 
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
+    # A PyInstaller windowed executable intentionally has no console streams.
+    # Uvicorn's stock formatter probes ``sys.stderr.isatty()`` while it builds
+    # its logging configuration, which otherwise prevents the desktop app from
+    # starting before the native window can be created.  Keep normal console
+    # logging for source/headless runs and omit only the console-oriented
+    # configuration when that stream is unavailable.
+    log_config = None if not callable(getattr(sys.stderr, "isatty", None)) else uvicorn.config.LOGGING_CONFIG
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
         port=port,
         log_level=log_level,
         access_log=False,
+        log_config=log_config,
     )
     server = uvicorn.Server(config)
     app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)

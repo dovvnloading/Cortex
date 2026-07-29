@@ -1,4 +1,4 @@
-import { Brain, Eraser, Plus, Trash2, Save } from "lucide-react";
+import { Eraser, Plus, Trash2, Save } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 type Props = {
@@ -36,7 +36,6 @@ export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
           <p className="eyebrow">PERMANENT MEMORY</p>
           <h2 id="memory-title">Remembered facts</h2>
         </div>
-        <Brain aria-hidden="true" size={19} />
       </div>
       <form className="inline-form" onSubmit={handleSubmit}>
         <label className="sr-only" htmlFor="new-memory">New memory</label>

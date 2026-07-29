@@ -33,12 +33,12 @@ export type SettingsPanelProps = {
 
 const DEFAULT_TRANSLATION_MODEL = "translategemma:4b";
 
-const sections: { id: SettingsSection; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "model", label: "AI Model" },
-  { id: "memory", label: "Memory" },
-  { id: "translation", label: "Translation" },
-  { id: "system", label: "System" },
+const sections: { id: SettingsSection; label: string; detail: string }[] = [
+  { id: "general", label: "General", detail: "Appearance and behavior" },
+  { id: "model", label: "AI Model", detail: "Chat model and generation" },
+  { id: "memory", label: "Memory", detail: "Saved local context" },
+  { id: "translation", label: "Translation", detail: "Optional response translation" },
+  { id: "system", label: "System", detail: "Runtime and installed models" },
 ];
 
 export function SettingsPanel({
@@ -98,7 +98,9 @@ export function SettingsPanel({
   return (
     <section className="settings-dialog" aria-labelledby="settings-title">
       <header className="settings-dialog-header">
-        <h2 id="settings-title">Settings</h2>
+        <div className="settings-title-group">
+          <h2 id="settings-title">Settings</h2>
+        </div>
         <button className="icon-button icon-button-small" type="button" aria-label="Close settings" onClick={onClose}>
           <X aria-hidden="true" size={17} />
         </button>
@@ -106,17 +108,18 @@ export function SettingsPanel({
 
       <div className="settings-dialog-body">
         <nav className="settings-nav" aria-label="Settings categories">
-          {sections.map((item) => (
-            <button
+          {sections.map((item) => {
+            return <button
               className={`settings-tab ${section === item.id ? "settings-tab-active" : ""}`}
               type="button"
               key={item.id}
+              aria-label={item.label}
               aria-current={section === item.id ? "page" : undefined}
               onClick={() => setSection(item.id)}
             >
-              {item.label}
+              <span><strong>{item.label}</strong><small>{item.detail}</small></span>
             </button>
-          ))}
+          })}
         </nav>
 
         <div className="settings-pane">

@@ -37,6 +37,17 @@ def test_explicit_backend_port_remains_strict():
     assert launcher_main._requested_port(args.port) == 8765
 
 
+def test_windowed_launcher_does_not_configure_uvicorn_console_logging_without_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    server = launcher_main._server_for_app(app, port=43125, log_level="info")
+
+    assert server.config.log_config is None
+
+
 def test_default_launch_is_native_and_legacy_no_browser_alias_is_headless():
     assert launcher_main.build_parser().parse_args([]).headless is False
     assert launcher_main.build_parser().parse_args(["--headless"]).headless is True
@@ -54,7 +65,11 @@ def test_native_window_uses_private_isolated_edge_webview(
 ):
     webview_settings: dict[str, object] = {}
     closed = SimpleNamespace(is_set=lambda: False)
-    window = SimpleNamespace(events=SimpleNamespace(closed=closed))
+    loaded_urls: list[str] = []
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=closed),
+        load_url=loaded_urls.append,
+    )
     calls: dict[str, object] = {}
 
     class FakeWebview:
@@ -110,6 +125,7 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["private_mode"] is True
     assert calls["start"]["storage_path"] == str(storage)
     assert calls["start"]["icon"] == str(icon)
+    assert loaded_urls == ["http://127.0.0.1:8765"]
     assert dark_title_bar_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex"}]
     assert webview_settings["ALLOW_DOWNLOADS"] is False
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True

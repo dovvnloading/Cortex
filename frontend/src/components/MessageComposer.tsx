@@ -195,13 +195,16 @@ export function MessageComposer({
           />
 
           <div className="composer-utility-row">
-            <LocalModelMenu
-              models={localModels}
-              selectedModel={selectedModel}
-              onSelect={onSelectModel}
-              onRescan={onRescanModels}
-              disabled={phase !== "ready" || modelBusy}
-            />
+            <span className="composer-local-badge">LOCAL ENGINE</span>
+            <div className="composer-model-control">
+              <LocalModelMenu
+                models={localModels}
+                selectedModel={selectedModel}
+                onSelect={onSelectModel}
+                onRescan={onRescanModels}
+                disabled={phase !== "ready" || modelBusy}
+              />
+            </div>
             <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true">
               {status}
             </span>

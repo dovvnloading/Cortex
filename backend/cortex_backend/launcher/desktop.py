@@ -82,6 +82,13 @@ def run_desktop_window(
 
     def after_start() -> None:
         try:
+            # WebView2 can briefly restore the last in-memory surface before it
+            # processes the URL supplied to ``create_window``. Re-issue Cortex's
+            # one-time loopback URL after the owned window is initialized so a
+            # native launch never depends on a manual browser refresh.
+            load_url = getattr(window, "load_url", None)
+            if callable(load_url):
+                load_url(config.url)
             # pywebview 6 exposes ``renderer`` on its module. Older compatible
             # installations used by Visual Studio do not, but still select
             # EdgeChromium when the checked WebView2 Runtime is present.

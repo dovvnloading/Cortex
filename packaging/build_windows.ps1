@@ -17,7 +17,14 @@ if (-not $SkipDependencyInstall) {
 
 & (Join-Path $PSScriptRoot "prepare_webview2.ps1")
 python main.py --build-frontend
+if ($LASTEXITCODE -ne 0) {
+    throw "Cortex frontend build failed; refusing to package a stale bundle."
+}
+
 python -m PyInstaller --noconfirm --clean packaging/Cortex.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed to produce the Cortex Windows package."
+}
 
 $executable = Join-Path (Get-Location) "dist\Cortex\Cortex.exe"
 if (-not (Test-Path -LiteralPath $executable)) {

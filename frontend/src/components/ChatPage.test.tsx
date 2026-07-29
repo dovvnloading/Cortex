@@ -61,6 +61,16 @@ function renderChat(api: CortexApi, threadId = "thread-a") {
 describe("ChatPage composer integration", () => {
   afterEach(() => window.sessionStorage.clear());
 
+  it("turns a blank conversation into a useful starting surface", async () => {
+    const user = userEvent.setup();
+    renderChat(chatApi());
+
+    await screen.findByRole("heading", { name: "New thread" });
+    await user.click(screen.getByRole("button", { name: /Think through a decision/i }));
+
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("Help me think through a decision step by step.");
+  });
+
   it("retains the exact draft if generation acceptance fails", async () => {
     const user = userEvent.setup();
     const api = chatApi({ generate: vi.fn().mockRejectedValue(new ApiError(503, "Local runtime is unavailable.")) });
