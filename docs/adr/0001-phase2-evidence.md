@@ -7,6 +7,7 @@
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
 - **Worker ADR:** [Phase 2 fixed recipe worker protocol and package boundary](0001-phase2-worker-protocol.md)
 - **Release ADR:** [Phase 2 release and lifecycle health preflight](0001-phase2-release-lifecycle-gate.md)
+- **Qualification ADR:** [Phase 2 packaged worker release qualification](0001-phase2-worker-release-qualification.md)
 
 ## Stage checklist
 
@@ -28,6 +29,7 @@
 | Deterministic artifact security review | **Complete (qualification-only)** | `artifact_security_review.py --json --strict` passed the fixed 12-case disposable corpus (`artifact-boundary-review.v1`, digest `a748cc9f0a514c8d`): owner/path binding, link/hardlink rejection, active/non-finite content, exact claims/quarantine, rollback, and repository size integrity. Missing link primitives remain blocked. |
 | Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. Provider launch remains disabled pending external review and lifecycle wiring. |
 | Release/lifecycle health preflight | **Complete (fail-closed composition)** | `RecipeRuntimeReleaseGate` rechecks the active signed worker, requires the reviewed native process factory and live broker binder, and requires an explicit external-review result in a fixed order. It performs no launch, broker bind, provider load, or lifecycle mutation; missing review or production package state remains blocked. |
+| Packaged worker release qualification | **Complete (CI qualification-only)** | Quality CI builds the unsigned fixed one-folder worker, signs it only with an in-memory ephemeral key, installs/reverifies the immutable generation, and runs the live AppContainer/Job Object/broker/hostile/cancellation corpus with bounded 15/20-minute steps. Production trust material and provider enablement remain excluded. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
@@ -249,3 +251,12 @@ that no process, broker, provider, or lifecycle method is called by the prefligh
 The result remains blocked without an approved external-review record and a
 production-installed signed generation; this stage adds composition only and does
 not authorize provider launch.
+
+**Packaged worker release qualification result (2026-07-29):** A fresh local
+Windows one-folder build completed successfully, and the strict disposable
+end-to-end corpus passed all four cases: fixed transform, truncated-PNG hostile
+decoder rejection, active-SVG hostile decoder rejection, and in-flight
+cancellation acknowledgement. The run used only an in-memory ephemeral signing
+key and temporary installer store; no production trust material or provider
+lifecycle route was touched. Quality CI now repeats this corpus with bounded
+15-minute build and 20-minute qualification steps.

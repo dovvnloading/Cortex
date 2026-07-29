@@ -980,7 +980,10 @@ qualification closes the deterministic accounting and watchdog-control portion.
 The same day's `RecipeRuntimeReleaseGate` adds the fail-closed composition
 preflight for signed-worker provenance, native adapter presence, and explicit
 external-review evidence; external review approval, signed production package
-installation, and production lifecycle health remain open.
+installation, and production lifecycle health remain open. Quality CI now also
+builds the fixed worker and runs the disposable signed/AppContainer/broker,
+hostile-decoder, and cancellation corpus with bounded timeouts; this is
+qualification evidence only and does not supply production trust material.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 
