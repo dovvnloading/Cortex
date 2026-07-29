@@ -277,3 +277,9 @@ provider or lifecycle enablement. Thirteen adversarial tests passed, covering
 signature/tamper handling, independent review-key trust, freshness, exact release
 binding, size/schema bounds, and redacted failures. Production review evidence,
 trust roots, and signed package material remain intentionally external.
+
+**External review attestation CI verification (2026-07-29):** [Quality run
+30447055070](https://github.com/dovvnloading/Cortex/actions/runs/30447055070)
+([test job 90559898879](https://github.com/dovvnloading/Cortex/actions/runs/30447055070/job/90559898879))
+passed on commit `4b20fea`, including the full Python/frontend matrix, strict
+attestation tests, packaged-worker build, and disposable Windows qualification.
