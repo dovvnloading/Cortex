@@ -195,7 +195,6 @@ export function MessageComposer({
           />
 
           <div className="composer-utility-row">
-            <span className="composer-local-badge">LOCAL ENGINE</span>
             <div className="composer-model-control">
               <LocalModelMenu
                 models={localModels}
@@ -205,10 +204,12 @@ export function MessageComposer({
                 disabled={phase !== "ready" || modelBusy}
               />
             </div>
-            <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true">
-              {status}
+            <span className="composer-meta">
+              <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true">
+                {status}
+              </span>
+              {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} characters left</span>}
             </span>
-            {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} characters left</span>}
           </div>
 
           {isGenerating ? (
@@ -224,7 +225,7 @@ export function MessageComposer({
             </button>
           ) : (
             <button
-              className="composer-primary-control"
+              className={`composer-primary-control${canSubmit ? " composer-primary-control-ready" : ""}`}
               type="submit"
               aria-label={phase === "starting" ? "Starting response" : "Send message"}
               title={phase === "starting" ? "Starting response" : "Send message"}
