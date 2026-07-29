@@ -48,6 +48,13 @@ function ComposerHarness({
 }
 
 describe("MessageComposer", () => {
+  it("keeps the utility row quiet and model-focused", () => {
+    render(<ComposerHarness />);
+
+    expect(screen.queryByText("LOCAL ENGINE")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Selected local model: local-chat:7b" })).toBeVisible();
+  });
+
   it("submits once with Enter and clears only after acceptance", async () => {
     const user = userEvent.setup();
     const request = deferred<boolean>();
