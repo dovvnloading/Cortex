@@ -1,6 +1,6 @@
 # Cortex UI modernization audit
 
-**Status:** UI modernization implementation complete for this slice; dedicated image-editor affordances removed; native package rebuilt and startup-verified
+**Status:** UI modernization follow-up complete; dedicated image-editor affordances and preset prompt cards removed; native package rebuilt and startup-verified
 **Scope:** Every user-facing frontend surface, not a cosmetic theme pass
 
 ## What was audited
@@ -18,7 +18,7 @@ primary problems were structural:
 | Area | Finding | Modernization outcome |
 | --- | --- | --- |
 | Workspace shell | The top bar conveyed almost no context and the sidebar was a loose list of text. | A clear workspace header, local-runtime status, product identity, conversation count, and a deliberate sidebar footer establish hierarchy. |
-| Conversation canvas | A new chat opened into a large, empty dark region. | A compact new-thread orientation gives the canvas a clear starting point without turning it into a marketing screen. |
+| Conversation canvas | A new chat opened into a large, empty dark region, then introduced generic preset prompts. | A quiet new-thread orientation gives the canvas context while leaving the user in control of the first message. |
 | Composer | The input was visually stranded in a full-width bottom strip. | The composer is now a centered, elevated input island with integrated local-model context, state feedback, and responsive sizing. |
 | Conversation controls | Saved chats, rename, and delete controls had weak grouping and feedback. | The list uses active/hover/focus states, reveal-on-focus actions, and purposeful confirmation dialogs. |
 | Settings and submenus | Settings read as a large collection of unrelated boxes. | Text-led categories, descriptive labels, and a unified detail pane make settings read like a native control surface. |
@@ -53,7 +53,8 @@ opaque background service.
   runtime state, conversation navigation, and better destructive-action dialogs.
 - `frontend/src/components/ChatPage.tsx` adds the intentional blank-chat launch
   surface and docks the composer as part of the conversation canvas. It does
-  not advertise image transformation or image generation.
+  not advertise image transformation, image generation, or preset prompt
+  suggestions.
 - `frontend/src/components/MessageComposer.tsx` integrates local-model context
   into the composer island.
 - `frontend/src/components/SettingsPanel.tsx` turns settings into a structured
@@ -77,7 +78,7 @@ This slice passed the release checks: 44 component tests in a single worker,
 6 browser-level flows, typecheck, lint, production build, a fresh Windows
 package build, and a packaged launch with `GET /api/v1/health/ready` returning
 HTTP 200. The production bundle contains no dedicated image-transform UI
-labels or selectors.
+labels or selectors, and no preset starter-card selectors or labels.
 
 During the audit, the existing packaged executable exposed a separate native
 startup defect: Uvicorn's default console formatter dereferenced `sys.stderr`

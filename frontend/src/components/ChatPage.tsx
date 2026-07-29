@@ -391,16 +391,6 @@ export function ChatPage({
             <p>
               Ask a question or check a calculation using the model on this device.
             </p>
-            <div className="chat-starter-list">
-              <button type="button" onClick={() => updateDraft("Help me think through a decision step by step.")}>
-                <span className="chat-starter-index" aria-hidden="true">01</span>
-                <span><strong>Think through a decision</strong><small>Turn a rough idea into a clear plan.</small></span>
-              </button>
-              <button type="button" onClick={() => updateDraft("Calculate and explain: ")}>
-                <span className="chat-starter-index" aria-hidden="true">02</span>
-                <span><strong>Check a calculation</strong><small>Work through a result with local computation.</small></span>
-              </button>
-            </div>
             {selectedModel && <span className="chat-welcome-model">{selectedModel}</span>}
           </section>
         )}
