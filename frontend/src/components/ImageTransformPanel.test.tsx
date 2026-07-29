@@ -20,7 +20,9 @@ describe("ImageTransformPanel", () => {
         status: "succeeded",
         result: { artifact_id: "result-artifact", mime_type: "image/png" },
       }),
-      downloadExecutionArtifact: vi.fn().mockResolvedValue(new Response(new Blob(["image"]), { status: 200 })),
+      downloadExecutionArtifact: vi.fn().mockResolvedValue({
+        blob: vi.fn().mockResolvedValue(new Blob(["image"], { type: "image/png" })),
+      } as unknown as Response),
     } as unknown as CortexApi;
 
     render(<ImageTransformPanel api={api} available />);
