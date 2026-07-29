@@ -968,8 +968,9 @@ lifecycle health must pass before any provider is enabled.
 
 The 2026-07-28 packaged qualification evidence closes the hostile decoder corpus,
 signed provenance, broker identity, and in-flight cancellation portions of this
-gate. Parser fuzzing, artifact security review, resource/watchdog accounting,
-external review, and production lifecycle health remain open.
+gate. The 2026-07-28 parser qualification also closes the deterministic parser-
+fuzzing portion. Artifact security review, resource/watchdog accounting, external
+review, and production lifecycle health remain open.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

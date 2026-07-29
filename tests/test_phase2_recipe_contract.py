@@ -180,3 +180,15 @@ def test_check_tolerance_is_only_available_for_is_close():
                 "tolerance": 0.1,
             }
         )
+
+    with pytest.raises(RecipeValidationError) as missing_tolerance:
+        parse_check(
+            {
+                "schema_version": "check.v1",
+                "operation": "is_close",
+                "left": "1",
+                "right": "1",
+                "tolerance": None,
+            }
+        )
+    assert missing_tolerance.value.code == "invalid_check"
