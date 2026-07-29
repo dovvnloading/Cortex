@@ -150,9 +150,9 @@ probe is Windows-only, bounded, redacted, and has no host-process fallback.
 
 ## Next stage
 
-The coordinator implementation and hosted Quality CI gates are complete. The
-immediate remaining action is review/merge of PR #64. Any follow-on Phase 3
-arbitrary-code profile requires its own ADR and qualification gates; this
-API/coordinator contract must remain default-off. No external reviewer or
-production key is required for the open-source qualification path; production
-trust remains optional release hardening.
+The coordinator implementation and hosted Quality CI gates are complete, and PR
+#64 is merged. The next product stage is a normal user-facing recipe flow; this
+API/coordinator contract remains qualification-only until that flow is reviewed.
+Any follow-on scratch-compute profile needs focused capability and safety tests,
+but it does not need an external reviewer or production key for the open-source
+qualification path. Production trust remains optional release hardening.

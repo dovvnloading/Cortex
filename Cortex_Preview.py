@@ -42,11 +42,16 @@ def build_preview_app(
     frontend_dist: Path | None = None,
     serve_frontend: bool = True,
     handoff_secret: str | None = None,
-    execution_profile: str | None = None,
+    execution_profile: str | None = "local",
     qualification: QualificationLifecycleConfig | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
 ):
-    """Build the local web application without starting a server."""
+    """Build the local web application without starting a server.
+
+    Source and packaged launches select the checked-in ``local`` execution
+    profile. Pass ``execution_profile="disabled"`` for a chat-only preview or
+    inject a lifecycle explicitly for qualification tests.
+    """
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
     execution_repository = ExecutionRepository(
         paths.execution_database,

@@ -6,6 +6,7 @@ import { displayChatTitle } from "../lib/chatTitle";
 import { composerDraftKey, readComposerDraft, writeComposerDraft } from "../lib/composerDraft";
 import { humanizeGenerationStatus } from "../lib/generationStatus";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
+import { ImageTransformPanel } from "./ImageTransformPanel";
 import { SafeMarkdown } from "./SafeMarkdown";
 
 type Props = {
@@ -16,6 +17,8 @@ type Props = {
   localModels: readonly string[];
   selectedModel: string | null;
   modelBusy: boolean;
+  imageTransformAvailable?: boolean;
+  onSessionExpired?: () => void;
   onSelectModel: (model: string) => Promise<boolean>;
   onRescanModels: () => Promise<void>;
   onThreadCreated: (threadId: string) => void;
@@ -44,6 +47,8 @@ export function ChatPage({
   localModels,
   selectedModel,
   modelBusy,
+  imageTransformAvailable = false,
+  onSessionExpired,
   onSelectModel,
   onRescanModels,
   onThreadCreated,
@@ -409,6 +414,7 @@ export function ChatPage({
       </div>
       <div className="input-container">
         {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}>Jump to latest</button>}
+        <ImageTransformPanel api={api} available={imageTransformAvailable} onSessionExpired={onSessionExpired} />
         <MessageComposer
           value={draft}
           phase={composerPhase}

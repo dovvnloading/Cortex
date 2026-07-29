@@ -448,6 +448,9 @@
           "appearance": {
             "$ref": "#/components/schemas/AppearanceSettings"
           },
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionSettings"
+          },
           "generation": {
             "$ref": "#/components/schemas/GenerationSettings"
           },
@@ -788,6 +791,19 @@
           "status"
         ],
         "title": "ExecutionSSEEvent",
+        "type": "object"
+      },
+      "ExecutionSettings": {
+        "additionalProperties": false,
+        "description": "Small, user-visible controls for the bounded local execution tools.",
+        "properties": {
+          "automatic_compute": {
+            "default": true,
+            "title": "Automatic Compute",
+            "type": "boolean"
+          }
+        },
+        "title": "ExecutionSettings",
         "type": "object"
       },
       "ExecutionStatusResponse": {
@@ -1948,6 +1964,74 @@
         "title": "SSEEvent",
         "type": "object"
       },
+      "ScratchComputeAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "profile": {
+            "const": "scratch.auto.v1",
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence"
+        ],
+        "title": "ScratchComputeAccepted",
+        "type": "object"
+      },
+      "ScratchComputeRequest": {
+        "additionalProperties": false,
+        "description": "One bounded expression, never Python source or a shell command.",
+        "properties": {
+          "expression": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Expression",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expression"
+        ],
+        "title": "ScratchComputeRequest",
+        "type": "object"
+      },
       "SessionExchangeRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2174,6 +2258,11 @@
             "title": "Execution Preview Available",
             "type": "boolean"
           },
+          "image_transform_available": {
+            "default": false,
+            "title": "Image Transform Available",
+            "type": "boolean"
+          },
           "ollama_host": {
             "default": "http://127.0.0.1:11434",
             "title": "Ollama Host",
@@ -2187,6 +2276,11 @@
           "preview": {
             "default": true,
             "title": "Preview",
+            "type": "boolean"
+          },
+          "scratch_compute_available": {
+            "default": false,
+            "title": "Scratch Compute Available",
             "type": "boolean"
           },
           "session_required": {
@@ -2619,6 +2713,44 @@
         "summary": "Diagnostics"
       }
     },
+    "/api/v1/execution/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Return one owner-scoped, integrity-checked result artifact.\n\nThe UI receives bytes only after the repository re-checks retention,\nlocation, size, and digest.  Neither the artifact path nor the source\nfilename is exposed to the browser.",
+        "operationId": "download_execution_artifact_api_v1_execution_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Execution Artifact"
+      }
+    },
     "/api/v1/execution/attachments": {
       "post": {
         "description": "Stage one bounded attachment for a qualified recipe request.\n\nThe route accepts only a bounded base64 envelope.  Decoded bytes pass\nthrough the same owner-scoped artifact boundary used by recipe output;\nno caller path, filename, or executable instruction is accepted.",
@@ -2733,6 +2865,45 @@
           }
         },
         "summary": "Start Recipe Image Transform"
+      }
+    },
+    "/api/v1/execution/scratch": {
+      "post": {
+        "description": "Start one bounded calculation in the local worker profile.",
+        "operationId": "start_scratch_compute_api_v1_execution_scratch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScratchComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScratchComputeAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Scratch Compute"
       }
     },
     "/api/v1/execution/tasks": {

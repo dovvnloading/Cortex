@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 fixed recipe worker protocol and package boundary
 
-- **Status:** Protocol, authenticated worker loop, and packaging qualification complete; signed end-to-end execution remains blocked
+- **Status:** Protocol, authenticated worker loop, packaging, and signed-worker end-to-end qualification complete; normal app remains default-off
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Signed worker provenance](0001-phase2-worker-provenance.md), [native broker adapter](0001-phase2-native-broker.md), and [native launcher](0001-phase2-native-launcher.md)

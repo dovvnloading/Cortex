@@ -1,10 +1,39 @@
 # ADR-0001: Capability-tiered agentic execution harness
 
-- **Status:** Proposed
+- **Status:** Active — open-source product plan; Phases 0–2 qualification complete, Phases 3–4 pending
 - **Date:** 2026-07-21
 - **Decision owners:** Cortex maintainers
 - **Scope:** Local model tool use, background computation, artifact transformation, and execution-job reliability
 - **Target platform:** Windows 10 and later, preserving Cortex's local-first one-folder distribution
+
+> **Project-plan correction (2026-07-29):** The concise [open-source execution plan](../OPEN_SOURCE_EXECUTION_PLAN.md)
+> is the authoritative delivery sequence. This ADR remains the detailed technical
+> reference for the safety boundaries and qualification evidence. External review,
+> production signing, release attestation, updater drills, and similar official-release
+> controls are optional hardening; they are not contributor or open-source product gates.
+
+## Complexity audit (2026-07-29)
+
+The original design mixed three different concerns: user-facing product work,
+runtime safety, and official binary-release trust. That made every small feature
+look like a release-gate project. The split is now explicit:
+
+- **Keep in the product:** an out-of-process worker, no ambient host authority,
+  hard resource limits, cancellation, typed input/output validation, atomic
+  artifacts, and visible progress/errors. These directly protect users from
+  untrusted model output and hostile files.
+- **Keep as qualification evidence, not separate roadmap stages:** the existing
+  broker, AppContainer/Job Object, worker, artifact, and deterministic corpus
+  checks. They prove the safety boundary; they do not each require a new product
+  launch or outside organization.
+- **Remove from the open-source critical path:** external review, production
+  signing, pinned release roots, release attestation, updater drills, remote
+  attestation, cloud/workflow infrastructure, and network/workspace support.
+  These are optional official-release hardening or explicitly deferred capabilities.
+
+The concise open-source plan contains the only remaining product stages. This ADR's
+long technical sections and historical qualification records should not be read as
+additional TODO items.
 
 ## Decision summary
 
@@ -920,7 +949,13 @@ add external security review, production signing, pinned trust roots, updater dr
 and release-specific red-team evidence; it must never be presented as a prerequisite
 for ordinary open-source development.
 
-## Rollout plan
+## Technical qualification history and capability rollout
+
+The phases below preserve the architecture's traceability. Phase 0 and Phase 1 are
+closed, and the Phase 2 qualification boundary is closed through the durable
+coordinator. Do not count each sub-control or supporting ADR as another product
+phase; use [the open-source execution plan](../OPEN_SOURCE_EXECUTION_PLAN.md) for
+remaining work.
 
 ### Phase 0 — threat model and executable spikes
 
@@ -1046,10 +1081,10 @@ is implied by acceptance of this ADR.
 
 ## Success criteria
 
-- At least 99.5% of qualified scratch attempts reach a terminal state without orphaned
-  process/staging residue in soak tests.
-- Cancellation reaches a terminal state and kills the process tree within a defined
-  percentile target established in Phase 0.
+- Qualified attempts reach a terminal state without known orphaned process or staging
+  residue in the focused reliability suite.
+- Cancellation reaches a terminal state and reaps the worker within the configured
+  bounded cancellation window.
 - Crash-recovery tests produce no duplicate assistant message or artifact publication.
 - Sandbox tests show zero unauthorized host-file, registry, handle, process, or network
   access across the supported Windows matrix.

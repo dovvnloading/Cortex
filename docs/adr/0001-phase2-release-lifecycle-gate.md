@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 release and lifecycle health preflight
 
-- **Status:** Optional official-release preflight and explicit local qualification composition implemented and verified; recipe request execution remains separate
+- **Status:** Optional official-release preflight and explicit local qualification composition implemented and verified; recipe request execution is a separate product-integration surface
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [signed worker provenance](0001-phase2-worker-provenance.md), [native launcher](0001-phase2-native-launcher.md), [native broker](0001-phase2-native-broker.md), and [Phase 1 lifecycle](0001-phase1-production-lifecycle.md)

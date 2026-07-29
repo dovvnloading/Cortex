@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 signed bundle installation and recovery
 
-- **Status:** Implemented and verified; provider, codec, and execution enablement remain blocked
+- **Status:** Implemented and verified as a qualification-only installation boundary; normal app enablement remains a product-integration decision
 - **Parent:** [Phase 2 signed recipe manifest and rollback gate](0001-phase2-signed-manifest.md)
 - **Scope:** Verified bundle staging, atomic activation, durable keyring rotation, and explicit recovery
 

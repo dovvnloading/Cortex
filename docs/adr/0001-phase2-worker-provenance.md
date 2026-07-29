@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 signed worker provenance binding
 
-- **Status:** Storage-only worker-role verifier complete; native launch remains blocked
+- **Status:** Worker-role verifier and native-launch qualification complete; production trust material is optional release hardening
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [signed bundle installation](0001-phase2-bundle-installation.md), [signed recipe manifest](0001-phase2-signed-manifest.md), and [Windows sandbox qualification](0001-phase2-sandbox-qualification.md)

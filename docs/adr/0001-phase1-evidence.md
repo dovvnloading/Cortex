@@ -1,7 +1,7 @@
 # ADR-0001 Phase 1 evidence log
 
 - **Phase:** 1 — durable jobs, artifacts, and UI with a fake executor
-- **Status:** Production lifecycle control-plane slice complete; overall Phase 1 remains in progress
+- **Status:** Complete; the Phase 1 durable control-plane exit gate is met
 - **Scope:** Durable execution workflow only; no model-generated code, guest
   runtime, recipe provider, or host subprocess is enabled.
 - **Source decision:** [ADR-0001](0001-capability-tiered-agentic-execution-harness.md)
@@ -24,7 +24,7 @@ failures can be exhausted without executing code.
 | Task tray/accessibility/approvals | **Complete (Phase 1 slice)** | Global tray has an owner-scoped task list, polite live region, visible phase/status text, keyboard Stop action, active-work spinner, and a non-modal pending-approval card with safe reason/profile/expiry plus Allow once/Deny controls. Decisions are exact-job, owner-scoped, expiry-gated, and never launch a provider. |
 | Cancellation and recovery | **Complete (backend + startup supervisor)** | Cooperative fake cancellation, terminal cancellation, per-job lease recovery, single-instance supervisor exclusion/reclaim, startup rehydration, approval expiry, and malformed-payload fail-closed behavior are covered; process/runtime cancellation is deferred to later phases. |
 | Deterministic fake provider | **Complete (backend slice)** | `fake.v1` emits fixed prepare/progress/completion/failure/cancellation outcomes and never accepts source, paths, network, or host-process controls. |
-| Phase 1 exit gate | **Blocked** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement/UI/API, startup supervisor, and installation-principal wiring are green. Production lifecycle/recovery integration remains. |
+| Phase 1 exit gate | **Complete** | Durable backend, authenticated fake-only preview API, SSE replay, task tray, approval persistence/enforcement/UI/API, startup supervisor, installation-principal wiring, and lifecycle/recovery integration are green. Real providers remain intentionally outside the fake-executor phase. |
 
 ## Cross-check findings
 
@@ -123,6 +123,7 @@ npm.cmd test --prefix frontend -- --run
 123 tests with one pre-existing `pytest-asyncio` deprecation warning. Frontend lint,
 typecheck, production build (`tsc -b` + Vite), and all 39 component tests passed.
 Generated OpenAPI/TypeScript contracts are current and `git diff --check` passed.
-Phase 1 control-plane lifecycle/recovery is complete; provider implementation,
-broker ACL/framing, external review, and release enablement remain separate gates.
-This stage does not enable production code execution.
+Phase 1 is closed. Provider implementation and broker/worker execution belong to
+the later fixed-recipe and scratch-compute workstreams; external review, production
+signing, and official release enablement are optional hardening. This stage does not
+enable arbitrary code execution.

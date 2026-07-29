@@ -73,16 +73,16 @@ hardening, not open-source prerequisites.
 
 The trusted attachment boundary, signed/native attempt factory, and durable
 packaged-worker coordinator qualification are implemented behind the passing
-lifecycle health check. Hosted Quality run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
-passed `recipe_coordinator_e2e_qualification.py` on commit `0c7b350`; the
-immediate remaining action is review and merge. The lifecycle builder still
-intentionally does not create processes or discover artifacts. Official
-prebuilt releases may add external review and production trust as optional
-hardening.
+lifecycle health check. Merged PR #64 passed hosted Quality run
+[30467455657](https://github.com/dovvnloading/Cortex/actions/runs/30467455657),
+including `recipe_coordinator_e2e_qualification.py`. The lifecycle builder still
+intentionally does not create processes or discover artifacts. The next product
+work is wiring a normal user-facing recipe flow; official prebuilt releases may
+add external review and production trust as optional hardening.
 
 ## Verification
 
 `tests/test_phase2_recipe_contract.py` covers canonical identity, malformed and
 oversized plans, path/operation rejection, decimal determinism, division and result
 limits, explicit comparisons, and redacted failures. The full repository and
-frontend matrix remains required before this stage is merged.
+frontend matrix passed for this stage.

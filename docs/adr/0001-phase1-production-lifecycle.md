@@ -68,9 +68,8 @@ execution unavailable. Stop is idempotent for disabled or already-stopped lifecy
 ## Verification
 
 `tests/test_phase1_execution_lifecycle.py` covers disabled, health-blocked, healthy
-startup/recovery/shutdown, and redacted factory-failure paths. Existing repository,
-API, restart, approval, frontend, and Phase 0 contract tests remain required before
-this stage can be merged.
+startup/recovery/shutdown, and redacted factory-failure paths. The repository, API,
+restart, approval, frontend, and Phase 0 contract suites passed for this stage.
 
 This ADR does not authorize a production execution provider. Provider implementation,
 broker ACL/framing, staging/publish validation, external review, and release enablement

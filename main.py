@@ -400,4 +400,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # The normal local image and compute profiles use short-lived, restricted
+    # worker processes. PyInstaller requires this hand-off before it enters
+    # the desktop application's main function.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     raise SystemExit(main())

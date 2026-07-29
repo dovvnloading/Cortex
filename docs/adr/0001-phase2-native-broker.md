@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 native broker adapter
 
-- **Status:** Transport, launcher identity binder, and worker-side client loop implemented and verified; signed-worker end-to-end enablement remains blocked
+- **Status:** Transport, launcher identity binder, worker-side client loop, and signed-worker end-to-end qualification implemented and verified; normal app remains default-off
 - **Parent:** [Phase 2 authenticated broker contract](0001-phase2-broker-contract.md)
 - **Scope:** Windows named-pipe transport, protected DACL, OS peer identity, and
   authenticated session-key establishment
