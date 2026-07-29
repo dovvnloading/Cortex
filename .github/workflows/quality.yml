@@ -35,6 +35,9 @@ jobs:
       - name: Run headless tests
         run: python -m pytest
 
+      - name: Run artifact security qualification
+        run: python tools/execution_spikes/artifact_security_review.py --json --strict
+
       - name: Compile application modules
         run: python -m compileall -q main.py backend
 

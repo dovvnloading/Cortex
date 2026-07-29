@@ -89,9 +89,9 @@ handshake, normal `collect_output`, hostile decoder rejection for truncated PNG
 and active SVG bytes, and an in-flight `cancel_ack` after `input_complete`. The
 native read path polls `PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`,
 keeping the worker's cancellation reader live without starving the provider
-transform. Resource/watchdog accounting, artifact security review, external review,
-and production-lifecycle release gates remain open; parser-fuzz evidence is
-qualified below.
+transform. Resource/watchdog accounting, external review, and production-lifecycle
+release gates remain open; parser-fuzz and artifact-security evidence are qualified
+below.
 
 ## Run the typed parser fuzz qualification
 
@@ -110,7 +110,25 @@ typed models or stable redacted `RecipeValidationError` categories; unexpected
 exceptions, unbounded budgets, or canonicalization failures return exit code 2.
 The current evidence is 158 accepted payloads, 1,842 rejections, and zero
 unexpected exceptions. This closes parser-fuzz evidence only; resource/watchdog,
-artifact-security, external-review, and production-lifecycle gates remain open.
+external-review, and production-lifecycle gates remain open.
+
+## Run the artifact security review qualification
+
+The artifact review is deterministic and disposable. It uses fixed bytes and a
+temporary root to exercise the trusted copy-in/publication boundary; it never
+accepts user/model input, opens a provider, or executes a file:
+
+```powershell
+python tools/execution_spikes/artifact_security_review.py --json
+python tools/execution_spikes/artifact_security_review.py --json --strict
+```
+
+The `artifact-boundary-review.v1` corpus has 12 cases covering owner and ADS/path
+binding, active UTF-8/UTF-16 and non-finite content, hardlink/symlink rejection,
+exact output claims, quarantine, all-or-nothing rollback, and repository stored-size
+integrity. The current evidence is 12/12 passed with corpus digest
+`a748cc9f0a514c8d`. `--strict` returns exit code `2` for any failure or for an
+unavailable required link primitive; a blocked result is not a release pass.
 
 ## What the probes prove
 

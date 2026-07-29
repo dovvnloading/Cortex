@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -37,6 +38,17 @@ _ARCHIVE_MAGICS = (
     b"Rar!\x1a\x07",
     b"7z\xbc\xaf\x27\x1c",
     b"\x1f\x8b",
+)
+_ACTIVE_TEXT_MARKERS = (
+    b"<!doctype html",
+    b"<html",
+    b"<script",
+    b"<svg",
+    b"javascript:",
+    b"[internetshortcut]",
+    b"@echo off",
+    b"powershell ",
+    b"cmd.exe ",
 )
 
 
@@ -199,13 +211,44 @@ def _reject_json_constant(_value: str) -> Any:
     raise _NonFiniteJSON("non-finite JSON number")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    """Reject exponent overflow even when JSON does not spell ``Infinity``."""
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise _NonFiniteJSON("non-finite JSON number")
+    return parsed
+
+
+def _active_text_prefixes(prefix: bytes) -> tuple[bytes, ...]:
+    """Return normalized UTF-8/UTF-16/UTF-32 prefixes for active-content checks."""
+
+    candidates = [prefix.lstrip(b"\xef\xbb\xbf \t\r\n").lower()]
+    for encoding in ("utf-32", "utf-16"):
+        try:
+            decoded = prefix.decode(encoding)
+        except UnicodeError:
+            continue
+        candidates.append(decoded.lstrip("\ufeff \t\r\n").lower().encode("utf-8"))
+    return tuple(candidates)
+
+
+def _contains_active_text(prefixes: tuple[bytes, ...]) -> bool:
+    return any(
+        any(prefix.startswith(marker) for marker in _ACTIVE_TEXT_MARKERS)
+        or b"<svg" in prefix[:1024]
+        for prefix in prefixes
+    )
+
+
 def sniff_artifact_mime(content: bytes) -> str:
     """Return a conservative MIME type or reject active/archive content."""
 
     if not isinstance(content, bytes):
         raise ArtifactBoundaryError("invalid_artifact")
     prefix = content[:4096]
-    lower = prefix.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    prefixes = _active_text_prefixes(prefix)
+    lower = prefixes[0]
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if content.startswith(b"\xff\xd8\xff"):
@@ -220,19 +263,18 @@ def sniff_artifact_mime(content: bytes) -> str:
         raise ArtifactBoundaryError("invalid_artifact")
     if any(content.startswith(magic) for magic in _ARCHIVE_MAGICS) or content[257:262] == b"ustar":
         raise ArtifactBoundaryError("invalid_artifact")
-    if (
-        lower.startswith((b"<!doctype html", b"<html", b"<script", b"<svg", b"javascript:"))
-        or b"<svg" in lower[:1024]
-    ):
-        raise ArtifactBoundaryError("invalid_artifact")
-    if lower.startswith((b"@echo off", b"powershell ", b"cmd.exe ")):
+    if _contains_active_text(prefixes):
         raise ArtifactBoundaryError("invalid_artifact")
     if _is_printable_text(content):
         try:
-            parsed = json.loads(content.decode("utf-8"), parse_constant=_reject_json_constant)
+            parsed = json.loads(
+                content.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+                parse_float=_parse_finite_json_float,
+            )
         except _NonFiniteJSON:
             raise ArtifactBoundaryError("invalid_artifact") from None
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             return "text/plain"
         if isinstance(parsed, (dict, list, str, int, float, bool)) or parsed is None:
             return "application/json"
@@ -294,6 +336,8 @@ class ArtifactBoundary:
     ) -> ExecutionArtifact:
         """Copy one explicitly granted source into the owner-scoped artifact store."""
 
+        if not isinstance(grant, ArtifactSourceGrant):
+            raise ArtifactBoundaryError("artifact_grant_invalid")
         self._validate_retention(retention_seconds)
         self._authorize_job(grant.job_id, grant.owner)
         source = grant.source_path

@@ -81,6 +81,27 @@ def test_copy_in_rejects_wrong_owner_and_alternate_data_stream_paths(tmp_path: P
     assert ads_error.value.code == "artifact_path_invalid"
 
 
+def test_copy_in_rejects_an_untyped_grant_with_a_stable_category(tmp_path: Path):
+    repository, job_id = _repository(tmp_path)
+    boundary = ArtifactBoundary(repository)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.copy_in(object())
+    assert error.value.code == "artifact_grant_invalid"
+
+
+def test_copy_in_rejects_sparse_files_before_reading_them(tmp_path: Path, monkeypatch):
+    repository, job_id = _repository(tmp_path)
+    source = tmp_path / "sparse.bin"
+    source.write_bytes(b"sparse candidate")
+    boundary = ArtifactBoundary(repository)
+    monkeypatch.setattr(boundary_module, "_is_sparse", lambda _info: True)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.copy_in(_grant(source, job_id))
+    assert error.value.code == "artifact_sparse_file"
+
+
 def test_copy_in_rejects_source_mutation_during_snapshot(tmp_path: Path, monkeypatch):
     repository, job_id = _repository(tmp_path)
     source = tmp_path / "input.txt"
@@ -173,7 +194,9 @@ def test_output_extra_file_is_quarantined_without_partial_publication(tmp_path: 
         (b"MZ\x90\x00unsafe executable", "invalid_artifact"),
         (b"PK\x03\x04archive", "invalid_artifact"),
         (b"0" * 257 + b"ustar" + b"tar", "invalid_artifact"),
+        (b"[InternetShortcut]\nURL=https://example.invalid", "invalid_artifact"),
         (b'{"value": NaN}', "invalid_artifact"),
+        (b'{"value": 1e999999}', "invalid_artifact"),
         (b"plain text", "artifact_mime_mismatch"),
     ],
 )
@@ -233,6 +256,38 @@ def test_json_non_finite_numbers_are_not_misclassified_as_text():
     with pytest.raises(ArtifactBoundaryError) as error:
         sniff_artifact_mime(b'{"value": Infinity}')
     assert error.value.code == "invalid_artifact"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff\xfe<\x00s\x00v\x00g\x00>\x00",
+        b"\xff\xfe<\x00s\x00c\x00r\x00i\x00p\x00t\x00>\x00",
+    ],
+)
+def test_active_utf16_markup_is_rejected_as_active_content(content: bytes):
+    with pytest.raises(ArtifactBoundaryError) as error:
+        sniff_artifact_mime(content)
+    assert error.value.code == "invalid_artifact"
+
+
+def test_oversized_json_integer_does_not_escape_the_mime_boundary():
+    assert sniff_artifact_mime(b'{"value": ' + b"9" * 5_000 + b"}") == "text/plain"
+
+
+def test_repository_read_rejects_database_size_tampering(tmp_path: Path):
+    repository, job_id = _repository(tmp_path)
+    source = tmp_path / "input.txt"
+    source.write_text("safe", encoding="utf-8")
+    artifact = ArtifactBoundary(repository).copy_in(_grant(source, job_id))
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_artifacts SET size = size + 1 WHERE artifact_id = ?",
+            (artifact.artifact_id,),
+        )
+
+    with pytest.raises(ExecutionRepositoryError, match="Artifact"):
+        repository.read_artifact(artifact.artifact_id)
 
 
 def test_repository_expiry_cleanup_fails_closed_for_external_database_paths(tmp_path: Path):
