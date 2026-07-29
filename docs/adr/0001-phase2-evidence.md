@@ -38,7 +38,7 @@
 | OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, watchdog tree reaping, and the durable packaged-worker coordinator run are qualified. Official-release review/signing remains optional hardening. |
 | Explicit qualification-profile lifecycle wiring | **Complete (local/CI composition; default-off in the app)** | `build_execution_lifecycle()` accepts only exact `disabled`/`qualification` selection, requires a qualification release gate, coordinator factory, and provider-health probe, and composes them in a fail-closed order. `Cortex_Preview.build_preview_app` exposes this only as an explicit injection; the normal app supplies no profile or controls. |
 | Durable recipe coordinator/request, attachment staging, and artifact publication | **Complete (qualification-only API; default-off in the app)** | `RecipeExecutionCoordinator` persists only opaque artifact IDs and canonical plan digests, enforces owner-scoped input reads and idempotency conflicts, leases/recoveries/cancels attempts, validates worker envelopes/chunks, and publishes exactly one output through `ArtifactBoundary.collect_outputs`. `POST /api/v1/execution/attachments` creates an idempotent owner-scoped `attachment.stage.v1` record through `ArtifactBoundary.stage_bytes`; `POST /api/v1/execution/recipe/image` consumes its opaque artifact ID after a ready `qualification` lifecycle. `build_native_recipe_coordinator_factory` binds a fresh signed/native launcher/broker/client attempt per job without host fallback. `tests/test_phase2_recipe_coordinator.py`, `tests/test_phase2_recipe_api.py`, `tests/test_phase2_attachment_staging.py`, `tests/test_phase2_native_recipe_attempt.py`, and `tests/test_phase2_qualification_lifecycle.py` cover the hostile, cancellation, API, native-composition, and lifecycle paths. |
-| Durable packaged-worker coordinator qualification | **Complete (local; hosted CI gate added)** | `recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300` passed on Windows using an in-memory ephemeral signing key and a disposable immutable installer generation. The single coordinator corpus staged a PNG attachment, completed a real signed/native transform, verified digest/MIME/size and atomic publication, rejected a foreign owner, expired and purged a one-second artifact, cancelled an in-flight transform with no result artifact, and verified native worker/process and temporary-root cleanup. The strict Quality workflow step runs the same gate after packaged worker release qualification; the hosted commit/job URL is recorded after this PR's CI completes. |
+| Durable packaged-worker coordinator qualification | **Complete (local + hosted CI; default-off)** | `recipe_coordinator_e2e_qualification.py --json --strict --timeout-seconds 300` passed on Windows using an in-memory ephemeral signing key and a disposable immutable installer generation. The single coordinator corpus staged a PNG attachment, completed a real signed/native transform, verified digest/MIME/size and atomic publication, rejected a foreign owner, expired and purged a one-second artifact, cancelled an in-flight transform with no result artifact, and verified native worker/process and temporary-root cleanup. Quality run [30466500094](https://github.com/dovvnloading/Cortex/actions/runs/30466500094), job [90625483750](https://github.com/dovvnloading/Cortex/actions/runs/30466500094/job/90625483750), passed on commit `d9cab42` in 4m11s after the packaged worker release qualification. |
 
 ## Security invariants
 
@@ -333,8 +333,8 @@ the explicit coordinator helper requires a reviewed process-factory injection
 and creates no process during configuration. Focused verification passed 52
 tests across artifact boundary, attachment staging, native composition, API,
 and launcher suites; the qualification route remains unavailable in the normal
-default-off app. The next evidence step is hosted Quality CI verification of the
-durable packaged-worker coordinator gate.
+default-off app. Hosted Quality CI verification of the durable packaged-worker
+coordinator gate is complete.
 
 **Durable packaged-worker coordinator qualification result (2026-07-29):** The
 strict Windows probe
@@ -346,4 +346,6 @@ publication, rejected a foreign-owner request before worker launch, expired and
 purged a one-second attachment, cancelled an in-flight resize transform with no
 published result, and verified native process plus temporary workspace cleanup.
 The probe remains qualification-only and does not enable the normal application;
-hosted Quality CI now runs it after the packaged worker release qualification.
+hosted Quality CI run [30466500094](https://github.com/dovvnloading/Cortex/actions/runs/30466500094)
+and job [90625483750](https://github.com/dovvnloading/Cortex/actions/runs/30466500094/job/90625483750)
+passed the same gate on commit `d9cab42` in 4m11s.

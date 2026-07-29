@@ -150,9 +150,9 @@ probe is Windows-only, bounded, redacted, and has no host-process fallback.
 
 ## Next stage
 
-The coordinator implementation gate is complete. The immediate next stage is
-hosted Quality CI verification of the strict packaged-worker coordinator probe,
-followed by review/merge of the stacked PR. That stage must preserve this
-API/coordinator contract and keep the normal application default-off. No
-external reviewer or production key is required for the open-source
-qualification path; production trust remains optional release hardening.
+The coordinator implementation and hosted Quality CI gates are complete. The
+immediate remaining action is review/merge of PR #64. Any follow-on Phase 3
+arbitrary-code profile requires its own ADR and qualification gates; this
+API/coordinator contract must remain default-off. No external reviewer or
+production key is required for the open-source qualification path; production
+trust remains optional release hardening.

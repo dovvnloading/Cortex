@@ -91,6 +91,8 @@ packaged worker release qualification.
 
 ## Next stage
 
-Run the hosted Quality CI job on the stacked PR and record its immutable commit
-and job URL in the Phase 2 evidence log. The application remains disabled unless
-an explicit caller injects a ready qualification profile.
+Hosted Quality CI run [30466500094](https://github.com/dovvnloading/Cortex/actions/runs/30466500094)
+and job [90625483750](https://github.com/dovvnloading/Cortex/actions/runs/30466500094/job/90625483750)
+passed the coordinator gate on commit `d9cab42`. The immediate remaining action
+is review/merge of PR #64; the application remains disabled unless an explicit
+caller injects a ready qualification profile.

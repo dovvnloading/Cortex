@@ -73,9 +73,10 @@ hardening, not open-source prerequisites.
 
 The trusted attachment boundary, signed/native attempt factory, and durable
 packaged-worker coordinator qualification are implemented behind the passing
-lifecycle health check. The immediate remaining gate is hosted Quality CI
-verification of `recipe_coordinator_e2e_qualification.py`; the lifecycle builder
-still intentionally does not create processes or discover artifacts. Official
+lifecycle health check. Hosted Quality run [30466500094](https://github.com/dovvnloading/Cortex/actions/runs/30466500094)
+passed `recipe_coordinator_e2e_qualification.py` on commit `d9cab42`; the
+immediate remaining action is review and merge. The lifecycle builder still
+intentionally does not create processes or discover artifacts. Official
 prebuilt releases may add external review and production trust as optional
 hardening.
 
