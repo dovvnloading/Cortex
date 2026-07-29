@@ -1,16 +1,22 @@
 # ADR-0001 Phase 2 release and lifecycle health preflight
 
-- **Status:** Preflight implemented and verified; provider release remains blocked
+- **Status:** Optional official-release preflight implemented and verified; open-source qualification is a separate track
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [signed worker provenance](0001-phase2-worker-provenance.md), [native launcher](0001-phase2-native-launcher.md), [native broker](0001-phase2-native-broker.md), and [Phase 1 lifecycle](0001-phase1-production-lifecycle.md)
-- **Scope:** Read-only composition of mandatory release controls for a future lifecycle health callback
+- **Scope:** Read-only composition of optional official-release controls for a future lifecycle health callback
+
+This ADR governs a maintainer-controlled official release profile. It is not a
+requirement for cloning the repository, running the tests, building the worker, or
+using a future explicit local/qualification profile with disposable signing material.
+The normal source checkout remains default-off until that profile is deliberately
+wired and documented.
 
 ## Decision
 
-`RecipeRuntimeReleaseGate` is the single preflight boundary that a future
+`RecipeRuntimeReleaseGate` is the single preflight boundary that an official
 `ExecutionLifecycle` integration may use for Phase 2 runtime health. It evaluates
-mandatory controls in a fixed order:
+the official-release controls in a fixed order:
 
 1. the process must be running on the supported Windows boundary;
 2. `verify_active_worker()` must re-check the installer-selected immutable
@@ -18,8 +24,16 @@ mandatory controls in a fixed order:
    `recipe_worker.exe` role;
 3. a reviewed native suspended-process factory must be configured;
 4. a live broker identity binder must be configured; and
-5. an explicit external security-review probe must return an available,
-   bounded `RuntimeHealth` result.
+5. when the official release policy requires it, an explicit external
+   security-review probe must return an available, bounded `RuntimeHealth` result.
+
+The gate defaults to `release_profile="official"`, which requires the external
+review callback. An explicit `release_profile="qualification"` is available for
+local/CI development after the sandbox controls pass; it records
+`qualification_profile` and intentionally does not require outside review or
+production trust material. The qualification profile is not an implicit provider
+enablement and the application remains default-off until a separate explicit
+lifecycle wiring change.
 
 The result is a `ReleaseGateSnapshot` containing only safe check names, stable
 codes, and a `RuntimeHealth`. Missing or invalid controls return a blocked result
@@ -36,12 +50,12 @@ provider or make a review claim trustworthy.
 ## External-review contract
 
 The external-review callback is deliberately injected rather than inferred from
-local files or a boolean build flag. A production caller must verify an
+local files or a boolean build flag. An official-release caller may verify an
 out-of-band review record against the release commit, package digest, native
 launcher scope, and current threat model before returning `RuntimeHealth.ready()`.
-Until that verifier exists and an approved review record is available, the gate
-returns `external_review_required` or `external_review_unavailable` and the
-provider remains absent from the API.
+If that optional policy is selected without an approved review record, the gate
+returns `external_review_required` or `external_review_unavailable`; this affects
+that official profile only, not local qualification.
 
 The concrete verification contract is defined by the companion [external
 release-review attestation ADR](0001-phase2-external-review-attestation.md).
@@ -90,6 +104,7 @@ invalid/exceptional review redaction, and the all-controls-ready snapshot. The
 preflight tests use disposable signed fixtures and assert that process and broker
 methods are never called.
 
-This stage closes the composition/preflight implementation gate. It does not close
-the external security review, signed production package installation, real-worker
-resource-enforcement, or provider lifecycle enablement gates.
+This stage closes the optional official-release composition/preflight implementation
+gate. It does not force an external review or signed production package onto the
+open-source development path. A maintainer choosing official release hardening must
+still supply those materials and make a separate lifecycle-enable change.

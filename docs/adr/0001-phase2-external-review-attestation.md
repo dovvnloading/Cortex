@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 external release-review attestation
 
-- **Status:** Verification contract implemented; production approval remains external
+- **Status:** Optional official-release hardening implemented; not required for open-source qualification
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Phase 2 release and lifecycle health preflight](0001-phase2-release-lifecycle-gate.md)
 - **Depends on:** [packaged worker release qualification](0001-phase2-worker-release-qualification.md)
@@ -47,14 +47,14 @@ The verifier fails closed when any rule is violated:
 
 ## Release interpretation
 
-This ADR makes the external-review boundary implementable and testable; it is not
-an approval record. No production review payload, review private key, worker
-private key, public trust root, or signed generation is committed. A production
-caller must obtain the out-of-band review record, verify it against the exact
-release commit/package/launcher/threat-model target, and supply the independently
-pinned review key root. The provider remains absent until that review, the signed
-production installation, real-worker resource enforcement, and the separate
-`ExecutionLifecycle` enablement change all pass.
+This ADR makes the optional official-release boundary implementable and testable;
+it is not an approval record. No production review payload, review private key,
+worker private key, public trust root, or signed generation is committed. A
+maintainer distributing an official prebuilt release may obtain the out-of-band
+review record, verify it against the exact release commit/package/launcher/
+threat-model target, and supply the independently pinned review key root. None of
+that is required to clone the repository, run tests, build the worker, or use the
+explicit `release_profile="qualification"` path with disposable signing material.
 
 ## Verification
 

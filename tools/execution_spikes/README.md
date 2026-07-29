@@ -40,14 +40,18 @@ python tools/execution_spikes/native_launcher_qualification.py
 The expected result at this stage is `qualification_status=blocked`: the native
 AppContainer and Job Object controls may pass, but the signed `recipe_worker.exe`
 bundle is not shipped yet. A blocked worker-provenance check is intentional and
-must remain blocking until trust-root verification, native worker identity, and
-real-worker lifecycle enforcement are implemented.
+must remain blocking for this isolated probe until trust-root verification, native
+worker identity, and real-worker lifecycle enforcement are implemented. The strict
+packaged-worker qualification is the separate open-source evidence path; official
+trust roots and external review are optional release hardening.
 
 The native launcher qualification prints a passing resource-policy subcheck when
 the fixed suspended child receives and reports Job Object CPU/memory/active-process
-limits with no breakaway flags. Its overall exit remains blocked until the signed
-worker package is installed and the worker completes the live authenticated broker
-handshake; launcher-side PID/AppContainer binding is now implemented separately.
+limits with no breakaway flags. Its overall exit remains blocked for this isolated
+probe until the signed worker package is installed and the worker completes the live
+authenticated broker handshake; launcher-side PID/AppContainer binding is now
+implemented separately. This does not block the dedicated packaged qualification
+workflow or the planned explicit local qualification profile.
 
 The fixed worker protocol/package boundary can be qualified separately on Windows:
 
@@ -97,8 +101,9 @@ and active SVG bytes, and an in-flight `cancel_ack` after `input_complete`. The
 native read path polls `PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`,
 keeping the worker's cancellation reader live without starving the provider
 transform. Resource/watchdog accounting is qualified by the fixed corpus below;
-external review and production-lifecycle release gates remain open. Parser-fuzz
-and artifact-security evidence are qualified below.
+the open-source qualification track is ready for its explicit lifecycle-wiring
+slice. External review and production signing are optional official-release
+hardening. Parser-fuzz and artifact-security evidence are qualified below.
 
 ## Run the resource/watchdog accounting qualification
 
@@ -118,15 +123,18 @@ The current `resource-watchdog.v1` evidence passes all 15 cases (digest
 regression, stable CPU/memory/input/output/console/observation/message limits,
 missing-memory fail-closed behavior, actual Job Object accounting, and full-tree
 reaping. This is
-qualification-only evidence; signed-worker enforcement, external review, and
-production lifecycle wiring remain blocked.
+qualification-only evidence; explicit qualification-profile lifecycle wiring is
+the next core implementation slice. External review and production signing are
+optional official-release hardening.
 
 The release/lifecycle composition preflight is covered by the backend boundary
 `RecipeRuntimeReleaseGate` and `tests/test_phase2_release_gate.py`. It is a
-read-only health callback candidate: it rechecks active worker provenance,
-requires the native process-factory and broker-binder shapes, and requires an
-explicit external-review result. It never starts a process or enables a provider;
-without an approved review record it remains blocked.
+read-only health callback candidate for the official release profile: it rechecks
+active worker provenance, requires the native process-factory and broker-binder
+shapes, and requires an explicit external-review result. It never starts a process
+or enables a provider. Local/CI development can explicitly select
+`release_profile="qualification"` after the same sandbox controls pass; that profile
+does not require an outside review or production trust material.
 
 The external-review result can be supplied by `ReleaseReviewProbe` from
 `cortex_backend.execution.release_attestation`. It verifies a bounded
@@ -134,7 +142,7 @@ The external-review result can be supplied by `ReleaseReviewProbe` from
 review key root and an exact release target (commit, bundle digest, worker key,
 launcher scope, and threat-model version). The verifier performs no I/O or
 lifecycle mutation; production review evidence and trust material remain
-out-of-band.
+out-of-band and are optional official-release hardening.
 
 ## Run the typed parser fuzz qualification
 
@@ -152,8 +160,8 @@ control/unicode text, and invalid optional values. A green result requires only
 typed models or stable redacted `RecipeValidationError` categories; unexpected
 exceptions, unbounded budgets, or canonicalization failures return exit code 2.
 The current evidence is 158 accepted payloads, 1,842 rejections, and zero
-unexpected exceptions. This closes parser-fuzz evidence only; resource/watchdog,
-external-review, and production-lifecycle gates remain open.
+unexpected exceptions. This closes parser-fuzz evidence only; explicit
+qualification-profile lifecycle wiring remains the next core slice.
 
 ## Run the artifact security review qualification
 
@@ -228,7 +236,8 @@ unavailable required link primitive; a blocked result is not a release pass.
 An API export check is not proof of AppContainer process isolation. The native
 helper is evidence for this disposable smoke corpus only; it is not authorized
 to launch guest runtimes or model-generated code. LPAC policy qualification,
-real-worker enforcement, and the security review remain separate release gates.
+real-worker enforcement remains part of the qualification track; security review
+is optional official-release hardening.
 
 ## Safety rules
 
@@ -240,5 +249,5 @@ real-worker enforcement, and the security review remain separate release gates.
    versions and hashes in the Phase 0 evidence log.
 5. A blocked result is safer than a green result produced by a weaker fallback.
 6. Do not add the recipe qualification harness or any worker bundle to application
-   imports, model tools, or PyInstaller hidden imports before its release gate is
-   explicitly closed.
+   imports, model tools, or PyInstaller hidden imports before the explicit
+   qualification-profile lifecycle gate is closed.

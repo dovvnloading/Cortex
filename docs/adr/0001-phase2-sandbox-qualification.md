@@ -1,10 +1,10 @@
 # ADR-0001 Phase 2 Windows recipe sandbox qualification
 
-- **Status:** Qualification harness and release/lifecycle preflight implemented; signed provider worker and release gate blocked
+- **Status:** Qualification harness and packaged worker/release preflight implemented; explicit qualification-profile lifecycle wiring remains next
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 recipe provider core](0001-phase2-recipe-provider.md), [signed bundle installation](0001-phase2-bundle-installation.md), [native broker adapter](0001-phase2-native-broker.md), and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
-- **Scope:** Disposable Windows control qualification only. No production provider or lifecycle route is enabled.
+- **Scope:** Disposable Windows control qualification only. No provider or lifecycle route is enabled by default.
 
 ## Decision
 
@@ -27,11 +27,12 @@ The harness is deliberately fail-closed and has independent checks for:
    qualified transport to a signed worker's actual PID/AppContainer token and the
    packaged worker completes the authenticated client handshake and hostile corpus.
 
-The fourth check is intentionally blocked in this stage. A directory, executable,
-self-reported digest, or unverified manifest cannot authorize a launch. The future
-implementation must verify the packaged trust root, signed manifest, every declared
-byte, worker identity, and runtime version before the native launcher is allowed to
-start the worker. Until that exists, `provider_launch_authorized` is always false.
+The worker package boundary is now qualified by the strict disposable packaged-worker
+corpus. A directory, executable, self-reported digest, or unverified manifest still
+cannot authorize a launch; every declared byte, worker identity, runtime version,
+broker identity, hostile decoder case, cancellation path, and resource/watchdog
+control must pass. The qualification result uses disposable signing material and
+does not establish an official production trust root.
 
 The harness accepts no command, source text, uploaded path, network target, or model
 input. It invokes only fixed repository helpers and fixed bytes. It is not imported
@@ -45,19 +46,19 @@ fallback.
 | AppContainer token and zero-capability denials | `appcontainer_smoke.py`, child report `recipe_appcontainer_control` | Required prerequisite; does not prove LPAC policy or provider launch identity |
 | Job Object kill-on-close and tree cancellation | `cancellation_corpus.py`, child report `recipe_cancellation_control` | Required prerequisite; the watchdog corpus proves full-tree reaping |
 | Suspended launch/resource policy | `native_launcher_qualification.py`, child report `recipe_native_launcher_policy` | Policy application/query passes for a fixed benign child; real worker enforcement/review remains open |
-| Resource/watchdog accounting | `resource_watchdog_qualification.py`, child report `recipe_resource_controls` | Immutable budgets, actual Job Object accounting, and kill-on-close reaping qualify; signed-worker enforcement and external review remain open |
+| Resource/watchdog accounting | `resource_watchdog_qualification.py`, child report `recipe_resource_controls` | Immutable budgets, actual Job Object accounting, and kill-on-close reaping qualify; official-release review/signing remains optional hardening |
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
 | Signed worker provenance | Storage-only `verify_active_worker()` role binding plus fixed package precondition | **Storage gate complete; launch remains blocked** until a packaged executable and native launcher exist |
 | Broker identity and framed IPC | Native broker transport tests and ADR | Must be bound to the actual worker PID/token before launch |
-| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `RecipeRuntimeReleaseGate` composes the mandatory health checks without mutating lifecycle state | No provider can become reachable from the application |
+| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `RecipeRuntimeReleaseGate` supports an explicit `release_profile="qualification"` without external review and an `official` profile with optional release hardening | No provider can become reachable accidentally; the next core slice is explicit qualification-profile wiring |
 
 No single green smoke result closes the gate. A missing, failed, or unverified
 control produces `blocked` or `fail`, and no weaker host-process path is attempted.
 
 ## Required future worker qualification
 
-The remaining release gate must install a signed, pinned worker bundle and run the
-existing native launcher/worker loop per attempt:
+The explicit qualification profile must install a disposable signed worker bundle and
+run the existing native launcher/worker loop per attempt:
 
 1. verifies the installed immutable generation and image-worker entrypoint;
 2. creates private staging and grants only the sandbox identity and required
@@ -72,7 +73,8 @@ existing native launcher/worker loop per attempt:
    trusted artifact boundary, and removes staging with recoverable cleanup state.
 
 If any step cannot be applied or verified, the provider remains unavailable. The
-host process must never decode the input as a fallback.
+host process must never decode the input as a fallback. Official maintainers may add
+production signing and external review as a separate release-hardening track.
 
 ## Verification performed
 
@@ -83,8 +85,9 @@ python tools/execution_spikes/recipe_sandbox_qualification.py --strict --json
 ```
 
 The AppContainer and cancellation controls passed, and the fixed decoder corpus
-passed. The overall result was intentionally `blocked` because the signed worker
-package is not shipped. This is the expected result for the current stage.
+passed. The separate strict packaged-worker qualification now passes the signed
+disposable transform, hostile decoder, cancellation, broker-identity, and cleanup
+corpus; no production trust root is required for that evidence.
 
 Regression coverage is in `tests/test_recipe_sandbox_qualification.py`, including
 missing/unsigned worker refusal, helper timeout/evidence failure, and the invariant
@@ -92,13 +95,14 @@ that a blocked worker gate never authorizes provider launch.
 
 The release/lifecycle composition stage is covered separately by
 `tests/test_phase2_release_gate.py`. It rechecks active worker provenance, requires
-both native adapter shapes and an explicit external-review result, and asserts that
+both native adapter shapes and the explicit profile behavior, and asserts that
 preflight never creates a process, binds a broker, or enables a provider.
 
 ## Consequences
 
 This stage provides reproducible evidence for the controls that already exist and
-prevents accidental false-green qualification. It does not claim signed-worker
-resource enforcement, signed runtime provenance, native worker identity, or
-production readiness. Those remain explicit blockers before the provider can be
-wired to lifecycle or exposed to any model/UI route.
+prevents accidental false-green qualification. The source checkout remains
+default-off; the next implementation slice wires the explicit qualification profile
+to lifecycle. Official production readiness, signing, and external review are
+separate optional maintainer concerns and are not prerequisites for open-source
+development.

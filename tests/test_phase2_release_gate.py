@@ -149,6 +149,15 @@ def test_external_review_is_explicit_and_fail_closed(tmp_path: Path):
     )
 
 
+def test_explicit_qualification_profile_does_not_require_external_review(tmp_path: Path):
+    snapshot = _gate(tmp_path, release_profile="qualification").check()
+
+    assert snapshot.available is True
+    assert snapshot.health.code == "ready"
+    assert snapshot.health.message == "Recipe runtime qualification controls are ready."
+    assert snapshot.checks[-1].code == "qualification_profile"
+
+
 def test_invalid_or_failing_review_is_redacted(tmp_path: Path):
     invalid = _gate(
         tmp_path / "invalid",

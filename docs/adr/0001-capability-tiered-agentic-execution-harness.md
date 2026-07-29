@@ -908,13 +908,17 @@ supported Windows versions.
 
 ### Release gates
 
-- run on every supported Windows release/architecture in CI or a controlled test pool;
-- external security review of the launcher, IPC, policy, staging, and updater before
-  arbitrary code is enabled by default;
-- sandbox escape and containment red-team exercises;
-- cold-start, memory, cancellation latency, and low-end hardware benchmarks; and
-- an operational drill for runtime disable, rollback, database migration rollback, and
-  artifact cleanup.
+The core open-source checkout and the official packaged release are separate tracks.
+The source checkout may exercise only the fixed, bounded qualification profile after
+the hostile corpus, containment tests, benchmarks, kill switch, and cleanup controls
+pass. It does not need an outside organization, production signing key, or review
+attestation to run that profile locally.
+
+Official-release hardening is optional project-maintainer work for distributing a
+trusted prebuilt package or enabling higher-risk profiles by default. That track may
+add external security review, production signing, pinned trust roots, updater drills,
+and release-specific red-team evidence; it must never be presented as a prerequisite
+for ordinary open-source development.
 
 ## Rollout plan
 
@@ -940,7 +944,10 @@ pass without executing code.
 ### Phase 2 — signed image recipes and calculator/check primitives
 
 - Keep the typed recipe, signed bundle, broker transport, and trusted artifact boundary
-  provider-independent until the sandbox qualification gate passes.
+  provider-independent until the sandbox qualification gate passes. After that gate,
+  the fixed-function provider may be exercised through an explicit local/qualification
+  profile using disposable signing material; the official packaged-release track is
+  separate.
 - The owner-bound copy-in, exact-claim output validation, quarantine, hashing, and
   atomic publication boundary is implemented. The fixed-function provider core is
   qualification-only. The disposable Windows sandbox qualification harness now
@@ -956,8 +963,8 @@ pass without executing code.
   and in-flight cancellation corpus. The deterministic artifact-security corpus now
   also qualifies owner/path binding, active-content rejection, exact claims,
   quarantine, rollback, and repository integrity without user/model input. Collect
-  opt-in aggregate reliability metrics, never content, only after the remaining
-  release gates close and the provider is sandbox-qualified. The deterministic
+  opt-in aggregate reliability metrics, never content, after the qualification
+  controls pass and the provider is sandbox-qualified. The deterministic
   resource/watchdog corpus now qualifies immutable profile budgets, monotonic
   watchdog categories, cumulative accounting rejection, actual Windows Job Object
   accounting, and kill-on-close process-tree reaping.
@@ -966,10 +973,17 @@ pass without executing code.
 worker-provenance, sandbox-qualification, and native-launcher-policy regression
 suites pass; no source overwrite is possible. The qualification harness must remain
 fail-closed when the signed worker is absent.
-**Release gate:** parser fuzzing, artifact security review, hostile decoder corpus
-executed inside the worker, OS sandbox qualification, signed provenance, broker
-identity, resource/watchdog accounting, external review, and fixed-function provider
-lifecycle health must pass before any provider is enabled.
+**Open-source qualification gate:** parser fuzzing, artifact security review, hostile
+decoder corpus executed inside the worker, OS sandbox qualification, signed
+provenance, broker identity, resource/watchdog accounting, and fixed-function
+provider lifecycle health must pass before the explicit local/qualification profile
+is enabled. This gate uses disposable signing material and does not require an
+external review or production trust root.
+
+**Optional official-release gate:** maintainers who distribute a prebuilt package or
+enable a higher-risk profile by default may additionally require external review,
+production signing, pinned trust roots, updater/rollback drills, and release-specific
+red-team evidence. Those controls are deployment hardening, not core project blockers.
 
 The 2026-07-28 packaged qualification evidence closes the hostile decoder corpus,
 signed provenance, broker identity, and in-flight cancellation portions of this
@@ -978,17 +992,16 @@ fuzzing portion. The 2026-07-28 artifact-security qualification closes the
 deterministic copy-in/publication review. The 2026-07-29 resource/watchdog
 qualification closes the deterministic accounting and watchdog-control portion.
 The same day's `RecipeRuntimeReleaseGate` adds the fail-closed composition
-preflight for signed-worker provenance, native adapter presence, and explicit
-external-review evidence; external review approval, signed production package
-installation, and production lifecycle health remain open. Quality CI now also
-builds the fixed worker and runs the disposable signed/AppContainer/broker,
-hostile-decoder, and cancellation corpus with bounded timeouts; this is
-qualification evidence only and does not supply production trust material. The
-external-review boundary now has a separate `recipe.release-review.v1` verifier
-that binds an out-of-band approval to the exact release commit, bundle digest,
-worker signer, launcher scope, and threat-model version through an independent
-pinned review key root. The verifier remains observation-only; no approval record
-or production trust material is committed.
+preflight for an official release: signed-worker provenance, native adapter
+presence, and (when maintainers choose to use it) explicit external-review evidence.
+Quality CI now builds the fixed worker and runs the disposable
+signed/AppContainer/broker, hostile-decoder, and cancellation corpus with bounded
+timeouts; this is the open-source qualification evidence and does not need
+production trust material. The next core slice is explicit lifecycle wiring for
+`release_profile="qualification"`, with the application still default-off and the
+profile documented as local/CI-only. The separate `recipe.release-review.v1`
+verifier is available as optional release hardening; it remains observation-only
+and no approval record or production trust material is committed.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 
@@ -997,8 +1010,10 @@ or production trust material is committed.
 - Keep artifacts, workspace, and network unavailable to arbitrary scratch code unless
   explicitly supported by a separately qualified profile.
 
-**Exit gate:** external review, adversarial suite, benchmark budgets, kill switch, and
-runtime update process are complete.
+**Exit gate:** adversarial suite, benchmark budgets, kill switch, and runtime update
+process are complete for the explicit open-source profile. External review and
+production signing are optional requirements only for an official prebuilt release
+or a default-on higher-risk profile.
 
 ### Phase 4 — staged artifact code profile
 
