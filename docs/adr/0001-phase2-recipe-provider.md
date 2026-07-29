@@ -126,8 +126,8 @@ Windows corpus launches the provider out of process, completes a staged
 transform, rejects a foreign owner, expires and purges a short-retention
 attachment, cancels in flight, verifies atomic publication, and proves native
 cleanup. It never falls back to a host process or in-process execution. Hosted
-Quality run [30466500094](https://github.com/dovvnloading/Cortex/actions/runs/30466500094)
-passed this gate on commit `d9cab42`; the immediate remaining action is review
+Quality run [30466976650](https://github.com/dovvnloading/Cortex/actions/runs/30466976650)
+passed this gate on commit `0c7b350`; the immediate remaining action is review
 and merge.
 External review and production signing remain optional official-release
 hardening.
