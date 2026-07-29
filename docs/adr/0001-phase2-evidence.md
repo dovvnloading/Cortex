@@ -227,7 +227,7 @@ session exposes cumulative input/output byte counters. Resource/watchdog
 qualification is complete for the fixed controls; real signed-worker enforcement,
 external review, and production lifecycle health remain open.
 
-**Resource stage verification (2026-07-29):** The full Python suite passed 288
+**Resource stage verification (2026-07-29):** The full Python suite passed 289
 tests with one expected Windows-platform skip and one pre-existing
 `pytest-asyncio` deprecation warning. The resource/watchdog strict probe passed
 15/15 cases, the artifact-security strict probe passed 12/12 cases, compileall
