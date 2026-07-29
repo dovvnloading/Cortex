@@ -8,6 +8,7 @@
 - **Worker ADR:** [Phase 2 fixed recipe worker protocol and package boundary](0001-phase2-worker-protocol.md)
 - **Release ADR:** [Phase 2 release and lifecycle health preflight](0001-phase2-release-lifecycle-gate.md)
 - **Qualification ADR:** [Phase 2 packaged worker release qualification](0001-phase2-worker-release-qualification.md)
+- **Review ADR:** [Phase 2 external release-review attestation](0001-phase2-external-review-attestation.md)
 
 ## Stage checklist
 
@@ -30,6 +31,7 @@
 | Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. Provider launch remains disabled pending external review and lifecycle wiring. |
 | Release/lifecycle health preflight | **Complete (fail-closed composition)** | `RecipeRuntimeReleaseGate` rechecks the active signed worker, requires the reviewed native process factory and live broker binder, and requires an explicit external-review result in a fixed order. It performs no launch, broker bind, provider load, or lifecycle mutation; missing review or production package state remains blocked. |
 | Packaged worker release qualification | **Complete (CI qualification-only)** | Quality CI builds the unsigned fixed one-folder worker, signs it only with an in-memory ephemeral key, installs/reverifies the immutable generation, and runs the live AppContainer/Job Object/broker/hostile/cancellation corpus with bounded 15/20-minute steps. Production trust material and provider enablement remain excluded. |
+| External release-review attestation | **Complete (verification-only)** | `recipe.release-review.v1`, an independent pinned review key root, exact release/bundle/worker-key/launcher/threat-model binding, bounded freshness, and redacted `RuntimeHealth` adaptation are implemented and adversarially tested. No production approval record or trust material is committed. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
@@ -268,3 +270,10 @@ completed successfully in 4m10s on commit `2abbd883`. It built the fixed one-fol
 passed the strict transform, hostile-decoder, cancellation, AppContainer,
 Job Object, broker-identity, provenance, and cleanup corpus using only an
 ephemeral in-memory signing key.
+
+**External review attestation contract result (2026-07-29):** The independent
+`recipe.release-review.v1` verifier and `ReleaseReviewProbe` were added without
+provider or lifecycle enablement. Thirteen adversarial tests passed, covering
+signature/tamper handling, independent review-key trust, freshness, exact release
+binding, size/schema bounds, and redacted failures. Production review evidence,
+trust roots, and signed package material remain intentionally external.

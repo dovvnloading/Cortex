@@ -43,6 +43,14 @@ Until that verifier exists and an approved review record is available, the gate
 returns `external_review_required` or `external_review_unavailable` and the
 provider remains absent from the API.
 
+The concrete verification contract is defined by the companion [external
+release-review attestation ADR](0001-phase2-external-review-attestation.md).
+`ReleaseReviewProbe` verifies a bounded `recipe.release-review.v1` payload with
+an independent pinned review key root, exact release/bundle/worker-key/launcher/
+threat-model binding, and a bounded validity window. It still supplies only a
+health callback; it does not create trust material, install a package, or enable
+the provider.
+
 ## Failure and lifecycle behavior
 
 The fixed failure order is:

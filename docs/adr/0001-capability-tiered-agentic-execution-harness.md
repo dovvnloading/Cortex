@@ -983,7 +983,12 @@ external-review evidence; external review approval, signed production package
 installation, and production lifecycle health remain open. Quality CI now also
 builds the fixed worker and runs the disposable signed/AppContainer/broker,
 hostile-decoder, and cancellation corpus with bounded timeouts; this is
-qualification evidence only and does not supply production trust material.
+qualification evidence only and does not supply production trust material. The
+external-review boundary now has a separate `recipe.release-review.v1` verifier
+that binds an out-of-band approval to the exact release commit, bundle digest,
+worker signer, launcher scope, and threat-model version through an independent
+pinned review key root. The verifier remains observation-only; no approval record
+or production trust material is committed.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

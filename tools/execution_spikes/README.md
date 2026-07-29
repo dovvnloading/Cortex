@@ -128,6 +128,14 @@ requires the native process-factory and broker-binder shapes, and requires an
 explicit external-review result. It never starts a process or enables a provider;
 without an approved review record it remains blocked.
 
+The external-review result can be supplied by `ReleaseReviewProbe` from
+`cortex_backend.execution.release_attestation`. It verifies a bounded
+`recipe.release-review.v1` Ed25519 attestation against an independently pinned
+review key root and an exact release target (commit, bundle digest, worker key,
+launcher scope, and threat-model version). The verifier performs no I/O or
+lifecycle mutation; production review evidence and trust material remain
+out-of-band.
+
 ## Run the typed parser fuzz qualification
 
 The parser probe is deterministic and bounded; it never executes a recipe or
