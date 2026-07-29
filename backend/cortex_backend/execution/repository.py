@@ -343,6 +343,60 @@ class ExecutionRepository:
             return None
         return self._job_from_row(row)
 
+    def replace_job_payload(
+        self,
+        job_id: str,
+        payload: Mapping[str, Any],
+        *,
+        expected_status: ExecutionStatus = "queued",
+    ) -> ExecutionJob:
+        """Replace a queued job payload before its first worker lease.
+
+        The payload is control-plane metadata, not an event. It is updated under
+        an immediate transaction and cannot be changed once a worker has claimed
+        the job or the job has left the expected state.
+        """
+
+        if not isinstance(payload, Mapping):
+            raise ExecutionRepositoryError("Execution payload is invalid.")
+        try:
+            encoded = json.dumps(
+                dict(payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError, OverflowError):
+            raise ExecutionRepositoryError("Execution payload is invalid.") from None
+        if len(encoded.encode("utf-8")) > MAX_EVENT_BYTES:
+            raise ExecutionRepositoryError("Execution payload is too large.")
+        if expected_status not in {"queued", "running", "cancelling"}:
+            raise ValueError("expected_status is invalid")
+        now = self._now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise ExecutionRepositoryError("Execution job does not exist.")
+            if row["status"] != expected_status:
+                raise ExecutionRepositoryError("Execution payload is no longer mutable.")
+            lease = connection.execute(
+                "SELECT 1 FROM execution_leases WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if lease is not None:
+                raise ExecutionRepositoryError("Execution payload is no longer mutable.")
+            connection.execute(
+                "UPDATE execution_jobs SET payload_json = ?, updated_at = ? WHERE job_id = ?",
+                (encoded, now, job_id),
+            )
+        updated = self.get_job(job_id)
+        if updated is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
+        return updated
+
     def list_jobs(
         self,
         *,
@@ -711,7 +765,6 @@ class ExecutionRepository:
             raise ValueError("ttl_seconds must be positive")
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=ttl_seconds)
-        now_text = now.isoformat()
         expires_text = expires.isoformat()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -863,6 +916,41 @@ class ExecutionRepository:
             path=str(target),
             created_at=now.isoformat(),
             expires_at=expires.isoformat(),
+        )
+
+    def get_artifact(
+        self,
+        artifact_id: str,
+        *,
+        owner: str | None = None,
+    ) -> ExecutionArtifact | None:
+        """Return artifact metadata only when its owning job is visible."""
+
+        if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.*
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.artifact_id = ?
+                  AND (? IS NULL OR j.owner = ?)
+                """,
+                (artifact_id, owner, owner),
+            ).fetchone()
+        if row is None:
+            return None
+        return ExecutionArtifact(
+            artifact_id=row["artifact_id"],
+            job_id=row["job_id"],
+            name=row["name"],
+            mime_type=row["mime_type"],
+            size=int(row["size"]),
+            sha256=row["sha256"],
+            path=row["path"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
         )
 
     def delete_artifact(self, artifact_id: str) -> None:

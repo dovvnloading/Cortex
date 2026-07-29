@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 fixed-function recipe provider qualification
 
-- **Status:** Qualification core and explicit qualification-profile lifecycle composition implemented and verified; recipe request execution remains next
+- **Status:** Qualification core, explicit qualification-profile lifecycle composition, and the internal recipe coordinator/publication path implemented and verified; application exposure remains separate
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 typed recipe contract](0001-phase2-recipe-contract.md) and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -113,8 +113,9 @@ limits, crop bounds, cancellation, stop behavior, and non-raiseable configuratio
 The explicit qualification-profile lifecycle composition now consumes the signed
 worker provenance, disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md),
 native broker identity, watchdog, and accounting controls through an injected
-health-gated builder. The next gate is the recipe-specific coordinator/request
-and artifact-publication path. The provider must still launch out of process
-under the bounded worker contract; it must never fall back to a host process or
-in-process execution. External review and production signing remain optional
-official-release hardening.
+health-gated builder. The internal recipe coordinator now binds that worker
+contract to owner-scoped staged artifacts and atomic publication. The next gate
+is the explicit UI/API request surface and qualified worker-attempt factory; the
+provider must still launch out of process under the bounded worker contract and
+must never fall back to a host process or in-process execution. External review
+and production signing remain optional official-release hardening.

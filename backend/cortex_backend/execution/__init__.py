@@ -1,10 +1,10 @@
 """Durable execution primitives and provider-independent safety contracts.
 
 Only deterministic contracts, the storage-only signed bundle installer, the
-reviewed broker transports, and the explicit local qualification composition are
-exposed in this phase. Native transport and bundle storage never load a provider;
-the normal application remains default-off and a recipe request coordinator is a
-later ADR slice.
+reviewed broker transports, the explicit local qualification composition, and the
+internal qualified recipe coordinator are exposed in this phase. Native transport
+and bundle storage never load a provider; the normal application remains
+default-off until a later application-integration decision.
 """
 
 from .broker import (
@@ -127,6 +127,23 @@ from .repository import (
     LeaseConflict,
     ExecutionRepositoryError,
 )
+from .recipe_coordinator import (
+    DEFAULT_CANCEL_GRACE_SECONDS,
+    DEFAULT_RECIPE_RETENTION_SECONDS,
+    DEFAULT_WORKER_TIMEOUT_SECONDS,
+    MAX_RECIPE_RETENTION_SECONDS,
+    RECIPE_IMAGE_PROFILE,
+    RECIPE_PAYLOAD_SCHEMA,
+    RECIPE_RESULT_SCHEMA,
+    RecipeExecutionCoordinator,
+    RecipeExecutionError,
+    RecipeImageRequest,
+    RecipeWorkerAttempt,
+    RecipeWorkerAttemptFactory,
+    RecipeWorkerClient,
+    RecipeWorkerConnection,
+    RecipeWorkerOutput,
+)
 from .resource_accounting import (
     MAX_CONSOLE_BYTES,
     MAX_COUNTER,
@@ -183,6 +200,21 @@ __all__ = [
     "DEFAULT_NATIVE_PIPE_BUFFER_BYTES",
     "ExecutionRepository",
     "ExecutionRepositoryError",
+    "DEFAULT_CANCEL_GRACE_SECONDS",
+    "DEFAULT_RECIPE_RETENTION_SECONDS",
+    "DEFAULT_WORKER_TIMEOUT_SECONDS",
+    "MAX_RECIPE_RETENTION_SECONDS",
+    "RECIPE_IMAGE_PROFILE",
+    "RECIPE_PAYLOAD_SCHEMA",
+    "RECIPE_RESULT_SCHEMA",
+    "RecipeExecutionCoordinator",
+    "RecipeExecutionError",
+    "RecipeImageRequest",
+    "RecipeWorkerAttempt",
+    "RecipeWorkerAttemptFactory",
+    "RecipeWorkerClient",
+    "RecipeWorkerConnection",
+    "RecipeWorkerOutput",
     "ExecutionLifecycle",
     "ExecutionProfile",
     "CoordinatorFactory",

@@ -105,6 +105,7 @@ recorded in the [Phase 2 evidence log](0001-phase2-evidence.md).
 
 This ADR does not authorize image decoding, thumbnail generation, archive extraction,
 provider loading, code execution, model tool exposure, network access, or automatic
-execution. The artifact security review is complete; provider enablement remains
-blocked on resource/watchdog accounting, external security review, and lifecycle
-health gates in the parent ADR.
+execution. The artifact security review is complete. The internal recipe
+coordinator now consumes this boundary only after the separate resource/watchdog
+and lifecycle gates pass; official external review and production trust remain
+optional release hardening.

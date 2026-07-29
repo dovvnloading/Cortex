@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 explicit qualification-profile lifecycle
 
-- **Status:** Implemented as a local/CI lifecycle composition boundary; recipe request execution remains a separate slice
+- **Status:** Implemented as a local/CI lifecycle composition boundary; the internal recipe coordinator is now available behind it and application exposure remains separate
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 release/lifecycle preflight](0001-phase2-release-lifecycle-gate.md), [recipe provider](0001-phase2-recipe-provider.md), and [Phase 1 lifecycle](0001-phase1-production-lifecycle.md)
@@ -53,10 +53,11 @@ qualification code without an outside reviewer, production signing key, or
 trusted release root. The normal application cannot be enabled accidentally by
 importing the provider or setting an implicit default.
 
-The next Phase 2 slice is the recipe-specific coordinator/request and artifact
-publication path that can be injected behind this lifecycle. It must preserve
-the same release gate, native launcher, broker identity, resource/watchdog, and
-trusted artifact controls.
+The internal recipe-specific coordinator/request and artifact-publication path is
+now implemented behind this lifecycle boundary. It preserves the same release
+gate, native launcher, broker identity, resource/watchdog, and trusted artifact
+controls. The next slice is the explicit UI/API request surface and qualified
+worker-attempt factory wiring; it must remain default-off in the application.
 
 ## Verification
 
