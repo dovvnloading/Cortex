@@ -116,6 +116,28 @@ def _probe_resource_policy() -> dict[str, Any]:
             | _JOB_OBJECT_LIMIT_PROCESS_TIME
             | _JOB_OBJECT_LIMIT_JOB_TIME
         )
+        accounting_fields = (
+            "total_user_time_100ns",
+            "total_kernel_time_100ns",
+            "this_period_user_time_100ns",
+            "this_period_kernel_time_100ns",
+            "total_page_fault_count",
+            "total_processes",
+            "active_processes",
+            "total_terminated_processes",
+            "read_operations",
+            "write_operations",
+            "other_operations",
+            "read_transfers",
+            "write_transfers",
+            "other_transfers",
+        )
+        accounting_present = all(
+            field in info and type(info[field]) is int for field in accounting_fields
+        )
+        total_cpu_100ns = int(info.get("total_user_time_100ns", -1)) + int(
+            info.get("total_kernel_time_100ns", -1)
+        )
         checks = {
             "appcontainer_token": details.get("is_appcontainer") is True,
             "suspended_policy_applied_before_resume": True,
@@ -129,6 +151,13 @@ def _probe_resource_policy() -> dict[str, Any]:
             "breakaway_not_granted": flags
             & (_JOB_OBJECT_LIMIT_BREAKAWAY_OK | _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)
             == 0,
+            "accounting_fields_present": accounting_present,
+            "accounting_values_nonnegative": accounting_present
+            and all(info[field] >= 0 for field in accounting_fields),
+            "accounting_process_observed": info.get("total_processes", 0) >= 1,
+            "accounting_memory_within_limit": info.get("peak_job_memory_used", -1)
+            <= 128 * 1024 * 1024,
+            "accounting_cpu_within_limit": 0 <= total_cpu_100ns <= 40_000_000,
         }
         status = PASS if all(checks.values()) else FAIL
         return _result(

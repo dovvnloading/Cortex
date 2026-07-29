@@ -13,12 +13,19 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 import re
 from threading import Event, Thread
-from time import monotonic
+from time import process_time_ns
 from typing import Any, Callable, Final, Literal, Protocol
 
 from .broker import BrokerMessage
 from .lifecycle import RuntimeHealth
 from .recipe_provider import RecipeImageProvider
+from .resource_accounting import (
+    ResourceAccountingError,
+    ResourceBudget,
+    ResourceGovernor,
+    ResourceSample,
+    ResourceUsage,
+)
 from .worker_protocol import (
     RecipeWorkerDispatcher,
     RecipeWorkerSession,
@@ -83,6 +90,8 @@ class WorkerRuntimeReport:
 
     processed_messages: int
     terminal_state: Literal["complete", "cancelled", "failed", "message_budget"]
+    resource_usage: ResourceUsage | None = None
+    resource_error: str | None = None
 
 
 def _validate_principal(value: str) -> str:
@@ -117,6 +126,7 @@ class RecipeWorkerBrokerRuntime:
         provider_factory: Callable[[], WorkerProvider] = RecipeImageProvider,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         watchdog_timeout_ms: int = DEFAULT_WATCHDOG_TIMEOUT_MS,
+        resource_sampler: Callable[[], ResourceSample] | None = None,
     ) -> None:
         if not all(
             callable(getattr(connection, method, None))
@@ -132,9 +142,17 @@ class RecipeWorkerBrokerRuntime:
             raise ValueError("worker message budget is invalid")
         if type(watchdog_timeout_ms) is not int or not 1 <= watchdog_timeout_ms <= 600_000:
             raise ValueError("worker watchdog timeout is invalid")
+        if resource_sampler is not None and not callable(resource_sampler):
+            raise TypeError("worker resource sampler must be callable")
         self._provider_factory = provider_factory
         self._max_messages = max_messages
         self._watchdog_timeout_ms = watchdog_timeout_ms
+        self._resource_budget = ResourceBudget.artifact_transform_v1().with_watchdog(
+            wall_time_ms=watchdog_timeout_ms,
+            idle_timeout_ms=watchdog_timeout_ms,
+            max_messages=max_messages,
+        )
+        self._resource_sampler = resource_sampler
 
     @staticmethod
     def _envelope_body(message: BrokerMessage) -> Any:
@@ -254,10 +272,54 @@ class RecipeWorkerBrokerRuntime:
             if not isinstance(health, RuntimeHealth) or not health.available:
                 raise WorkerRuntimeError("provider_unavailable")
             dispatcher = RecipeWorkerDispatcher(RecipeWorkerSession(provider))
+            resource_governor = ResourceGovernor(self._resource_budget)
+            process_started_ns = process_time_ns()
+            resource_error_code: str | None = None
             pending_collect: BrokerMessage | None = None
             cancel_acknowledged = False
             active_request: BrokerMessage | None = None
-            transform_started_at = 0.0
+
+            def resource_sample() -> ResourceSample:
+                if self._resource_sampler is not None:
+                    try:
+                        sample = self._resource_sampler()
+                    except ResourceAccountingError:
+                        raise
+                    except Exception:
+                        raise ResourceAccountingError("accounting_invalid") from None
+                    if not isinstance(sample, ResourceSample):
+                        raise ResourceAccountingError("accounting_invalid")
+                    return sample
+                return ResourceSample(
+                    cpu_time_ms=max(0, (process_time_ns() - process_started_ns) // 1_000_000),
+                    bytes_read=dispatcher.bytes_read,
+                    bytes_written=dispatcher.bytes_written,
+                    messages=processed,
+                )
+
+            def observe_resources(*, progress: bool) -> ResourceUsage:
+                nonlocal resource_error_code
+                try:
+                    return resource_governor.observe(resource_sample(), progress=progress)
+                except ResourceAccountingError as error:
+                    resource_error_code = error.code
+                    raise
+
+            def report(state: Literal["complete", "cancelled", "failed", "message_budget"]) -> WorkerRuntimeReport:
+                nonlocal resource_error_code
+                if resource_error_code is None:
+                    try:
+                        observe_resources(progress=True)
+                    except ResourceAccountingError:
+                        pass
+                if resource_error_code is None and not resource_governor.usage.accounting_complete:
+                    resource_error_code = "accounting_unavailable"
+                return WorkerRuntimeReport(
+                    processed,
+                    state,
+                    resource_usage=resource_governor.usage,
+                    resource_error=resource_error_code,
+                )
 
             def start_receiver() -> None:
                 nonlocal receiver
@@ -271,45 +333,48 @@ class RecipeWorkerBrokerRuntime:
                     receiver.start()
 
             while processed < self._max_messages:
-                if (
-                    active_request is not None
-                    and completion_thread is not None
-                    and completion_thread.is_alive()
-                    and not cancel_acknowledged
-                    and monotonic() - transform_started_at
-                    > self._watchdog_timeout_ms / 1000
-                ):
-                    timeout_cancel = BrokerMessage(
-                        schema_version="broker.message.v1",
-                        direction="to_executor",
-                        operation="cancel",
-                        request_id=active_request.request_id,
-                        job_id=active_request.job_id,
-                        installation_principal_id=self._principal,
-                        body={
-                            "schema_version": "recipe.worker.cancel.v1",
-                            "request_id": active_request.request_id,
-                            "job_id": active_request.job_id,
-                            "reason": "timeout",
-                        },
-                    )
-                    try:
-                        dispatcher.dispatch("cancel", timeout_cancel.body)
-                    except WorkerProtocolError:
-                        pass
-                    self._connection.send_message(
-                        self._response(
-                            active_request,
-                            WorkerError(
-                                schema_version="recipe.worker.error.v1",
-                                request_id=active_request.request_id,
-                                job_id=active_request.job_id,
-                                code="timeout",
-                            ),
+                try:
+                    observe_resources(progress=active_request is None)
+                except ResourceAccountingError as error:
+                    if (
+                        active_request is not None
+                        and completion_thread is not None
+                        and completion_thread.is_alive()
+                        and not cancel_acknowledged
+                        and error.code in {"deadline_exceeded", "watchdog_stalled"}
+                    ):
+                        timeout_cancel = BrokerMessage(
+                            schema_version="broker.message.v1",
+                            direction="to_executor",
+                            operation="cancel",
+                            request_id=active_request.request_id,
+                            job_id=active_request.job_id,
+                            installation_principal_id=self._principal,
+                            body={
+                                "schema_version": "recipe.worker.cancel.v1",
+                                "request_id": active_request.request_id,
+                                "job_id": active_request.job_id,
+                                "reason": "timeout",
+                            },
                         )
-                    )
-                    terminal = "failed"
-                    return WorkerRuntimeReport(processed, terminal)
+                        try:
+                            dispatcher.dispatch("cancel", timeout_cancel.body)
+                        except WorkerProtocolError:
+                            pass
+                        self._connection.send_message(
+                            self._response(
+                                active_request,
+                                WorkerError(
+                                    schema_version="recipe.worker.error.v1",
+                                    request_id=active_request.request_id,
+                                    job_id=active_request.job_id,
+                                    code="timeout",
+                                ),
+                            )
+                        )
+                        terminal = "failed"
+                        return report(terminal)
+                    raise WorkerRuntimeError(error.code) from None
                 if receiver is None:
                     try:
                         incoming.put(self._connection.receive_message())
@@ -329,7 +394,7 @@ class RecipeWorkerBrokerRuntime:
                     if isinstance(error, WorkerProtocolError):
                         if error.code == "cancelled" and cancel_acknowledged:
                             terminal = "cancelled"
-                            return WorkerRuntimeReport(processed, terminal)
+                            return report(terminal)
                         response = WorkerError(
                             schema_version="recipe.worker.error.v1",
                             request_id=completed_request.request_id,
@@ -340,7 +405,7 @@ class RecipeWorkerBrokerRuntime:
                             self._response(completed_request, response)
                         )
                         terminal = "cancelled" if error.code == "cancelled" else "failed"
-                        return WorkerRuntimeReport(processed, terminal)
+                        return report(terminal)
                     if response is not None:
                         self._connection.send_message(
                             self._response(completed_request, response)
@@ -364,10 +429,10 @@ class RecipeWorkerBrokerRuntime:
                         if isinstance(deferred_response, WorkerOutputChunk):
                             if deferred_response.final:
                                 terminal = "complete"
-                                return WorkerRuntimeReport(processed, terminal)
+                                return report(terminal)
                     if cancel_acknowledged:
                         terminal = "cancelled"
-                        return WorkerRuntimeReport(processed, terminal)
+                        return report(terminal)
                     continue
                 if isinstance(request, Exception):
                     raise WorkerRuntimeError("broker_receive_failed") from None
@@ -406,7 +471,6 @@ class RecipeWorkerBrokerRuntime:
                 if request.operation == "input_complete":
                     self._validate_envelope(request)
                     active_request = request
-                    transform_started_at = monotonic()
                     start_receiver()
                     completion_thread = Thread(
                         target=self._dispatch_completion,
@@ -435,16 +499,16 @@ class RecipeWorkerBrokerRuntime:
                         cancel_acknowledged = True
                         if completion_thread is None:
                             terminal = "cancelled"
-                            return WorkerRuntimeReport(processed, terminal)
+                            return report(terminal)
                     elif isinstance(response, WorkerError):
                         cancel_acknowledged = False
                 if session_state == "failed":
                     terminal = "failed"
-                    return WorkerRuntimeReport(processed, terminal)
+                    return report(terminal)
                 if request.operation == "collect" and isinstance(response, WorkerOutputChunk):
                     if response.final:
                         terminal = "complete"
-                        return WorkerRuntimeReport(processed, terminal)
+                        return report(terminal)
 
             terminal = "message_budget"
             raise WorkerRuntimeError("message_budget_exceeded")

@@ -41,7 +41,7 @@ The expected result at this stage is `qualification_status=blocked`: the native
 AppContainer and Job Object controls may pass, but the signed `recipe_worker.exe`
 bundle is not shipped yet. A blocked worker-provenance check is intentional and
 must remain blocking until trust-root verification, native worker identity, and
-resource/watchdog enforcement are implemented.
+real-worker lifecycle enforcement are implemented.
 
 The native launcher qualification prints a passing resource-policy subcheck when
 the fixed suspended child receives and reports Job Object CPU/memory/active-process
@@ -89,9 +89,30 @@ handshake, normal `collect_output`, hostile decoder rejection for truncated PNG
 and active SVG bytes, and an in-flight `cancel_ack` after `input_complete`. The
 native read path polls `PeekNamedPipe` with a bounded 5 ms wait before `ReadFile`,
 keeping the worker's cancellation reader live without starving the provider
-transform. Resource/watchdog accounting, external review, and production-lifecycle
-release gates remain open; parser-fuzz and artifact-security evidence are qualified
-below.
+transform. Resource/watchdog accounting is qualified by the fixed corpus below;
+external review and production-lifecycle release gates remain open. Parser-fuzz
+and artifact-security evidence are qualified below.
+
+## Run the resource/watchdog accounting qualification
+
+This deterministic corpus exercises the immutable ADR budgets and the worker's
+monotonic accounting contract without model or user input. On Windows it also
+runs the fixed Job Object policy probe and kill-on-close descendant corpus; the
+report records only stable status/evidence categories and never authorizes a
+provider launch:
+
+```powershell
+python tools/execution_spikes/resource_watchdog_qualification.py --json
+python tools/execution_spikes/resource_watchdog_qualification.py --json --strict
+```
+
+The current `resource-watchdog.v1` evidence passes all 15 cases (digest
+`5eac03e2b4981543`): budget matrix, wall/idle watchdogs, clock and sample
+regression, stable CPU/memory/input/output/console/observation/message limits,
+missing-memory fail-closed behavior, actual Job Object accounting, and full-tree
+reaping. This is
+qualification-only evidence; signed-worker enforcement, external review, and
+production lifecycle wiring remain blocked.
 
 ## Run the typed parser fuzz qualification
 
@@ -158,8 +179,11 @@ unavailable required link primitive; a blocked result is not a release pass.
   controls with the qualification-only decoder corpus and a mandatory signed
   worker provenance gate; it never authorizes a host-process fallback.
 - `native_launcher_qualification`: creates only a fixed suspended `findstr.exe`
-  child, applies and queries Job Object resource policy before resume, and reports
+  child, applies and queries Job Object resource policy/accounting before resume, and reports
   the signed-worker and broker-binding blockers without launching either.
+- `resource_watchdog_qualification`: runs the fixed logical budget/watchdog corpus,
+  requires actual native Job Object accounting and kill-on-close tree reaping on
+  Windows, and never enables a provider.
 - `recipe_worker_e2e_qualification`: signs and installs a disposable worker
   generation, proves the live native broker identity boundary, and runs the fixed
   packaged-worker protocol corpus; any provider or cleanup timeout remains
@@ -182,8 +206,7 @@ unavailable required link primitive; a blocked result is not a release pass.
 An API export check is not proof of AppContainer process isolation. The native
 helper is evidence for this disposable smoke corpus only; it is not authorized
 to launch guest runtimes or model-generated code. LPAC policy qualification,
-resource limits, cancellation corpus, and the security review remain separate
-Phase 0 gates.
+real-worker enforcement, and the security review remain separate release gates.
 
 ## Safety rules
 

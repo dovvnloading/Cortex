@@ -50,9 +50,12 @@ sequence with a fixed benign executable:
 7. close all handles and remove the disposable profile/marker.
 
 The lower-level `appcontainer_smoke._run_child()` now exposes bounded optional
-resource-limit parameters and returns the queried policy/accounting. Existing
-filesystem/network and cancellation probes continue to use the same helper and
-remain green after this change.
+resource-limit parameters and returns the queried policy plus actual basic CPU,
+memory, process, page-fault, and I/O accounting. The deterministic
+`resource_watchdog_qualification.py` corpus also exercises monotonic logical
+budgets and the kill-on-close process-tree watchdog. Existing filesystem/network
+and cancellation probes continue to use the same helper and remain green after
+this change.
 
 This is qualification evidence for control application, not approval to launch a
 recipe worker. The fixed probe reports `provider_launch_authorized=false` until
@@ -63,18 +66,21 @@ or a weaker sandbox.
 
 ## Evidence and limits
 
-On the controlled Windows host (2026-07-22), the resource-policy check passed with:
+On the controlled Windows host (2026-07-29), the resource-policy check passed with:
 
 - AppContainer token confirmed;
 - active-process limit `1`;
 - process memory `64 MiB`, job memory `128 MiB`;
 - process CPU `2 s`, job CPU `4 s`;
+- actual Job Object accounting fields present with non-negative CPU, memory,
+  process, page-fault, and I/O values;
 - kill-on-close present; and
 - breakaway flags absent.
 
-The policy values are queried before the Job Object handle closes. This does not
-yet prove enforcement against a real signed recipe worker, resource exhaustion
-behavior across supported Windows versions, or external launcher review.
+The policy and accounting values are queried before the Job Object handle closes.
+The fixed probe and watchdog corpus do not yet prove enforcement against a real
+signed recipe worker, resource-exhaustion behavior across supported Windows
+versions, or external launcher review.
 
 ## Remaining blockers
 
@@ -83,11 +89,12 @@ behavior across supported Windows versions, or external launcher review.
 - The fixed signed `recipe_worker.exe` bundle is not installed in the immutable
   generation used by the launcher, so no real worker has completed the broker
   handshake yet.
-- The packaged worker loop is now broker-only and fail-closed; the end-to-end
-  authenticated input/output, watchdog, and cancellation path still needs evidence
-  against the signed installed generation before provider execution is authorized.
-- Watchdog progress, output framing, staging ACLs, hostile decoder execution, and
-  lifecycle health-gated wiring remain separate release gates.
+- The packaged worker loop is now broker-only and fail-closed; the disposable
+  signed-worker qualification covers authenticated input/output, hostile decoder,
+  and cancellation cases, but the immutable production generation is not shipped
+  at the launcher path.
+- Real signed-worker resource enforcement, external security review, and lifecycle
+  health-gated wiring remain separate release gates.
 
 If any control is missing or cannot be verified, the provider remains unavailable;
 there is no host-process or weaker-sandbox fallback.
@@ -103,5 +110,6 @@ AppContainer child on Windows, verifies its token, applies/query-verifies Job Ob
 policy, and closes it without resuming. `tests/test_native_launcher_qualification.py`
 covers the disposable probe's
 non-Windows blocking, report fail-closed behavior, and no-breakaway invariant. The
-full repository suite and the existing AppContainer/cancellation corpus are
-required before this boundary can be merged.
+`resource_watchdog_qualification.py --json --strict` corpus additionally requires
+actual accounting and full-tree reaping. The full repository suite and the existing
+AppContainer/cancellation corpus are required before this boundary can be merged.

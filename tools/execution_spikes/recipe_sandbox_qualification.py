@@ -289,7 +289,7 @@ def _probe_signed_worker_precondition() -> dict[str, Any]:
 
 
 def _probe_future_worker_controls() -> list[dict[str, Any]]:
-    """Run the fixed launcher policy probe and expose remaining blockers."""
+    """Run fixed launcher/resource probes and expose remaining blockers."""
 
     helper = ROOT / "tools" / "execution_spikes" / "native_launcher_qualification.py"
     launcher = _run_fixed_helper(
@@ -298,15 +298,17 @@ def _probe_future_worker_controls() -> list[dict[str, Any]]:
         30,
     )
     launcher["name"] = "recipe_native_launcher_policy"
+    resource_helper = ROOT / "tools" / "execution_spikes" / "resource_watchdog_qualification.py"
+    resource = _run_fixed_helper(
+        resource_helper,
+        "cortex-resource-watchdog-qualification",
+        30,
+    )
+    resource["name"] = "recipe_resource_controls"
 
     return [
         launcher,
-        _result(
-            "recipe_resource_controls",
-            BLOCKED,
-            "The fixed resource-policy spike reports its configured/queryable limits, but release still requires a real worker launch and external enforcement review.",
-            launch_refused=True,
-        ),
+        resource,
         _result(
             "recipe_broker_identity",
             BLOCKED,

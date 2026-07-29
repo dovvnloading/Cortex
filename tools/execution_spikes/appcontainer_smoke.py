@@ -43,6 +43,7 @@ _TOKEN_IS_APPCONTAINER = 29
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 0x102
 _INFINITE = 0xFFFFFFFF
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
@@ -60,6 +61,19 @@ class _IoCounters(ctypes.Structure):
         ("read_transfers", ctypes.c_ulonglong),
         ("write_transfers", ctypes.c_ulonglong),
         ("other_transfers", ctypes.c_ulonglong),
+    ]
+
+
+class _BasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("total_user_time", _LargeInteger),
+        ("total_kernel_time", _LargeInteger),
+        ("this_period_total_user_time", _LargeInteger),
+        ("this_period_total_kernel_time", _LargeInteger),
+        ("total_page_fault_count", wintypes.DWORD),
+        ("total_processes", wintypes.DWORD),
+        ("active_processes", wintypes.DWORD),
+        ("total_terminated_processes", wintypes.DWORD),
     ]
 
 
@@ -481,6 +495,15 @@ def _job_extended_info(kernel32: Any, job: wintypes.HANDLE) -> dict[str, int]:
         ctypes.byref(returned),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
+    accounting = _BasicAccountingInformation()
+    if not query(
+        job,
+        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(accounting),
+        ctypes.sizeof(accounting),
+        ctypes.byref(returned),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
     return {
         "limit_flags": int(info.basic_limit_information.limit_flags),
         "active_process_limit": int(info.basic_limit_information.active_process_limit),
@@ -494,6 +517,24 @@ def _job_extended_info(kernel32: Any, job: wintypes.HANDLE) -> dict[str, int]:
         ),
         "peak_process_memory_used": int(info.peak_process_memory_used),
         "peak_job_memory_used": int(info.peak_job_memory_used),
+        "total_user_time_100ns": int(accounting.total_user_time.quad_part),
+        "total_kernel_time_100ns": int(accounting.total_kernel_time.quad_part),
+        "this_period_user_time_100ns": int(
+            accounting.this_period_total_user_time.quad_part
+        ),
+        "this_period_kernel_time_100ns": int(
+            accounting.this_period_total_kernel_time.quad_part
+        ),
+        "total_page_fault_count": int(accounting.total_page_fault_count),
+        "total_processes": int(accounting.total_processes),
+        "active_processes": int(accounting.active_processes),
+        "total_terminated_processes": int(accounting.total_terminated_processes),
+        "read_operations": int(info.io_info.read_operations),
+        "write_operations": int(info.io_info.write_operations),
+        "other_operations": int(info.io_info.other_operations),
+        "read_transfers": int(info.io_info.read_transfers),
+        "write_transfers": int(info.io_info.write_transfers),
+        "other_transfers": int(info.io_info.other_transfers),
     }
 
 

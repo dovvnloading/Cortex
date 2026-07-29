@@ -83,6 +83,7 @@ def test_worker_session_requires_in_order_hashed_input_and_collects_output():
     session.prepare(prepare)
     session.input_chunk(_chunk(content[:8]))
     session.input_chunk(_chunk(content[8:], offset=8))
+    assert session.bytes_read == len(content)
 
     result = session.complete_input(
         WorkerInputComplete(
@@ -107,6 +108,7 @@ def test_worker_session_requires_in_order_hashed_input_and_collects_output():
     )
     assert output.decoded()
     assert output.final
+    assert session.bytes_written == len(output.decoded())
 
 
 def test_dispatcher_rejects_unknown_or_malformed_operations():

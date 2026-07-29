@@ -20,8 +20,9 @@ The harness is deliberately fail-closed and has independent checks for:
    qualification-only Pillow core, while recording `sandboxed=false`; and
 4. it requires the future fixed recipe worker package at the repository's fixed
    packaging location;
-5. it reports per-worker CPU/memory/breakaway/accounting controls as blocked until
-   the native launcher applies and verifies them; and
+5. it runs the deterministic resource/watchdog corpus, requiring immutable
+   budgets, cumulative accounting, actual Job Object CPU/memory/process/I/O
+   accounting, and kill-on-close tree reaping; and
 6. it reports end-to-end broker execution as blocked until the launcher binds the
    qualified transport to a signed worker's actual PID/AppContainer token and the
    packaged worker completes the authenticated client handshake and hostile corpus.
@@ -42,8 +43,9 @@ fallback.
 | Control | Evidence in this stage | Release interpretation |
 | --- | --- | --- |
 | AppContainer token and zero-capability denials | `appcontainer_smoke.py`, child report `recipe_appcontainer_control` | Required prerequisite; does not prove LPAC policy or provider launch identity |
-| Job Object kill-on-close and tree cancellation | `cancellation_corpus.py`, child report `recipe_cancellation_control` | Required prerequisite; resource limits and accounting remain open |
+| Job Object kill-on-close and tree cancellation | `cancellation_corpus.py`, child report `recipe_cancellation_control` | Required prerequisite; the watchdog corpus proves full-tree reaping |
 | Suspended launch/resource policy | `native_launcher_qualification.py`, child report `recipe_native_launcher_policy` | Policy application/query passes for a fixed benign child; real worker enforcement/review remains open |
+| Resource/watchdog accounting | `resource_watchdog_qualification.py`, child report `recipe_resource_controls` | Immutable budgets, actual Job Object accounting, and kill-on-close reaping qualify; signed-worker enforcement and external review remain open |
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
 | Signed worker provenance | Storage-only `verify_active_worker()` role binding plus fixed package precondition | **Storage gate complete; launch remains blocked** until a packaged executable and native launcher exist |
 | Broker identity and framed IPC | Native broker transport tests and ADR | Must be bound to the actual worker PID/token before launch |
@@ -91,7 +93,7 @@ that a blocked worker gate never authorizes provider launch.
 ## Consequences
 
 This stage provides reproducible evidence for the controls that already exist and
-prevents accidental false-green qualification. It does not claim decoder isolation,
-LPAC capability policy, resource enforcement, signed runtime provenance, native
-worker identity, or production readiness. Those remain explicit blockers before
-the provider can be wired to lifecycle or exposed to any model/UI route.
+prevents accidental false-green qualification. It does not claim signed-worker
+resource enforcement, signed runtime provenance, native worker identity, or
+production readiness. Those remain explicit blockers before the provider can be
+wired to lifecycle or exposed to any model/UI route.
