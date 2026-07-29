@@ -1,6 +1,6 @@
 # Cortex UI modernization audit
 
-**Status:** UI modernization follow-up complete; dedicated image-editor affordances, preset prompt cards, composer clutter, and runtime-status overlap removed; native package rebuilt and startup-verified
+**Status:** UI modernization follow-up complete; dedicated image-editor affordances, preset prompt cards, composer clutter, runtime-status overlap, and flattened transcript output removed; native package rebuilt and startup-verified
 **Scope:** Every user-facing frontend surface, not a cosmetic theme pass
 
 ## What was audited
@@ -19,6 +19,7 @@ primary problems were structural:
 | --- | --- | --- |
 | Workspace shell | The top bar conveyed almost no context and the sidebar was a loose list of text. | A clear workspace header, local-runtime status, product identity, conversation count, and a deliberate sidebar footer establish hierarchy. |
 | Conversation canvas | A new chat opened into a large, empty dark region, then introduced generic preset prompts. | A quiet new-thread orientation gives the canvas context while leaving the user in control of the first message. |
+| Transcript output | The modernization flattened assistant responses into transparent text and weakened the visual treatment of markdown, reasoning, sources, and code. | Role-aware message bubbles, identity metadata, structured markdown rhythm, expandable reasoning/source sections, tables, and labeled copyable fenced-code surfaces restore a professional local workbench transcript. |
 | Composer | The input was visually stranded in a full-width bottom strip, with redundant badges and competing colored controls. Long offline-runtime status text could also paint beneath the send control. | The composer is a compact centered island with one model control, grouped metadata, neutral idle chrome, an accent send action only when actionable, and a bounded status region that ellipsizes inside a dedicated gutter before the send column. |
 | Conversation controls | Saved chats, rename, and delete controls had weak grouping and feedback. | The list uses active/hover/focus states, reveal-on-focus actions, and purposeful confirmation dialogs. |
 | Settings and submenus | Settings read as a large collection of unrelated boxes. | Text-led categories, descriptive labels, and a unified detail pane make settings read like a native control surface. |
@@ -52,9 +53,11 @@ opaque background service.
 - `frontend/src/components/AppShell.tsx` establishes the workspace hierarchy,
   runtime state, conversation navigation, and better destructive-action dialogs.
 - `frontend/src/components/ChatPage.tsx` adds the intentional blank-chat launch
-  surface and docks the composer as part of the conversation canvas. It does
-  not advertise image transformation, image generation, or preset prompt
-  suggestions.
+  surface, role-aware transcript bubbles, message metadata, and structured
+  response sections. It does not advertise image transformation, image
+  generation, or preset prompt suggestions.
+- `frontend/src/components/SafeMarkdown.tsx` keeps links and HTML safe while
+  providing readable fenced-code toolbars with language labels and copy actions.
 - `frontend/src/components/MessageComposer.tsx` integrates local-model context
   into the composer island with a compact, quiet utility row and state-based
   send control.
@@ -75,9 +78,9 @@ build, and browser-level flows for new chat, streaming, retry/regenerate/fork,
 settings, memory, model progress, and compact-window composer behavior. The
 native Windows package must also launch from a fresh build before release.
 
-This slice passed the release checks: 45 component tests in a single worker,
-7 browser-level flows (including a geometry regression that keeps long
-runtime-status text at least 6px before the send control), typecheck, lint, production build, a fresh Windows
+This slice passed the release checks: 47 component tests in a single worker,
+8 browser-level flows (including transcript structure and a geometry regression
+that keeps long runtime-status text at least 6px before the send control), typecheck, lint, production build, a fresh Windows
 package build, and a packaged launch with `GET /api/v1/health/ready` returning
 HTTP 200. The production bundle contains no dedicated image-transform UI
 labels or selectors, and no preset starter-card selectors or labels.

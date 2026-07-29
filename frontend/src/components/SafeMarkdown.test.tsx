@@ -11,4 +11,14 @@ describe("SafeMarkdown", () => {
     expect(screen.getByRole("link", { name: "good" })).toHaveAttribute("href", "https://example.com/");
     expect(screen.queryByRole("link", { name: "bad" })).not.toBeInTheDocument();
   });
+
+  it("gives fenced code a language label and a valid copy control", () => {
+    render(<SafeMarkdown content={"```ts\nconst answer = 42;\n```"} />);
+
+    expect(screen.getByText("ts")).toBeInTheDocument();
+    const copy = screen.getByRole("button", { name: "Copy ts code" });
+    expect(copy).toBeInTheDocument();
+    expect(copy.closest("code")).toBeNull();
+    expect(screen.getByText("const answer = 42;")).toBeInTheDocument();
+  });
 });

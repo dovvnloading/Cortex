@@ -71,6 +71,37 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
   });
 
+  it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {
+    const transcript: ChatResponse = {
+      id: "thread-a",
+      title: "Workbench",
+      timestamp: "2026-01-01T00:00:00Z",
+      revision: 2,
+      messages: [
+        { id: "m-1", role: "user", content: "Show me the result." },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "# Result\n\n```ts\nconst answer = 42;\n```",
+          thoughts: "I checked the input first.",
+          sources: ["[Reference](https://example.com/reference)"],
+          timestamp: "2026-01-01T00:05:00Z",
+        },
+      ],
+    };
+    const api = chatApi({
+      chat: vi.fn(async () => transcript),
+    });
+    renderChat(api);
+
+    expect(await screen.findByText("Cortex")).toBeInTheDocument();
+    expect(screen.getByText("You")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Result", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
+    expect(screen.getByText("Reasoning")).toBeInTheDocument();
+    expect(screen.getByText("Sources")).toBeInTheDocument();
+  });
+
   it("retains the exact draft if generation acceptance fails", async () => {
     const user = userEvent.setup();
     const api = chatApi({ generate: vi.fn().mockRejectedValue(new ApiError(503, "Local runtime is unavailable.")) });
