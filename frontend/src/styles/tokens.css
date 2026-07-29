@@ -478,7 +478,11 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .execution-task-tray { position: fixed; right: 20px; bottom: 20px; z-index: 40; width: min(380px, calc(100vw - 40px)); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent); border-radius: 7px; padding: 14px; background: var(--surface-elevated); box-shadow: var(--shadow-md); }
 .execution-task-tray-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .execution-task-tray-heading h2 { margin: 0; color: var(--text); font-size: 0.86rem; }
+.execution-task-tray-controls { display: flex; align-items: center; gap: 7px; }
 .execution-task-tray-count { display: grid; place-items: center; min-width: 22px; height: 22px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 0.7rem; font-weight: 750; }
+.execution-task-tray-dismiss { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.execution-task-tray-dismiss:hover { border-color: var(--line-strong); background: var(--surface-raised); color: var(--text); }
+.execution-task-tray-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .execution-task-tray-live { margin-top: 4px; color: var(--text-muted); font-size: 0.74rem; }
 .execution-task-list { display: grid; gap: 8px; margin: 11px 0 0; padding: 0; list-style: none; }
 .execution-task { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding-top: 9px; border-top: 1px solid var(--line); }

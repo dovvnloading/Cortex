@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { X } from "lucide-react";
 import type { ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../contracts/cortex-api";
 
 type ExecutionApprovalDecision = ExecutionApprovalDecisionRequest["decision"];
@@ -14,10 +15,19 @@ const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(() => new Set());
   const [deciding, setDeciding] = useState<Map<string, ExecutionApprovalDecision>>(() => new Map());
+  const [dismissedCompletionKey, setDismissedCompletionKey] = useState<string | null>(null);
   const activeTasks = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)
     && !["pending", "denied", "expired"].includes(task.approval_state ?? "not_required"));
   const pendingApprovals = tasks.filter((task) => task.approval_state === "pending");
+  const hasLiveWork = activeTasks.length > 0 || pendingApprovals.length > 0;
+  const completionKey = tasks
+    .filter((task) => !ACTIVE_STATUSES.has(task.status) && task.approval_state !== "pending")
+    .map((task) => `${task.job_id}:${task.sequence}:${task.status}:${task.updated_at}`)
+    .sort()
+    .join("|");
+  const completionDismissed = !hasLiveWork && Boolean(completionKey) && dismissedCompletionKey === completionKey;
   if (!tasks.length) return null;
+  if (completionDismissed) return null;
 
   const announce = pendingApprovals.length
     ? `${pendingApprovals.length} background task${pendingApprovals.length === 1 ? " requires" : "s require"} approval.`
@@ -61,7 +71,20 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) 
     <aside className="execution-task-tray" aria-label="Background tasks">
       <div className="execution-task-tray-heading">
         <h2>Background tasks</h2>
-        <span className="execution-task-tray-count" aria-hidden="true">{tasks.length}</span>
+        <div className="execution-task-tray-controls">
+          <span className="execution-task-tray-count" aria-hidden="true">{tasks.length}</span>
+          {!hasLiveWork && Boolean(completionKey) && (
+            <button
+              className="execution-task-tray-dismiss"
+              type="button"
+              onClick={() => setDismissedCompletionKey(completionKey)}
+              aria-label="Dismiss completed background task notification"
+              title="Dismiss notification"
+            >
+              <X aria-hidden="true" size={15} strokeWidth={2.25} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="execution-task-tray-live" aria-live="polite" role="status">{announce}</div>
       <ul className="execution-task-list">

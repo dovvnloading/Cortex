@@ -31,10 +31,18 @@ describe("ExecutionTaskTray", () => {
     expect(onCancel).toHaveBeenCalledWith("job-1");
   });
 
-  it("keeps terminal state visible without offering Stop", () => {
-    render(<ExecutionTaskTray tasks={[{ ...task, status: "succeeded", can_cancel: false, message: "Complete" }]} />);
+  it("keeps terminal state visible without offering Stop", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ExecutionTaskTray tasks={[{ ...task, status: "succeeded", can_cancel: false, message: "Complete" }]} />);
     expect(screen.getByRole("status")).toHaveTextContent("Background tasks complete.");
     expect(screen.queryByRole("button", { name: /Stop background task/ })).not.toBeInTheDocument();
+    const dismiss = screen.getByRole("button", { name: "Dismiss completed background task notification" });
+    expect(dismiss).toHaveAttribute("title", "Dismiss notification");
+    await user.click(dismiss);
+    expect(screen.queryByRole("complementary", { name: "Background tasks" })).not.toBeInTheDocument();
+
+    rerender(<ExecutionTaskTray tasks={[{ ...task, job_id: "job-2", status: "succeeded", can_cancel: false, message: "Another complete task" }]} />);
+    expect(screen.getByRole("button", { name: "Dismiss completed background task notification" })).toBeVisible();
   });
 
   it("renders pending approval as a non-modal action card without a spinner", async () => {
