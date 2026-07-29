@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 durable recipe coordinator and artifact publication
 
-- **Status:** Implemented and verified as an internal qualification composition
-  boundary; application/API exposure remains a separate default-off decision
+- **Status:** Implemented and verified behind an explicit qualification-only
+  API boundary; the normal application remains default-off
 - **Phase:** 2 - fixed-function image recipe
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [typed recipe contract](0001-phase2-recipe-contract.md),
@@ -15,9 +15,11 @@
 
 The qualified image recipe is coordinated by
 `cortex_backend.execution.recipe_coordinator.RecipeExecutionCoordinator`.
-The coordinator is an internal composition seam, not a new application route.
-It can be injected by the explicit `release_profile="qualification"`
-lifecycle, while the normal application remains disabled by default.
+The coordinator is exposed through the explicit
+`POST /api/v1/execution/recipe/image` route only when the app was built with a
+ready `release_profile="qualification"` lifecycle. The normal application
+remains disabled by default, and the deterministic `fake.v1` preview route
+cannot reach the recipe coordinator.
 
 The request contract is `RecipeImageRequest`. It contains an owner, an
 idempotency request identifier, an opaque `source_artifact_id`, a validated
@@ -81,31 +83,40 @@ The coordinator exposes stable categories such as `input_artifact_unavailable`,
 tokens, and stack traces do not enter job events or results. Terminal repository
 state is immutable, so late worker callbacks cannot overwrite a validated result.
 
-The worker factory is deliberately injected. This stage does not pretend that an
-unsigned package, missing broker identity binding, or absent production trust root
-is a usable runtime. Those are release/qualification composition inputs owned by
-the existing lifecycle and launcher gates.
+The worker factory is deliberately injected. The qualification helper
+`build_recipe_coordinator_factory` binds that already-qualified attempt factory
+to the lifecycle-owned repository without creating a process, binding a broker,
+loading a provider, or falling back to host execution. This stage does not
+pretend that an unsigned package, missing broker identity binding, or absent
+production trust root is a usable runtime; those remain release/qualification
+composition inputs owned by the existing lifecycle and launcher gates.
 
 ## Explicit non-goals
 
-This ADR does not add a public API route, automatic model tool selection, arbitrary
-Python/WASI execution, source-path access, direct user-file mutation, network
-access, application-exit persistence, production signing, or external-review
-requirements. It also does not make the qualification profile the application
-default.
+This ADR does not add an attachment-upload/staging route, automatic model tool
+selection, arbitrary Python/WASI execution, source-path access, direct user-file
+mutation, network access, application-exit persistence, production signing, or
+external-review requirements. It also does not make the qualification profile
+the application default.
 
 ## Verification
 
 `tests/test_phase2_recipe_coordinator.py` covers opaque request binding, output
 digest/MIME revalidation, owner-scoped publication, idempotency conflicts,
 redacted worker failure, cancellation cleanup, and a real authenticated worker
-runtime round trip including in-flight cancellation. The repository-wide matrix
-passed with **324 passed, 1 skipped** on 2026-07-29.
+runtime round trip including in-flight cancellation. `tests/test_phase2_recipe_api.py`
+covers default-off/blocked exposure, typed JSON plan parsing, owner-scoped
+artifacts, idempotency/conflict handling, and the shared status/task surface.
+`tests/test_phase2_qualification_lifecycle.py` covers the explicit coordinator
+factory seam. The generated OpenAPI and TypeScript contracts include the typed
+request/acceptance envelope, and `frontend/src/api/client.ts` exposes the
+qualification route without enabling it in the UI by default.
 
 ## Next stage
 
-The next implementation decision is application integration: define the explicit
-UI/API request surface and wire a qualified worker-attempt factory into the
-qualification lifecycle. That stage must preserve this coordinator contract and
-keep the normal application default-off. No external reviewer or production key
-is required to continue the open-source qualification path.
+The next implementation decision is trusted attachment staging plus binding the
+real signed/native broker worker into the injected attempt factory. That stage
+must preserve this API/coordinator contract, keep the normal application
+default-off, and prove cancellation, ownership, retention, and publication with
+the real qualified attempt. No external reviewer or production key is required
+to continue the open-source qualification path.

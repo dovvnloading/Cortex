@@ -1,6 +1,8 @@
 # ADR-0001 Phase 2 fixed-function recipe provider qualification
 
-- **Status:** Qualification core, explicit qualification-profile lifecycle composition, and the internal recipe coordinator/publication path implemented and verified; application exposure remains separate
+- **Status:** Qualification core, explicit qualification-profile lifecycle
+  composition, durable recipe coordination, and the qualification-only API
+  request surface implemented and verified; application remains default-off
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 typed recipe contract](0001-phase2-recipe-contract.md) and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -24,12 +26,13 @@ Python dependency declaration.
 
 ## Decision
 
-`RecipeImageProvider` is a qualification-only core. It is deliberately not imported
-by the application lifecycle or exported as an execution API. A future `RecipeExecutor`
-may call this core only after the Windows sandbox controls pass and the caller selects
-the explicit `release_profile="qualification"`. An official prebuilt release may
-add separate release-review/signing hardening, but that is not required for the
-open-source source checkout.
+`RecipeImageProvider` remains a qualification-only core. It is not imported by
+the default application lifecycle or exposed as a provider API. The typed recipe
+request route reaches the durable coordinator only after the caller selects the
+explicit `release_profile="qualification"`; the coordinator receives a
+pre-staged opaque artifact ID and an injected worker attempt. An official
+prebuilt release may add separate release-review/signing hardening, but that is
+not required for the open-source source checkout.
 
 ### Input and decoder boundary
 
@@ -113,9 +116,11 @@ limits, crop bounds, cancellation, stop behavior, and non-raiseable configuratio
 The explicit qualification-profile lifecycle composition now consumes the signed
 worker provenance, disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md),
 native broker identity, watchdog, and accounting controls through an injected
-health-gated builder. The internal recipe coordinator now binds that worker
-contract to owner-scoped staged artifacts and atomic publication. The next gate
-is the explicit UI/API request surface and qualified worker-attempt factory; the
-provider must still launch out of process under the bounded worker contract and
-must never fall back to a host process or in-process execution. External review
-and production signing remain optional official-release hardening.
+health-gated builder. The durable recipe coordinator binds that worker contract
+to owner-scoped staged artifacts and atomic publication, and the typed API route
+is available only after the lifecycle is ready. The next gate is trusted
+attachment staging plus binding the real native broker worker into the attempt
+factory; the provider must still launch out of process under the bounded worker
+contract and must never fall back to a host process or in-process execution.
+External review and production signing remain optional official-release
+hardening.

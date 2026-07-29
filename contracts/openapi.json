@@ -84,6 +84,34 @@
         "title": "AppearanceSettings",
         "type": "object"
       },
+      "BrightnessStep": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Factor"
+          },
+          "op": {
+            "const": "brightness",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "factor"
+        ],
+        "title": "BrightnessStep",
+        "type": "object"
+      },
       "ChatMessage": {
         "additionalProperties": false,
         "properties": {
@@ -291,6 +319,34 @@
         "title": "ConnectionResult",
         "type": "object"
       },
+      "ContrastStep": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Factor"
+          },
+          "op": {
+            "const": "contrast",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "factor"
+        ],
+        "title": "ContrastStep",
+        "type": "object"
+      },
       "CortexSettings": {
         "additionalProperties": false,
         "description": "Complete validated settings snapshot with legacy-compatible defaults.",
@@ -344,6 +400,49 @@
           }
         },
         "title": "CreateChatRequest",
+        "type": "object"
+      },
+      "CropStep": {
+        "additionalProperties": false,
+        "properties": {
+          "height": {
+            "maximum": 16384.0,
+            "minimum": 1.0,
+            "title": "Height",
+            "type": "integer"
+          },
+          "op": {
+            "const": "crop",
+            "title": "Op",
+            "type": "string"
+          },
+          "width": {
+            "maximum": 16384.0,
+            "minimum": 1.0,
+            "title": "Width",
+            "type": "integer"
+          },
+          "x": {
+            "maximum": 16383.0,
+            "minimum": 0.0,
+            "title": "X",
+            "type": "integer"
+          },
+          "y": {
+            "maximum": 16383.0,
+            "minimum": 0.0,
+            "title": "Y",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "title": "CropStep",
         "type": "object"
       },
       "DiagnosticsResponse": {
@@ -1014,6 +1113,21 @@
         "title": "GenerationSettings",
         "type": "object"
       },
+      "GrayscaleStep": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "grayscale",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "GrayscaleStep",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1058,6 +1172,84 @@
           }
         },
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "ImageTransformPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "input_artifact_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Input Artifact Id",
+            "type": "string"
+          },
+          "output_format": {
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "title": "Output Format",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "artifact.transform.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "brightness": "#/components/schemas/BrightnessStep",
+                  "contrast": "#/components/schemas/ContrastStep",
+                  "crop": "#/components/schemas/CropStep",
+                  "grayscale": "#/components/schemas/GrayscaleStep",
+                  "resize": "#/components/schemas/ResizeStep",
+                  "rotate": "#/components/schemas/RotateStep"
+                },
+                "propertyName": "op"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/GrayscaleStep"
+                },
+                {
+                  "$ref": "#/components/schemas/ContrastStep"
+                },
+                {
+                  "$ref": "#/components/schemas/BrightnessStep"
+                },
+                {
+                  "$ref": "#/components/schemas/CropStep"
+                },
+                {
+                  "$ref": "#/components/schemas/ResizeStep"
+                },
+                {
+                  "$ref": "#/components/schemas/RotateStep"
+                }
+              ]
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Steps",
+            "type": "array"
+          },
+          "strip_metadata": {
+            "const": true,
+            "default": true,
+            "title": "Strip Metadata",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "input_artifact_id",
+          "steps",
+          "output_format"
+        ],
+        "title": "ImageTransformPlan",
         "type": "object"
       },
       "InstalledModel": {
@@ -1393,6 +1585,86 @@
         "title": "OnboardingSettings",
         "type": "object"
       },
+      "RecipeImageTransformAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "profile": {
+            "const": "recipe.image.v1",
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence"
+        ],
+        "title": "RecipeImageTransformAccepted",
+        "type": "object"
+      },
+      "RecipeImageTransformRequest": {
+        "additionalProperties": false,
+        "description": "Explicit request for one qualified, fixed-function image transform.\n\nThe source artifact must already have been copied into the owner-scoped\nartifact store by a trusted attachment boundary. The API accepts only the\nopaque artifact ID and the typed recipe plan; it never accepts a path or\nexecutable instruction.",
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/ImageTransformPlan"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retention_seconds": {
+            "default": 86400,
+            "maximum": 2592000.0,
+            "minimum": 1.0,
+            "title": "Retention Seconds",
+            "type": "integer"
+          },
+          "source_artifact_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Source Artifact Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "source_artifact_id",
+          "plan"
+        ],
+        "title": "RecipeImageTransformRequest",
+        "type": "object"
+      },
       "RegenerationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1466,6 +1738,60 @@
           "memos"
         ],
         "title": "ReplaceMemoryRequest",
+        "type": "object"
+      },
+      "ResizeStep": {
+        "additionalProperties": false,
+        "properties": {
+          "height": {
+            "maximum": 16384.0,
+            "minimum": 1.0,
+            "title": "Height",
+            "type": "integer"
+          },
+          "op": {
+            "const": "resize",
+            "title": "Op",
+            "type": "string"
+          },
+          "width": {
+            "maximum": 16384.0,
+            "minimum": 1.0,
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op",
+          "width",
+          "height"
+        ],
+        "title": "ResizeStep",
+        "type": "object"
+      },
+      "RotateStep": {
+        "additionalProperties": false,
+        "properties": {
+          "degrees": {
+            "enum": [
+              90,
+              180,
+              270
+            ],
+            "title": "Degrees",
+            "type": "integer"
+          },
+          "op": {
+            "const": "rotate",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "degrees"
+        ],
+        "title": "RotateStep",
         "type": "object"
       },
       "SSEEvent": {
@@ -2235,6 +2561,45 @@
           }
         },
         "summary": "Start Fake Execution"
+      }
+    },
+    "/api/v1/execution/recipe/image": {
+      "post": {
+        "description": "Start one explicitly qualified, owner-scoped image recipe.\n\nThe route is intentionally unavailable unless the app was built with\nthe explicit qualification lifecycle and that lifecycle completed its\nhealth-gated startup. Attachment staging is a separate trusted boundary;\ncallers provide only its opaque artifact identifier here.",
+        "operationId": "start_recipe_image_transform_api_v1_execution_recipe_image_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipeImageTransformRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeImageTransformAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Recipe Image Transform"
       }
     },
     "/api/v1/execution/tasks": {

@@ -999,12 +999,15 @@ signed/AppContainer/broker, hostile-decoder, and cancellation corpus with bounde
 timeouts; this is the open-source qualification evidence and does not need
 production trust material. Explicit lifecycle composition for
 `release_profile="qualification"` is now available through the documented
-local/CI-only builder; the application remains default-off and no recipe request
-route is enabled by this slice. The next core slice is the recipe-specific
-coordinator/request and artifact-publication path behind that lifecycle. The
-separate `recipe.release-review.v1` verifier is available as optional release
-hardening; it remains observation-only and no approval record or production
-trust material is committed.
+local/CI-only builder; the application remains default-off. The durable recipe
+coordinator, typed `POST /api/v1/execution/recipe/image` request surface, and
+generated TypeScript client method are available only after that lifecycle is
+ready and consume an opaque artifact ID staged by a separate trusted boundary.
+The next core slice is trusted attachment staging and binding the real
+signed/native broker worker into the injected attempt factory. The separate
+`recipe.release-review.v1` verifier is available as optional release hardening;
+it remains observation-only and no approval record or production trust material
+is committed.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 
