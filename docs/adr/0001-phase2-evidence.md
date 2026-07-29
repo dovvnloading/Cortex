@@ -1,13 +1,14 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, artifact security review, signed worker launch/broker qualification, packaged transform/hostile-decoder/cancellation qualification, resource/watchdog accounting qualification, and release/lifecycle preflight complete; external review, signed production package installation, and lifecycle release gates remain open
+- **Status:** Open-source qualification track complete through the fixed-function worker boundary; optional official-release hardening is separate
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
 - **Worker ADR:** [Phase 2 fixed recipe worker protocol and package boundary](0001-phase2-worker-protocol.md)
 - **Release ADR:** [Phase 2 release and lifecycle health preflight](0001-phase2-release-lifecycle-gate.md)
 - **Qualification ADR:** [Phase 2 packaged worker release qualification](0001-phase2-worker-release-qualification.md)
+- **Review ADR:** [Phase 2 external release-review attestation](0001-phase2-external-review-attestation.md)
 
 ## Stage checklist
 
@@ -27,13 +28,14 @@
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Deterministic artifact security review | **Complete (qualification-only)** | `artifact_security_review.py --json --strict` passed the fixed 12-case disposable corpus (`artifact-boundary-review.v1`, digest `a748cc9f0a514c8d`): owner/path binding, link/hardlink rejection, active/non-finite content, exact claims/quarantine, rollback, and repository size integrity. Missing link primitives remain blocked. |
-| Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. Provider launch remains disabled pending external review and lifecycle wiring. |
-| Release/lifecycle health preflight | **Complete (fail-closed composition)** | `RecipeRuntimeReleaseGate` rechecks the active signed worker, requires the reviewed native process factory and live broker binder, and requires an explicit external-review result in a fixed order. It performs no launch, broker bind, provider load, or lifecycle mutation; missing review or production package state remains blocked. |
+| Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. The explicit local/qualification profile is the next lifecycle-wiring slice; external review is not required for this open-source path. |
+| Release/lifecycle health preflight | **Complete (official + qualification profiles)** | `RecipeRuntimeReleaseGate` defaults to `release_profile="official"` and requires the reviewed native process factory, live broker binder, and external-review result. An explicit `release_profile="qualification"` records `qualification_profile` and omits only the optional outside-review requirement for local/CI development; it performs no launch, broker bind, provider load, or lifecycle mutation. |
 | Packaged worker release qualification | **Complete (CI qualification-only)** | Quality CI builds the unsigned fixed one-folder worker, signs it only with an in-memory ephemeral key, installs/reverifies the immutable generation, and runs the live AppContainer/Job Object/broker/hostile/cancellation corpus with bounded 15/20-minute steps. Production trust material and provider enablement remain excluded. |
-| Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
+| External release-review attestation | **Complete (optional official-release hardening)** | `recipe.release-review.v1`, an independent pinned review key root, exact release/bundle/worker-key/launcher/threat-model binding, bounded freshness, and redacted `RuntimeHealth` adaptation are implemented and adversarially tested. It is not required to build, test, or use the open-source qualification profile. |
+| Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains default-off until explicit qualification-profile lifecycle wiring. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. External review and production lifecycle wiring remain required before provider enablement. |
+| OS sandbox provider and provider-produced image outputs | **Complete (qualification; default-off in the app)** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. The next core slice is explicit local/qualification lifecycle wiring; official-release review/signing remains optional hardening. |
 
 ## Security invariants
 
@@ -248,9 +250,10 @@ check: supported Windows boundary, active signed-worker provenance, reviewed
 native process-factory shape, live broker identity-binder shape, and an explicit
 external-review result. Focused regression coverage passed 6 tests and verified
 that no process, broker, provider, or lifecycle method is called by the preflight.
-The result remains blocked without an approved external-review record and a
-production-installed signed generation; this stage adds composition only and does
-not authorize provider launch.
+The official-release result remains blocked without an approved external-review
+record and a production-installed signed generation; this stage adds composition
+only and does not authorize provider launch. The open-source qualification profile
+does not use this official-release approval requirement.
 
 **Packaged worker release qualification result (2026-07-29):** A fresh local
 Windows one-folder build completed successfully, and the strict disposable
@@ -268,3 +271,25 @@ completed successfully in 4m10s on commit `2abbd883`. It built the fixed one-fol
 passed the strict transform, hostile-decoder, cancellation, AppContainer,
 Job Object, broker-identity, provenance, and cleanup corpus using only an
 ephemeral in-memory signing key.
+
+**External review attestation contract result (2026-07-29):** The independent
+`recipe.release-review.v1` verifier and `ReleaseReviewProbe` were added without
+provider or lifecycle enablement. Thirteen adversarial tests passed, covering
+signature/tamper handling, independent review-key trust, freshness, exact release
+binding, size/schema bounds, and redacted failures. Production review evidence,
+trust roots, and signed package material remain intentionally external.
+
+**External review attestation CI verification (2026-07-29):** [Quality run
+30447055070](https://github.com/dovvnloading/Cortex/actions/runs/30447055070)
+([test job 90559898879](https://github.com/dovvnloading/Cortex/actions/runs/30447055070/job/90559898879))
+passed on commit `4b20fea`, including the full Python/frontend matrix, strict
+attestation tests, packaged-worker build, and disposable Windows qualification.
+
+**Roadmap correction (2026-07-29):** External review, production signing, and
+trusted release roots are now explicitly classified as optional official-release
+hardening. They do not block the open-source source checkout, local qualification,
+or a future explicit development profile. The release gate now exposes an explicit
+`release_profile="qualification"` for that path, while the application remains
+default-off. The next core implementation slice is wiring that profile into the
+local lifecycle with clear default-off controls; no outside reviewer or production
+key is required for that work.

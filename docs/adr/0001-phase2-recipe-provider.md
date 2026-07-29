@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 fixed-function recipe provider qualification
 
-- **Status:** Qualification core implemented and verified; OS sandbox and lifecycle enablement remain blocked
+- **Status:** Qualification core implemented and verified; explicit qualification-profile lifecycle wiring remains next
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 typed recipe contract](0001-phase2-recipe-contract.md) and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -26,8 +26,10 @@ Python dependency declaration.
 
 `RecipeImageProvider` is a qualification-only core. It is deliberately not imported
 by the application lifecycle or exported as an execution API. A future `RecipeExecutor`
-may call this core only after the Windows sandbox has been independently constructed
-and attested.
+may call this core only after the Windows sandbox controls pass and the caller selects
+the explicit `release_profile="qualification"`. An official prebuilt release may
+add separate release-review/signing hardening, but that is not required for the
+open-source source checkout.
 
 ### Input and decoder boundary
 
@@ -70,8 +72,10 @@ or weaker-provider fallback. `stop()` is monotonic and clears the enabled state.
 
 The current `RuntimeHealth.ready()` test fixture is only a contract test. It is not an
 attestation of an AppContainer/LPAC, Job Object, restricted handle set, signed bundle,
-named-pipe identity, CPU watchdog, or memory limit. Those controls remain required
-before this provider can be wired into `ExecutionLifecycle`.
+named-pipe identity, CPU watchdog, or memory limit. The packaged qualification
+corpus now supplies those disposable-control results; they remain required before
+this provider can be wired into the explicit qualification profile. External review
+is optional official-release hardening.
 
 ## Qualification ceilings
 
@@ -106,10 +110,9 @@ allowlisted transforms, deterministic output hashes, metadata stripping, malform
 active inputs, malformed JPEGs, animated WebP rejection, pixel/decoded-memory/output
 limits, crop bounds, cancellation, stop behavior, and non-raiseable configuration caps.
 
-The next gate is the [signed worker provenance binding](0001-phase2-worker-provenance.md)
-followed by the disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md).
-The storage boundary now proves only the exact role and immutable bytes; the actual
-provider worker must still launch out of process
-under a signed bundle, AppContainer/LPAC and Job Object controls, restricted
-handles/environment, native broker identity, watchdog, and accounting; run the hostile
-decoder corpus there; then wire it to `ExecutionLifecycle` only after external review.
+The next gate is explicit qualification-profile lifecycle wiring after the signed
+worker provenance, disposable [Windows sandbox qualification harness](0001-phase2-sandbox-qualification.md),
+native broker identity, watchdog, and accounting controls pass. The provider must
+still launch out of process under the bounded worker contract; it must never fall
+back to a host process or in-process execution. External review and production
+signing remain optional official-release hardening.

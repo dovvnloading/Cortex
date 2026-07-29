@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .bundle_installer import SignedBundleInstaller
 from .lifecycle import RuntimeHealth
@@ -67,11 +67,14 @@ def _adapter_available(value: object, *methods: str) -> bool:
 
 
 class RecipeRuntimeReleaseGate:
-    """Compose mandatory controls without authorizing a provider launch.
+    """Compose controls for an official or explicit qualification profile.
 
     The gate is intentionally conservative.  It reports the first missing
     control in a fixed order so diagnostics are deterministic and no internal
-    paths, exception text, or token values cross the lifecycle boundary.
+    paths, exception text, or token values cross the lifecycle boundary. The
+    default ``official`` profile requires an external review callback; the
+    explicit ``qualification`` profile is for local/CI development with
+    disposable signing material and does not require that optional release gate.
     """
 
     def __init__(
@@ -82,6 +85,7 @@ class RecipeRuntimeReleaseGate:
         broker_binder: object | None = None,
         external_review_check: ExternalReviewProbe | None = None,
         platform_name: str | None = None,
+        release_profile: Literal["official", "qualification"] = "official",
     ) -> None:
         if not isinstance(installer, SignedBundleInstaller):
             raise TypeError("installer must be a SignedBundleInstaller")
@@ -89,11 +93,17 @@ class RecipeRuntimeReleaseGate:
             raise TypeError("platform name must be a string")
         if external_review_check is not None and not callable(external_review_check):
             raise TypeError("external review check must be callable")
+        if not isinstance(release_profile, str) or release_profile not in {
+            "official",
+            "qualification",
+        }:
+            raise ValueError("release profile must be official or qualification")
         self._installer = installer
         self._process_factory = process_factory
         self._broker_binder = broker_binder
         self._external_review_check = external_review_check
         self._platform_name = platform_name or os.name
+        self._release_profile = release_profile
 
     @staticmethod
     def _blocked(
@@ -157,6 +167,13 @@ class RecipeRuntimeReleaseGate:
                 message="The live native broker identity binder is not configured.",
             )
         checks.append(ReleaseGateCheck("native_broker_binding", True, "configured"))
+
+        if self._release_profile == "qualification":
+            checks.append(ReleaseGateCheck("external_review", True, "qualification_profile"))
+            return ReleaseGateSnapshot(
+                health=RuntimeHealth.ready("Recipe runtime qualification controls are ready."),
+                checks=tuple(checks),
+            )
 
         if self._external_review_check is None:
             return self._blocked(
