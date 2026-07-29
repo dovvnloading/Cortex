@@ -161,13 +161,14 @@ test("clips a long runtime status before the send control", async ({ page }) => 
 
   const surface = page.locator(".composer-surface");
   const meta = page.locator(".composer-meta");
+  const status = page.locator(".composer-status");
   const send = page.getByRole("button", { name: "Send message" });
   await expect(surface).toBeVisible();
   await expect(meta).toContainText("Could not connect to Ollama.");
 
-  const metaBox = await meta.boundingBox();
+  const statusBox = await status.boundingBox();
   const sendBox = await send.boundingBox();
-  expect(metaBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
   expect(sendBox).not.toBeNull();
-  expect(metaBox!.x + metaBox!.width).toBeLessThanOrEqual(sendBox!.x);
+  expect(statusBox!.x + statusBox!.width).toBeLessThanOrEqual(sendBox!.x - 6);
 });
