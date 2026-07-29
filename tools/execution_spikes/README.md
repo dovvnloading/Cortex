@@ -83,6 +83,13 @@ Use `--case` to rerun one case during diagnosis; the default runs the full
 corpus. Full package closure verification can take several minutes on Windows;
 the protocol timeout applies after launch and is fail-closed.
 
+The Quality workflow now builds this one-folder package with
+`packaging/build_recipe_worker.ps1 -SkipDependencyInstall` and runs the full
+strict corpus in a dedicated, time-bounded step. CI uses only the in-memory
+qualification key; it never consumes a production private key or installs a
+launch-authorized generation. The step timeout makes slow package verification
+an explicit failed release check rather than an unbounded job.
+
 The current evidence result passes the complete packaged-worker corpus:
 signed installation, provenance, AppContainer/job identity binding, broker
 handshake, normal `collect_output`, hostile decoder rejection for truncated PNG
