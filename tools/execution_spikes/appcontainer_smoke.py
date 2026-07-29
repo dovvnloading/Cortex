@@ -47,6 +47,7 @@ _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
+_HRESULT = getattr(wintypes, "HRESULT", ctypes.c_long)
 
 
 class _LargeInteger(ctypes.Union):
@@ -174,9 +175,10 @@ def _configure_apis() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         wintypes.DWORD,
         ctypes.POINTER(wintypes.LPVOID),
     ]
-    userenv.CreateAppContainerProfile.restype = wintypes.HRESULT
+    # HRESULT is not exposed by every supported CPython wintypes module.
+    userenv.CreateAppContainerProfile.restype = _HRESULT
     userenv.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
-    userenv.DeleteAppContainerProfile.restype = wintypes.HRESULT
+    userenv.DeleteAppContainerProfile.restype = _HRESULT
     advapi32.FreeSid.argtypes = [wintypes.LPVOID]
     advapi32.FreeSid.restype = wintypes.LPVOID
     advapi32.OpenProcessToken.argtypes = [

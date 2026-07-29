@@ -221,7 +221,8 @@ On Windows it additionally queried actual Job Object CPU, memory, process,
 page-fault, and I/O accounting for a suspended fixed child and proved kill-on-close
 reaping of its descendant tree. The initial native query exposed and fixed an ABI
 gap (the Windows accounting struct requires both per-period user and kernel time
-fields). The worker loop now reports cumulative CPU/byte/message usage, and the
+fields) and made the Win32 `HRESULT` binding explicit for supported CPython
+versions. The worker loop now reports cumulative CPU/byte/message usage, and the
 session exposes cumulative input/output byte counters. Resource/watchdog
 qualification is complete for the fixed controls; real signed-worker enforcement,
 external review, and production lifecycle health remain open.
