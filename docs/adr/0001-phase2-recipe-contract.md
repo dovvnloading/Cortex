@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, and qualification-only provider core implemented and verified; explicit qualification-profile lifecycle wiring remains next
+- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, qualification-only provider core, and explicit qualification-profile lifecycle composition implemented and verified; recipe request execution remains next
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -64,17 +64,18 @@ This ADR does not authorize:
 - model prompt/tool exposure, automatic execution, or application lifecycle enablement.
 
 Those gates require their own implementation evidence. The packaged application
-remains on the explicitly disabled lifecycle from Phase 1 until the local
-qualification profile is deliberately wired; outside review and production trust
-are optional official-release hardening, not open-source prerequisites.
+remains on the explicitly disabled lifecycle from Phase 1; the local qualification
+profile is now deliberately composable through an explicit injected lifecycle
+builder. Outside review and production trust are optional official-release
+hardening, not open-source prerequisites.
 
 ## Required next gates
 
-1. Wire the fixed-function provider inside the OS sandbox through a passing lifecycle
-   health check for the explicit `release_profile="qualification"`; the current
-   provider core intentionally does not satisfy this gate by itself. Official
-   prebuilt releases may add external review and production trust as optional
-   hardening.
+1. Add the recipe-specific coordinator/request and artifact-publication path behind
+   the passing lifecycle health check for the explicit
+   `release_profile="qualification"`. The lifecycle builder intentionally does not
+   create processes or expose a recipe route by itself. Official prebuilt releases
+   may add external review and production trust as optional hardening.
 
 ## Verification
 

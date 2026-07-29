@@ -1,9 +1,10 @@
 """Durable execution primitives and provider-independent safety contracts.
 
-Only deterministic contracts, the storage-only signed bundle installer, and the
-reviewed broker transports are exposed in this phase. Native transport and bundle
-storage never load a provider; real runtime providers stay absent until later ADR
-gates are approved.
+Only deterministic contracts, the storage-only signed bundle installer, the
+reviewed broker transports, and the explicit local qualification composition are
+exposed in this phase. Native transport and bundle storage never load a provider;
+the normal application remains default-off and a recipe request coordinator is a
+later ADR slice.
 """
 
 from .broker import (
@@ -43,6 +44,15 @@ from .bundle_installer import (
     verify_keyring_update,
 )
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
+from .qualification import (
+    CoordinatorFactory,
+    ExecutionProfile,
+    ProviderHealthProbe,
+    QualificationLifecycleConfig,
+    QualificationProfileError,
+    build_execution_lifecycle,
+    parse_execution_profile,
+)
 from .manifest import (
     ManifestEntry,
     ManifestState,
@@ -174,6 +184,8 @@ __all__ = [
     "ExecutionRepository",
     "ExecutionRepositoryError",
     "ExecutionLifecycle",
+    "ExecutionProfile",
+    "CoordinatorFactory",
     "CalculatorPlan",
     "CheckPlan",
     "FakeExecutionPlan",
@@ -212,6 +224,11 @@ __all__ = [
     "PublishedArtifact",
     "RecipeValidationError",
     "RuntimeHealth",
+    "ProviderHealthProbe",
+    "QualificationLifecycleConfig",
+    "QualificationProfileError",
+    "build_execution_lifecycle",
+    "parse_execution_profile",
     "RollbackAuthorizer",
     "SignedBundleInstaller",
     "SignedRecipeManifest",

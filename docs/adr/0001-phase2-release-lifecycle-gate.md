@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 release and lifecycle health preflight
 
-- **Status:** Optional official-release preflight implemented and verified; open-source qualification is a separate track
+- **Status:** Optional official-release preflight and explicit local qualification composition implemented and verified; recipe request execution remains separate
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [signed worker provenance](0001-phase2-worker-provenance.md), [native launcher](0001-phase2-native-launcher.md), [native broker](0001-phase2-native-broker.md), and [Phase 1 lifecycle](0001-phase1-production-lifecycle.md)
@@ -8,9 +8,9 @@
 
 This ADR governs a maintainer-controlled official release profile. It is not a
 requirement for cloning the repository, running the tests, building the worker, or
-using a future explicit local/qualification profile with disposable signing material.
-The normal source checkout remains default-off until that profile is deliberately
-wired and documented.
+using the explicit local/qualification profile with disposable signing material.
+The normal source checkout remains default-off; the composition boundary is
+documented separately in [the qualification lifecycle ADR](0001-phase2-qualification-lifecycle.md).
 
 ## Decision
 
@@ -32,8 +32,8 @@ review callback. An explicit `release_profile="qualification"` is available for
 local/CI development after the sandbox controls pass; it records
 `qualification_profile` and intentionally does not require outside review or
 production trust material. The qualification profile is not an implicit provider
-enablement and the application remains default-off until a separate explicit
-lifecycle wiring change.
+enablement; the application remains default-off and only the separate injected
+lifecycle builder may compose it.
 
 The result is a `ReleaseGateSnapshot` containing only safe check names, stable
 codes, and a `RuntimeHealth`. Missing or invalid controls return a blocked result
@@ -77,10 +77,10 @@ The fixed failure order is:
 | Broker identity | `native_broker_binding_required` | The live PID/AppContainer binder is not configured. |
 | External review | `external_review_required`, `external_review_unavailable`, `external_review_result_invalid`, or `external_review_check_failed` | Release approval is absent, failed, or malformed. |
 
-The snapshot is suitable for an `ExecutionLifecycle` health callback, but the
-application must still construct an explicitly enabled lifecycle and a reviewed
-coordinator as a separate release change. The current build remains disabled by
-default, so ordinary chat readiness is unaffected.
+The snapshot is suitable for an `ExecutionLifecycle` health callback. The local
+qualification builder additionally requires a provider-health probe and an
+injected coordinator; the application remains disabled by default, so ordinary
+chat readiness is unaffected.
 
 ## Invariants
 
