@@ -2,6 +2,7 @@ import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { ChatAttachment } from "../../../contracts/cortex-api";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 
 function deferred<T>() {
@@ -20,12 +21,20 @@ function ComposerHarness({
   onSubmit = vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
   onStop = vi.fn(),
   error = null,
+  attachments = [],
+  onAddAttachments,
+  onRemoveAttachment,
+  imageInputBlocked = null,
 }: {
   initialValue?: string;
   phase?: ComposerPhase;
   onSubmit?: () => Promise<boolean>;
   onStop?: () => void | Promise<void>;
   error?: string | null;
+  attachments?: readonly ChatAttachment[];
+  onAddAttachments?: (files: File[]) => Promise<void> | void;
+  onRemoveAttachment?: (attachmentId: string) => void;
+  imageInputBlocked?: string | null;
 }) {
   const [value, setValue] = useState(initialValue);
   return (
@@ -35,6 +44,10 @@ function ComposerHarness({
       selectedModel="local-chat:7b"
       localModels={["local-chat:7b", "local-chat:13b"]}
       error={error}
+      attachments={attachments}
+      onAddAttachments={onAddAttachments}
+      onRemoveAttachment={onRemoveAttachment}
+      imageInputBlocked={imageInputBlocked}
       onValueChange={setValue}
       onSubmit={async () => {
         const accepted = await onSubmit();
@@ -142,5 +155,38 @@ describe("MessageComposer", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("Your message is still here.");
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("Preserved");
+  });
+
+  it("keeps the file picker inside the composer and forwards the selected file", async () => {
+    const user = userEvent.setup();
+    const onAddAttachments = vi.fn();
+    render(<ComposerHarness onAddAttachments={onAddAttachments} />);
+
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    await user.upload(screen.getByLabelText("Attach images or documents"), file);
+
+    expect(onAddAttachments).toHaveBeenCalledWith([file]);
+  });
+
+  it("shows attachment chips and blocks send when the selected model cannot accept images", () => {
+    const attachment: ChatAttachment = {
+      attachment_id: "image-1",
+      filename: "photo.png",
+      mime_type: "image/png",
+      size: 4,
+      sha256: "a".repeat(64),
+      kind: "image",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    render(
+      <ComposerHarness
+        attachments={[attachment]}
+        imageInputBlocked="Selected model cannot accept images."
+      />,
+    );
+
+    expect(screen.getByText("photo.png")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("cannot accept images");
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 });

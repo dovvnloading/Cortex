@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event
 from typing import Any, Protocol
 
@@ -20,6 +20,9 @@ class ModelGateway(Protocol):
     def pull(self, model: str, *, stream: bool = False) -> Any:
         """Pull one exact model tag."""
 
+    def show(self, model: str) -> Any:
+        """Return Ollama's model details, including capability metadata."""
+
 
 @dataclass(frozen=True, slots=True)
 class InstalledModel:
@@ -28,6 +31,8 @@ class InstalledModel:
     name: str
     size: int | None = None
     modified_at: str | None = None
+    capabilities: tuple[str, ...] = ()
+    supports_vision: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,11 +70,19 @@ class ModelService:
     def inventory(self) -> tuple[tuple[InstalledModel, ...], ConnectionResult]:
         """Read one authoritative local inventory and its connection result."""
         try:
-            models = tuple(
+            raw_models = tuple(
                 sorted(
                     self.extract_model_details(self._gateway.list()),
                     key=lambda item: item.name,
                 )
+            )
+            models = tuple(
+                replace(
+                    item,
+                    capabilities=(capabilities := self.capabilities(item.name)) or (),
+                    supports_vision=(None if capabilities is None else "vision" in capabilities),
+                )
+                for item in raw_models
             )
         except Exception as exc:
             logging.error("Ollama model metadata listing failed (%s).", type(exc).__name__)
@@ -229,6 +242,34 @@ class ModelService:
                     ),
                 )
         return tuple(details.values())
+
+    def capabilities(self, model: str) -> tuple[str, ...] | None:
+        """Read the official Ollama ``/api/show`` capability list.
+
+        Older test/compatibility gateways may not expose ``show``; ``None``
+        means capability detection is unavailable, while an empty tuple is a
+        successful response that explicitly advertises no capabilities.
+        """
+
+        show = getattr(self._gateway, "show", None)
+        if not callable(show):
+            return None
+        try:
+            response = show(model)
+        except Exception as exc:
+            logging.warning("Ollama capability probe failed (%s).", type(exc).__name__)
+            return None
+        if isinstance(response, Mapping):
+            values = response.get("capabilities", ())
+        else:
+            values = getattr(response, "capabilities", ())
+        if not isinstance(values, (list, tuple, set)):
+            return ()
+        return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+    def model_supports_vision(self, model: str) -> bool | None:
+        capabilities = self.capabilities(model)
+        return None if capabilities is None else "vision" in capabilities
 
     @staticmethod
     def _iter_updates(stream: Any) -> Iterable[Any]:

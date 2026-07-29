@@ -6,6 +6,7 @@ import unittest
 
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository
 from cortex_backend.repositories.legacy_storage import DatabaseManager
+from cortex_backend.core.generation import GenerationAttachment
 from cortex_backend.services.llm import SynthesisAgent
 
 
@@ -95,6 +96,30 @@ class ChatCorrectnessTests(unittest.TestCase):
 
         self.assertLess(len(fitted), len(memories))
         self.assertEqual(fitted[-1].split()[0], "memory-19")
+
+    def test_context_budget_trims_document_reference_text_but_keeps_attachment_identity(self):
+        attachment = GenerationAttachment(
+            attachment_id="doc-1",
+            filename="large.md",
+            mime_type="text/markdown",
+            kind="document",
+            text_content="important " * 20_000,
+        )
+
+        fitted = SynthesisAgent.fit_attachments_to_context(
+            (attachment,),
+            query="Summarize the attachment.",
+            chat_history="No history available.",
+            permanent_memories=[],
+            memories_enabled=False,
+            user_system_instructions=None,
+            num_ctx=1024,
+        )
+
+        self.assertEqual(fitted[0].attachment_id, "doc-1")
+        self.assertEqual(fitted[0].filename, "large.md")
+        self.assertLess(len(fitted[0].text_content or ""), len(attachment.text_content or ""))
+        self.assertIn("truncated to fit the model context", fitted[0].text_content or "")
 
     def test_vector_memory_is_not_initialized_until_integrated(self):
         source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")

@@ -28,6 +28,7 @@ class ChatRepository(Protocol):
         *,
         sources: list[Any] | None = None,
         thoughts: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         thread_title: str | None = None,
     ) -> str: ...
 
@@ -45,6 +46,7 @@ class ChatRepository(Protocol):
         *,
         sources: list[Any] | None = None,
         thoughts: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None: ...
 
 
@@ -105,6 +107,7 @@ class LegacyDatabaseChatRepository:
         *,
         sources: list[Any] | None = None,
         thoughts: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         self._database.replace_message(
             thread_id,
@@ -112,6 +115,7 @@ class LegacyDatabaseChatRepository:
             content,
             sources=sources,
             thoughts=thoughts,
+            attachments=attachments,
         )
 
 
@@ -180,6 +184,7 @@ class InMemoryChatRepository:
         *,
         sources: list[Any] | None = None,
         thoughts: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         thread_title: str | None = None,
     ) -> str:
         chat = self._chats.get(thread_id)
@@ -197,6 +202,7 @@ class InMemoryChatRepository:
                 "timestamp": self._timestamp(),
                 "sources": deepcopy(sources),
                 "thoughts": thoughts,
+                "attachments": deepcopy(attachments),
             }
         )
         chat["timestamp"] = self._timestamp()
@@ -246,6 +252,7 @@ class InMemoryChatRepository:
         *,
         sources: list[Any] | None = None,
         thoughts: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         chat = self._chats.get(thread_id)
         if chat is None:
@@ -260,6 +267,8 @@ class InMemoryChatRepository:
                     thoughts=thoughts,
                     timestamp=self._timestamp(),
                 )
+                if attachments is not None:
+                    message["attachments"] = deepcopy(attachments)
                 chat["timestamp"] = self._timestamp()
                 return
         raise ChatRepositoryError("Message does not exist.")

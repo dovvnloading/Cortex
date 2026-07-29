@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatResponse } from "../../../contracts/cortex-api";
+import type { ChatAttachment, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
 import { humanizeGenerationStatus } from "../lib/generationStatus";
 import { ChatPage } from "./ChatPage";
@@ -35,11 +35,12 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
     generationStatus: vi.fn(),
     cancelGeneration: vi.fn(async () => ({ job_id: "job-1", kind: "generation", status: "cancelling", sequence: 2 })),
     forkChat: vi.fn(),
+    stageChatAttachment: vi.fn(),
     ...overrides,
   } as unknown as CortexApi;
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a") {
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null) {
   return render(
     <ChatPage
       api={api}
@@ -48,6 +49,7 @@ function renderChat(api: CortexApi, threadId = "thread-a") {
       runtimeMessage={null}
       localModels={["local-chat:7b"]}
       selectedModel="local-chat:7b"
+      selectedModelSupportsVision={selectedModelSupportsVision}
       modelBusy={false}
       onSelectModel={async () => true}
       onRescanModels={async () => undefined}
@@ -85,6 +87,7 @@ describe("ChatPage composer integration", () => {
           content: "# Result\n\n```ts\nconst answer = 42;\n```",
           thoughts: "I checked the input first.",
           sources: ["[Reference](https://example.com/reference)"],
+          attachments: [{ attachment_id: "doc-1", filename: "result.md", mime_type: "text/markdown", size: 12, sha256: "a".repeat(64), kind: "document", expires_at: "2099-01-01T00:00:00Z" }],
           timestamp: "2026-01-01T00:05:00Z",
         },
       ],
@@ -100,6 +103,7 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
     expect(screen.getByText("Reasoning")).toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
+    expect(screen.getByText("result.md")).toBeInTheDocument();
   });
 
   it("retains the exact draft if generation acceptance fails", async () => {
@@ -210,5 +214,56 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(screen.getByText("Generating in another conversation")).toBeVisible());
     expect(screen.getByRole("button", { name: "Stop generating" })).toBeVisible();
     expect(screen.getByLabelText("Message Cortex")).toBeEnabled();
+  });
+
+  it("stages a document without putting its contents into the composer and sends its opaque metadata", async () => {
+    const user = userEvent.setup();
+    const attachment: ChatAttachment = {
+      attachment_id: "doc-1",
+      filename: "notes.md",
+      mime_type: "text/markdown",
+      size: 12,
+      sha256: "b".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const api = chatApi({
+      stageChatAttachment: vi.fn().mockResolvedValue(attachment),
+      generate: vi.fn().mockResolvedValue({ job_id: "job-1", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "message-1" }),
+    });
+    renderChat(api, "thread-a", true);
+
+    const file = new File(["private document contents"], "notes.md", { type: "text/markdown" });
+    await user.upload(await screen.findByLabelText("Attach images or documents"), file);
+    expect(await screen.findByText("notes.md")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledWith(expect.objectContaining({
+      user_input: "Please review the attached file(s).",
+      attachments: [attachment],
+    })));
+  });
+
+  it("explains the image capability mismatch before a generation request is made", async () => {
+    const user = userEvent.setup();
+    const attachment: ChatAttachment = {
+      attachment_id: "image-1",
+      filename: "photo.png",
+      mime_type: "image/png",
+      size: 12,
+      sha256: "c".repeat(64),
+      kind: "image",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const api = chatApi({ stageChatAttachment: vi.fn().mockResolvedValue(attachment) });
+    renderChat(api, "thread-a", false);
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "photo.png", { type: "image/png" });
+    await user.upload(await screen.findByLabelText("Attach images or documents"), file);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("cannot accept images");
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(api.generate).not.toHaveBeenCalled();
   });
 });

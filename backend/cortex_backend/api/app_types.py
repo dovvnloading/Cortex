@@ -8,6 +8,7 @@ from cortex_backend.repositories.chats import ChatRepository
 from cortex_backend.repositories.memories import MemoryRepository
 from cortex_backend.repositories.settings import SettingsRepository
 from cortex_backend.services.generation import GenerationService
+from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelService
 
 
@@ -17,3 +18,4 @@ class BackendDependenciesProtocol(Protocol):
     memories: MemoryRepository
     models: ModelService
     generation: GenerationService
+    attachments: ChatAttachmentService | None

@@ -10,6 +10,7 @@ export interface AddMessageRequest {
   content: string;
   sources?: Array<unknown> | null;
   thoughts?: string | null;
+  attachments?: Array<ChatAttachment> | null;
 }
 
 export interface AppearanceSettings {
@@ -40,6 +41,22 @@ export interface BrightnessStep {
   factor: number | string;
 }
 
+export interface ChatAttachment {
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  kind: "image" | "document";
+  expires_at: string;
+}
+
+export interface ChatAttachmentStageRequest {
+  request_id: string;
+  filename: string;
+  content_base64: string;
+}
+
 export interface ChatMessage {
   id?: string | null;
   role: "user" | "assistant" | "system";
@@ -47,6 +64,7 @@ export interface ChatMessage {
   timestamp?: string | null;
   sources?: Array<unknown> | null;
   thoughts?: string | null;
+  attachments?: Array<ChatAttachment> | null;
 }
 
 export interface ChatResponse {
@@ -196,6 +214,7 @@ export interface GenerationRequest {
   thread_id?: string | null;
   user_input: string;
   base_revision?: number | null;
+  attachments?: Array<ChatAttachment>;
 }
 
 export interface GenerationSettings {
@@ -234,6 +253,8 @@ export interface InstalledModel {
   name: string;
   size?: number | null;
   modified_at?: string | null;
+  capabilities?: Array<string>;
+  supports_vision?: boolean | null;
 }
 
 export interface JobAccepted {
@@ -305,6 +326,7 @@ export interface RegenerationRequest {
   request_id?: string | null;
   message_id: string;
   user_input?: string | null;
+  attachments?: Array<ChatAttachment>;
 }
 
 export interface RenameChatRequest {

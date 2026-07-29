@@ -42,7 +42,7 @@ async function stubWorkspace(page: Page, {
       json: {
         required_models: [], optional_models: [], installed_models: models,
         missing_models: [], optional_missing_models: [],
-        models: models.map((name) => ({ name })),
+        models: models.map((name) => ({ name, supports_vision: name.includes("vision") })),
         connection: { success: connectionSuccess, status: connectionSuccess ? "connected" : "error", message: connectionMessage },
       },
     });
@@ -171,4 +171,76 @@ test("clips a long runtime status before the send control", async ({ page }) => 
   expect(statusBox).not.toBeNull();
   expect(sendBox).not.toBeNull();
   expect(statusBox!.x + statusBox!.width).toBeLessThanOrEqual(sendBox!.x - 6);
+});
+
+test("stages a document as a composer chip and sends only its opaque metadata", async ({ page }) => {
+  let stagedRequests = 0;
+  let generationPayload: Record<string, unknown> | null = null;
+  await stubWorkspace(page);
+  await page.route("**/api/v1/attachments", async (route) => {
+    stagedRequests += 1;
+    await route.fulfill({
+      status: 201,
+      json: {
+        attachment_id: "attachment-doc-1",
+        filename: "notes.md",
+        mime_type: "text/markdown",
+        size: 15,
+        sha256: "a".repeat(64),
+        kind: "document",
+        expires_at: "2099-01-01T00:00:00Z",
+      },
+    });
+  });
+  await page.route("**/api/v1/generations", async (route) => {
+    generationPayload = await route.request().postDataJSON();
+    await route.fulfill({ status: 503, json: { detail: "Local runtime is unavailable." } });
+  });
+
+  await page.goto("/?bootstrap=launcher-token");
+  await page.getByLabel("Attach images or documents").setInputFiles({
+    name: "notes.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("private document"),
+  });
+
+  await expect.poll(() => stagedRequests).toBe(1);
+  await expect(page.getByText("notes.md")).toBeVisible();
+  await expect(page.getByLabel("Message Cortex")).toHaveValue("");
+  await page.getByRole("button", { name: "Send message" }).click();
+
+  await expect.poll(() => generationPayload).not.toBeNull();
+  expect(generationPayload).toMatchObject({
+    user_input: "Please review the attached file(s).",
+    attachments: [{ attachment_id: "attachment-doc-1", filename: "notes.md", kind: "document" }],
+  });
+  expect(JSON.stringify(generationPayload)).not.toContain("private document");
+});
+
+test("explains when the selected model cannot accept an image attachment", async ({ page }) => {
+  await stubWorkspace(page, { models: ["local-chat:7b"] });
+  await page.route("**/api/v1/attachments", async (route) => {
+    await route.fulfill({
+      status: 201,
+      json: {
+        attachment_id: "attachment-image-1",
+        filename: "photo.png",
+        mime_type: "image/png",
+        size: 8,
+        sha256: "b".repeat(64),
+        kind: "image",
+        expires_at: "2099-01-01T00:00:00Z",
+      },
+    });
+  });
+
+  await page.goto("/?bootstrap=launcher-token");
+  await page.getByLabel("Attach images or documents").setInputFiles({
+    name: "photo.png",
+    mimeType: "image/png",
+    buffer: Buffer.from([137, 80, 78, 71]),
+  });
+
+  await expect(page.getByRole("alert")).toContainText("cannot accept images");
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 });

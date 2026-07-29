@@ -2,6 +2,8 @@ import type {
   AddMemoryRequest,
   AttachmentStageAccepted,
   AttachmentStageRequest,
+  ChatAttachment,
+  ChatAttachmentStageRequest,
   ChatResponse,
   ChatSummary,
   CreateChatRequest,
@@ -272,6 +274,13 @@ export class CortexApi {
 
   stageAttachment(payload: AttachmentStageRequest): Promise<AttachmentStageAccepted> {
     return this.request<AttachmentStageAccepted>("/execution/attachments", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  stageChatAttachment(payload: ChatAttachmentStageRequest): Promise<ChatAttachment> {
+    return this.request<ChatAttachment>("/attachments", {
       method: "POST",
       body: JSON.stringify(payload),
     });

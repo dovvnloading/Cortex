@@ -20,6 +20,21 @@
       "AddMessageRequest": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChatAttachment"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
+          },
           "content": {
             "maxLength": 100000,
             "minLength": 1,
@@ -206,9 +221,117 @@
         "title": "BrightnessStep",
         "type": "object"
       },
+      "ChatAttachment": {
+        "additionalProperties": false,
+        "description": "Opaque metadata for one staged image or text document.",
+        "properties": {
+          "attachment_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 180,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "image",
+              "document"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "mime_type": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 10485760.0,
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "filename",
+          "mime_type",
+          "size",
+          "sha256",
+          "kind",
+          "expires_at"
+        ],
+        "title": "ChatAttachment",
+        "type": "object"
+      },
+      "ChatAttachmentStageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content_base64": {
+            "maxLength": 13981029,
+            "minLength": 4,
+            "title": "Content Base64",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "filename",
+          "content_base64"
+        ],
+        "title": "ChatAttachmentStageRequest",
+        "type": "object"
+      },
       "ChatMessage": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChatAttachment"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -1138,6 +1261,14 @@
       "GenerationRequest": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "maxItems": 8,
+            "title": "Attachments",
+            "type": "array"
+          },
           "base_revision": {
             "anyOf": [
               {
@@ -1365,6 +1496,14 @@
       "InstalledModel": {
         "additionalProperties": false,
         "properties": {
+          "capabilities": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
           "modified_at": {
             "anyOf": [
               {
@@ -1390,6 +1529,17 @@
               }
             ],
             "title": "Size"
+          },
+          "supports_vision": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Vision"
           }
         },
         "required": [
@@ -1778,6 +1928,14 @@
       "RegenerationRequest": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "maxItems": 8,
+            "title": "Attachments",
+            "type": "array"
+          },
           "message_id": {
             "maxLength": 200,
             "minLength": 1,
@@ -2374,6 +2532,45 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/attachments": {
+      "post": {
+        "description": "Stage one bounded image or text document for a chat turn.\n\nThe browser receives opaque metadata only.  Content is retained in the\nowner-scoped local attachment store and is resolved only when the\ngeneration job starts.",
+        "operationId": "stage_chat_attachment_api_v1_attachments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatAttachmentStageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatAttachment"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stage Chat Attachment"
+      }
+    },
     "/api/v1/chats": {
       "get": {
         "operationId": "list_chats_api_v1_chats_get",

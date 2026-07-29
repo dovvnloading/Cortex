@@ -1,4 +1,4 @@
-import { ArrowUp, LoaderCircle, Square } from "lucide-react";
+import { ArrowUp, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Square, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { LocalModelMenu } from "./LocalModelMenu";
+import type { ChatAttachment } from "../../../contracts/cortex-api";
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
 
@@ -30,6 +31,12 @@ export type MessageComposerProps = {
   onRescanModels?: () => Promise<void> | void;
   onRetry?: () => Promise<void | boolean> | void | boolean;
   onDismissError?: () => void;
+  attachments?: readonly ChatAttachment[];
+  attachmentsBusy?: boolean;
+  attachmentError?: string | null;
+  imageInputBlocked?: string | null;
+  onAddAttachments?: (files: File[]) => Promise<void> | void;
+  onRemoveAttachment?: (attachmentId: string) => void;
 };
 
 const MAX_MESSAGE_LENGTH = 100_000;
@@ -52,6 +59,12 @@ export function MessageComposer({
   onRescanModels,
   onRetry,
   onDismissError,
+  attachments = [],
+  attachmentsBusy = false,
+  attachmentError = null,
+  imageInputBlocked = null,
+  onAddAttachments,
+  onRemoveAttachment,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -62,11 +75,16 @@ export function MessageComposer({
   const [focused, setFocused] = useState(false);
   const statusId = useId();
   const counterId = useId();
-  const canSubmit = phase === "ready" && Boolean(value.trim()) && !submissionPending;
+  const canSubmit = phase === "ready"
+    && Boolean(value.trim() || attachments.length > 0)
+    && !submissionPending
+    && !attachmentsBusy
+    && !imageInputBlocked;
   const isStopping = phase === "stopping";
   const isGenerating = phase === "generating" || isStopping;
   const remaining = MAX_MESSAGE_LENGTH - value.length;
   const showCounter = remaining <= 1_000;
+  const attachmentInputId = useId();
 
   const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -145,6 +163,12 @@ export function MessageComposer({
     if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
   };
 
+  const handleAttachmentChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length && onAddAttachments) void onAddAttachments(files);
+  };
+
   const status = phase === "starting"
     ? "Starting response"
     : phase === "stopping"
@@ -179,6 +203,26 @@ export function MessageComposer({
           }}
         >
           <label className="sr-only" htmlFor="chat-composer">Message Cortex</label>
+          {attachments.length > 0 && (
+            <div className="composer-attachments" aria-label="Attached files">
+              {attachments.map((attachment) => (
+                <div className="composer-attachment" key={attachment.attachment_id}>
+                  {attachment.kind === "image" ? <ImageIcon size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
+                  <span className="composer-attachment-name" title={attachment.filename}>{attachment.filename}</span>
+                  <button
+                    className="composer-attachment-remove"
+                    type="button"
+                    aria-label={`Remove ${attachment.filename}`}
+                    title={`Remove ${attachment.filename}`}
+                    onClick={() => onRemoveAttachment?.(attachment.attachment_id)}
+                    disabled={attachmentsBusy}
+                  >
+                    <X size={13} aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             id="chat-composer"
@@ -195,6 +239,19 @@ export function MessageComposer({
           />
 
           <div className="composer-utility-row">
+            <label className={`composer-attachment-button${attachmentsBusy ? " composer-attachment-button-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
+              {attachmentsBusy ? <LoaderCircle size={15} className="composer-control-spinner" aria-hidden="true" /> : <Paperclip size={15} aria-hidden="true" />}
+              <span className="sr-only">Attach images or documents</span>
+              <input
+                id={attachmentInputId}
+                className="sr-only"
+                type="file"
+                multiple
+                accept="image/*,text/*,.md,.markdown,.rst,.adoc,.org,.text,.csv,.tsv,.json,.jsonl,.ndjson,.yaml,.yml,.toml,.ini,.conf,.cfg,.env,.editorconfig,.log,.lock,.diff,.patch,.rtf,.proto,.graphql,.gql,.tf,.hcl,.srt,.vtt,.plist,.xhtml,.map,.py,.js,.jsx,.ts,.tsx,.java,.c,.cc,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.sql,.sh,.bash,.bat,.ps1,.html,.xml,.css,.scss,.less,.vue,.swift,.kt,.kts,.tex,.ipynb"
+                onChange={handleAttachmentChange}
+                disabled={attachmentsBusy || !onAddAttachments}
+              />
+            </label>
             <div className="composer-model-control">
               <LocalModelMenu
                 models={localModels}
@@ -211,6 +268,12 @@ export function MessageComposer({
               {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} characters left</span>}
             </span>
           </div>
+
+          {(attachmentError || imageInputBlocked) && (
+            <div className="composer-attachment-message" role="alert">
+              {attachmentError ?? imageInputBlocked}
+            </div>
+          )}
 
           {isGenerating ? (
             <button
