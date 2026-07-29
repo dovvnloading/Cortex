@@ -328,6 +328,52 @@ class ArtifactBoundary:
     def _generated_name(digest: str) -> str:
         return f"artifact-{digest[:32]}"
 
+    def _publish_bytes(
+        self,
+        job_id: str,
+        owner: str,
+        content: bytes,
+        *,
+        retention_seconds: int,
+    ) -> ExecutionArtifact:
+        """Validate and publish one bounded byte payload for an owned job."""
+
+        self._validate_retention(retention_seconds)
+        self._authorize_job(job_id, owner)
+        if not isinstance(content, bytes) or not content:
+            raise ArtifactBoundaryError("artifact_content_invalid")
+        if len(content) > self.max_input_bytes:
+            raise ArtifactBoundaryError("artifact_too_large")
+        mime_type = sniff_artifact_mime(content)
+        digest = sha256(content).hexdigest()
+        try:
+            return self.repository.publish_artifact(
+                job_id,
+                name=self._generated_name(digest),
+                content=content,
+                mime_type=mime_type,
+                retention_seconds=retention_seconds,
+            )
+        except ExecutionRepositoryError:
+            raise ArtifactBoundaryError("artifact_publish_failed") from None
+
+    def stage_bytes(
+        self,
+        job_id: str,
+        owner: str,
+        content: bytes,
+        *,
+        retention_seconds: int = 86_400,
+    ) -> ExecutionArtifact:
+        """Stage one bounded attachment payload without accepting a source path."""
+
+        return self._publish_bytes(
+            job_id,
+            owner,
+            content,
+            retention_seconds=retention_seconds,
+        )
+
     def copy_in(
         self,
         grant: ArtifactSourceGrant,
@@ -344,18 +390,12 @@ class ArtifactBoundary:
         _validate_absolute_path(source)
         _validate_components(source)
         content = _read_stable(source, self.max_input_bytes)
-        mime_type = sniff_artifact_mime(content)
-        digest = sha256(content).hexdigest()
-        try:
-            return self.repository.publish_artifact(
-                grant.job_id,
-                name=self._generated_name(digest),
-                content=content,
-                mime_type=mime_type,
-                retention_seconds=retention_seconds,
-            )
-        except ExecutionRepositoryError:
-            raise ArtifactBoundaryError("artifact_publish_failed") from None
+        return self._publish_bytes(
+            grant.job_id,
+            grant.owner,
+            content,
+            retention_seconds=retention_seconds,
+        )
 
     @staticmethod
     def _validate_retention(retention_seconds: int) -> None:

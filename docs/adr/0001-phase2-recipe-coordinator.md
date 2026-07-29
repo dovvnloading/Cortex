@@ -1,15 +1,17 @@
 # ADR-0001 Phase 2 durable recipe coordinator and artifact publication
 
 - **Status:** Implemented and verified behind an explicit qualification-only
-  API boundary; the normal application remains default-off
+  API boundary, including trusted attachment staging and signed/native attempt
+  composition; the normal application remains default-off
 - **Phase:** 2 - fixed-function image recipe
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [typed recipe contract](0001-phase2-recipe-contract.md),
   [trusted artifact boundary](0001-phase2-artifact-boundary.md),
   [worker protocol](0001-phase2-worker-protocol.md), and
   [qualification lifecycle](0001-phase2-qualification-lifecycle.md)
-- **Scope:** Durable request/attempt coordination, cancellation and recovery,
-  and all-or-nothing publication for the fixed image recipe
+- **Scope:** Durable attachment staging, signed/native request-attempt
+  composition, cancellation and recovery, and all-or-nothing publication for
+  the fixed image recipe
 
 ## Decision
 
@@ -28,12 +30,26 @@ identifier must match the request identifier exactly. No source path, filename,
 command, model name, shell text, network target, or executable authority is
 accepted or written to durable job state.
 
+`POST /api/v1/execution/attachments` is the qualification-only input boundary.
+It accepts a bounded base64 envelope, decodes it in memory, and passes the bytes
+through `ArtifactBoundary.stage_bytes`; the durable `attachment.stage.v1` record
+stores only the content digest, size, derived MIME, and bounded retention. Its
+response contains an opaque artifact ID and safe metadata, never a path or the
+encoded payload.
+
 The worker seam is `RecipeWorkerAttempt`. A factory receives the durable job and
-returns one already-authenticated attempt. The attempt receives immutable input
+returns one fresh, already-authenticated attempt. The native implementation
+`NativeRecipeWorkerAttemptFactory` creates a new `NativeBrokerIdentityBinder`,
+`NativeWorkerLauncher`, protected pipe binding, suspended AppContainer worker,
+and `RecipeWorkerClient` per job. It requires an injected reviewed process
+factory and signed installer, binds the broker PID/principal/job identity before
+resume, waits only within a bounded accept window, and closes the client,
+broker, and process tree on every failure or cancellation. It has no host
+process or alternate transport fallback. The attempt receives immutable input
 bytes and a typed plan, and returns `RecipeWorkerOutput` with byte-derived MIME,
 format, dimensions, and SHA-256. The concrete `RecipeWorkerClient` speaks only
-the existing authenticated broker/worker protocol; it does not open a process,
-choose a provider, or invent a fallback transport.
+the existing authenticated broker/worker protocol; it does not choose a
+provider or invent a fallback transport.
 
 ## Durable lifecycle
 
@@ -50,15 +66,18 @@ choose a provider, or invent a fallback transport.
    payload, and resumes only the known recipe profile. Invalid recovery metadata
    becomes `recovery_invalid_payload`; it is never interpreted as executable
    input.
-4. Cancellation sets a durable `cancelling` state, signals the worker attempt,
+4. Attachment staging is idempotent on `(owner, request_id)`. A duplicate
+   matching payload revalidates the stored artifact bytes and returns the same
+   opaque artifact; a different payload is a stable `request_conflict`.
+5. Cancellation sets a durable `cancelling` state, signals the worker attempt,
    and waits only within the worker's bounded cancellation path. A cancelled
    attempt cannot publish a successful result.
-5. A valid output is written to a private temporary staging directory under the
+6. A valid output is written to a private temporary staging directory under the
    artifact root. `ArtifactBoundary.collect_outputs` requires the exact single
    `output` claim, re-sniffs bytes, enforces size/link/reparse/hash limits, and
    publishes atomically. Any publication failure rolls back records and
    quarantines or reports cleanup failure through a stable category.
-6. The terminal result contains only the published artifact ID, safe MIME/format,
+7. The terminal result contains only the published artifact ID, safe MIME/format,
    size, digest, dimensions, and plan digest. It never returns the staging or
    repository path. A cancellation race after publication deletes the unpublished
    records before recording `cancelled`.
@@ -84,20 +103,21 @@ tokens, and stack traces do not enter job events or results. Terminal repository
 state is immutable, so late worker callbacks cannot overwrite a validated result.
 
 The worker factory is deliberately injected. The qualification helper
-`build_recipe_coordinator_factory` binds that already-qualified attempt factory
-to the lifecycle-owned repository without creating a process, binding a broker,
-loading a provider, or falling back to host execution. This stage does not
+`build_recipe_coordinator_factory` remains the generic seam, while
+`build_native_recipe_coordinator_factory` composes the signed/native attempt
+factory when a caller supplies the installer, allowed user SIDs, and reviewed
+process-factory factory. Configuration creates no process. This stage does not
 pretend that an unsigned package, missing broker identity binding, or absent
 production trust root is a usable runtime; those remain release/qualification
 composition inputs owned by the existing lifecycle and launcher gates.
 
 ## Explicit non-goals
 
-This ADR does not add an attachment-upload/staging route, automatic model tool
-selection, arbitrary Python/WASI execution, source-path access, direct user-file
-mutation, network access, application-exit persistence, production signing, or
-external-review requirements. It also does not make the qualification profile
-the application default.
+This ADR does not add automatic model tool selection, arbitrary Python/WASI
+execution, source-path access, direct user-file mutation, network access,
+application-exit persistence, production signing, or external-review
+requirements. It also does not make the qualification profile the application
+default or claim that the normal app discovers a worker package implicitly.
 
 ## Verification
 
@@ -108,15 +128,21 @@ runtime round trip including in-flight cancellation. `tests/test_phase2_recipe_a
 covers default-off/blocked exposure, typed JSON plan parsing, owner-scoped
 artifacts, idempotency/conflict handling, and the shared status/task surface.
 `tests/test_phase2_qualification_lifecycle.py` covers the explicit coordinator
-factory seam. The generated OpenAPI and TypeScript contracts include the typed
-request/acceptance envelope, and `frontend/src/api/client.ts` exposes the
-qualification route without enabling it in the UI by default.
+factory seam. `tests/test_phase2_attachment_staging.py` covers byte limits,
+active/archive rejection, owner/idempotency binding, result revalidation, and
+retention. `tests/test_phase2_native_recipe_attempt.py` covers fresh per-job
+identity/resource scopes, principal validation, explicit process-factory
+composition, and bounded cleanup. The generated OpenAPI and TypeScript
+contracts include both typed envelopes, and `frontend/src/api/client.ts`
+exposes the qualification routes without enabling them in the UI by default.
 
 ## Next stage
 
-The next implementation decision is trusted attachment staging plus binding the
-real signed/native broker worker into the injected attempt factory. That stage
-must preserve this API/coordinator contract, keep the normal application
-default-off, and prove cancellation, ownership, retention, and publication with
-the real qualified attempt. No external reviewer or production key is required
-to continue the open-source qualification path.
+The next implementation decision is an end-to-end qualification run through the
+durable coordinator using the packaged signed worker: stage an attachment,
+launch/bind the native attempt, exercise transform and cancellation, and verify
+retention, owner isolation, atomic publication, and complete native cleanup.
+That run must preserve this API/coordinator contract and keep the normal
+application default-off. No external reviewer or production key is required to
+continue the open-source qualification path; production trust remains optional
+release hardening.

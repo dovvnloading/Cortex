@@ -28,7 +28,11 @@ and [MoveFileEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-
 
 `ArtifactBoundary` is the only Phase 2 API allowed to copy a user source into the
 artifact store or publish provider output. It is owner-scoped, fail-closed, and
-provider-independent.
+provider-independent. In addition to explicit path grants, it exposes
+`stage_bytes(job_id, owner, content, retention_seconds)` for a trusted caller
+that already holds bounded attachment bytes. This method shares the same owner
+check, byte limit, MIME sniffer, digest-derived name, retention, and atomic
+repository publication as path copy-in; it never accepts a filename or path.
 
 ### 1. Explicit source grants and immutable snapshots
 
@@ -54,6 +58,13 @@ numeric literals cannot escape as parser exceptions. Unknown non-active bytes ma
 stored as `application/octet-stream`; this is metadata safety, not permission to decode
 or execute them. Production image decoding remains behind the separate sandboxed
 [recipe provider qualification gate](0001-phase2-recipe-provider.md).
+
+The qualification-only `AttachmentStagingService` wraps this byte capability in
+an idempotent `attachment.stage.v1` job. Its durable payload contains only the
+schema, digest, size, derived MIME, and retention. A matching retry revalidates
+the stored artifact; a changed payload with the same owner/request key is a
+stable conflict. The API returns an opaque artifact ID and safe metadata, never
+the encoded payload or repository path.
 
 ### 3. Private output staging and exact claims
 
@@ -88,7 +99,10 @@ The boundary exposes only categories such as `artifact_owner_mismatch`,
 `artifact_source_changed`, `artifact_too_large`, `invalid_artifact`,
 `artifact_unclaimed_output`, `artifact_mime_mismatch`, `artifact_output_limit`,
 `artifact_publish_failed`, and `artifact_cleanup_pending`. Raw paths and operating
-system details do not cross the application boundary.
+system details do not cross the application boundary. Byte staging additionally
+uses `attachment_content_invalid`, `attachment_too_large`,
+`attachment_retention_invalid`, and `attachment_cleanup_pending` at its service
+boundary.
 
 ## Verification and evidence
 
@@ -96,7 +110,10 @@ system details do not cross the application boundary.
 ADS/link/reparse rejection, source mutation, sparse-file rejection, exact claims,
 quarantine, active/archive rejection, executable rejection, finite-number checks,
 MIME mismatch, aggregate limits, all-or-nothing publication rollback, and stored-size
-integrity. The deterministic `tools/execution_spikes/artifact_security_review.py`
+integrity. `tests/test_phase2_attachment_staging.py` additionally covers bounded
+byte input, idempotency, active/archive rejection, retention, and terminal
+artifact revalidation. The deterministic
+`tools/execution_spikes/artifact_security_review.py`
 probe repeats the fixed 12-case corpus in a disposable temporary root and reports
 `blocked` when a required host link primitive is unavailable. The complete matrix is
 recorded in the [Phase 2 evidence log](0001-phase2-evidence.md).

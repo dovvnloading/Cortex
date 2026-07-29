@@ -10,6 +10,7 @@ from cortex_backend.execution.qualification import (
     QualificationLifecycleConfig,
     QualificationProfileError,
     build_execution_lifecycle,
+    build_native_recipe_coordinator_factory,
     build_recipe_coordinator_factory,
     parse_execution_profile,
 )
@@ -161,3 +162,22 @@ def test_recipe_factory_keeps_worker_attempt_injection_explicit_and_repository_b
     assert coordinator.artifact_boundary.repository is repository
     coordinator.shutdown()
     assert worker_calls == []
+
+
+def test_native_recipe_factory_is_explicit_and_does_not_launch_during_composition(tmp_path):
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    installer = SignedBundleInstaller(
+        tmp_path / "native-store",
+        TrustedRecipeKeys({"qualification": b"q" * 32}),
+    )
+    process_calls: list[bool] = []
+    factory = build_native_recipe_coordinator_factory(
+        installer,
+        allowed_user_sids=frozenset({"S-1-5-21-1-2-3-4"}),
+        process_factory_factory=lambda: process_calls.append(True),
+    )
+
+    coordinator = factory(repository)
+    assert coordinator.repository is repository
+    assert process_calls == []
+    coordinator.shutdown()

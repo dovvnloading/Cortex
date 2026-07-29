@@ -1,5 +1,7 @@
 import type {
   AddMemoryRequest,
+  AttachmentStageAccepted,
+  AttachmentStageRequest,
   ChatResponse,
   ChatSummary,
   CreateChatRequest,
@@ -250,6 +252,13 @@ export class CortexApi {
     payload: RecipeImageTransformRequest,
   ): Promise<RecipeImageTransformAccepted> {
     return this.request<RecipeImageTransformAccepted>("/execution/recipe/image", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  stageAttachment(payload: AttachmentStageRequest): Promise<AttachmentStageAccepted> {
+    return this.request<AttachmentStageAccepted>("/execution/attachments", {
       method: "POST",
       body: JSON.stringify(payload),
     });

@@ -118,9 +118,11 @@ worker provenance, disposable [Windows sandbox qualification harness](0001-phase
 native broker identity, watchdog, and accounting controls through an injected
 health-gated builder. The durable recipe coordinator binds that worker contract
 to owner-scoped staged artifacts and atomic publication, and the typed API route
-is available only after the lifecycle is ready. The next gate is trusted
-attachment staging plus binding the real native broker worker into the attempt
-factory; the provider must still launch out of process under the bounded worker
-contract and must never fall back to a host process or in-process execution.
+is available only after the lifecycle is ready. Trusted attachment staging and
+signed/native attempt composition are now present behind that same lifecycle.
+The next gate is an end-to-end durable coordinator run through the packaged
+worker: the provider must launch out of process, complete a staged transform,
+cancel in flight, and prove retention, publication, and native cleanup. It must
+never fall back to a host process or in-process execution.
 External review and production signing remain optional official-release
 hardening.

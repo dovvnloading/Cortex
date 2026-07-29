@@ -30,6 +30,9 @@ from .recipe_coordinator import (
     RecipeExecutionCoordinator,
     RecipeWorkerAttemptFactory,
 )
+from .native_launcher import NativeProcessFactory, NativeWorkerPolicy
+from .native_recipe_attempt import build_native_recipe_worker_attempt_factory
+from .bundle_installer import SignedBundleInstaller
 from .release_gate import RecipeRuntimeReleaseGate
 from .repository import ExecutionRepository
 
@@ -94,6 +97,43 @@ def build_recipe_coordinator_factory(
         )
 
     return factory
+
+
+def build_native_recipe_coordinator_factory(
+    installer: SignedBundleInstaller,
+    *,
+    allowed_user_sids: frozenset[str],
+    process_factory_factory: Callable[[], NativeProcessFactory],
+    policy: NativeWorkerPolicy | None = None,
+    accept_timeout_seconds: float = 15.0,
+    worker_timeout_seconds: float = 120.0,
+    cancel_grace_seconds: float = 5.0,
+    artifact_boundary_factory: Callable[[ExecutionRepository], ArtifactBoundary] | None = None,
+    lease_seconds: float = 30.0,
+    supervisor_lease_seconds: float = 30.0,
+) -> CoordinatorFactory:
+    """Bind the signed/native attempt factory to the lifecycle repository.
+
+    The process factory is deliberately required as an explicit composition
+    input.  This helper creates no process while configuring the lifecycle and
+    has no host-process or alternate-transport fallback.
+    """
+
+    worker_factory = build_native_recipe_worker_attempt_factory(
+        installer,
+        allowed_user_sids=allowed_user_sids,
+        process_factory_factory=process_factory_factory,
+        policy=policy,
+        accept_timeout_seconds=accept_timeout_seconds,
+        worker_timeout_seconds=worker_timeout_seconds,
+        cancel_grace_seconds=cancel_grace_seconds,
+    )
+    return build_recipe_coordinator_factory(
+        worker_factory,
+        artifact_boundary_factory=artifact_boundary_factory,
+        lease_seconds=lease_seconds,
+        supervisor_lease_seconds=supervisor_lease_seconds,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +269,7 @@ __all__ = [
     "QualificationLifecycleConfig",
     "QualificationProfileError",
     "build_execution_lifecycle",
+    "build_native_recipe_coordinator_factory",
     "build_recipe_coordinator_factory",
     "parse_execution_profile",
 ]

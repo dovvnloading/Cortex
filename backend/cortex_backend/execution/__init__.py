@@ -32,6 +32,16 @@ from .artifact_boundary import (
     PublishedArtifact,
     sniff_artifact_mime,
 )
+from .attachment_staging import (
+    ATTACHMENT_PAYLOAD_SCHEMA,
+    ATTACHMENT_RESULT_SCHEMA,
+    ATTACHMENT_STAGE_PROFILE,
+    AttachmentStageResult,
+    AttachmentStagingError,
+    AttachmentStagingService,
+    DEFAULT_ATTACHMENT_RETENTION_SECONDS,
+    MAX_ATTACHMENT_RETENTION_SECONDS,
+)
 from .fake import FakeExecutionPlan, FakeExecutionProvider
 from .bundle_installer import (
     BundleInstallError,
@@ -51,6 +61,7 @@ from .qualification import (
     QualificationLifecycleConfig,
     QualificationProfileError,
     build_execution_lifecycle,
+    build_native_recipe_coordinator_factory,
     build_recipe_coordinator_factory,
     parse_execution_profile,
 )
@@ -88,6 +99,11 @@ from .native_launcher import (
     NativeWorkerLaunchPlan,
     NativeWorkerLauncher,
     NativeWorkerPolicy,
+)
+from .native_recipe_attempt import (
+    NativeRecipeWorkerAttempt,
+    NativeRecipeWorkerAttemptFactory,
+    build_native_recipe_worker_attempt_factory,
 )
 from .native_win32 import (
     NativeWin32Error,
@@ -186,6 +202,14 @@ __all__ = [
     "ArtifactBoundary",
     "ArtifactBoundaryError",
     "ArtifactSourceGrant",
+    "ATTACHMENT_PAYLOAD_SCHEMA",
+    "ATTACHMENT_RESULT_SCHEMA",
+    "ATTACHMENT_STAGE_PROFILE",
+    "AttachmentStageResult",
+    "AttachmentStagingError",
+    "AttachmentStagingService",
+    "DEFAULT_ATTACHMENT_RETENTION_SECONDS",
+    "MAX_ATTACHMENT_RETENTION_SECONDS",
     "ApprovalPolicyError",
     "ApprovalTransitionError",
     "BrokerAclPolicy",
@@ -220,6 +244,7 @@ __all__ = [
     "ExecutionProfile",
     "CoordinatorFactory",
     "build_recipe_coordinator_factory",
+    "build_native_recipe_coordinator_factory",
     "CalculatorPlan",
     "CheckPlan",
     "FakeExecutionPlan",
@@ -250,6 +275,9 @@ __all__ = [
     "NativeWorkerLaunchPlan",
     "NativeWorkerLauncher",
     "NativeWorkerPolicy",
+    "NativeRecipeWorkerAttempt",
+    "NativeRecipeWorkerAttemptFactory",
+    "build_native_recipe_worker_attempt_factory",
     "NativeWin32Error",
     "NativeWin32ProcessFactory",
     "Win32SuspendedWorker",

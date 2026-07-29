@@ -16,6 +16,25 @@ export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
 
+export interface AttachmentStageAccepted {
+  job_id: string;
+  request_id: string;
+  profile: "attachment.stage.v1";
+  status: "succeeded";
+  sequence: number;
+  artifact_id: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  expires_at: string;
+}
+
+export interface AttachmentStageRequest {
+  request_id: string;
+  content_base64: string;
+  retention_seconds?: number;
+}
+
 export interface BrightnessStep {
   op: "brightness";
   factor: number | string;

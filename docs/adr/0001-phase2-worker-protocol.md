@@ -84,12 +84,19 @@ On the controlled Windows host (2026-07-23), the
 PyInstaller build produced `dist/recipe-runtime/recipe_worker.exe`; direct launch
 without the exact native broker arguments returned exit code `78` as required.
 
-## Remaining blockers
+## Remaining qualification gate
 
-This ADR does not authorize provider execution. The remaining stage must install a
-real signed generation, launch it through the reviewed suspended AppContainer/Job
-Object factory, bind the live broker session to the actual worker PID and
-AppContainer token, and run the hostile decoder/cancellation corpus through that
-packaged process with the qualified resource/watchdog and artifact-boundary
-controls. Lifecycle/UI enablement remains behind those gates and external security
-review.
+The durable coordinator now has an explicit native attempt factory that installs
+no fallback transport: each job creates a fresh pipe/broker identity, launches a
+verified signed generation through the reviewed suspended AppContainer/Job Object
+factory, binds the live session to the actual worker PID and AppContainer token,
+and closes the client, broker, and process tree on failure or cancellation.
+Attachment staging is likewise available only through the owner-scoped artifact
+boundary and qualification lifecycle.
+
+This ADR still does not authorize the normal application to execute providers.
+The next gate must run the full hostile decoder/cancellation corpus through the
+durable coordinator using that packaged process and verify retention, atomic
+publication, and cleanup. Lifecycle/UI enablement remains behind those gates;
+external security review and production trust remain optional official-release
+hardening.
