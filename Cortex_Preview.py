@@ -17,8 +17,11 @@ import uvicorn  # noqa: E402
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
-from cortex_backend.execution.coordinator import DurableFakeCoordinator  # noqa: E402
-from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth  # noqa: E402
+from cortex_backend.execution.lifecycle import ExecutionLifecycle  # noqa: E402
+from cortex_backend.execution.qualification import (  # noqa: E402
+    QualificationLifecycleConfig,
+    build_execution_lifecycle,
+)
 from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
@@ -39,6 +42,9 @@ def build_preview_app(
     frontend_dist: Path | None = None,
     serve_frontend: bool = True,
     handoff_secret: str | None = None,
+    execution_profile: str | None = None,
+    qualification: QualificationLifecycleConfig | None = None,
+    execution_lifecycle: ExecutionLifecycle | None = None,
 ):
     """Build the local web application without starting a server."""
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
@@ -46,17 +52,18 @@ def build_preview_app(
         paths.execution_database,
         paths.execution_artifacts,
     )
-    execution_lifecycle = ExecutionLifecycle(
-        execution_repository,
-        coordinator_factory=lambda repository: DurableFakeCoordinator(
-            repository, auto_recover=False
-        ),
-        health_check=lambda: RuntimeHealth.blocked(
-            code="runtime_unavailable",
-            message="A qualified execution runtime is not enabled in this build.",
-        ),
-        enabled=False,
-    )
+    if execution_lifecycle is not None and (
+        execution_profile is not None or qualification is not None
+    ):
+        raise ValueError(
+            "execution lifecycle cannot be combined with an execution profile"
+        )
+    if execution_lifecycle is None:
+        execution_lifecycle = build_execution_lifecycle(
+            execution_repository,
+            profile=execution_profile,
+            qualification=qualification,
+        )
     database = DatabaseManager(app_paths=paths)
     database.migrate_from_json_if_needed()
     permanent_memory = PermanentMemoryManager(app_paths=paths)

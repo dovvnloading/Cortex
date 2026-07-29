@@ -67,6 +67,7 @@ class LifecycleSnapshot:
     state: LifecycleState
     health: RuntimeHealth
     recovered_job_ids: tuple[str, ...] = ()
+    profile: str = "disabled"
 
     @property
     def available(self) -> bool:
@@ -83,11 +84,21 @@ class ExecutionLifecycle:
         coordinator_factory: Callable[[ExecutionRepository], LifecycleCoordinator],
         health_check: Callable[[], RuntimeHealth],
         enabled: bool = False,
+        profile: str | None = None,
     ) -> None:
+        selected_profile = (
+            profile if profile is not None else ("disabled" if not enabled else "custom")
+        )
+        if (
+            not isinstance(selected_profile, str)
+            or _SAFE_HEALTH_CODE.fullmatch(selected_profile) is None
+        ):
+            raise ValueError("execution lifecycle profile must be a bounded identifier")
         self.repository = repository
         self._coordinator_factory = coordinator_factory
         self._health_check = health_check
         self._enabled = enabled
+        self._profile = selected_profile
         self._coordinator: LifecycleCoordinator | None = None
         self._recovered_job_ids: tuple[str, ...] = ()
         self._health = (
@@ -108,8 +119,15 @@ class ExecutionLifecycle:
         return LifecycleSnapshot(
             state=self._state,
             health=self._health,
+            profile=self._profile,
             recovered_job_ids=self._recovered_job_ids,
         )
+
+    @property
+    def profile(self) -> str:
+        """Return the bounded profile label selected at construction time."""
+
+        return self._profile
 
     @property
     def coordinator(self) -> LifecycleCoordinator | None:

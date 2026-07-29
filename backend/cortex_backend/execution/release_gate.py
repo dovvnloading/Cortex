@@ -105,6 +105,12 @@ class RecipeRuntimeReleaseGate:
         self._platform_name = platform_name or os.name
         self._release_profile = release_profile
 
+    @property
+    def release_profile(self) -> Literal["official", "qualification"]:
+        """Return the immutable profile selected for this preflight."""
+
+        return self._release_profile
+
     @staticmethod
     def _blocked(
         checks: list[ReleaseGateCheck],

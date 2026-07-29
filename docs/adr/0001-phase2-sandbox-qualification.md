@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 Windows recipe sandbox qualification
 
-- **Status:** Qualification harness and packaged worker/release preflight implemented; explicit qualification-profile lifecycle wiring remains next
+- **Status:** Qualification harness, packaged worker/release preflight, and explicit qualification-profile lifecycle composition implemented; recipe request execution remains next
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 recipe provider core](0001-phase2-recipe-provider.md), [signed bundle installation](0001-phase2-bundle-installation.md), [native broker adapter](0001-phase2-native-broker.md), and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -8,8 +8,9 @@
 
 ## Decision
 
-The next gate is represented by `tools/execution_spikes/recipe_sandbox_qualification.py`.
-The harness is deliberately fail-closed and has independent checks for:
+The qualification evidence is represented by `tools/execution_spikes/recipe_sandbox_qualification.py`
+and the strict packaged-worker harness. These helpers are deliberately
+fail-closed and have independent checks for:
 
 1. it runs the reviewed zero-capability AppContainer isolation helper in a child
    process and requires token identity, parent-file denial, loopback denial, and
@@ -18,14 +19,14 @@ The harness is deliberately fail-closed and has independent checks for:
    process and requires full process-tree reaping after watchdog cancellation;
 3. it exercises a fixed allowlisted/hostile decoder corpus against the
    qualification-only Pillow core, while recording `sandboxed=false`; and
-4. it requires the future fixed recipe worker package at the repository's fixed
+4. it requires the fixed recipe worker package at the repository's fixed
    packaging location;
 5. it runs the deterministic resource/watchdog corpus, requiring immutable
    budgets, cumulative accounting, actual Job Object CPU/memory/process/I/O
    accounting, and kill-on-close tree reaping; and
-6. it reports end-to-end broker execution as blocked until the launcher binds the
-   qualified transport to a signed worker's actual PID/AppContainer token and the
-   packaged worker completes the authenticated client handshake and hostile corpus.
+6. it binds the qualified transport to a signed worker's actual PID/AppContainer
+   token and requires the packaged worker to complete the authenticated client
+   handshake and hostile corpus.
 
 The worker package boundary is now qualified by the strict disposable packaged-worker
 corpus. A directory, executable, self-reported digest, or unverified manifest still
@@ -45,20 +46,20 @@ fallback.
 | --- | --- | --- |
 | AppContainer token and zero-capability denials | `appcontainer_smoke.py`, child report `recipe_appcontainer_control` | Required prerequisite; does not prove LPAC policy or provider launch identity |
 | Job Object kill-on-close and tree cancellation | `cancellation_corpus.py`, child report `recipe_cancellation_control` | Required prerequisite; the watchdog corpus proves full-tree reaping |
-| Suspended launch/resource policy | `native_launcher_qualification.py`, child report `recipe_native_launcher_policy` | Policy application/query passes for a fixed benign child; real worker enforcement/review remains open |
+| Suspended launch/resource policy | `native_launcher_qualification.py`, child report `recipe_native_launcher_policy` | Policy application/query and disposable worker enforcement qualify; official-release review/signing remains optional hardening |
 | Resource/watchdog accounting | `resource_watchdog_qualification.py`, child report `recipe_resource_controls` | Immutable budgets, actual Job Object accounting, and kill-on-close reaping qualify; official-release review/signing remains optional hardening |
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
-| Signed worker provenance | Storage-only `verify_active_worker()` role binding plus fixed package precondition | **Storage gate complete; launch remains blocked** until a packaged executable and native launcher exist |
-| Broker identity and framed IPC | Native broker transport tests and ADR | Must be bound to the actual worker PID/token before launch |
-| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `RecipeRuntimeReleaseGate` supports an explicit `release_profile="qualification"` without external review and an `official` profile with optional release hardening | No provider can become reachable accidentally; the next core slice is explicit qualification-profile wiring |
+| Signed worker provenance | Storage-only `verify_active_worker()` role binding plus strict packaged-worker corpus | **Qualification complete** for the fixed worker role; production trust remains separate |
+| Broker identity and framed IPC | Native broker transport tests and strict packaged-worker corpus | **Qualification complete** when bound to the actual worker PID/token; no host fallback |
+| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `build_execution_lifecycle()` composes an explicit `release_profile="qualification"` only with an injected gate, coordinator, and provider-health probe | No provider can become reachable accidentally; the next core slice is the recipe coordinator/request path |
 
 No single green smoke result closes the gate. A missing, failed, or unverified
 control produces `blocked` or `fail`, and no weaker host-process path is attempted.
 
-## Required future worker qualification
+## Qualification worker sequence
 
-The explicit qualification profile must install a disposable signed worker bundle and
-run the existing native launcher/worker loop per attempt:
+The explicit qualification profile installs a disposable signed worker bundle and
+runs the existing native launcher/worker loop per attempt:
 
 1. verifies the installed immutable generation and image-worker entrypoint;
 2. creates private staging and grants only the sandbox identity and required
@@ -102,7 +103,8 @@ preflight never creates a process, binds a broker, or enables a provider.
 
 This stage provides reproducible evidence for the controls that already exist and
 prevents accidental false-green qualification. The source checkout remains
-default-off; the next implementation slice wires the explicit qualification profile
-to lifecycle. Official production readiness, signing, and external review are
-separate optional maintainer concerns and are not prerequisites for open-source
-development.
+default-off; the explicit qualification profile is now a deliberate, injected
+lifecycle composition rather than an application default. Official production
+readiness, signing, and external review are separate optional maintainer concerns
+and are not prerequisites for open-source development. The next implementation
+slice is the recipe coordinator/request path behind this boundary.

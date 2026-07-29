@@ -997,11 +997,14 @@ presence, and (when maintainers choose to use it) explicit external-review evide
 Quality CI now builds the fixed worker and runs the disposable
 signed/AppContainer/broker, hostile-decoder, and cancellation corpus with bounded
 timeouts; this is the open-source qualification evidence and does not need
-production trust material. The next core slice is explicit lifecycle wiring for
-`release_profile="qualification"`, with the application still default-off and the
-profile documented as local/CI-only. The separate `recipe.release-review.v1`
-verifier is available as optional release hardening; it remains observation-only
-and no approval record or production trust material is committed.
+production trust material. Explicit lifecycle composition for
+`release_profile="qualification"` is now available through the documented
+local/CI-only builder; the application remains default-off and no recipe request
+route is enabled by this slice. The next core slice is the recipe-specific
+coordinator/request and artifact-publication path behind that lifecycle. The
+separate `recipe.release-review.v1` verifier is available as optional release
+hardening; it remains observation-only and no approval record or production
+trust material is committed.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

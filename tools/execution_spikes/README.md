@@ -51,7 +51,7 @@ limits with no breakaway flags. Its overall exit remains blocked for this isolat
 probe until the signed worker package is installed and the worker completes the live
 authenticated broker handshake; launcher-side PID/AppContainer binding is now
 implemented separately. This does not block the dedicated packaged qualification
-workflow or the planned explicit local qualification profile.
+workflow or the explicit local qualification profile builder.
 
 The fixed worker protocol/package boundary can be qualified separately on Windows:
 
@@ -122,10 +122,11 @@ The current `resource-watchdog.v1` evidence passes all 15 cases (digest
 `5eac03e2b4981543`): budget matrix, wall/idle watchdogs, clock and sample
 regression, stable CPU/memory/input/output/console/observation/message limits,
 missing-memory fail-closed behavior, actual Job Object accounting, and full-tree
-reaping. This is
-qualification-only evidence; explicit qualification-profile lifecycle wiring is
-the next core implementation slice. External review and production signing are
-optional official-release hardening.
+reaping. This is qualification-only evidence; the explicit qualification-profile
+lifecycle builder now consumes this evidence when a caller injects its controls.
+The recipe-specific coordinator/request path is the next core implementation
+slice. External review and production signing are optional official-release
+hardening.
 
 The release/lifecycle composition preflight is covered by the backend boundary
 `RecipeRuntimeReleaseGate` and `tests/test_phase2_release_gate.py`. It is a
@@ -160,8 +161,9 @@ control/unicode text, and invalid optional values. A green result requires only
 typed models or stable redacted `RecipeValidationError` categories; unexpected
 exceptions, unbounded budgets, or canonicalization failures return exit code 2.
 The current evidence is 158 accepted payloads, 1,842 rejections, and zero
-unexpected exceptions. This closes parser-fuzz evidence only; explicit
-qualification-profile lifecycle wiring remains the next core slice.
+unexpected exceptions. This closes parser-fuzz evidence; the lifecycle builder
+keeps the profile blocked unless the release gate, coordinator, and provider
+health controls are explicitly supplied.
 
 ## Run the artifact security review qualification
 
