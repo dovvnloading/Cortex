@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged provider transform qualification complete; watchdog/hostile-decoder evidence, external review, and lifecycle release gates remain open
+- **Status:** Typed contract, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; parser fuzzing, resource/watchdog accounting, artifact security review, external review, and lifecycle release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -24,9 +24,9 @@
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
-| Windows recipe sandbox qualification harness | **Complete (signed launch/broker/provider transform)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG grayscale corpus through `collect_output`. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
+| Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, and `collect_output` are live-qualified inside the packaged worker. The remaining gate is watchdog/cancellation and hostile-decoder evidence, external review, and production lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, and in-flight cancellation acknowledgement are live-qualified inside the packaged worker. The remaining gate is parser fuzzing, artifact security review, resource/watchdog accounting, external review, and production lifecycle wiring. |
 
 ## Security invariants
 
@@ -96,6 +96,9 @@
 26. Native broker reads poll bounded pipe availability before synchronous reads so a
     cancellation reader cannot starve the provider transform; pipe errors still fail
     closed and do not bypass framing, authentication, or sequence checks.
+27. Hostile decoder bytes are rejected inside the signed worker, and cancellation is
+    sent only after `input_complete` over the authenticated broker; a missing or
+    ambiguous terminal response remains a blocked qualification result.
 
 ## Re-run target
 
@@ -150,3 +153,16 @@ closed the broker, binder, worker, and profile; no `recipe_worker.exe` process
 remained. This closes the packaged provider-transform qualification gate but does
 not close the remaining watchdog/hostile-decoder, external-review, or lifecycle
 release gates.
+
+**Packaged hostile/cancellation qualification result (2026-07-28):** The full
+`recipe_worker_e2e_qualification.py --json --timeout-seconds 10 --strict` run
+passed all four signed-worker cases: normal fixed PNG transform with
+`collect_output`, truncated PNG rejection, active SVG rejection, and an
+in-flight eight-step bounded transform that returned `cancel_ack` after
+`input_complete`. Each case used a fresh authenticated broker binding and
+disposable worker; the run reported no worker process or binding cleanup
+residue. The optional `--case cancellation` path reproduces the cancellation
+gate in isolation. These results close the packaged hostile-decoder and
+cancellation qualification evidence, but do not enable the provider or close
+parser fuzzing, resource/watchdog accounting, artifact security review,
+external review, or production lifecycle health gates.

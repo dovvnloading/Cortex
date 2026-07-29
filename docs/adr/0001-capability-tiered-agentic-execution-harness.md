@@ -952,8 +952,10 @@ pass without executing code.
   authenticated broker loop is implemented. The release-only signer now covers the
   complete one-folder dependency closure with inert resource entries and refuses to
   produce metadata without an external key; signed-worker end-to-end broker
-  execution remains blocked. Collect opt-in aggregate reliability metrics, never
-  content, only after the provider is sandbox-qualified.
+  packaged-worker qualification now passes the fixed transform, hostile decoder,
+  and in-flight cancellation corpus. Collect opt-in aggregate reliability metrics,
+  never content, only after the remaining release gates close and the provider is
+  sandbox-qualified.
 
 **Implementation gate:** parser, artifact-boundary, qualification-provider,
 worker-provenance, sandbox-qualification, and native-launcher-policy regression
@@ -963,6 +965,11 @@ fail-closed when the signed worker is absent.
 executed inside the worker, OS sandbox qualification, signed provenance, broker
 identity, resource/watchdog accounting, external review, and fixed-function provider
 lifecycle health must pass before any provider is enabled.
+
+The 2026-07-28 packaged qualification evidence closes the hostile decoder corpus,
+signed provenance, broker identity, and in-flight cancellation portions of this
+gate. Parser fuzzing, artifact security review, resource/watchdog accounting,
+external review, and production lifecycle health remain open.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

@@ -3,8 +3,9 @@
 This probe is deliberately separate from Cortex runtime wiring.  It signs the
 already-built fixed worker with an in-memory ephemeral Ed25519 key, installs it
 into a disposable store, launches it through the reviewed AppContainer factory,
-and exercises only the fixed PNG grayscale protocol corpus.  No user files,
-model text, commands, paths, or production trust roots are accepted.
+and exercises a fixed PNG transform, hostile decoder corpus, and in-flight
+cancellation protocol corpus.  No user files, model text, commands, paths, or
+production trust roots are accepted.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from cortex_backend.execution.native_launcher import (  # noqa: E402
 from cortex_backend.execution.native_win32 import NativeWin32ProcessFactory  # noqa: E402
 from cortex_backend.execution.recipes import parse_image_transform  # noqa: E402
 from cortex_backend.execution.worker_protocol import (  # noqa: E402
+    WorkerCancel,
     WorkerCollect,
     WorkerInputChunk,
     WorkerInputComplete,
@@ -56,6 +58,11 @@ from cortex_backend.execution.worker_release import build_signed_worker_manifest
 
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
+# The worker protocol permits 48 KiB chunks, but base64 plus the authenticated
+# broker envelope must also fit within its 64 KiB frame ceiling.  Keep this
+# qualification transport bound conservative so the test exercises the worker
+# rather than failing at the outer framing layer.
+QUALIFICATION_CHUNK_BYTES = 32 * 1024
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -158,6 +165,35 @@ def _fixed_png() -> bytes:
         image.close()
 
 
+def _slow_png() -> bytes:
+    """Return a deterministic bounded image large enough for cancellation timing."""
+
+    image = Image.new("RGB", (4, 3), (120, 80, 40))
+    try:
+        with BytesIO() as stream:
+            image.save(stream, format="PNG")
+            return stream.getvalue()
+    finally:
+        image.close()
+
+
+def _plan(*, artifact_id: str, slow: bool = False) -> Any:
+    steps: list[dict[str, Any]] = [{"op": "grayscale"}]
+    if slow:
+        steps = [
+            {"op": "resize", "width": 3500 - (index % 2), "height": 3500 - (index % 2)}
+            for index in range(8)
+        ]
+    return parse_image_transform(
+        {
+            "schema_version": "artifact.transform.v1",
+            "input_artifact_id": artifact_id,
+            "steps": steps,
+            "output_format": "png",
+        }
+    )
+
+
 def _receive_with_timeout(
     connection: NativeBrokerConnection,
     timeout_seconds: float,
@@ -241,145 +277,261 @@ def _install_ephemeral(source_root: Path, store_root: Path) -> SignedBundleInsta
     return installer
 
 
-def qualify(source_root: Path, *, timeout_seconds: float) -> dict[str, Any]:
+def _close_worker_case(
+    connection: NativeBrokerConnection | None,
+    worker: Any,
+    binder: NativeBrokerIdentityBinder,
+    workspace: Path,
+) -> None:
+    """Boundedly close one disposable worker, broker binding, and process tree."""
+
+    if connection is not None:
+        _bounded_cleanup(connection.close)
+    _bounded_cleanup(binder.close_binding)
+    if worker is not None:
+        _bounded_cleanup(worker.close)
+        try:
+            executable = _process_executable(worker.process_id)
+            if executable is not None and executable.is_relative_to(workspace.resolve()):
+                subprocess.run(
+                    ["taskkill", "/PID", str(worker.process_id), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        except Exception:
+            pass
+
+
+def qualify(
+    source_root: Path,
+    *,
+    timeout_seconds: float,
+    case_name: str | None = None,
+) -> dict[str, Any]:
     if not source_root.is_dir():
         return {"status": "blocked", "code": "package_missing", "stages": []}
     workspace = Path(mkdtemp(prefix="cortex-worker-e2e-qualification-"))
     stages: list[str] = []
-    connection: NativeBrokerConnection | None = None
-    worker = None
+    cases: dict[str, dict[str, Any]] = {}
     binder: NativeBrokerIdentityBinder | None = None
     try:
         installer = _install_ephemeral(source_root, workspace / "store")
         stages.extend(["signed_ephemeral_manifest", "installed_immutable_generation"])
         verify_active_worker(installer)
         stages.append("provenance_verified")
-        principal = sha256(os.urandom(32)).hexdigest()
-        job_id = f"qualification-{uuid4().hex[:12]}"
-        binding = BrokerWorkerBinding(
-            pipe_name=rf"\\.\pipe\cortex-qualification-{uuid4().hex}",
-            broker_process_id=os.getpid(),
-            installation_principal_id=principal,
-            job_id=job_id,
-        )
         binder = NativeBrokerIdentityBinder(allowed_user_sids=frozenset({_current_user_sid()}))
         launcher = NativeWorkerLauncher(
             installer,
             process_factory=NativeWin32ProcessFactory(),
             broker_binder=binder,
         )
-        worker = launcher.launch(binding)
-        stages.append("appcontainer_job_policy_and_identity_bound")
-        accepted: Queue[object] = Queue(maxsize=1)
 
-        def accept() -> None:
+        def run_case(
+            case_name: str,
+            content: bytes,
+            plan: Any,
+            *,
+            mode: str,
+        ) -> None:
+            principal = sha256(os.urandom(32)).hexdigest()
+            job_id = f"qualification-{case_name}-{uuid4().hex[:12]}"
+            request_id = f"qualification-{case_name}"
+            binding = BrokerWorkerBinding(
+                pipe_name=rf"\\.\pipe\cortex-qualification-{uuid4().hex}",
+                broker_process_id=os.getpid(),
+                installation_principal_id=principal,
+                job_id=job_id,
+            )
+            connection: NativeBrokerConnection | None = None
+            worker: Any = None
+            case_stages: list[str] = []
             try:
-                accepted.put(
-                    binder.accept(
-                        owner_for_job=lambda value: principal if value == job_id else None
-                    )
+                worker = launcher.launch(binding)
+                case_stages.append("appcontainer_job_policy_and_identity_bound")
+                accepted: Queue[object] = Queue(maxsize=1)
+
+                def accept() -> None:
+                    try:
+                        accepted.put(
+                            binder.accept(
+                                owner_for_job=lambda value: principal if value == job_id else None
+                            )
+                        )
+                    except Exception as error:  # pragma: no cover - native failure path.
+                        accepted.put(error)
+
+                Thread(target=accept, name="cortex-qualification-accept", daemon=True).start()
+                try:
+                    value = accepted.get(timeout=timeout_seconds)
+                except Exception:
+                    raise TimeoutError("broker handshake timeout") from None
+                if isinstance(value, Exception):
+                    raise value
+                connection = value
+                case_stages.append("authenticated_broker_handshake")
+
+                digest = sha256(content).hexdigest()
+                prepare = WorkerPrepare(
+                    schema_version="recipe.worker.prepare.v1",
+                    request_id=request_id,
+                    job_id=job_id,
+                    plan=plan,
+                    input_size=len(content),
+                    input_sha256=digest,
+                    input_mime_type="image/png",
                 )
-            except Exception as error:  # pragma: no cover - native failure path.
-                accepted.put(error)
+                connection.send_message(_message("prepare", prepare, principal=principal, job_id=job_id))
+                response = _receive_with_timeout(connection, timeout_seconds)
+                if _response_code(response, "prepare") != "recipe.worker.ack.v1":
+                    raise ValueError("prepare acknowledgement invalid")
+                case_stages.append("prepare_ack")
 
-        Thread(target=accept, name="cortex-qualification-accept", daemon=True).start()
-        try:
-            value = accepted.get(timeout=timeout_seconds)
-        except Exception:
-            raise TimeoutError("broker handshake timeout") from None
-        if isinstance(value, Exception):
-            raise value
-        connection = value
-        stages.append("authenticated_broker_handshake")
+                offset = 0
+                chunk_number = 0
+                while offset < len(content):
+                    part = content[offset : offset + QUALIFICATION_CHUNK_BYTES]
+                    chunk = WorkerInputChunk(
+                        schema_version="recipe.worker.input_chunk.v1",
+                        request_id=request_id,
+                        job_id=job_id,
+                        offset=offset,
+                        data=base64.urlsafe_b64encode(part).decode("ascii").rstrip("="),
+                        sha256=sha256(part).hexdigest(),
+                    )
+                    connection.send_message(
+                        _message("input_chunk", chunk, principal=principal, job_id=job_id)
+                    )
+                    response = _receive_with_timeout(connection, timeout_seconds)
+                    if _response_code(response, "input_chunk") != "recipe.worker.ack.v1":
+                        raise ValueError("input acknowledgement invalid")
+                    offset += len(part)
+                    chunk_number += 1
+                case_stages.append("input_chunk_ack")
 
-        content = _fixed_png()
-        request_id = "qualification-request"
-        plan = parse_image_transform(
-            {
-                "schema_version": "artifact.transform.v1",
-                "input_artifact_id": "qualification-artifact",
-                "steps": [{"op": "grayscale"}],
-                "output_format": "png",
-            }
-        )
-        prepare = WorkerPrepare(
-            schema_version="recipe.worker.prepare.v1",
-            request_id=request_id,
-            job_id=job_id,
-            plan=plan,
-            input_size=len(content),
-            input_sha256=sha256(content).hexdigest(),
-            input_mime_type="image/png",
-        )
-        connection.send_message(_message("prepare", prepare, principal=principal, job_id=job_id))
-        response = _receive_with_timeout(connection, timeout_seconds)
-        if _response_code(response, "prepare") != "recipe.worker.ack.v1":
-            raise ValueError("prepare acknowledgement invalid")
-        stages.append("prepare_ack")
+                complete = WorkerInputComplete(
+                    schema_version="recipe.worker.input_complete.v1",
+                    request_id=request_id,
+                    job_id=job_id,
+                    input_size=len(content),
+                    input_sha256=digest,
+                )
+                connection.send_message(
+                    _message("input_complete", complete, principal=principal, job_id=job_id)
+                )
+                if mode == "cancel":
+                    case_stages.append("input_complete_sent")
+                    cancel = WorkerCancel(
+                        schema_version="recipe.worker.cancel.v1",
+                        request_id=request_id,
+                        job_id=job_id,
+                        reason="user",
+                    )
+                    connection.send_message(
+                        _message("cancel", cancel, principal=principal, job_id=job_id)
+                    )
+                    response = _receive_with_timeout(connection, timeout_seconds)
+                    if response.operation == "cancel" and _response_code(response, "cancel") == "recipe.worker.ack.v1":
+                        case_stages.append("cancel_ack")
+                    elif (
+                        response.operation == "input_complete"
+                        and response.body.get("schema_version") == "recipe.worker.error.v1"
+                        and response.body.get("code") == "cancelled"
+                    ):
+                        case_stages.append("cancelled_result")
+                    else:
+                        raise ValueError(
+                            "cancellation was not acknowledged before completion:"
+                            f" operation={response.operation}"
+                            f" schema={response.body.get('schema_version')}"
+                            f" code={response.body.get('code')}"
+                        )
+                    cases[case_name] = {"status": "passed", "stages": case_stages, "chunks": chunk_number}
+                    stages.extend(f"{case_name}:{stage}" for stage in case_stages)
+                    return
 
-        chunk = WorkerInputChunk(
-            schema_version="recipe.worker.input_chunk.v1",
-            request_id=request_id,
-            job_id=job_id,
-            offset=0,
-            data=base64.urlsafe_b64encode(content).decode("ascii").rstrip("="),
-            sha256=sha256(content).hexdigest(),
-        )
-        connection.send_message(_message("input_chunk", chunk, principal=principal, job_id=job_id))
-        response = _receive_with_timeout(connection, timeout_seconds)
-        if _response_code(response, "input_chunk") != "recipe.worker.ack.v1":
-            raise ValueError("input acknowledgement invalid")
-        stages.append("input_chunk_ack")
+                response = _receive_with_timeout(connection, timeout_seconds)
+                if mode == "hostile":
+                    if (
+                        response.operation != "input_complete"
+                        or response.body.get("schema_version") != "recipe.worker.error.v1"
+                        or response.body.get("code") not in {"invalid_input", "decode_failed", "unsupported_format"}
+                    ):
+                        raise ValueError("hostile decoder input was not rejected safely")
+                    case_stages.append("hostile_input_rejected")
+                    cases[case_name] = {"status": "passed", "stages": case_stages, "chunks": chunk_number}
+                    stages.extend(f"{case_name}:{stage}" for stage in case_stages)
+                    return
 
-        complete = WorkerInputComplete(
-            schema_version="recipe.worker.input_complete.v1",
-            request_id=request_id,
-            job_id=job_id,
-            input_size=len(content),
-            input_sha256=sha256(content).hexdigest(),
-        )
-        connection.send_message(_message("input_complete", complete, principal=principal, job_id=job_id))
-        response = _receive_with_timeout(connection, timeout_seconds)
-        if response.operation != "input_complete":
-            raise ValueError("input completion response invalid")
-        stages.append("input_complete_result")
+                if response.operation != "input_complete":
+                    raise ValueError("input completion response invalid")
+                case_stages.append("input_complete_result")
+                collect = WorkerCollect(
+                    schema_version="recipe.worker.collect.v1",
+                    request_id=request_id,
+                    job_id=job_id,
+                    offset=0,
+                    max_bytes=QUALIFICATION_CHUNK_BYTES,
+                )
+                connection.send_message(_message("collect", collect, principal=principal, job_id=job_id))
+                response = _receive_with_timeout(connection, timeout_seconds)
+                if _response_code(response, "collect") != "recipe.worker.output_chunk.v1":
+                    raise ValueError("output response invalid")
+                case_stages.append("collect_output")
+                cases[case_name] = {"status": "passed", "stages": case_stages, "chunks": chunk_number}
+                stages.extend(f"{case_name}:{stage}" for stage in case_stages)
+            except TimeoutError:
+                cases[case_name] = {
+                    "status": "blocked",
+                    "stages": case_stages,
+                    "error_type": "TimeoutError",
+                    "error": "worker response timeout",
+                }
+                raise
+            except Exception as error:
+                cases[case_name] = {
+                    "status": "blocked",
+                    "stages": case_stages,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                raise
+            finally:
+                _close_worker_case(connection, worker, binder, workspace)
 
-        collect = WorkerCollect(
-            schema_version="recipe.worker.collect.v1",
-            request_id=request_id,
-            job_id=job_id,
-            offset=0,
-            max_bytes=48 * 1024,
+        selected_cases = (
+            ("transform", _fixed_png(), _plan(artifact_id="qualification-transform"), "success"),
+            (
+                "hostile_truncated_png",
+                b"\x89PNG\r\n\x1a\ntruncated",
+                _plan(artifact_id="qualification-hostile-truncated"),
+                "hostile",
+            ),
+            (
+                "hostile_active_svg",
+                b"<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>",
+                _plan(artifact_id="qualification-hostile-svg"),
+                "hostile",
+            ),
+            (
+                "cancellation",
+                _slow_png(),
+                _plan(artifact_id="qualification-cancellation", slow=True),
+                "cancel",
+            ),
         )
-        connection.send_message(_message("collect", collect, principal=principal, job_id=job_id))
-        response = _receive_with_timeout(connection, timeout_seconds)
-        if _response_code(response, "collect") != "recipe.worker.output_chunk.v1":
-            raise ValueError("output response invalid")
-        stages.append("collect_output")
-        return {"status": "passed", "stages": stages}
+        for selected_name, content, plan, mode in selected_cases:
+            if case_name is None or case_name == selected_name:
+                run_case(selected_name, content, plan, mode=mode)
+        return {"status": "passed", "stages": stages, "cases": cases}
     except TimeoutError:
-        return {"status": "blocked", "code": "worker_response_timeout", "stages": stages}
+        return {"status": "blocked", "code": "worker_response_timeout", "stages": stages, "cases": cases}
     except Exception:
-        return {"status": "blocked", "code": "qualification_failed_closed", "stages": stages}
+        return {"status": "blocked", "code": "qualification_failed_closed", "stages": stages, "cases": cases}
     finally:
-        if connection is not None:
-            _bounded_cleanup(connection.close)
         if binder is not None:
             _bounded_cleanup(binder.close_binding)
-        if worker is not None:
-            _bounded_cleanup(worker.close)
-            try:
-                executable = _process_executable(worker.process_id)
-                if executable is not None and executable.is_relative_to(workspace.resolve()):
-                    subprocess.run(
-                        ["taskkill", "/PID", str(worker.process_id), "/T", "/F"],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    )
-            except Exception:
-                pass
         try:
             shutil.rmtree(workspace)
         except OSError:
@@ -394,10 +546,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument(
+        "--case",
+        choices=("transform", "hostile_truncated_png", "hostile_active_svg", "cancellation"),
+        help="qualify one case instead of the full signed-worker corpus",
+    )
     args = parser.parse_args(argv)
     if not 1 <= args.timeout_seconds <= 120:
         parser.error("--timeout-seconds must be between 1 and 120")
-    result = qualify(args.source_root.resolve(), timeout_seconds=args.timeout_seconds)
+    result = qualify(
+        args.source_root.resolve(),
+        timeout_seconds=args.timeout_seconds,
+        case_name=args.case,
+    )
     print(json.dumps(result, sort_keys=True, separators=(",", ":") if args.json else None))
     return 2 if args.strict and result["status"] != "passed" else 0
 
