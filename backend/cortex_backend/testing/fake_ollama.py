@@ -40,6 +40,7 @@ class FakeOllamaState:
     title_response: str | None = None
     disconnect_after_chunks: int | None = None
     fail_pull_stream: bool = False
+    model_capabilities: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class FakeOllamaGateway:
@@ -73,6 +74,9 @@ class FakeOllamaGateway:
             yield {"status": "success", "total": 100, "completed": 100}
 
         return updates()
+
+    def show(self, model: str) -> dict[str, Any]:
+        return {"capabilities": list(self.state.model_capabilities.get(model, ("completion",)))}
 
 
 class FakeGenerationEngine:
@@ -132,6 +136,7 @@ class FakeGenerationEngine:
         memories_enabled: bool,
         user_system_instructions: str | None,
         options: dict[str, Any],
+        attachments: tuple[Any, ...] = (),
     ) -> tuple[str, str | None, MemoryCommand]:
         del (
             chat_history,
@@ -139,6 +144,7 @@ class FakeGenerationEngine:
             memories_enabled,
             user_system_instructions,
             options,
+            attachments,
         )
         if self.state.generation_delay_seconds > 0:
             time.sleep(self.state.generation_delay_seconds)
@@ -192,6 +198,13 @@ def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="model required")
         fake_state.installed_models.add(model)
         return {"status": "success", "model": model}
+
+    @app.post("/api/show")
+    def show(payload: dict[str, Any]) -> dict[str, Any]:
+        model = payload.get("model")
+        if not isinstance(model, str) or model not in fake_state.installed_models:
+            raise HTTPException(status_code=404, detail="fake model not found")
+        return {"capabilities": list(fake_state.model_capabilities.get(model, ("completion",)))}
 
     @app.post("/api/generate", response_model=None)
     def generate(payload: dict[str, Any]) -> dict[str, str] | StreamingResponse:

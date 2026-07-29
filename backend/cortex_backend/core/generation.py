@@ -118,6 +118,23 @@ class MemoryCommand:
 
 
 @dataclass(frozen=True)
+class GenerationAttachment:
+    """Resolved attachment data supplied to one model generation call.
+
+    The browser and chat persistence only carry opaque metadata.  This
+    in-memory value is created after owner/integrity checks and exists only for
+    the lifetime of the generation job.
+    """
+
+    attachment_id: str
+    filename: str
+    mime_type: str
+    kind: Literal["image", "document"]
+    text_content: str | None = None
+    image_base64: str | None = None
+
+
+@dataclass(frozen=True)
 class TranslationResult:
     """Outcome of the optional translation model call."""
 
@@ -165,3 +182,4 @@ class GenerationSnapshot:
     translation_enabled: bool
     target_language: str
     user_system_instructions: str | None
+    attachments: tuple[GenerationAttachment, ...] = field(default_factory=tuple)

@@ -9,6 +9,7 @@ from threading import Event
 from typing import Any, Protocol
 
 from cortex_backend.core.generation import (
+    GenerationAttachment,
     GenerationSnapshot,
     MemoryCommand,
     ModelOperationError,
@@ -52,6 +53,7 @@ class GenerationEngine(Protocol):
         memories_enabled: bool,
         user_system_instructions: str | None,
         options: dict[str, Any],
+        attachments: Sequence[GenerationAttachment] = (),
     ) -> tuple[str, str | None, MemoryCommand]:
         """Generate a response and validated memory command."""
 
@@ -135,13 +137,20 @@ class GenerationService:
         )
 
         self._check_cancelled(cancellation_event)
+        generate_kwargs: dict[str, Any] = {
+            "query": snapshot.user_input,
+            "chat_history": chat_history,
+            "permanent_memories": permanent_memories,
+            "memories_enabled": snapshot.memories_enabled,
+            "user_system_instructions": snapshot.user_system_instructions,
+            "options": dict(snapshot.model_options),
+        }
+        # Keep the legacy headless engine protocol compatible for callers that
+        # do not use attachments; real engines receive the resolved payload.
+        if snapshot.attachments:
+            generate_kwargs["attachments"] = snapshot.attachments
         response, thoughts, memory_command = engine.generate(
-            query=snapshot.user_input,
-            chat_history=chat_history,
-            permanent_memories=permanent_memories,
-            memories_enabled=snapshot.memories_enabled,
-            user_system_instructions=snapshot.user_system_instructions,
-            options=dict(snapshot.model_options),
+            **generate_kwargs,
         )
         if not isinstance(memory_command, MemoryCommand):
             raise ModelOperationError(

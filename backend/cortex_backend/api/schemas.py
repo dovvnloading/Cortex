@@ -18,6 +18,10 @@ from cortex_backend.execution.attachment_staging import (
     DEFAULT_ATTACHMENT_RETENTION_SECONDS,
     MAX_ATTACHMENT_RETENTION_SECONDS,
 )
+from cortex_backend.services.attachments import (
+    MAX_CHAT_ATTACHMENT_BYTES,
+    MAX_CHAT_ATTACHMENTS,
+)
 from cortex_backend.execution.recipes import (
     ImageTransformPlan,
     RecipeValidationError,
@@ -73,6 +77,29 @@ class HealthResponse(APIModel):
 ChatRole = Literal["user", "assistant", "system"]
 
 
+class ChatAttachment(APIModel):
+    """Opaque metadata for one staged image or text document."""
+
+    attachment_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    filename: str = Field(min_length=1, max_length=180)
+    mime_type: str = Field(min_length=1, max_length=128)
+    size: int = Field(gt=0, le=MAX_CHAT_ATTACHMENT_BYTES)
+    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    kind: Literal["image", "document"]
+    expires_at: datetime
+
+
+class ChatAttachmentStageRequest(APIModel):
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    filename: str = Field(min_length=1, max_length=512)
+    content_base64: str = Field(min_length=4, max_length=((MAX_CHAT_ATTACHMENT_BYTES * 4) // 3) + 16, strict=True)
+
+
 class ChatMessage(APIModel):
     id: str | None = None
     role: ChatRole
@@ -80,6 +107,7 @@ class ChatMessage(APIModel):
     timestamp: str | None = None
     sources: list[Any] | None = None
     thoughts: str | None = None
+    attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
 
 
 class ChatSummary(APIModel):
@@ -109,6 +137,7 @@ class AddMessageRequest(APIModel):
     content: str = Field(min_length=1, max_length=100_000)
     sources: list[Any] | None = None
     thoughts: str | None = Field(default=None, max_length=100_000)
+    attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
 
 
 class SettingsMigrationReport(APIModel):
@@ -167,6 +196,8 @@ class InstalledModel(APIModel):
     name: str
     size: int | None = None
     modified_at: str | None = None
+    capabilities: tuple[str, ...] = ()
+    supports_vision: bool | None = None
 
 
 class ModelResponse(APIModel):
@@ -418,6 +449,7 @@ class GenerationRequest(APIModel):
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_input: str = Field(min_length=1, max_length=100_000)
     base_revision: int | None = Field(default=None, ge=0)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
 
 
 class ForkRequest(APIModel):
@@ -428,6 +460,7 @@ class RegenerationRequest(APIModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     message_id: str = Field(min_length=1, max_length=200)
     user_input: str | None = Field(default=None, max_length=100_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
 
 
 class JobAccepted(APIModel):

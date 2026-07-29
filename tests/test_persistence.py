@@ -14,6 +14,29 @@ from cortex_backend.repositories.legacy_storage import (
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_chat_attachment_metadata_survives_sqlite_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))
+            attachment = {
+                "attachment_id": "doc-1",
+                "filename": "notes.md",
+                "mime_type": "text/markdown",
+                "size": 12,
+                "sha256": "a" * 64,
+                "kind": "document",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            }
+            manager.add_message(
+                "thread-attachments",
+                "user",
+                "Please review the attached file(s).",
+                attachments=[attachment],
+                thread_title="Attachments",
+            )
+
+            loaded = manager.load_chat("thread-attachments")
+            self.assertEqual(loaded["messages"][0]["attachments"], [attachment])
+
     def test_database_operations_are_safe_across_threads(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = DatabaseManager(

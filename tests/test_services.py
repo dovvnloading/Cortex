@@ -236,6 +236,27 @@ class GenerationServiceTests(unittest.TestCase):
 
 
 class ModelServiceTests(unittest.TestCase):
+    def test_inventory_exposes_ollama_capabilities_and_vision_support(self):
+        class CapabilityGateway:
+            def list(self):
+                return {"models": [{"name": "vision-model"}, {"name": "text-model"}]}
+
+            def show(self, model: str):
+                return {
+                    "capabilities": ["completion", "vision"]
+                    if model == "vision-model"
+                    else ["completion"]
+                }
+
+        inventory, connection = ModelService(CapabilityGateway()).inventory()
+
+        self.assertTrue(connection.success)
+        self.assertEqual(inventory[0].name, "text-model")
+        self.assertFalse(inventory[0].supports_vision)
+        self.assertEqual(inventory[0].capabilities, ("completion",))
+        self.assertTrue(inventory[1].supports_vision)
+        self.assertEqual(inventory[1].capabilities, ("completion", "vision"))
+
     def test_extracts_legacy_object_and_current_dict_model_shapes(self):
         class ModelEntry:
             model = "qwen3:8b"

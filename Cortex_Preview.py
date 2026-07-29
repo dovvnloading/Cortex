@@ -32,6 +32,7 @@ from cortex_backend.repositories.legacy_storage import (  # noqa: E402
 from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository  # noqa: E402
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository  # noqa: E402
 from cortex_backend.services.generation import GenerationService  # noqa: E402
+from cortex_backend.services.attachments import ChatAttachmentService  # noqa: E402
 from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
 
@@ -98,6 +99,7 @@ def build_preview_app(
         memories=LegacyPermanentMemoryRepository(permanent_memory),
         models=model_service,
         generation=generation_service,
+        attachments=ChatAttachmentService(execution_repository),
     )
 
     def readiness_check() -> bool:

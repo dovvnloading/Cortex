@@ -282,6 +282,10 @@ a { color: inherit; text-decoration: none; }
 .message-user .message-bubble { border-color: var(--line); border-radius: 15px 15px 5px 15px; background: var(--user-start); color: var(--text); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16); }
 .message-assistant .message-bubble { border-bottom-left-radius: 5px; }
 .message-pending .message-bubble { border-style: dashed; border-color: color-mix(in srgb, var(--accent) 48%, var(--line-strong)); }
+.message-attachments { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0 0 14px; }
+.message-attachment { display: inline-flex; align-items: center; min-width: 0; max-width: min(100%, 250px); gap: 6px; min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text-muted); font-size: 0.72rem; }
+.message-attachment > svg { flex: 0 0 auto; color: var(--accent); }
+.message-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .generation-status { display: inline-flex; align-items: center; gap: 9px; min-height: 30px; padding: 2px 0; color: var(--text-muted); font-size: 0.8rem; font-weight: 650; }
 .generation-status .loading-spinner { width: 15px; height: 15px; border-width: 2px; }
 .markdown-body { min-width: 0; overflow-wrap: anywhere; color: inherit; font-size: 0.93rem; line-height: 1.65; }
@@ -337,14 +341,24 @@ a { color: inherit; text-decoration: none; }
 .composer-dock { z-index: 10; }
 .composer-area, .composer { width: 100%; }
 .composer { width: min(100%, 780px); margin: 0 auto; }
-.composer-surface { display: grid; grid-template-columns: minmax(0, 1fr) 46px; grid-template-rows: minmax(48px, auto) 27px; width: 100%; padding: 7px 7px 6px 13px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-elevated); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18); transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease; }
+.composer-surface { display: grid; grid-template-columns: minmax(0, 1fr) 46px; grid-template-rows: auto minmax(48px, auto) auto 27px; width: 100%; padding: 7px 7px 6px 13px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-elevated); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18); transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease; }
 .composer-surface:focus-within { border-color: var(--line-strong); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22); background: var(--surface-raised); }
-.composer-surface textarea { grid-column: 1; grid-row: 1; display: block; width: 100%; min-height: 46px; max-height: 188px; resize: none; border: 0; outline: 0; padding: 5px 4px 5px 0; background: transparent; color: var(--text); font-size: 0.9rem; line-height: 1.5; scrollbar-gutter: stable; }
+.composer-surface textarea { grid-column: 1; grid-row: 2; display: block; width: 100%; min-height: 46px; max-height: 188px; resize: none; border: 0; outline: 0; padding: 5px 4px 5px 0; background: transparent; color: var(--text); font-size: 0.9rem; line-height: 1.5; scrollbar-gutter: stable; }
 .composer-surface textarea::placeholder { color: var(--text-faint); }
-.composer-utility-row { grid-column: 1; grid-row: 2; display: flex; align-items: center; min-width: 0; gap: 7px; overflow: hidden; }
+.composer-attachments { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: 6px; padding: 2px 4px 7px 0; }
+.composer-attachment { display: inline-flex; align-items: center; min-width: 0; max-width: min(100%, 230px); gap: 6px; min-height: 27px; padding: 0 6px 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text-muted); font-size: 0.71rem; }
+.composer-attachment > svg { flex: 0 0 auto; color: var(--accent); }
+.composer-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-attachment-remove { display: inline-grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--text-faint); }
+.composer-attachment-remove:hover:not(:disabled), .composer-attachment-remove:focus-visible { background: var(--surface-hover); color: var(--text); outline: 0; }
+.composer-utility-row { grid-column: 1; grid-row: 4; display: flex; align-items: center; min-width: 0; gap: 7px; overflow: hidden; }
+.composer-attachment-button { display: inline-grid; flex: 0 0 27px; place-items: center; width: 27px; height: 27px; border-radius: 7px; color: var(--text-faint); cursor: pointer; }
+.composer-attachment-button:hover, .composer-attachment-button:focus-within { background: var(--surface-soft); color: var(--text); }
+.composer-attachment-button-busy { cursor: wait; color: var(--accent); }
+.composer-attachment-message { grid-column: 1; grid-row: 3; align-self: center; min-width: 0; max-width: calc(100% - 4px); overflow: hidden; padding: 0 4px; color: var(--danger); font-size: 0.7rem; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 .composer-model-control { display: flex; flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: hidden; }
 .composer-meta { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: 100%; gap: 8px; margin-left: auto; overflow: hidden; }
-.composer-primary-control { grid-column: 2; grid-row: 1 / span 2; align-self: end; justify-self: end; display: inline-grid; place-items: center; width: 36px; height: 36px; margin-bottom: 0; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-soft); color: var(--text-faint); box-shadow: none; transition: background 160ms ease, border-color 160ms ease, color 160ms ease; }
+.composer-primary-control { grid-column: 2; grid-row: 1 / span 4; align-self: end; justify-self: end; display: inline-grid; place-items: center; width: 36px; height: 36px; margin-bottom: 0; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-soft); color: var(--text-faint); box-shadow: none; transition: background 160ms ease, border-color 160ms ease, color 160ms ease; }
 .composer-primary-control-ready { border-color: var(--accent); background: var(--accent); color: #fff; }
 .composer-primary-control-ready:hover:not(:disabled) { background: var(--accent-strong); filter: brightness(1.05); }
 .composer-primary-control:disabled { background: var(--surface-soft); color: var(--text-faint); box-shadow: none; opacity: 1; }
@@ -552,7 +566,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   .message-user .message-bubble { padding: 13px 15px; }
   .message-bubble { padding: 14px 15px; }
   .input-container { padding: 7px 12px max(14px, env(safe-area-inset-bottom)); }
-  .composer-surface { grid-template-columns: minmax(0, 1fr) 46px; grid-template-rows: minmax(48px, auto) 27px; border-radius: 11px; padding: 6px 6px 6px 12px; }
+  .composer-surface { grid-template-columns: minmax(0, 1fr) 46px; grid-template-rows: auto minmax(48px, auto) auto 27px; border-radius: 11px; padding: 6px 6px 6px 12px; }
   .composer-surface textarea { min-height: 46px; padding-top: 6px; }
   .composer-primary-control { width: 36px; height: 36px; border-radius: 7px; }
   .composer-phase-ready .composer-status { display: none; }

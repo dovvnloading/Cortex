@@ -51,7 +51,7 @@ class MigrationResult:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -127,6 +127,7 @@ class DatabaseManager:
                     content TEXT NOT NULL,
                     sources TEXT,
                     thoughts TEXT,
+                    attachments TEXT,
                     timestamp TEXT NOT NULL,
                     FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
                 );
@@ -145,6 +146,12 @@ class DatabaseManager:
                     f"Unsupported database schema version {version}.",
                     operation="schema_check",
                 )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "attachments" not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
             if version < self.SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
             logging.info("Database tables and indexes verified/created successfully.")
@@ -241,8 +248,8 @@ class DatabaseManager:
                             conn.execute(
                                 """
                                 INSERT INTO messages
-                                    (thread_id, role, content, sources, thoughts, timestamp)
-                                VALUES (?, ?, ?, ?, ?, ?)
+                                    (thread_id, role, content, sources, thoughts, attachments, timestamp)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (
                                     chat_data['id'],
@@ -250,6 +257,7 @@ class DatabaseManager:
                                     message['content'],
                                     json.dumps(message.get('sources')) if message.get('sources') else None,
                                     message.get('thoughts'),
+                                    json.dumps(message.get('attachments')) if message.get('attachments') else None,
                                     message_timestamp,
                                 ),
                             )
@@ -306,12 +314,13 @@ class DatabaseManager:
                         msg.get('content'),
                         json.dumps(msg.get('sources')) if msg.get('sources') else None,
                         msg.get('thoughts'),
+                        json.dumps(msg.get('attachments')) if msg.get('attachments') else None,
                         msg_timestamp
                     ))
                 
                 conn.executemany("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, messages_to_insert)
                 logging.info(f"Successfully created forked chat {thread_id} with {len(messages)} messages.")
         except PersistenceError as exc:
@@ -328,6 +337,7 @@ class DatabaseManager:
         content: str,
         sources: list | None = None,
         thoughts: str | None = None,
+        attachments: list | None = None,
         thread_title: str | None = None,
     ):
         """Adds a new message to a specific chat thread."""
@@ -339,14 +349,15 @@ class DatabaseManager:
                         (thread_id, thread_title, _utc_now().isoformat()),
                     )
                 conn.execute("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     thread_id,
                     role,
                     content,
                     json.dumps(sources) if sources else None,
                     thoughts,
+                    json.dumps(attachments) if attachments else None,
                     _utc_now().isoformat()
                 ))
                 # Update the thread's main timestamp to reflect recent activity
@@ -375,7 +386,7 @@ class DatabaseManager:
                 chat_data = dict(thread_row)
                 
                 cursor.execute(
-                    "SELECT id, role, content, sources, thoughts, timestamp FROM messages "
+                    "SELECT id, role, content, sources, thoughts, attachments, timestamp FROM messages "
                     "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
@@ -384,6 +395,8 @@ class DatabaseManager:
                     msg_dict = dict(msg_row)
                     if msg_dict.get('sources'):
                         msg_dict['sources'] = json.loads(msg_dict['sources'])
+                    if msg_dict.get('attachments'):
+                        msg_dict['attachments'] = json.loads(msg_dict['attachments'])
                     messages.append(msg_dict)
                 
                 chat_data['messages'] = messages
@@ -443,6 +456,7 @@ class DatabaseManager:
         *,
         sources: list | None = None,
         thoughts: str | None = None,
+        attachments: list | None = None,
     ) -> None:
         """Replace one assistant response without disturbing its user turn."""
         try:
@@ -450,13 +464,14 @@ class DatabaseManager:
                 cursor = conn.execute(
                     """
                     UPDATE messages
-                    SET content = ?, sources = ?, thoughts = ?, timestamp = ?
+                    SET content = ?, sources = ?, thoughts = ?, attachments = ?, timestamp = ?
                     WHERE id = ? AND thread_id = ? AND role = 'assistant'
                     """,
                     (
                         content,
                         json.dumps(sources) if sources else None,
                         thoughts,
+                        json.dumps(attachments) if attachments else None,
                         _utc_now().isoformat(),
                         message_id,
                         thread_id,

@@ -26,6 +26,7 @@ from cortex_backend.repositories.settings import (
     SettingsRepository,
 )
 from cortex_backend.services.generation import GenerationService
+from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelService
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.lifecycle import ExecutionLifecycle
@@ -49,6 +50,7 @@ class BackendDependencies:
     memories: MemoryRepository
     models: ModelService
     generation: GenerationService
+    attachments: ChatAttachmentService | None = None
 
 
 def build_demo_dependencies(
@@ -75,6 +77,7 @@ def build_demo_dependencies(
         memories=memories,
         models=models,
         generation=generation,
+        attachments=ChatAttachmentService(),
     )
 
 
@@ -169,6 +172,9 @@ def create_app(
         openapi_url=None,
     )
     app.state.dependencies = dependencies or build_demo_dependencies()
+    app.state.chat_attachment_service = getattr(
+        app.state.dependencies, "attachments", None
+    )
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
     app.state.execution_lifecycle = execution_lifecycle

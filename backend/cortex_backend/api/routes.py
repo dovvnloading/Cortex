@@ -17,7 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 
-from cortex_backend.core.generation import ConnectionResult, GenerationSnapshot
+from cortex_backend.core.generation import ConnectionResult, GenerationAttachment, GenerationSnapshot
 from cortex_backend.services.chat import (
     ChatDomainError,
     chat_revision,
@@ -29,6 +29,12 @@ from cortex_backend.core.settings import CortexSettings
 from cortex_backend.repositories.chats import ChatRepositoryError
 from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
+from cortex_backend.services.attachments import (
+    ChatAttachmentError,
+    ChatAttachmentService,
+    MAX_CHAT_ATTACHMENTS,
+    MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
+)
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.fake import FakeExecutionPlan
 from cortex_backend.execution.attachment_staging import (
@@ -65,6 +71,8 @@ from .schemas import (
     DiagnosticsResponse,
     AttachmentStageAccepted,
     AttachmentStageRequest,
+    ChatAttachment,
+    ChatAttachmentStageRequest,
     ExecutionAccepted,
     ExecutionApprovalDecisionRequest,
     ExecutionPreviewRequest,
@@ -311,20 +319,32 @@ def build_router() -> APIRouter:
     def add_message(
         thread_id: str,
         payload: AddMessageRequest,
+        request: Request,
         deps: BackendDependenciesProtocol = Depends(dependencies),
-        _: SessionPrincipal = Depends(require_session),
+        principal: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
             existing = deps.chats.get_chat(thread_id)
+            attachment_refs = _validate_chat_attachment_refs(
+                request,
+                deps,
+                principal,
+                payload.attachments or [],
+            )
             deps.chats.add_message(
                 thread_id,
                 payload.role,
                 payload.content,
                 sources=payload.sources,
                 thoughts=payload.thoughts,
+                attachments=[attachment.model_dump(mode="json") for attachment in attachment_refs],
                 thread_title="New Chat" if existing is None else None,
             )
             chat = deps.chats.get_chat(thread_id)
+        except ChatAttachmentError as exc:
+            _raise_chat_attachment_error(exc)
+        except ChatDomainError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("save message", exc)
         if chat is None:
@@ -603,6 +623,43 @@ def build_router() -> APIRouter:
             sha256=artifact.sha256,
             expires_at=datetime.fromisoformat(artifact.expires_at),
         )
+
+    @router.post(
+        "/attachments",
+        response_model=ChatAttachment,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def stage_chat_attachment(
+        payload: ChatAttachmentStageRequest,
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> ChatAttachment:
+        """Stage one bounded image or text document for a chat turn.
+
+        The browser receives opaque metadata only.  Content is retained in the
+        owner-scoped local attachment store and is resolved only when the
+        generation job starts.
+        """
+
+        try:
+            content = base64.b64decode(payload.content_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Attachment payload is invalid.",
+            ) from None
+        service = _chat_attachment_service(request, deps)
+        try:
+            descriptor = service.stage(
+                owner=_attachment_owner(request, principal),
+                request_id=payload.request_id,
+                filename=payload.filename,
+                content=content,
+            )
+        except ChatAttachmentError as exc:
+            _raise_chat_attachment_error(exc)
+        return ChatAttachment.model_validate(descriptor.as_dict())
 
     @router.get("/execution/artifacts/{artifact_id}")
     def download_execution_artifact(
@@ -1023,6 +1080,7 @@ def build_router() -> APIRouter:
                 thread_id=thread_id,
                 user_input=user_input,
                 base_revision=chat_revision(chat),
+                attachments=payload.attachments,
             )
             snapshot, _ = await _start_generation_job(
                 request,
@@ -1059,6 +1117,13 @@ def build_router() -> APIRouter:
                 payload,
                 settings,
                 deps.models.list_installed(),
+                attachments=_resolve_generation_attachments(
+                    request,
+                    deps,
+                    principal,
+                    payload.attachments,
+                    settings=settings,
+                ),
             )
         except ChatDomainError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1237,7 +1302,22 @@ async def _start_generation_job(
 
     settings = _load_settings(deps)
     job_id = uuid4().hex
-    generation_payload = payload.model_copy(update={"thread_id": thread_id})
+    attachment_refs = list(payload.attachments)
+    if target_message_id is not None and not attachment_refs and chat is not None:
+        messages = list(chat.get("messages", ()))
+        try:
+            target_position = message_position(chat, target_message_id)
+        except ChatDomainError:
+            target_position = -1
+        if target_position > 0:
+            prior_user = messages[target_position - 1]
+            attachment_refs = [
+                ChatAttachment.model_validate(item)
+                for item in (prior_user.get("attachments") or [])
+            ]
+    generation_payload = payload.model_copy(
+        update={"thread_id": thread_id, "attachments": attachment_refs}
+    )
     compute_observation = await _automatic_compute_observation(
         request,
         principal,
@@ -1251,6 +1331,13 @@ async def _start_generation_job(
         settings,
         deps.models.list_installed(),
         compute_observation=compute_observation,
+        attachments=_resolve_generation_attachments(
+            request,
+            deps,
+            principal,
+            attachment_refs,
+            settings=settings,
+        ),
     )
 
     user_message_id: str | None = None
@@ -1259,6 +1346,7 @@ async def _start_generation_job(
             thread_id,
             "user",
             payload.user_input,
+            attachments=[attachment.model_dump(mode="json") for attachment in attachment_refs],
             thread_title="New Chat" if chat is None else None,
         )
 
@@ -1537,6 +1625,8 @@ def _model_response(
                 name=model.name,
                 size=model.size,
                 modified_at=model.modified_at,
+                capabilities=model.capabilities,
+                supports_vision=model.supports_vision,
             )
             for model in models
         ),
@@ -1550,6 +1640,7 @@ def _generation_snapshot(
     installed_models: tuple[str, ...],
     *,
     compute_observation: str | None = None,
+    attachments: tuple[GenerationAttachment, ...] = (),
 ) -> GenerationSnapshot:
     chat_model = _selected_local_model(settings.models.chat, installed_models)
     if chat_model is None:
@@ -1589,6 +1680,7 @@ def _generation_snapshot(
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
         user_system_instructions=instructions,
+        attachments=attachments,
     )
 
 
@@ -1613,6 +1705,7 @@ def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
             "timestamp": message.get("timestamp"),
             "sources": message.get("sources"),
             "thoughts": message.get("thoughts"),
+            "attachments": message.get("attachments"),
         }
         for message in chat.get("messages", [])
     ]
@@ -1798,6 +1891,130 @@ def _raise_attachment_staging_error(exc: AttachmentStagingError) -> None:
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail="Attachment could not be staged safely.",
     ) from exc
+
+
+def _chat_attachment_service(
+    request: Request,
+    deps: BackendDependenciesProtocol,
+) -> ChatAttachmentService:
+    service = getattr(deps, "attachments", None) or getattr(
+        request.app.state, "chat_attachment_service", None
+    )
+    if not isinstance(service, ChatAttachmentService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chat attachments are unavailable in this runtime.",
+        )
+    return service
+
+
+def _attachment_owner(request: Request, principal: SessionPrincipal) -> str:
+    """Bind attachments to the local installation, not an expiring session."""
+
+    return str(
+        getattr(request.app.state, "installation_principal_id", None)
+        or principal.session_id
+    )
+
+
+def _raise_chat_attachment_error(exc: ChatAttachmentError) -> None:
+    messages = {
+        "attachment_too_large": "Files must be 10 MB or smaller.",
+        "attachment_type_unsupported": "Cortex supports images and common text/code/config documents.",
+        "attachment_not_text": "That document is not a readable text file.",
+        "attachment_image_invalid": "The image could not be verified safely.",
+        "attachment_request_conflict": "That upload request conflicts with an existing attachment.",
+        "attachment_unavailable": "That attachment is no longer available. Upload it again.",
+        "attachment_integrity_failed": "The attachment failed an integrity check. Upload it again.",
+    }
+    if exc.code == "attachment_request_conflict":
+        status_code = status.HTTP_409_CONFLICT
+    elif exc.code in {"attachment_unavailable", "attachment_integrity_failed"}:
+        status_code = status.HTTP_404_NOT_FOUND
+    else:
+        status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    raise HTTPException(
+        status_code=status_code,
+        detail=messages.get(exc.code, "Attachment could not be staged safely."),
+    ) from exc
+
+
+def _resolve_generation_attachments(
+    request: Request,
+    deps: BackendDependenciesProtocol,
+    principal: SessionPrincipal,
+    references: list[ChatAttachment],
+    *,
+    settings: CortexSettings,
+) -> tuple[GenerationAttachment, ...]:
+    if not references:
+        return ()
+    if len(references) > MAX_CHAT_ATTACHMENTS:
+        raise ChatDomainError("A message can include at most eight attachments.")
+    if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
+        raise ChatDomainError("The combined attachment size is too large for one message.")
+    installed = deps.models.list_installed()
+    model = _selected_local_model(settings.models.chat, installed)
+    contains_image = any(item.kind == "image" for item in references)
+    if contains_image and model is not None:
+        vision = deps.models.model_supports_vision(model)
+        if vision is False:
+            raise ChatDomainError(
+                f"Selected model '{model}' does not support image input. Choose a vision model or remove the image."
+            )
+    service = _chat_attachment_service(request, deps)
+    owner = _attachment_owner(request, principal)
+    resolved: list[GenerationAttachment] = []
+    seen: set[str] = set()
+    for reference in references:
+        if reference.attachment_id in seen:
+            raise ChatDomainError("The same attachment cannot be added twice.")
+        seen.add(reference.attachment_id)
+        try:
+            item = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
+        except ChatAttachmentError as exc:
+            _raise_chat_attachment_error(exc)
+        resolved.append(
+            GenerationAttachment(
+                attachment_id=item.descriptor.attachment_id,
+                filename=item.descriptor.filename,
+                mime_type=item.descriptor.mime_type,
+                kind="image" if item.descriptor.kind == "image" else "document",
+                text_content=item.text_content,
+                image_base64=item.image_base64,
+            )
+        )
+    return tuple(resolved)
+
+
+def _validate_chat_attachment_refs(
+    request: Request,
+    deps: BackendDependenciesProtocol,
+    principal: SessionPrincipal,
+    references: list[ChatAttachment],
+) -> list[ChatAttachment]:
+    """Validate metadata-only message writes against the local attachment store."""
+
+    if not references:
+        return []
+    if len(references) > MAX_CHAT_ATTACHMENTS:
+        raise ChatDomainError("A message can include at most eight attachments.")
+    if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
+        raise ChatDomainError("The combined attachment size is too large for one message.")
+    service = _chat_attachment_service(request, deps)
+    owner = _attachment_owner(request, principal)
+    normalized: list[ChatAttachment] = []
+    seen: set[str] = set()
+    for reference in references:
+        if reference.attachment_id in seen:
+            raise ChatDomainError("The same attachment cannot be added twice.")
+        seen.add(reference.attachment_id)
+        try:
+            resolved = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
+        except ChatAttachmentError:
+            raise
+        normalized.append(ChatAttachment.model_validate(resolved.descriptor.as_dict()))
+    return normalized
 
 
 def _execution_repository(request: Request):
