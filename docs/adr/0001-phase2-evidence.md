@@ -260,3 +260,11 @@ cancellation acknowledgement. The run used only an in-memory ephemeral signing
 key and temporary installer store; no production trust material or provider
 lifecycle route was touched. Quality CI now repeats this corpus with bounded
 15-minute build and 20-minute qualification steps.
+
+**Packaged worker CI verification (2026-07-29):** [Quality run
+30444700170](https://github.com/dovvnloading/Cortex/actions/runs/30444700170)
+([test job 90552092500](https://github.com/dovvnloading/Cortex/actions/runs/30444700170/job/90552092500))
+completed successfully in 4m12s. It built the fixed one-folder worker and
+passed the strict transform, hostile-decoder, cancellation, AppContainer,
+Job Object, broker-identity, provenance, and cleanup corpus using only an
+ephemeral in-memory signing key.
