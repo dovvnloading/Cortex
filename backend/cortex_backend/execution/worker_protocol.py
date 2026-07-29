@@ -287,12 +287,24 @@ class RecipeWorkerSession:
         self._input = bytearray()
         self._result: RecipeProviderResult | None = None
         self._cancelled = False
+        self._bytes_read = 0
+        self._bytes_written = 0
         self._lock = RLock()
 
     @property
     def state(self) -> Literal["idle", "receiving", "running", "complete", "cancelled", "failed"]:
         with self._lock:
             return self._state  # type: ignore[return-value]
+
+    @property
+    def bytes_read(self) -> int:
+        with self._lock:
+            return self._bytes_read
+
+    @property
+    def bytes_written(self) -> int:
+        with self._lock:
+            return self._bytes_written
 
     def prepare(self, message: WorkerPrepare) -> None:
         with self._lock:
@@ -302,6 +314,8 @@ class RecipeWorkerSession:
             self._input = bytearray()
             self._result = None
             self._cancelled = False
+            self._bytes_read = 0
+            self._bytes_written = 0
             self._state = "receiving"
 
     def input_chunk(self, message: WorkerInputChunk) -> None:
@@ -316,6 +330,7 @@ class RecipeWorkerSession:
             if len(self._input) + len(content) > self._prepare.input_size:
                 raise WorkerProtocolError("input_size_exceeded")
             self._input.extend(content)
+            self._bytes_read += len(content)
 
     def cancel(self, message: WorkerCancel) -> None:
         with self._lock:
@@ -396,7 +411,7 @@ class RecipeWorkerSession:
             if not chunk:
                 raise WorkerProtocolError("output_offset_invalid")
             encoded = base64.urlsafe_b64encode(chunk).decode("ascii").rstrip("=")
-            return WorkerOutputChunk(
+            chunk_model = WorkerOutputChunk(
                 schema_version="recipe.worker.output_chunk.v1",
                 request_id=message.request_id,
                 job_id=message.job_id,
@@ -405,6 +420,8 @@ class RecipeWorkerSession:
                 sha256=hashlib.sha256(chunk).hexdigest(),
                 final=end == len(output),
             )
+            self._bytes_written += len(chunk)
+            return chunk_model
 
 
 class RecipeWorkerDispatcher:
@@ -431,6 +448,14 @@ class RecipeWorkerDispatcher:
         """Expose only the bounded session state to the broker loop."""
 
         return self._session.state
+
+    @property
+    def bytes_read(self) -> int:
+        return self._session.bytes_read
+
+    @property
+    def bytes_written(self) -> int:
+        return self._session.bytes_written
 
     def dispatch(self, operation: str, body: dict[str, Any]) -> WorkerResult | WorkerOutputChunk | None:
         model_type = self._MODELS.get(operation)

@@ -16,6 +16,10 @@ def test_non_windows_resource_probe_fails_closed(monkeypatch):
     assert result["status"] == "blocked"
 
 
+def test_native_api_hresult_type_is_available_across_supported_python_versions():
+    assert native._HRESULT is not None
+
+
 def test_launcher_report_never_authorizes_when_worker_or_broker_is_blocked(monkeypatch):
     monkeypatch.setattr(
         qualification,

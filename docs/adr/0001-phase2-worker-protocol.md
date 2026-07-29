@@ -69,9 +69,17 @@ root.
 `tests/test_phase2_worker_protocol.py` covers successful in-order streaming and
 collection, malformed operations, replay/order failure, claim mismatch,
 cancellation terminality, and chunk tampering. `tests/test_phase2_worker_runtime.py`
-(9 tests) covers authenticated envelope binding, redacted repairable failures,
-provider failure, message budgets, terminal cleanup, watchdog expiry,
-fixed-entrypoint parsing, and cancellation delivered while a transform is running.
+(10 tests) covers authenticated envelope binding, redacted repairable failures,
+provider failure, message budgets, terminal cleanup, watchdog expiry, cumulative
+resource reporting, fixed-entrypoint parsing, and cancellation delivered while a
+transform is running. `RecipeWorkerSession` exposes cumulative input/output byte
+counters for the coordinator's accounting sample. The deterministic
+`resource_watchdog_qualification.py --json --strict` corpus covers immutable
+budgets, monotonic watchdog categories, sample regression, stable limit
+precedence, missing-memory fail-closed behavior, actual Job Object accounting,
+and kill-on-close tree reaping. A terminal runtime report marks
+`resource_error=accounting_unavailable` when no peak-memory sampler is supplied;
+it cannot be mistaken for release-qualified accounting.
 On the controlled Windows host (2026-07-23), the
 PyInstaller build produced `dist/recipe-runtime/recipe_worker.exe`; direct launch
 without the exact native broker arguments returned exit code `78` as required.
@@ -82,5 +90,6 @@ This ADR does not authorize provider execution. The remaining stage must install
 real signed generation, launch it through the reviewed suspended AppContainer/Job
 Object factory, bind the live broker session to the actual worker PID and
 AppContainer token, and run the hostile decoder/cancellation corpus through that
-packaged process with watchdog and artifact-boundary evidence. Lifecycle/UI
-enablement remains behind those gates and external security review.
+packaged process with the qualified resource/watchdog and artifact-boundary
+controls. Lifecycle/UI enablement remains behind those gates and external security
+review.

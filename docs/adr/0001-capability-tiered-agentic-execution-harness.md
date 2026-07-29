@@ -957,7 +957,10 @@ pass without executing code.
   also qualifies owner/path binding, active-content rejection, exact claims,
   quarantine, rollback, and repository integrity without user/model input. Collect
   opt-in aggregate reliability metrics, never content, only after the remaining
-  release gates close and the provider is sandbox-qualified.
+  release gates close and the provider is sandbox-qualified. The deterministic
+  resource/watchdog corpus now qualifies immutable profile budgets, monotonic
+  watchdog categories, cumulative accounting rejection, actual Windows Job Object
+  accounting, and kill-on-close process-tree reaping.
 
 **Implementation gate:** parser, artifact-boundary, qualification-provider,
 worker-provenance, sandbox-qualification, and native-launcher-policy regression
@@ -972,8 +975,9 @@ The 2026-07-28 packaged qualification evidence closes the hostile decoder corpus
 signed provenance, broker identity, and in-flight cancellation portions of this
 gate. The 2026-07-28 parser qualification also closes the deterministic parser-
 fuzzing portion. The 2026-07-28 artifact-security qualification closes the
-deterministic copy-in/publication review. Resource/watchdog accounting, external
-review, and production lifecycle health remain open.
+deterministic copy-in/publication review. The 2026-07-29 resource/watchdog
+qualification closes the deterministic accounting and watchdog-control portion;
+external review and production lifecycle health remain open.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 

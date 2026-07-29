@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, artifact security review, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; resource/watchdog accounting, external review, and lifecycle release gates remain open
+- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, artifact security review, signed worker launch/broker qualification, packaged transform/hostile-decoder/cancellation qualification, and resource/watchdog accounting qualification complete; external review and lifecycle release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -25,10 +25,11 @@
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
 | Deterministic artifact security review | **Complete (qualification-only)** | `artifact_security_review.py --json --strict` passed the fixed 12-case disposable corpus (`artifact-boundary-review.v1`, digest `a748cc9f0a514c8d`): owner/path binding, link/hardlink rejection, active/non-finite content, exact claims/quarantine, rollback, and repository size integrity. Missing link primitives remain blocked. |
+| Deterministic resource/watchdog accounting | **Complete (qualification-only)** | `resource_watchdog_qualification.py --json --strict` passed the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`): immutable ADR budgets, wall/idle watchdogs, clock and cumulative-sample regression, stable CPU/memory/input/output/console/observation/message limit precedence, missing-memory fail-closed behavior, actual Windows Job Object accounting, and kill-on-close process-tree reaping. Provider launch remains disabled pending external review and lifecycle wiring. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
-| Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
+| Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation/resource/watchdog)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. `resource_watchdog_qualification.py` separately proves immutable budgets, actual Job Object accounting, and kill-on-close tree reaping. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, and artifact security review are qualified. The remaining gate is resource/watchdog accounting, external review, and production lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, artifact security review, resource accounting, and watchdog tree reaping are qualified. External review and production lifecycle wiring remain required before provider enablement. |
 
 ## Security invariants
 
@@ -87,8 +88,8 @@
     generation with one exact `image_transform`/`recipe_worker.exe` role and stable
     byte identity can proceed to a future launcher; no executable is loaded here.
 23. The disposable launcher applies all required Job Object policy before resume,
-    queries the configured limits/accounting, never grants breakaway, and reports
-    the absent worker/broker gates as blocking.
+    queries configured limits plus actual CPU, memory, process, and I/O accounting,
+    never grants breakaway, and reports the absent worker/broker gates as blocking.
 24. Release signing reads an external raw private key only for the signing operation,
     self-verifies the canonical manifest, rejects reparse/hardlink/mutable package
     inputs, and never treats a generated manifest as launch authorization.
@@ -108,6 +109,10 @@
     it checks owner/path binding, active-content and numeric safety, link rejection,
     exact claims, quarantine, rollback, and stored-size integrity. The probe accepts
     no user/model input and reports an unavailable required link primitive as blocked.
+30. Resource budgets are immutable and bounded; watchdog clocks must be finite and
+    monotonic; cumulative CPU, memory, byte, and message samples cannot regress;
+    limit precedence is stable; and a terminal result without required accounting
+    remains unavailable rather than being reported as a green qualification.
 
 ## Re-run target
 
@@ -128,6 +133,7 @@ python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
 python tools/execution_spikes/recipe_parser_fuzz.py --json --strict
 python tools/execution_spikes/artifact_security_review.py --json --strict
+python tools/execution_spikes/resource_watchdog_qualification.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -200,5 +206,34 @@ and quarantine, all-or-nothing rollback, and repository stored-size integrity.
 The review also fixed two fail-closed gaps: exponent-overflow JSON is rejected as
 non-finite, and oversized JSON integers no longer leak a `ValueError`; UTF-16
 active markup is rejected instead of being classified as inert binary. The focused
-artifact suite now passes 24 boundary tests plus the reproducibility test. Resource/
-watchdog accounting, external review, and production lifecycle health remain open.
+artifact suite now passes 24 boundary tests plus the reproducibility test. At the
+time of this artifact run, resource/watchdog accounting, external review, and
+production lifecycle health remained open.
+
+**Resource/watchdog qualification result (2026-07-29):** The deterministic
+`resource_watchdog_qualification.py --json --strict` probe passed all 15 cases in
+the fixed `resource-watchdog.v1` corpus (digest `5eac03e2b4981543`). The corpus
+locks the `scratch.auto.v1` and `artifact.transform.v1` budgets, wall and idle
+watchdog categories, clock/sample regression rejection, stable CPU/memory/input/
+output/console/observation/message limit precedence, and missing-memory fail-closed
+terminal behavior.
+On Windows it additionally queried actual Job Object CPU, memory, process,
+page-fault, and I/O accounting for a suspended fixed child and proved kill-on-close
+reaping of its descendant tree. The initial native query exposed and fixed an ABI
+gap (the Windows accounting struct requires both per-period user and kernel time
+fields) and made the Win32 `HRESULT` binding explicit for supported CPython
+versions. The worker loop now reports cumulative CPU/byte/message usage, and the
+session exposes cumulative input/output byte counters. Resource/watchdog
+qualification is complete for the fixed controls; real signed-worker enforcement,
+external review, and production lifecycle health remain open.
+
+**Resource stage verification (2026-07-29):** The full Python suite passed 289
+tests with one expected Windows-platform skip and one pre-existing
+`pytest-asyncio` deprecation warning. The resource/watchdog strict probe passed
+15/15 cases, the artifact-security strict probe passed 12/12 cases, compileall
+and `git diff --check` passed, generated API contracts were unchanged, and the
+frontend lint, typecheck, 39 unit tests, and production build all passed. The
+updated sandbox harness remained intentionally `qualification_status=blocked`
+only because the immutable signed worker/broker production gates are still absent;
+its AppContainer, cancellation, launcher-accounting, and resource controls were
+green.

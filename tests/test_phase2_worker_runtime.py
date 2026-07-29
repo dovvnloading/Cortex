@@ -19,6 +19,7 @@ from cortex_backend.execution.broker import BrokerMessage
 from cortex_backend.execution.lifecycle import RuntimeHealth
 from cortex_backend.execution.recipe_provider import RecipeImageProvider, RecipeProviderError
 from cortex_backend.execution.recipes import parse_image_transform
+from cortex_backend.execution.resource_accounting import ResourceSample
 from cortex_backend.execution.worker_protocol import (
     WorkerCancel,
     WorkerCollect,
@@ -156,6 +157,11 @@ def test_runtime_processes_authenticated_request_and_closes_provider_and_transpo
 
     assert report.terminal_state == "complete"
     assert report.processed_messages == 4
+    assert report.resource_usage is not None
+    assert report.resource_usage.bytes_read == len(_image_bytes())
+    assert report.resource_usage.bytes_written > 0
+    assert report.resource_usage.messages == 4
+    assert report.resource_error == "accounting_unavailable"
     assert connection.closed
     assert providers[0].health_snapshot.code == "recipe_provider_stopped"
     assert [message.operation for message in connection.sent] == [
@@ -197,6 +203,30 @@ def test_runtime_redacts_malformed_body_and_allows_bounded_repair():
         "code": "message_invalid",
     }
     assert "path" not in str(connection.sent[0].body)
+
+
+def test_runtime_accepts_cumulative_native_accounting_sample():
+    content = _image_bytes()
+    connection = _FakeConnection(_successful_messages(content))
+
+    report = RecipeWorkerBrokerRuntime(
+        connection,
+        expected_principal_id=PRINCIPAL,
+        job_id=JOB_ID,
+        resource_sampler=lambda: ResourceSample(
+            cpu_time_ms=1,
+            peak_memory_bytes=1024,
+            bytes_read=len(content),
+            bytes_written=1,
+            messages=4,
+        ),
+    ).run()
+
+    assert report.terminal_state == "complete"
+    assert report.resource_error is None
+    assert report.resource_usage is not None
+    assert report.resource_usage.accounting_complete
+    assert report.resource_usage.peak_memory_bytes == 1024
 
 
 def test_runtime_cancellation_is_terminal_and_acknowledged():
@@ -358,6 +388,7 @@ def test_runtime_watchdog_captures_stalled_transform_and_closes():
     ).run()
 
     assert report.terminal_state == "failed"
+    assert report.resource_error in {"deadline_exceeded", "watchdog_stalled"}
     assert connection.sent[-1].body["schema_version"] == "recipe.worker.error.v1"
     assert connection.sent[-1].body["code"] == "timeout"
     assert connection.closed
