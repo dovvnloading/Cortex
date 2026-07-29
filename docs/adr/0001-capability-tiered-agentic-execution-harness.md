@@ -976,8 +976,11 @@ signed provenance, broker identity, and in-flight cancellation portions of this
 gate. The 2026-07-28 parser qualification also closes the deterministic parser-
 fuzzing portion. The 2026-07-28 artifact-security qualification closes the
 deterministic copy-in/publication review. The 2026-07-29 resource/watchdog
-qualification closes the deterministic accounting and watchdog-control portion;
-external review and production lifecycle health remain open.
+qualification closes the deterministic accounting and watchdog-control portion.
+The same day's `RecipeRuntimeReleaseGate` adds the fail-closed composition
+preflight for signed-worker provenance, native adapter presence, and explicit
+external-review evidence; external review approval, signed production package
+installation, and production lifecycle health remain open.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
 
