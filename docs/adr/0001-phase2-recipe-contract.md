@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 typed recipe and primitive contract
 
-- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, qualification-only provider core, and explicit qualification-profile lifecycle composition implemented and verified; recipe request execution remains next
+- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, qualification-only provider core, explicit qualification-profile lifecycle composition, and the internal durable recipe coordinator implemented and verified; application integration remains separate
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
 - **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
@@ -71,11 +71,12 @@ hardening, not open-source prerequisites.
 
 ## Required next gates
 
-1. Add the recipe-specific coordinator/request and artifact-publication path behind
-   the passing lifecycle health check for the explicit
-   `release_profile="qualification"`. The lifecycle builder intentionally does not
-   create processes or expose a recipe route by itself. Official prebuilt releases
-   may add external review and production trust as optional hardening.
+1. Wire an explicit UI/API request surface and a qualified worker-attempt factory
+   behind the passing lifecycle health check. The implemented coordinator is
+   documented in [the coordinator ADR](0001-phase2-recipe-coordinator.md); the
+   lifecycle builder intentionally does not create processes or expose a recipe
+   route by itself. Official prebuilt releases may add external review and
+   production trust as optional hardening.
 
 ## Verification
 

@@ -1,6 +1,6 @@
 # ADR-0001 Phase 2 Windows recipe sandbox qualification
 
-- **Status:** Qualification harness, packaged worker/release preflight, and explicit qualification-profile lifecycle composition implemented; recipe request execution remains next
+- **Status:** Qualification harness, packaged worker/release preflight, explicit qualification-profile lifecycle composition, and internal recipe coordination implemented; application exposure remains separate
 - **Phase:** 2 - fixed-function image provider
 - **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Depends on:** [Phase 2 recipe provider core](0001-phase2-recipe-provider.md), [signed bundle installation](0001-phase2-bundle-installation.md), [native broker adapter](0001-phase2-native-broker.md), and [trusted artifact boundary](0001-phase2-artifact-boundary.md)
@@ -51,7 +51,7 @@ fallback.
 | Decoder hostile corpus | Fixed one-pixel PNG, truncated PNG, and active SVG against the core | Qualification-only evidence; not OS-sandbox evidence |
 | Signed worker provenance | Storage-only `verify_active_worker()` role binding plus strict packaged-worker corpus | **Qualification complete** for the fixed worker role; production trust remains separate |
 | Broker identity and framed IPC | Native broker transport tests and strict packaged-worker corpus | **Qualification complete** when bound to the actual worker PID/token; no host fallback |
-| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `build_execution_lifecycle()` composes an explicit `release_profile="qualification"` only with an injected gate, coordinator, and provider-health probe | No provider can become reachable accidentally; the next core slice is the recipe coordinator/request path |
+| Lifecycle enablement | `ExecutionLifecycle` remains disabled by default; `build_execution_lifecycle()` composes an explicit `release_profile="qualification"` only with an injected gate, coordinator, and provider-health probe | No provider can become reachable accidentally; the internal coordinator is now available and the next slice is explicit UI/API exposure |
 
 No single green smoke result closes the gate. A missing, failed, or unverified
 control produces `blocked` or `fail`, and no weaker host-process path is attempted.
@@ -106,5 +106,7 @@ prevents accidental false-green qualification. The source checkout remains
 default-off; the explicit qualification profile is now a deliberate, injected
 lifecycle composition rather than an application default. Official production
 readiness, signing, and external review are separate optional maintainer concerns
-and are not prerequisites for open-source development. The next implementation
-slice is the recipe coordinator/request path behind this boundary.
+and are not prerequisites for open-source development. The internal recipe
+coordinator/request path is now implemented behind this boundary; the next
+implementation slice is explicit UI/API exposure and qualified attempt-factory
+wiring.
