@@ -2,9 +2,15 @@ import { expect, test, type Page } from "@playwright/test";
 
 type WorkspaceOptions = {
   models?: string[];
+  connectionSuccess?: boolean;
+  connectionMessage?: string;
 };
 
-async function stubWorkspace(page: Page, { models = ["local-chat:7b", "local-chat:13b"] }: WorkspaceOptions = {}) {
+async function stubWorkspace(page: Page, {
+  models = ["local-chat:7b", "local-chat:13b"],
+  connectionSuccess = true,
+  connectionMessage = "Connected to local runtime.",
+}: WorkspaceOptions = {}) {
   let settings = {
     appearance: { theme: "dark" },
     models: { chat: models[0] ?? null, title: null, translation: "translategemma:4b" },
@@ -37,7 +43,7 @@ async function stubWorkspace(page: Page, { models = ["local-chat:7b", "local-cha
         required_models: [], optional_models: [], installed_models: models,
         missing_models: [], optional_missing_models: [],
         models: models.map((name) => ({ name })),
-        connection: { success: true, status: "connected", message: "Connected to local runtime." },
+        connection: { success: connectionSuccess, status: connectionSuccess ? "connected" : "error", message: connectionMessage },
       },
     });
   });
@@ -143,4 +149,25 @@ test.describe("compact window", () => {
     expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
     expect(layout.composerHeight).toBeLessThan(layout.composerScrollHeight);
   });
+});
+
+test("clips a long runtime status before the send control", async ({ page }) => {
+  await stubWorkspace(page, {
+    models: ["local-chat:7b"],
+    connectionSuccess: false,
+    connectionMessage: "Could not connect to Ollama. Please start Ollama and retry this local runtime connection.",
+  });
+  await page.goto("/?bootstrap=launcher-token");
+
+  const surface = page.locator(".composer-surface");
+  const meta = page.locator(".composer-meta");
+  const send = page.getByRole("button", { name: "Send message" });
+  await expect(surface).toBeVisible();
+  await expect(meta).toContainText("Could not connect to Ollama.");
+
+  const metaBox = await meta.boundingBox();
+  const sendBox = await send.boundingBox();
+  expect(metaBox).not.toBeNull();
+  expect(sendBox).not.toBeNull();
+  expect(metaBox!.x + metaBox!.width).toBeLessThanOrEqual(sendBox!.x);
 });
