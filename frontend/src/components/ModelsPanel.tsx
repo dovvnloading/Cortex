@@ -1,4 +1,4 @@
-import { ExternalLink, RefreshCw, Cpu } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import type { ModelResponse } from "../../../contracts/cortex-api";
 
 type Progress = {
@@ -27,7 +27,6 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck }: Props
           <p className="eyebrow">OLLAMA RUNTIME</p>
           <h2 id="models-title">Models and connectivity</h2>
         </div>
-        <Cpu aria-hidden="true" size={19} />
       </div>
       <div className="model-connection-row">
         <span className={`status-pill ${connection?.success ? "status-success" : "status-danger"}`}>

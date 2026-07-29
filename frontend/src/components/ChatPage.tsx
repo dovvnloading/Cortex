@@ -6,7 +6,6 @@ import { displayChatTitle } from "../lib/chatTitle";
 import { composerDraftKey, readComposerDraft, writeComposerDraft } from "../lib/composerDraft";
 import { humanizeGenerationStatus } from "../lib/generationStatus";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
-import { ImageTransformPanel } from "./ImageTransformPanel";
 import { SafeMarkdown } from "./SafeMarkdown";
 
 type Props = {
@@ -17,8 +16,6 @@ type Props = {
   localModels: readonly string[];
   selectedModel: string | null;
   modelBusy: boolean;
-  imageTransformAvailable?: boolean;
-  onSessionExpired?: () => void;
   onSelectModel: (model: string) => Promise<boolean>;
   onRescanModels: () => Promise<void>;
   onThreadCreated: (threadId: string) => void;
@@ -47,8 +44,6 @@ export function ChatPage({
   localModels,
   selectedModel,
   modelBusy,
-  imageTransformAvailable = false,
-  onSessionExpired,
   onSelectModel,
   onRescanModels,
   onThreadCreated,
@@ -390,6 +385,25 @@ export function ChatPage({
     <section className="chat-page" aria-labelledby="chat-title">
       <h2 id="chat-title" className="sr-only">{displayChatTitle(chat?.title, "New Chat")}</h2>
       <div className="transcript" ref={transcriptRef} onScroll={updateTranscriptPosition}>
+        {messages.length === 0 && !activeJobForCurrentThread && (
+          <section className="chat-welcome" aria-label="Start a new conversation">
+            <h1>New thread</h1>
+            <p>
+              Ask a question or check a calculation using the model on this device.
+            </p>
+            <div className="chat-starter-list">
+              <button type="button" onClick={() => updateDraft("Help me think through a decision step by step.")}>
+                <span className="chat-starter-index" aria-hidden="true">01</span>
+                <span><strong>Think through a decision</strong><small>Turn a rough idea into a clear plan.</small></span>
+              </button>
+              <button type="button" onClick={() => updateDraft("Calculate and explain: ")}>
+                <span className="chat-starter-index" aria-hidden="true">02</span>
+                <span><strong>Check a calculation</strong><small>Work through a result with local computation.</small></span>
+              </button>
+            </div>
+            {selectedModel && <span className="chat-welcome-model">{selectedModel}</span>}
+          </section>
+        )}
         {messages.map((message, index) => (
           <MessageCard
             key={message.id ?? `${message.role}-${index}`}
@@ -412,9 +426,8 @@ export function ChatPage({
           </article>
         )}
       </div>
-      <div className="input-container">
+      <div className="input-container composer-dock">
         {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}>Jump to latest</button>}
-        <ImageTransformPanel api={api} available={imageTransformAvailable} onSessionExpired={onSessionExpired} />
         <MessageComposer
           value={draft}
           phase={composerPhase}

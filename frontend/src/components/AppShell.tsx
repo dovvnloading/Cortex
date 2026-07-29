@@ -10,7 +10,7 @@ type Props = {
   activeChatId: string | null;
   modelConnection: ModelResponse["connection"];
   theme: "light" | "dark" | "system";
-  onSelectChat: (id: string) => void;
+  onSelectChat: (id: string | null) => void;
   onRenameChat: (id: string, title: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
   executionTasks?: ExecutionTaskSummary[];
@@ -41,10 +41,14 @@ export function AppShell({
   const isSettings = location.pathname === "/settings";
   const activeTitle = isSettings
     ? "Settings"
-    : displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title, "Cortex");
+    : activeChatId
+      ? displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title, "Cortex")
+      : "New thread";
 
   const closeSidebarOnCompactLayout = () => {
-    if (window.matchMedia("(max-width: 760px)").matches) setSidebarVisible(false);
+    if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches) {
+      setSidebarVisible(false);
+    }
   };
 
   useEffect(() => {
@@ -58,6 +62,7 @@ export function AppShell({
   }, []);
 
   const createChat = () => {
+    onSelectChat(null);
     navigate("/chat/new");
     closeSidebarOnCompactLayout();
   };
@@ -71,16 +76,25 @@ export function AppShell({
   return (
     <div className={`app-shell theme-${theme} ${sidebarVisible ? "" : "sidebar-collapsed"}`}>
       <header className="window-bar">
-        <button
-          className="window-control sidebar-toggle"
-          type="button"
-          aria-label={sidebarVisible ? "Hide chat history" : "Show chat history"}
-          onClick={() => setSidebarVisible((visible) => !visible)}
-        >
-          <Menu aria-hidden="true" size={17} />
-        </button>
-        <h1 className="window-title">{activeTitle}</h1>
+        <div className="window-bar-leading">
+          <button
+            className="window-control sidebar-toggle"
+            type="button"
+            aria-label={sidebarVisible ? "Hide chat history" : "Show chat history"}
+            onClick={() => setSidebarVisible((visible) => !visible)}
+          >
+            <Menu aria-hidden="true" size={17} />
+          </button>
+          <div className="window-title-group">
+            <span className="window-kicker">Cortex</span>
+            <h1 className="window-title">{activeTitle}</h1>
+          </div>
+        </div>
         <div className="window-actions">
+          <span className={`runtime-status ${modelConnection?.success ? "runtime-status-ready" : "runtime-status-error"}`} title={modelConnection?.message ?? undefined}>
+            <span className="runtime-status-dot" aria-hidden="true" />
+            {modelConnection?.success ? "Ollama online" : "Ollama offline"}
+          </span>
           <NavLink
             to="/settings"
             className={({ isActive }) => `window-control settings-control ${isActive ? "window-control-active" : ""}`}
@@ -96,10 +110,15 @@ export function AppShell({
       <div className="workspace-body">
         {sidebarVisible && <button className="sidebar-scrim" aria-label="Close chat history" onClick={() => setSidebarVisible(false)} />}
         <aside className="sidebar" aria-label="Chat history">
+          <div className="sidebar-brand">
+            <span className="sidebar-brand-mark" aria-hidden="true"><img src="/cortex.svg" alt="" /></span>
+            <span className="sidebar-brand-copy"><strong>Cortex</strong></span>
+          </div>
           <button className="new-chat-button" type="button" onClick={createChat}>
             <Plus aria-hidden="true" size={16} />
-            New Chat
+            New thread
           </button>
+          <div className="sidebar-section-heading"><span>Threads</span><span>{chats.length}</span></div>
           <div className="chat-list" aria-label="Saved chats">
             {chats.length ? chats.map((chat) => (
               <div className={`chat-list-item ${activeChatId === chat.id && !isSettings ? "chat-list-item-active" : ""}`} key={chat.id}>
@@ -115,7 +134,13 @@ export function AppShell({
                   </button>
                 </div>
               </div>
-            )) : <p className="sidebar-empty">No saved conversations yet.</p>}
+            )) : <p className="sidebar-empty">No threads yet.</p>}
+          </div>
+          <div className="sidebar-footer">
+            <span className={`sidebar-runtime ${modelConnection?.success ? "sidebar-runtime-ready" : "sidebar-runtime-error"}`}>
+              <span aria-hidden="true" />
+              {modelConnection?.success ? "Connected locally" : "Local runtime unavailable"}
+            </span>
           </div>
         </aside>
 

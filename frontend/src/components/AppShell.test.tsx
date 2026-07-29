@@ -30,6 +30,32 @@ describe("AppShell", () => {
     expect(screen.queryByText("**AI Purpose Explained**")).not.toBeInTheDocument();
   });
 
+  it("clears the current thread selection before opening a new thread", async () => {
+    const user = userEvent.setup();
+    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
+    const onSelectChat = vi.fn();
+
+    render(
+      <BrowserRouter>
+        <AppShell
+          chats={[chat]}
+          activeChatId={chat.id}
+          modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
+          theme="dark"
+          onSelectChat={onSelectChat}
+          onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
+          onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
+        >
+          <div>Chat content</div>
+        </AppShell>
+      </BrowserRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "New thread" }));
+
+    expect(onSelectChat).toHaveBeenCalledWith(null);
+  });
+
   it("requires the exact chat title before permanent deletion", async () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
