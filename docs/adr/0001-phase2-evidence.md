@@ -1,7 +1,7 @@
 # ADR-0001 Phase 2 evidence log
 
 - **Phase:** 2 — signed image recipes and calculator/check primitives
-- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; resource/watchdog accounting, artifact security review, external review, and lifecycle release gates remain open
+- **Status:** Typed contract, deterministic parser-fuzz qualification, signed-manifest verification, native broker transport, authenticated worker loop, signed bundle installation, trusted artifact boundary, artifact security review, signed worker launch/broker qualification, and packaged transform/hostile-decoder/cancellation qualification complete; resource/watchdog accounting, external review, and lifecycle release gates remain open
 - **Scope:** Provider-independent contracts plus a qualification-only fixed-function core
 - **Source decision:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
 - **Contract ADR:** [Phase 2 typed recipe and primitive contract](0001-phase2-recipe-contract.md)
@@ -24,10 +24,11 @@
 | Authenticated broker contract | **Complete (transport-neutral)** | Bounded versioned frames, direction-specific HMAC keys, canonical messages, peer ACL/integrity policy, and owner-scoped authorization are covered by adversarial tests. |
 | Native named-pipe adapter/DACL/peer-token binding | **Complete (transport-only)** | Protected local pipe, expected PID, OS token identity, X25519/HKDF handshake, direction keys, and close-on-error lifecycle are covered by native broker tests. |
 | User-artifact copy-in, output validation, and publication | **Complete (boundary only)** | Explicit owner/turn grants, bounded stable snapshots, link/reparse/hardlink/sparse/ADS rejection, byte-derived MIME policy, exact output claims, quarantine, hash/size limits, atomic repository publication, rollback, and cleanup categories are covered by `tests/test_phase2_artifact_boundary.py`. |
+| Deterministic artifact security review | **Complete (qualification-only)** | `artifact_security_review.py --json --strict` passed the fixed 12-case disposable corpus (`artifact-boundary-review.v1`, digest `a748cc9f0a514c8d`): owner/path binding, link/hardlink rejection, active/non-finite content, exact claims/quarantine, rollback, and repository size integrity. Missing link primitives remain blocked. |
 | Fixed-function image provider core | **Complete (qualification-only)** | `RecipeImageProvider` validates allowlisted PNG/JPEG/WebP bytes, verifies/loads one frame with Pillow bomb/resource limits, applies only parsed steps, strips metadata, revalidates encoded output, checks cancellation, and remains disabled until external sandbox health passes. |
 | Windows recipe sandbox qualification harness | **Complete (signed launch/broker/hostile/cancellation)** | `recipe_worker_e2e_qualification.py` signs a disposable package with an in-memory key, installs/verifies one immutable generation, binds the live AppContainer identity to the broker, and exercises the fixed PNG transform, truncated-PNG decoder rejection, active-SVG decoder rejection, and in-flight cancellation corpus. The native broker uses bounded availability polling before reads so the cancellation reader remains live while the packaged provider transforms. |
 | Suspended native launcher/resource policy | **Complete (factory + binder + ACL cleanup + qualification evidence)** | `NativeWin32ProcessFactory` grants only inherited read/execute access to the fresh AppContainer SID on the verified package root, applies and verifies Job Object policy before resume, and removes the per-launch ACE during cleanup. `NativeBrokerIdentityBinder` pins the live server to the worker PID/AppContainer SID and launcher cleanup closes it on failure. |
-| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, and in-flight cancellation acknowledgement are live-qualified inside the packaged worker. The remaining gate is artifact security review, resource/watchdog accounting, external review, and production lifecycle wiring. |
+| OS sandbox provider and provider-produced image outputs | **Blocked / release gate** | Signed installation, provenance, AppContainer/job identity, broker handshake, `prepare`, `input_chunk`, `input_complete`, `collect_output`, hostile decoder rejection, in-flight cancellation acknowledgement, and artifact security review are qualified. The remaining gate is resource/watchdog accounting, external review, and production lifecycle wiring. |
 
 ## Security invariants
 
@@ -103,6 +104,10 @@
 28. Typed parser fuzzing uses a fixed seed, bounded iteration count, bounded payload
     depth, and stable redacted error categories; an unexpected exception or budget
     violation is a blocked qualification result.
+29. Artifact security qualification uses fixed bytes and a disposable temporary root;
+    it checks owner/path binding, active-content and numeric safety, link rejection,
+    exact claims, quarantine, rollback, and stored-size integrity. The probe accepts
+    no user/model input and reports an unavailable required link primitive as blocked.
 
 ## Re-run target
 
@@ -122,6 +127,7 @@ python tools/execution_spikes/native_launcher_qualification.py
 python tools/execution_spikes/recipe_sandbox_qualification.py --json --strict
 python tools/execution_spikes/recipe_worker_e2e_qualification.py --json --strict
 python tools/execution_spikes/recipe_parser_fuzz.py --json --strict
+python tools/execution_spikes/artifact_security_review.py --json --strict
 python -m compileall -q backend\cortex_backend\execution tests
 python -m pytest -q
 python tools/generate_contracts.py
@@ -170,7 +176,8 @@ residue. The optional `--case cancellation` path reproduces the cancellation
 gate in isolation. These results close the packaged hostile-decoder and
 cancellation qualification evidence, but do not enable the provider or close
 resource/watchdog accounting, artifact security review, external review, or
-production lifecycle health gates.
+production lifecycle health gates; those were the remaining gates at the time of
+this run.
 
 **Parser fuzz qualification result (2026-07-28):** The deterministic
 `recipe_parser_fuzz.py --iterations 2000 --seed 20260728 --json --strict` run
@@ -180,5 +187,18 @@ typed parsers, including unknown fields, malformed operations, non-mapping
 values, oversized payloads, control/unicode text, and invalid optional values.
 The corpus exposed and the parser fixed an uncaught `None` tolerance validator
 failure for `check.v1`/`is_close`; the regression suite now locks that behavior
-to `invalid_check`. Resource/watchdog accounting, artifact security review,
-external review, and production lifecycle health remain open.
+to `invalid_check`. At the time of this run, resource/watchdog accounting,
+artifact security review, external review, and production lifecycle health
+remained open.
+
+**Artifact security review result (2026-07-28):** The deterministic
+`artifact_security_review.py --json --strict` probe passed all 12 cases in the
+fixed `artifact-boundary-review.v1` corpus (`a748cc9f0a514c8d`). The disposable
+review covered source preservation and owner/ADS binding, hardlink/symlink
+rejection, active UTF-8/UTF-16 and non-finite numeric content, exact output claims
+and quarantine, all-or-nothing rollback, and repository stored-size integrity.
+The review also fixed two fail-closed gaps: exponent-overflow JSON is rejected as
+non-finite, and oversized JSON integers no longer leak a `ValueError`; UTF-16
+active markup is rejected instead of being classified as inert binary. The focused
+artifact suite now passes 24 boundary tests plus the reproducibility test. Resource/
+watchdog accounting, external review, and production lifecycle health remain open.

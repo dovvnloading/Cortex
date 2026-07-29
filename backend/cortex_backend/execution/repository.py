@@ -895,13 +895,19 @@ class ExecutionRepository:
     def read_artifact(self, artifact_id: str) -> bytes:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT path, sha256, expires_at FROM execution_artifacts WHERE artifact_id = ?",
+                "SELECT path, size, sha256, expires_at FROM execution_artifacts WHERE artifact_id = ?",
                 (artifact_id,),
             ).fetchone()
         if row is None:
             raise ExecutionRepositoryError("Artifact does not exist.")
         if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
             raise ExecutionRepositoryError("Artifact retention has expired.")
+        try:
+            expected_size = int(row["size"])
+        except (TypeError, ValueError):
+            raise ExecutionRepositoryError("Artifact integrity check failed.") from None
+        if not 0 <= expected_size <= self.max_artifact_bytes:
+            raise ExecutionRepositoryError("Artifact integrity check failed.")
         original_path = Path(row["path"])
         if _is_reparse_point(original_path):
             raise ExecutionRepositoryError("Artifact path is unavailable.")
@@ -915,12 +921,16 @@ class ExecutionRepository:
             or _is_reparse_point(path)
             or not stat.S_ISREG(info.st_mode)
             or getattr(info, "st_nlink", 1) != 1
+            or int(info.st_size) != expected_size
         ):
             raise ExecutionRepositoryError("Artifact path is unavailable.")
         try:
-            content = path.read_bytes()
+            with path.open("rb") as stream:
+                content = stream.read(self.max_artifact_bytes + 1)
         except OSError:
             raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+        if len(content) != expected_size or len(content) > self.max_artifact_bytes:
+            raise ExecutionRepositoryError("Artifact integrity check failed.")
         if hashlib.sha256(content).hexdigest() != row["sha256"]:
             raise ExecutionRepositoryError("Artifact integrity check failed.")
         return content

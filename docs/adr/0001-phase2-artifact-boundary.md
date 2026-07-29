@@ -47,8 +47,10 @@ renamed, replaced, or deleted.
 
 MIME is derived from bytes, never from an extension or model declaration. PNG, JPEG,
 WebP, finite JSON, and ordinary UTF-8 text are recognized. Portable executables,
-ELF/OLE files, shortcuts, shebang scripts, archives, active HTML/SVG/JavaScript,
-and common shell/PowerShell launchers are rejected. Unknown non-active bytes may be
+ELF/OLE files, shortcuts, shebang scripts, archives, active HTML/SVG/JavaScript
+(including UTF-16/UTF-32 markup), and common shell/PowerShell launchers are rejected.
+Exponent-overflow JSON and non-finite JSON constants are rejected, while oversized
+numeric literals cannot escape as parser exceptions. Unknown non-active bytes may be
 stored as `application/octet-stream`; this is metadata safety, not permission to decode
 or execute them. Production image decoding remains behind the separate sandboxed
 [recipe provider qualification gate](0001-phase2-recipe-provider.md).
@@ -82,7 +84,7 @@ of a path outside the configured artifact root.
 ### 5. Stable failure categories
 
 The boundary exposes only categories such as `artifact_owner_mismatch`,
-`artifact_path_invalid`, `artifact_reparse_point`, `artifact_hardlink_rejected`,
+`artifact_grant_invalid`, `artifact_path_invalid`, `artifact_reparse_point`, `artifact_hardlink_rejected`,
 `artifact_source_changed`, `artifact_too_large`, `invalid_artifact`,
 `artifact_unclaimed_output`, `artifact_mime_mismatch`, `artifact_output_limit`,
 `artifact_publish_failed`, and `artifact_cleanup_pending`. Raw paths and operating
@@ -91,15 +93,18 @@ system details do not cross the application boundary.
 ## Verification and evidence
 
 `tests/test_phase2_artifact_boundary.py` covers owner binding, source preservation,
-ADS/link/reparse rejection, source mutation, exact claims, quarantine, active/archive
-rejection, executable rejection, non-finite JSON rejection, MIME mismatch, aggregate
-limits, and all-or-nothing publication rollback. The repository tests continue to
-cover hash/size/retention behavior. The complete matrix is recorded in the
-[Phase 2 evidence log](0001-phase2-evidence.md).
+ADS/link/reparse rejection, source mutation, sparse-file rejection, exact claims,
+quarantine, active/archive rejection, executable rejection, finite-number checks,
+MIME mismatch, aggregate limits, all-or-nothing publication rollback, and stored-size
+integrity. The deterministic `tools/execution_spikes/artifact_security_review.py`
+probe repeats the fixed 12-case corpus in a disposable temporary root and reports
+`blocked` when a required host link primitive is unavailable. The complete matrix is
+recorded in the [Phase 2 evidence log](0001-phase2-evidence.md).
 
 ## Explicit non-goals
 
 This ADR does not authorize image decoding, thumbnail generation, archive extraction,
 provider loading, code execution, model tool exposure, network access, or automatic
-execution. The next gate is fixed-function provider qualification inside the already
-planned OS sandbox, followed by a lifecycle health check and external security review.
+execution. The artifact security review is complete; provider enablement remains
+blocked on resource/watchdog accounting, external security review, and lifecycle
+health gates in the parent ADR.

@@ -953,9 +953,11 @@ pass without executing code.
   complete one-folder dependency closure with inert resource entries and refuses to
   produce metadata without an external key; signed-worker end-to-end broker
   packaged-worker qualification now passes the fixed transform, hostile decoder,
-  and in-flight cancellation corpus. Collect opt-in aggregate reliability metrics,
-  never content, only after the remaining release gates close and the provider is
-  sandbox-qualified.
+  and in-flight cancellation corpus. The deterministic artifact-security corpus now
+  also qualifies owner/path binding, active-content rejection, exact claims,
+  quarantine, rollback, and repository integrity without user/model input. Collect
+  opt-in aggregate reliability metrics, never content, only after the remaining
+  release gates close and the provider is sandbox-qualified.
 
 **Implementation gate:** parser, artifact-boundary, qualification-provider,
 worker-provenance, sandbox-qualification, and native-launcher-policy regression
@@ -969,7 +971,8 @@ lifecycle health must pass before any provider is enabled.
 The 2026-07-28 packaged qualification evidence closes the hostile decoder corpus,
 signed provenance, broker identity, and in-flight cancellation portions of this
 gate. The 2026-07-28 parser qualification also closes the deterministic parser-
-fuzzing portion. Artifact security review, resource/watchdog accounting, external
+fuzzing portion. The 2026-07-28 artifact-security qualification closes the
+deterministic copy-in/publication review. Resource/watchdog accounting, external
 review, and production lifecycle health remain open.
 
 ### Phase 3 — `scratch.auto.v1` arbitrary WebAssembly code
