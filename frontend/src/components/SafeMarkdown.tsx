@@ -20,21 +20,35 @@ function Link({ href, children, ...props }: ComponentProps<"a">) {
 }
 
 function Code({ className, children, ...props }: ComponentProps<"code">) {
-  const [copied, setCopied] = useState(false);
   const value = String(children).replace(/\n$/, "");
+  const fenced = Boolean(className) || value.includes("\n");
+  if (!fenced) return <code className={className} {...props}>{children}</code>;
+
+  const language = className?.replace(/^language-/, "") || "code";
+  return (
+    <span className="code-block-content">
+      <span className="code-block-toolbar">
+        <span className="code-language">{language}</span>
+        <CodeCopyButton value={value} language={language} />
+      </span>
+      <code className={className} {...props}>{children}</code>
+    </span>
+  );
+}
+
+function CodeCopyButton({ value, language }: { value: string; language: string }) {
+  const [copied, setCopied] = useState(false);
   const copy = async () => {
     if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
   };
-  const fenced = Boolean(className);
-  return (
-    <code className={className} {...props}>
-      {children}
-      {fenced && <button className="code-copy" type="button" onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>}
-    </code>
-  );
+  return <button className="code-copy" type="button" aria-label={`Copy ${language} code`} onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>;
 }
 
 export function SafeMarkdown({ content }: { content: string }) {

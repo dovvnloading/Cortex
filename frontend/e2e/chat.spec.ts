@@ -185,3 +185,68 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByText("50%")).toBeVisible();
 });
+
+test("renders a structured workbench transcript with markdown and code blocks", async ({ page }) => {
+  const content = [
+    "# Result",
+    "",
+    "The local calculation is complete. The value is **42**.",
+    "",
+    "- Input was validated",
+    "- Calculation was run locally",
+    "",
+    "| Input | Output |",
+    "| --- | ---: |",
+    "| 6 × 7 | 42 |",
+    "",
+    "```python",
+    "value = 6 * 7",
+    "print(value)",
+    "```",
+  ].join("\n");
+  const chat = {
+    id: "rich-thread",
+    title: "Workbench output",
+    timestamp: "2026-01-01T00:00:00Z",
+    revision: 2,
+    messages: [
+      { id: "m-1", role: "user", content: "Explain the result and show the calculation.", timestamp: "2026-01-01T00:00:00Z" },
+      { id: "m-2", role: "assistant", content, thoughts: "I checked the inputs before presenting the result.", sources: ["[Reference notes](https://example.com/reference)"], timestamp: "2026-01-01T00:05:00Z" },
+    ],
+  };
+
+  await page.route("**/api/v1/session/exchange", async (route) => {
+    await route.fulfill({ json: { session_token: "session-rich", expires_at: "2099-01-01T00:00:00Z" } });
+  });
+  await page.route("**/api/v1/system", async (route) => {
+    await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
+  });
+  await page.route("**/api/v1/chats", async (route) => {
+    if (route.request().method() === "GET") await route.fulfill({ json: [{ id: chat.id, title: chat.title, timestamp: chat.timestamp }] });
+    else await route.continue();
+  });
+  await page.route("**/api/v1/chats/rich-thread", async (route) => {
+    await route.fulfill({ json: chat });
+  });
+  await page.route("**/api/v1/settings", async (route) => {
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: false, model: null } } } });
+  });
+  await page.route("**/api/v1/memories", async (route) => {
+    await route.fulfill({ json: { memos: [] } });
+  });
+  await page.route("**/api/v1/models", async (route) => {
+    await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
+  });
+
+  await page.goto("/chat/rich-thread?bootstrap=launcher-token");
+  await expect(page.getByText("The local calculation is complete.")).toBeVisible();
+  await expect(page.getByRole("article", { name: "Cortex message" }).getByText("Cortex")).toBeVisible();
+  await expect(page.getByRole("article", { name: "Your message" }).getByText("You")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Result", level: 1 })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "42" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy python code" })).toBeVisible();
+  await expect(page.getByText("Reasoning")).toBeVisible();
+  await expect(page.getByText("Sources")).toBeVisible();
+  const layout = await page.evaluate(() => ({ documentWidth: document.documentElement.scrollWidth, viewportWidth: window.innerWidth }));
+  expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
+});
