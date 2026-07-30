@@ -310,6 +310,27 @@ def _native_cleanup(
     _require(not leaked, "native_worker_process_leaked")
 
 
+def _remove_workspace(workspace: Path, *, timeout_seconds: float = 10.0) -> None:
+    """Retry temporary-tree removal while native Windows handles settle."""
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error: OSError | None = None
+    while workspace.exists():
+        try:
+            shutil.rmtree(workspace)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            last_error = error
+        if not workspace.exists():
+            return
+        if time.monotonic() >= deadline:
+            if last_error is not None:
+                raise last_error
+            raise OSError("qualification workspace cleanup timed out")
+        time.sleep(0.05)
+
+
 def qualify(
     source_root: Path,
     *,
@@ -426,7 +447,10 @@ def qualify(
                 stages.append("native_worker_processes_closed")
             except QualificationFailure as error:
                 cleanup_error = error.code
-        _bounded_cleanup(lambda: shutil.rmtree(workspace))
+        _bounded_cleanup(
+            lambda: _remove_workspace(workspace),
+            timeout_seconds=15.0,
+        )
         if workspace.exists():
             cleanup_error = cleanup_error or "qualification_workspace_cleanup_failed"
 
