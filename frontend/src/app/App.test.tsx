@@ -133,4 +133,45 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Allow background task approval-job once" })).toBeEnabled();
     expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
   });
+
+  it("does not replay terminal tasks from before the current backend session", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const oldTask = {
+      job_id: "old-attachment",
+      profile: "chat.attachment.v1",
+      status: "succeeded",
+      sequence: 2,
+      phase: "completed",
+      message: "Old attachment staged.",
+      can_cancel: false,
+      created_at: "2026-07-20T18:00:00Z",
+      updated_at: "2026-07-20T18:00:01Z",
+    };
+    const currentTask = {
+      ...oldTask,
+      job_id: "current-attachment",
+      message: "Current attachment staged.",
+      created_at: "2026-07-21T18:00:01Z",
+      updated_at: "2026-07-21T18:00:02Z",
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) return json({ tasks: [currentTask, oldTask] });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByText("Current attachment staged.")).toBeVisible();
+    expect(screen.queryByText("Old attachment staged.")).not.toBeInTheDocument();
+  });
 });

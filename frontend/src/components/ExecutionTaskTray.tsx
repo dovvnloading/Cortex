@@ -10,12 +10,19 @@ type Props = {
   onDecideApproval?: (jobId: string, decision: ExecutionApprovalDecision) => Promise<void>;
 };
 
+type TaskGroup = {
+  key: string;
+  task: ExecutionTaskSummary;
+  count: number;
+};
+
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
 export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(() => new Set());
   const [deciding, setDeciding] = useState<Map<string, ExecutionApprovalDecision>>(() => new Map());
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<string | null>(null);
+  const taskGroups = groupTasks(tasks);
   const activeTasks = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)
     && !["pending", "denied", "expired"].includes(task.approval_state ?? "not_required"));
   const pendingApprovals = tasks.filter((task) => task.approval_state === "pending");
@@ -88,23 +95,26 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) 
       </div>
       <div className="execution-task-tray-live" aria-live="polite" role="status">{announce}</div>
       <ul className="execution-task-list">
-        {tasks.map((task) => {
+        {taskGroups.map((group) => {
+          const task = group.task;
           const approvalPending = task.approval_state === "pending";
           const approvalDecision = deciding.get(task.job_id);
           const showsWorking = ACTIVE_STATUSES.has(task.status)
             && !["pending", "denied", "expired"].includes(task.approval_state ?? "not_required");
           const canStop = !approvalPending && Boolean(task.can_cancel) && ACTIVE_STATUSES.has(task.status) && Boolean(onCancel);
           const isCancelling = cancelling.has(task.job_id) || task.status === "cancelling";
+          const taskMessage = task.message || task.phase || "Working";
+          const displayMessage = group.count > 1 ? `${group.count} × ${taskMessage}` : taskMessage;
           return (
             <li
               className={`execution-task ${approvalPending ? "execution-task-approval" : ""}`}
-              key={task.job_id}
+              key={group.key}
               aria-busy={approvalDecision ? "true" : undefined}
             >
               <div className="execution-task-copy">
                 <div className="execution-task-label">
                   {showsWorking && <span className="loading-spinner execution-task-spinner" aria-hidden="true" />}
-                  <strong>{approvalPending ? task.approval_reason || "Approval required" : task.message || task.phase || "Working"}</strong>
+                  <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
                 </div>
                 <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
               </div>
@@ -157,6 +167,24 @@ function formatApprovalMeta(task: ExecutionTaskSummary): string {
     ? "expiry unavailable"
     : `expires ${expires.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
   return `Action required · ${profile} · ${expiry}`;
+}
+
+function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
+  const groups = new Map<string, TaskGroup>();
+  for (const task of tasks) {
+    const approvalPending = task.approval_state === "pending";
+    const terminal = !ACTIVE_STATUSES.has(task.status) && !approvalPending;
+    const key = terminal
+      ? JSON.stringify(["terminal", task.profile, task.status, task.phase ?? "", task.message ?? ""])
+      : `job:${task.job_id}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      groups.set(key, { key, task, count: 1 });
+    }
+  }
+  return [...groups.values()];
 }
 
 function formatTaskStatus(status: ExecutionTaskSummary["status"]): string {

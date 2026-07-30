@@ -142,7 +142,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     };
   }, [api, onSessionExpired, system?.execution_preview_available]);
 
-  const visibleExecutionTasks = system?.execution_preview_available ? executionTasks : [];
+  const visibleExecutionTasks = system?.execution_preview_available
+    ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
+    : [];
 
   const cancelExecution = async (jobId: string) => {
     try {
@@ -339,6 +341,24 @@ function updateChatSummary(setChats: Dispatch<SetStateAction<ChatSummary[]>>, ch
     const next = current.filter((item) => item.id !== chat.id);
     return [summary, ...next];
   });
+}
+
+const ACTIVE_EXECUTION_STATUSES = new Set<ExecutionTaskSummary["status"]>([
+  "queued",
+  "running",
+  "cancelling",
+]);
+
+function shouldShowExecutionTask(task: ExecutionTaskSummary, runtimeStartedAt: string): boolean {
+  if (ACTIVE_EXECUTION_STATUSES.has(task.status) || task.approval_state === "pending") {
+    return true;
+  }
+  const taskUpdatedAt = Date.parse(task.updated_at);
+  const runtimeStart = Date.parse(runtimeStartedAt);
+  // Keep malformed records visible rather than silently dropping a task the
+  // user may need to understand or dismiss. Valid terminal records are scoped
+  // to this backend lifetime so old completions are not replayed on startup.
+  return Number.isNaN(taskUpdatedAt) || Number.isNaN(runtimeStart) || taskUpdatedAt >= runtimeStart;
 }
 
 function apiMessage(error: unknown, fallback: string): string {
