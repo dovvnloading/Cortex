@@ -75,6 +75,44 @@ test("keeps a multiline draft when generation acceptance fails", async ({ page }
   await expect(composer).toBeFocused();
 });
 
+test("selects and persists a model from the composer picker", async ({ page }) => {
+  await stubWorkspace(page);
+  await page.goto("/?bootstrap=launcher-token");
+
+  const trigger = page.getByRole("button", { name: "Selected local model: local-chat:7b" });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+
+  const option = page.getByRole("option", { name: "local-chat:13b" });
+  await expect(option).toBeVisible();
+  const overflow = await page.evaluate(() => ({
+    utilityRow: getComputedStyle(document.querySelector(".composer-utility-row")!).overflow,
+    modelControl: getComputedStyle(document.querySelector(".composer-model-control")!).overflow,
+  }));
+  expect(overflow).toEqual({ utilityRow: "visible", modelControl: "visible" });
+
+  await option.click();
+  await expect(page.getByRole("button", { name: "Selected local model: local-chat:13b" })).toBeVisible();
+  await expect(page.getByText("local-chat:13b is ready for local chat.")).toBeVisible();
+});
+
+test("keeps composer model options inside a compact viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubWorkspace(page);
+  await page.goto("/?bootstrap=launcher-token");
+
+  await page.getByRole("button", { name: "Selected local model: local-chat:7b" }).click();
+  const option = page.getByRole("option", { name: "local-chat:13b" });
+  await expect(option).toBeVisible();
+  const optionBox = await option.boundingBox();
+  expect(optionBox).not.toBeNull();
+  expect(optionBox!.x).toBeGreaterThanOrEqual(0);
+  expect(optionBox!.x + optionBox!.width).toBeLessThanOrEqual(390);
+
+  await option.click();
+  await expect(page.getByRole("button", { name: "Selected local model: local-chat:13b" })).toBeVisible();
+});
+
 test("keeps a next draft available while a response is stopped", async ({ page }) => {
   const threadId = "thread-composer";
   const jobId = "job-composer";
