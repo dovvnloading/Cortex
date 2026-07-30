@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import type { ChatAttachment, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
 import { humanizeGenerationStatus } from "../lib/generationStatus";
@@ -106,6 +107,159 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByText("result.md")).toBeInTheDocument();
   });
 
+  it("never renders the previous transcript when the current route fails to load", async () => {
+    const alpha: ChatResponse = {
+      id: "thread-a",
+      title: "Alpha",
+      timestamp: "2026-01-01T00:00:00Z",
+      revision: 2,
+      messages: [
+        { id: "m-1", role: "user", content: "Alpha question" },
+        { id: "m-2", role: "assistant", content: "Alpha answer" },
+      ],
+    };
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => {
+        if (id === "thread-a") return alpha;
+        throw new ApiError(404, "Chat not found.");
+      }),
+    });
+    const view = renderChat(api, "thread-a");
+    expect(await screen.findByText("Alpha answer")).toBeInTheDocument();
+
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-b"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Conversation unavailable" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Chat not found.")).toBeInTheDocument();
+    expect(screen.queryByText("Alpha answer")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Message Cortex")).not.toBeInTheDocument();
+  });
+
+  it("ignores an older request when the same route is loaded again", async () => {
+    const pending: Record<string, Array<(value: ChatResponse) => void>> = {};
+    const api = chatApi({
+      chat: vi.fn((id: string) => new Promise<ChatResponse>((resolve) => {
+        (pending[id] ??= []).push(resolve);
+      })),
+    });
+    const view = renderChat(api, "thread-a");
+    await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-a"));
+
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-b"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-a"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.chat).toHaveBeenCalledTimes(3));
+
+    pending["thread-a"][1]({ ...emptyChat("thread-a"), title: "Newest Alpha", messages: [{ id: "new", role: "assistant", content: "Newest Alpha response" }] });
+    expect(await screen.findByText("Newest Alpha response")).toBeInTheDocument();
+    pending["thread-a"][0]({ ...emptyChat("thread-a"), title: "Old Alpha", messages: [{ id: "old", role: "assistant", content: "Old Alpha response" }] });
+
+    await waitFor(() => expect(screen.getByText("Newest Alpha response")).toBeInTheDocument());
+    expect(screen.queryByText("Old Alpha response")).not.toBeInTheDocument();
+  });
+
+  it("keeps the accepted new-chat turn visible while its refresh is pending", async () => {
+    const user = userEvent.setup();
+    const accepted = { job_id: "job-new", kind: "generation" as const, status: "queued" as const, thread_id: "thread-new", user_message_id: "message-new" };
+    const api = chatApi({
+      chat: vi.fn(() => new Promise<ChatResponse>(() => undefined)),
+      generate: vi.fn().mockResolvedValue(accepted),
+    });
+    function RoutedChat() {
+      const [threadId, setThreadId] = useState<string | null>(null);
+      return (
+        <ChatPage
+          api={api}
+          threadId={threadId}
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={setThreadId}
+          onChatChanged={vi.fn()}
+          onForked={vi.fn()}
+        />
+      );
+    }
+    render(<RoutedChat />);
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Accepted immediately");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Accepted immediately")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop generating" })).toBeInTheDocument();
+  });
+
+  it("replays an active generation from the beginning after a remount", async () => {
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-replay", threadId: "thread-a", lastEventId: 7 }));
+    const streamCalls: Array<{ afterEventId?: number }> = [];
+    const api = chatApi({
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
+        streamCalls.push({ afterEventId: options.afterEventId });
+        onEvent({ event_id: 8, event: "generation.content_delta", job_id: "job-replay", thread_id: "thread-a", data: { delta: "replayed" } });
+        return new Promise<void>((_resolve, reject) => options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+      }),
+    });
+    const first = renderChat(api, "thread-a");
+    await waitFor(() => expect(streamCalls).toHaveLength(1));
+    first.unmount();
+    renderChat(api, "thread-a");
+    await waitFor(() => expect(streamCalls).toHaveLength(2));
+
+    expect(streamCalls[0].afterEventId).toBe(0);
+    expect(streamCalls[1].afterEventId).toBe(0);
+  });
+
   it("retains the exact draft if generation acceptance fails", async () => {
     const user = userEvent.setup();
     const api = chatApi({ generate: vi.fn().mockRejectedValue(new ApiError(503, "Local runtime is unavailable.")) });
@@ -159,8 +313,9 @@ describe("ChatPage composer integration", () => {
         onForked={vi.fn()}
       />,
     );
-    await waitFor(() => expect(composer).toHaveValue(""));
-    await user.type(composer, "Draft for B");
+    const composerB = await screen.findByLabelText("Message Cortex");
+    expect(composerB).toHaveValue("");
+    await user.type(composerB, "Draft for B");
 
     view.rerender(
       <ChatPage
@@ -178,7 +333,9 @@ describe("ChatPage composer integration", () => {
         onForked={vi.fn()}
       />,
     );
-    await waitFor(() => expect(composer).toHaveValue("Draft for A"));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Message Cortex")).toHaveValue("Draft for A");
+    });
   });
 
   it("keeps the active generation state available after changing conversations", async () => {

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
@@ -39,6 +39,55 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Connect to Cortex" })).toBeVisible());
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/session/exchange"))).toHaveLength(1);
     expect(screen.getByLabelText("Launcher token")).toHaveValue("");
+  });
+
+  it("keeps the shell selection aligned with browser route changes", async () => {
+    const user = userEvent.setup();
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.history.replaceState({}, "", "/chat/thread-a");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const chats = [
+      { id: "thread-a", title: "Alpha thread", timestamp: "2026-07-21T18:00:00Z" },
+      { id: "thread-b", title: "Beta thread", timestamp: "2026-07-21T18:01:00Z" },
+    ];
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chats")) return json(chats);
+      if (url.endsWith("/chats/thread-a")) {
+        return json({ ...chats[0], revision: 1, messages: [{ id: "message-a", role: "assistant", content: "Alpha transcript" }] });
+      }
+      if (url.endsWith("/chats/thread-b")) {
+        return json({ ...chats[1], revision: 1, messages: [{ id: "message-b", role: "assistant", content: "Beta transcript" }] });
+      }
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByText("Alpha transcript")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Alpha thread" })).toHaveAttribute("aria-current", "page");
+
+    act(() => {
+      window.history.pushState({}, "", "/chat/thread-b");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(await screen.findByText("Beta transcript")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Beta thread" })).toHaveAttribute("aria-current", "page"));
+    expect(screen.getByRole("button", { name: "Alpha thread" })).not.toHaveAttribute("aria-current");
+    expect(document.querySelector("h1.window-title")).toHaveTextContent("Beta thread");
+
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "Close settings" }));
+    expect(window.location.pathname).toBe("/chat/thread-b");
   });
 
   it("keeps an approval actionable and reports a safe API failure", async () => {

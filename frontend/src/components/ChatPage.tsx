@@ -35,6 +35,12 @@ type ScopedError = {
   threadId: string | null;
 };
 
+type ChatLoadState = {
+  threadId: string | null;
+  loading: boolean;
+  error: string | null;
+};
+
 const ACTIVE_JOB_KEY = "cortex.active.generation";
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
@@ -68,12 +74,15 @@ export function ChatPage({
   const [partial, setPartial] = useState("");
   const [thoughts, setThoughts] = useState("");
   const [status, setStatus] = useState("Ready");
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [chatLoad, setChatLoad] = useState<ChatLoadState>({
+    threadId,
+    loading: true,
+    error: null,
+  });
   const [generationError, setGenerationError] = useState<ScopedError | null>(null);
   const [activeJob, setActiveJob] = useState<GenerationState | null>(null);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [forkingMessage, setForkingMessage] = useState<string | null>(null);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -85,23 +94,41 @@ export function ChatPage({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const isNearTranscriptEnd = useRef(true);
   const viewThreadIdRef = useRef<string | null>(threadId);
+  const chatRequestVersionsRef = useRef(new Map<string | null, number>());
+  const initialMountRef = useRef(true);
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
 
-  const loadChat = useCallback(async () => {
+  const loadChat = useCallback(async ({ preserveCurrent = false }: { preserveCurrent?: boolean } = {}) => {
     const requestedThreadId = threadId;
-    setLoading(true);
-    setLoadError(null);
+    const requestVersion = (chatRequestVersionsRef.current.get(requestedThreadId) ?? 0) + 1;
+    chatRequestVersionsRef.current.set(requestedThreadId, requestVersion);
+    const isLatestRequest = () => chatRequestVersionsRef.current.get(requestedThreadId) === requestVersion;
+    if (!preserveCurrent) {
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: true,
+        error: null,
+      });
+    }
     try {
       const next = requestedThreadId ? await api.chat(requestedThreadId) : null;
-      if (viewThreadIdRef.current !== requestedThreadId) return;
+      if (viewThreadIdRef.current !== requestedThreadId || !isLatestRequest()) return;
       setChat(next);
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: false,
+        error: null,
+      });
       setStatus("Ready");
     } catch (requestError) {
-      if (viewThreadIdRef.current !== requestedThreadId) return;
-      setLoadError(requestError instanceof ApiError ? requestError.detail : "Could not load this chat.");
-    } finally {
-      if (viewThreadIdRef.current === requestedThreadId) setLoading(false);
+      if (viewThreadIdRef.current !== requestedThreadId || !isLatestRequest() || preserveCurrent) return;
+      setChat(null);
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: false,
+        error: requestError instanceof ApiError ? requestError.detail : "Could not load this chat.",
+      });
     }
   }, [api, threadId]);
 
@@ -109,15 +136,20 @@ export function ChatPage({
     return () => abortRef.current?.abort();
   }, []);
 
+  const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
+
   useEffect(() => {
     const node = transcriptRef.current;
     if (!node) return;
     if (isNearTranscriptEnd.current) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [chat?.messages?.length, partial, thoughts]);
+  }, [currentChat?.messages?.length, partial, thoughts]);
 
-  const messages = useMemo(() => chat?.messages ?? [], [chat?.messages]);
+  const messages = useMemo(
+    () => currentChat?.messages ?? [],
+    [currentChat?.messages],
+  );
   const draftScope = composerDraftKey(threadId);
   const draft = drafts[draftScope] ?? readComposerDraft(threadId);
   const attachmentScope = composerAttachmentKey(threadId);
@@ -230,25 +262,49 @@ export function ChatPage({
   }
 
   async function reconcileChat(id: string): Promise<void> {
+    const requestVersion = (chatRequestVersionsRef.current.get(id) ?? 0) + 1;
+    chatRequestVersionsRef.current.set(id, requestVersion);
+    const isLatestRequest = () => chatRequestVersionsRef.current.get(id) === requestVersion;
     try {
       const next = await api.chat(id);
+      if (!isLatestRequest()) return;
       onChatChanged(next);
-      if (viewThreadIdRef.current === id) setChat(next);
+      if (viewThreadIdRef.current === id) {
+        setChat(next);
+        setChatLoad({
+          threadId: id,
+          loading: false,
+          error: null,
+        });
+      }
     } catch {
+      if (!isLatestRequest()) return;
       setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
     }
   }
 
   useEffect(() => {
     viewThreadIdRef.current = threadId;
+    isNearTranscriptEnd.current = true;
+    const preserveCurrent = Boolean(
+      threadId !== null
+      && chat?.id === threadId
+      && chatLoad.threadId === threadId
+      && !chatLoad.loading
+      && !chatLoad.error,
+    );
     const timer = window.setTimeout(() => {
+      setShowJumpToLatest(false);
       setResolvedThreadId(threadId);
-      void loadChat();
+      void loadChat({ preserveCurrent });
       const stored = readActiveJob();
       if (stored) {
-        setActiveJob((current) => current ?? stored);
-        void consumeJob(stored);
+        const job = initialMountRef.current ? { ...stored, lastEventId: 0 } : stored;
+        initialMountRef.current = false;
+        setActiveJob((current) => current ?? job);
+        void consumeJob(job);
       } else {
+        initialMountRef.current = false;
         setActiveJob(null);
         setStopping(false);
         setPartial("");
@@ -283,7 +339,7 @@ export function ChatPage({
       const requestId = createRequestId();
       const accepted = regenerateMessageId
         ? await api.regenerate(threadId ?? "", { request_id: requestId, message_id: regenerateMessageId, user_input: input, attachments: [...suppliedAttachments] })
-        : await api.generate({ request_id: requestId, thread_id: threadId, user_input: input, attachments: [...suppliedAttachments], base_revision: chat?.revision ?? 0 });
+        : await api.generate({ request_id: requestId, thread_id: threadId, user_input: input, attachments: [...suppliedAttachments], base_revision: currentChat?.revision ?? 0 });
       const jobThreadId = accepted.thread_id ?? threadId;
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
@@ -294,13 +350,30 @@ export function ChatPage({
       if (!regenerateMessageId) {
         setChat((current) => ({
           id: jobThreadId,
-          title: current?.title ?? "New Chat",
-          timestamp: current?.timestamp ?? new Date().toISOString(),
-          revision: (current?.revision ?? 0) + 1,
-          messages: accepted.user_message_id && current?.messages?.some((message) => message.id === accepted.user_message_id)
+          title: current?.id === jobThreadId ? current.title : "New Chat",
+          timestamp: current?.id === jobThreadId ? current.timestamp : new Date().toISOString(),
+          revision: (
+            current?.id === jobThreadId ? current.revision ?? 0 : 0
+          ) + 1,
+          messages: accepted.user_message_id
+            && current?.id === jobThreadId
+            && current.messages?.some((message) => message.id === accepted.user_message_id)
             ? current.messages
-            : [...(current?.messages ?? []), { id: accepted.user_message_id ?? undefined, role: "user", content: input, attachments: [...suppliedAttachments] }],
+            : [
+                ...(current?.id === jobThreadId ? current.messages ?? [] : []),
+                {
+                  id: accepted.user_message_id ?? undefined,
+                  role: "user",
+                  content: input,
+                  attachments: [...suppliedAttachments],
+                },
+              ],
         }));
+        setChatLoad({
+          threadId: jobThreadId,
+          loading: false,
+          error: null,
+        });
       }
       if (!threadId) onThreadCreated(jobThreadId);
       void consumeJob(job);
@@ -449,12 +522,12 @@ export function ChatPage({
     setShowJumpToLatest(false);
   };
 
-  if (loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
-  if (loadError && !chat) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{loadError}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
+  if (chatLoad.threadId !== threadId || chatLoad.loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
+  if (chatLoad.error) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{chatLoad.error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
 
   return (
     <section className="chat-page" aria-labelledby="chat-title">
-      <h2 id="chat-title" className="sr-only">{displayChatTitle(chat?.title, "New Chat")}</h2>
+      <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
       <div className="transcript" ref={transcriptRef} onScroll={updateTranscriptPosition}>
         {messages.length === 0 && !activeJobForCurrentThread && (
           <section className="chat-welcome" aria-label="Start a new conversation">
