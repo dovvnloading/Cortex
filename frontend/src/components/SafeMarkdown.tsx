@@ -51,6 +51,14 @@ function CodeCopyButton({ value, language }: { value: string; language: string }
   return <button className="code-copy" type="button" aria-label={`Copy ${language} code`} onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>;
 }
 
+function Table({ children, ...props }: ComponentProps<"table">) {
+  return (
+    <div className="markdown-table-wrap">
+      <table {...props}>{children}</table>
+    </div>
+  );
+}
+
 export function SafeMarkdown({ content }: { content: string }) {
   return (
     <ReactMarkdown
@@ -60,6 +68,7 @@ export function SafeMarkdown({ content }: { content: string }) {
         a: Link,
         code: Code,
         img: () => null,
+        table: Table,
       }}
     >
       {content}
