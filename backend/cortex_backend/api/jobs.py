@@ -32,6 +32,10 @@ class JobConflict(RuntimeError):
     """Raised when the single active job for a kind already exists."""
 
 
+class JobRegistryClosed(JobConflict):
+    """Raised when new work is submitted during or after shutdown."""
+
+
 class JobNotFound(RuntimeError):
     """Raised when a job ID is unknown."""
 
@@ -69,6 +73,16 @@ class JobSnapshot:
 
 JobRunner = Callable[["JobProgressSink", Event], Any]
 JobSerializer = Callable[[Any], Mapping[str, Any]]
+JobPreparation = Callable[[], Mapping[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class JobReservation:
+    """Atomic admission result for work that needs asynchronous preparation."""
+
+    snapshot: JobSnapshot
+    created: bool
+    token: str | None = None
 
 
 @dataclass
@@ -78,6 +92,11 @@ class _JobRecord:
     owner: str
     thread_id: str | None
     request_id: str | None = None
+    request_fingerprint: str | None = None
+    reservation_token: str | None = None
+    acceptance: Mapping[str, Any] = field(default_factory=dict)
+    prepared: bool = False
+    preparation_error: str | None = None
     cancel_event: Event = field(default_factory=Event)
     status: JobStatus = "queued"
     sequence: int = 0
@@ -155,6 +174,7 @@ class JobRegistry:
         self._active: dict[JobKind, str] = {}
         self._request_index: dict[tuple[JobKind, str, str], str] = {}
         self._lock = RLock()
+        self._accepting = True
 
     async def start(
         self,
@@ -165,15 +185,62 @@ class JobRegistry:
         runner: JobRunner,
         serialize_result: JobSerializer | None = None,
         request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> JobSnapshot:
         """Queue a worker with bounded terminal replay and request dedupe."""
+        reservation = self.reserve(
+            kind=kind,
+            owner=owner,
+            thread_id=thread_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if not reservation.created:
+            snapshot, _ = await self.wait_until_prepared(
+                reservation.snapshot.job_id,
+                owner=owner,
+            )
+            return snapshot
+        snapshot, _ = self.start_reserved(
+            reservation,
+            owner=owner,
+            runner=runner,
+            serialize_result=serialize_result,
+        )
+        return snapshot
+
+    def reserve(
+        self,
+        *,
+        kind: JobKind,
+        owner: str,
+        thread_id: str | None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> JobReservation:
+        """Atomically claim a job kind before asynchronous preparation begins."""
+        if request_id and not request_fingerprint:
+            raise ValueError("request_fingerprint is required with request_id")
         with self._lock:
+            if not self._accepting:
+                raise JobRegistryClosed("Cortex is shutting down.")
             self._prune_terminal_records()
             if request_id:
                 existing_id = self._request_index.get((kind, owner, request_id))
                 existing = self._records.get(existing_id) if existing_id else None
                 if existing is not None:
-                    return self._snapshot(existing)
+                    if (
+                        request_fingerprint is not None
+                        and existing.request_fingerprint is not None
+                        and request_fingerprint != existing.request_fingerprint
+                    ):
+                        raise JobConflict(
+                            "This request ID was already used for a different payload."
+                        )
+                    return JobReservation(
+                        snapshot=self._snapshot(existing),
+                        created=False,
+                    )
             active_id = self._active.get(kind)
             if active_id is not None:
                 active = self._records.get(active_id)
@@ -181,12 +248,15 @@ class JobRegistry:
                     raise JobConflict(f"A {kind} job is already active.")
                 self._active.pop(kind, None)
 
+            reservation_token = uuid4().hex
             record = _JobRecord(
                 job_id=uuid4().hex,
                 kind=kind,
                 owner=owner,
                 thread_id=thread_id,
                 request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                reservation_token=reservation_token,
             )
             self._records[record.job_id] = record
             self._active[kind] = record.job_id
@@ -198,11 +268,101 @@ class JobRegistry:
                 status="queued",
                 data={"message": "Job queued."},
             )
+            return JobReservation(
+                snapshot=self._snapshot(record),
+                created=True,
+                token=reservation_token,
+            )
+
+    def start_reserved(
+        self,
+        reservation: JobReservation,
+        *,
+        owner: str,
+        runner: JobRunner,
+        serialize_result: JobSerializer | None = None,
+        prepare: JobPreparation | None = None,
+    ) -> tuple[JobSnapshot, Mapping[str, Any]]:
+        """Prepare side effects and start one previously reserved worker.
+
+        The optional preparation callback runs while admission remains locked.
+        This keeps request cancellation and shutdown from interleaving with the
+        final chat mutation that makes an accepted generation visible.
+        """
+        if not reservation.created or not reservation.token:
+            raise JobConflict("Only the reservation owner can start this job.")
+        record = self._owned_record(reservation.snapshot.job_id, owner)
+        with self._lock:
+            if not self._accepting:
+                raise JobRegistryClosed("Cortex is shutting down.")
+            if reservation.token != record.reservation_token:
+                raise JobConflict("Job reservation is no longer valid.")
+            if record.prepared or record.task is not None:
+                raise JobConflict("Job preparation has already completed.")
+            if record.status in TERMINAL_STATUSES or record.cancel_event.is_set():
+                raise JobConflict("Job preparation was cancelled.")
+            acceptance = dict(prepare() if prepare is not None else {})
+            record.acceptance = acceptance
+            record.prepared = True
+            record.reservation_token = None
             record.task = asyncio.create_task(
                 self._run(record, runner, serialize_result),
-                name=f"cortex-{kind}-{record.job_id}",
+                name=f"cortex-{record.kind}-{record.job_id}",
             )
+            return self._snapshot(record), dict(acceptance)
+
+    def abort_reservation(
+        self,
+        reservation: JobReservation,
+        *,
+        owner: str,
+        message: str = "Job preparation failed. Please try again.",
+    ) -> JobSnapshot:
+        """Fail a reservation that never reached its owned worker."""
+        if not reservation.created or not reservation.token:
+            raise JobConflict("Only the reservation owner can abort this job.")
+        record = self._owned_record(reservation.snapshot.job_id, owner)
+        with self._lock:
+            if reservation.token != record.reservation_token:
+                return self._snapshot(record)
+            if record.prepared or record.task is not None:
+                return self._snapshot(record)
+            if record.status not in TERMINAL_STATUSES:
+                record.preparation_error = message
+                record.error = message
+                record.prepared = True
+                record.reservation_token = None
+                self._append_event(
+                    record,
+                    kind="error",
+                    status="failed",
+                    data={"message": message, "details": "JobPreparationError"},
+                )
+            if self._active.get(record.kind) == record.job_id:
+                self._active.pop(record.kind, None)
+            if record.request_id:
+                key = (record.kind, record.owner, record.request_id)
+                if self._request_index.get(key) == record.job_id:
+                    self._request_index.pop(key, None)
             return self._snapshot(record)
+
+    async def wait_until_prepared(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+    ) -> tuple[JobSnapshot, Mapping[str, Any]]:
+        """Wait for an idempotent reservation to finish safe preparation."""
+        record = self._owned_record(job_id, owner)
+        while True:
+            with self._lock:
+                if record.prepared:
+                    if record.preparation_error is not None:
+                        raise JobConflict(record.preparation_error)
+                    return self._snapshot(record), dict(record.acceptance)
+                if record.status in TERMINAL_STATUSES:
+                    return self._snapshot(record), dict(record.acceptance)
+            await asyncio.sleep(self._poll_seconds)
 
     def status(self, job_id: str, *, owner: str) -> JobSnapshot:
         record = self._owned_record(job_id, owner)
@@ -240,6 +400,12 @@ class JobRegistry:
                     status="cancelling",
                     data={"message": "Stopping response..."},
                 )
+                if record.task is None:
+                    record.prepared = True
+                    record.reservation_token = None
+                    self._finalize_cancellation(record)
+                    if self._active.get(record.kind) == record.job_id:
+                        self._active.pop(record.kind, None)
             return self._snapshot(record)
 
     async def events(
@@ -270,6 +436,7 @@ class JobRegistry:
     async def shutdown(self) -> None:
         """Request cancellation and wait for owned workers to finish safely."""
         with self._lock:
+            self._accepting = False
             records = [
                 record
                 for record in self._records.values()
@@ -284,6 +451,12 @@ class JobRegistry:
                         status="cancelling",
                         data={"message": "Stopping response during shutdown..."},
                     )
+                if record.task is None:
+                    record.prepared = True
+                    record.reservation_token = None
+                    self._finalize_cancellation(record)
+                    if self._active.get(record.kind) == record.job_id:
+                        self._active.pop(record.kind, None)
             tasks = [record.task for record in self._records.values() if record.task]
         pending = [task for task in tasks if task is not asyncio.current_task()]
         if pending:
@@ -399,9 +572,9 @@ class JobRegistry:
         for record in terminal[: max(0, excess)]:
             self._records.pop(record.job_id, None)
             if record.request_id:
-                self._request_index.pop(
-                    (record.kind, record.owner, record.request_id), None
-                )
+                key = (record.kind, record.owner, record.request_id)
+                if self._request_index.get(key) == record.job_id:
+                    self._request_index.pop(key, None)
 
     def _append_event(
         self,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import asyncio
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -60,7 +61,14 @@ from cortex_backend.execution.repository import (
 )
 
 from .app_types import BackendDependenciesProtocol
-from .jobs import JobConflict, JobNotFound, JobOwnershipError, JobSnapshot
+from .jobs import (
+    JobConflict,
+    JobNotFound,
+    JobOwnershipError,
+    JobReservation,
+    JobRegistryClosed,
+    JobSnapshot,
+)
 from .schemas import (
     AddMemoryRequest,
     AddMessageRequest,
@@ -881,6 +889,11 @@ def build_router() -> APIRouter:
                 thread_id=None,
                 runner=runner,
             )
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except JobConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _accepted(snapshot)
@@ -925,6 +938,11 @@ def build_router() -> APIRouter:
                 thread_id=None,
                 runner=runner,
             )
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except JobConflict as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=str(exc)
@@ -948,7 +966,13 @@ def build_router() -> APIRouter:
                 deps,
                 principal,
                 payload,
+                request_fingerprint=_request_fingerprint("create", payload),
             )
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except JobConflict as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=str(exc)
@@ -1062,36 +1086,82 @@ def build_router() -> APIRouter:
         deps: BackendDependenciesProtocol = Depends(dependencies),
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobAccepted:
+        request_fingerprint = _request_fingerprint(
+            "regenerate",
+            payload,
+            path_thread_id=thread_id,
+        )
         try:
-            chat = deps.chats.get_chat(thread_id)
-            if chat is None:
-                raise HTTPException(status_code=404, detail="Chat not found.")
-            position = message_position(chat, payload.message_id)
-            messages = list(chat.get("messages", ()))
-            if position != len(messages) - 1 or messages[position].get("role") != "assistant":
-                raise ChatDomainError("Only the final assistant response can be regenerated.")
-            if position == 0 or messages[position - 1].get("role") != "user":
-                raise ChatDomainError("The selected response has no user turn to regenerate.")
-            user_input = (payload.user_input or messages[position - 1].get("content", "")).strip()
-            if not user_input:
-                raise ChatDomainError("A regeneration request needs user input.")
-            generation_payload = GenerationRequest(
-                request_id=payload.request_id,
+            reservation = request.app.state.jobs.reserve(
+                kind="generation",
+                owner=principal.session_id,
                 thread_id=thread_id,
-                user_input=user_input,
-                base_revision=chat_revision(chat),
-                attachments=payload.attachments,
+                request_id=payload.request_id,
+                request_fingerprint=request_fingerprint,
             )
-            snapshot, _ = await _start_generation_job(
-                request,
-                deps,
-                principal,
-                generation_payload,
-                target_message_id=payload.message_id,
-                history_messages=messages[:position],
-            )
+            if not reservation.created:
+                snapshot, _ = await request.app.state.jobs.wait_until_prepared(
+                    reservation.snapshot.job_id,
+                    owner=principal.session_id,
+                )
+            else:
+                try:
+                    chat = deps.chats.get_chat(thread_id)
+                    if chat is None:
+                        raise HTTPException(status_code=404, detail="Chat not found.")
+                    position = message_position(chat, payload.message_id)
+                    messages = list(chat.get("messages", ()))
+                    if (
+                        position != len(messages) - 1
+                        or messages[position].get("role") != "assistant"
+                    ):
+                        raise ChatDomainError(
+                            "Only the final assistant response can be regenerated."
+                        )
+                    if (
+                        position == 0
+                        or messages[position - 1].get("role") != "user"
+                    ):
+                        raise ChatDomainError(
+                            "The selected response has no user turn to regenerate."
+                        )
+                    user_input = (
+                        payload.user_input
+                        or messages[position - 1].get("content", "")
+                    ).strip()
+                    if not user_input:
+                        raise ChatDomainError(
+                            "A regeneration request needs user input."
+                        )
+                    generation_payload = GenerationRequest(
+                        request_id=payload.request_id,
+                        thread_id=thread_id,
+                        user_input=user_input,
+                        base_revision=chat_revision(chat),
+                        attachments=payload.attachments,
+                    )
+                    snapshot, _ = await _start_generation_job(
+                        request,
+                        deps,
+                        principal,
+                        generation_payload,
+                        request_fingerprint=request_fingerprint,
+                        reservation=reservation,
+                        target_message_id=payload.message_id,
+                        history_messages=messages[:position],
+                    )
+                finally:
+                    request.app.state.jobs.abort_reservation(
+                        reservation,
+                        owner=principal.session_id,
+                    )
         except HTTPException:
             raise
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except JobConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ChatDomainError as exc:
@@ -1109,54 +1179,77 @@ def build_router() -> APIRouter:
         deps: BackendDependenciesProtocol = Depends(dependencies),
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobAccepted:
+        jobs = request.app.state.jobs
         try:
-            settings = _load_settings(deps)
-            job_id = uuid4().hex
-            generation_snapshot = _generation_snapshot(
-                job_id,
-                payload,
-                settings,
-                deps.models.list_installed(),
-                attachments=_resolve_generation_attachments(
-                    request,
-                    deps,
-                    principal,
-                    payload.attachments,
-                    settings=settings,
-                ),
-            )
-        except ChatDomainError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-        def runner(sink, cancel_event):
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            result = deps.generation.generate(
-                generation_snapshot,
-                progress_sink=sink,
-                cancellation_event=cancel_event,
-            )
-            return {
-                "response": result.response,
-                "thoughts": result.thoughts,
-                "memory_command": {
-                    "additions": list(result.memory_command.additions),
-                    "clear_requested": result.memory_command.clear_requested,
-                },
-            }
-
-        try:
-            snapshot = await request.app.state.jobs.start(
+            reservation = jobs.reserve(
                 kind="generation",
                 owner=principal.session_id,
                 thread_id=payload.thread_id,
-                runner=runner,
                 request_id=payload.request_id,
+                request_fingerprint=_request_fingerprint("legacy", payload),
             )
+            if not reservation.created:
+                snapshot, _ = await jobs.wait_until_prepared(
+                    reservation.snapshot.job_id,
+                    owner=principal.session_id,
+                )
+            else:
+                try:
+                    settings = _load_settings(deps)
+                    generation_snapshot = _generation_snapshot(
+                        reservation.snapshot.job_id,
+                        payload,
+                        settings,
+                        deps.models.list_installed(),
+                        attachments=_resolve_generation_attachments(
+                            request,
+                            deps,
+                            principal,
+                            payload.attachments,
+                            settings=settings,
+                        ),
+                    )
+
+                    def runner(sink, cancel_event):
+                        if cancel_event.is_set():
+                            return {"cancelled": True}
+                        result = deps.generation.generate(
+                            generation_snapshot,
+                            progress_sink=sink,
+                            cancellation_event=cancel_event,
+                        )
+                        return {
+                            "response": result.response,
+                            "thoughts": result.thoughts,
+                            "memory_command": {
+                                "additions": list(result.memory_command.additions),
+                                "clear_requested": (
+                                    result.memory_command.clear_requested
+                                ),
+                            },
+                        }
+
+                    snapshot, _ = jobs.start_reserved(
+                        reservation,
+                        owner=principal.session_id,
+                        runner=runner,
+                    )
+                finally:
+                    jobs.abort_reservation(
+                        reservation,
+                        owner=principal.session_id,
+                    )
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except JobConflict as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=str(exc)
             ) from exc
+        except ChatDomainError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _accepted(snapshot)
 
     @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -1273,195 +1366,288 @@ def _runtime_is_ready(request: Request) -> bool:
         return False
 
 
+def _request_fingerprint(
+    operation: str,
+    payload: GenerationRequest | RegenerationRequest,
+    *,
+    path_thread_id: str | None = None,
+) -> str:
+    """Hash one validated client intent for safe request-ID idempotency."""
+    canonical = json.dumps(
+        {
+            "version": 1,
+            "operation": operation,
+            "path_thread_id": path_thread_id,
+            "payload": payload.model_dump(mode="json", exclude={"request_id"}),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 async def _start_generation_job(
     request: Request,
     deps: BackendDependenciesProtocol,
     principal: SessionPrincipal,
     payload: GenerationRequest,
     *,
+    request_fingerprint: str,
+    reservation: JobReservation | None = None,
     target_message_id: str | None = None,
     history_messages: list[Mapping[str, Any]] | None = None,
 ) -> tuple[JobSnapshot, str | None]:
-    """Persist the user turn, then run one authoritative generation job."""
+    """Atomically admit, prepare, and run one authoritative generation job."""
     jobs = request.app.state.jobs
-    existing = jobs.request_snapshot(
-        kind="generation",
-        owner=principal.session_id,
-        request_id=payload.request_id,
-    )
-    if existing is not None:
-        return existing, None
-    if jobs.active_snapshot(kind="generation") is not None:
-        raise JobConflict("A generation job is already active.")
+    candidate_thread_id = payload.thread_id or uuid4().hex
+    if reservation is None:
+        reservation = jobs.reserve(
+            kind="generation",
+            owner=principal.session_id,
+            thread_id=candidate_thread_id,
+            request_id=payload.request_id,
+            request_fingerprint=request_fingerprint,
+        )
+    if not reservation.created:
+        snapshot, acceptance = await jobs.wait_until_prepared(
+            reservation.snapshot.job_id,
+            owner=principal.session_id,
+        )
+        replayed_message_id = acceptance.get("user_message_id")
+        return snapshot, (
+            replayed_message_id if isinstance(replayed_message_id, str) else None
+        )
 
-    thread_id = payload.thread_id or uuid4().hex
-    chat = deps.chats.get_chat(thread_id)
-    if payload.base_revision is not None and chat is not None:
-        if chat_revision(chat) != payload.base_revision:
-            raise ChatDomainError("This chat changed. Reload it before generating again.")
+    thread_id = reservation.snapshot.thread_id or candidate_thread_id
+    started = False
+    try:
+        chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
+        current_revision = chat_revision(chat) if chat is not None else 0
+        if (
+            payload.base_revision is not None
+            and current_revision != payload.base_revision
+        ):
+            raise ChatDomainError(
+                "This chat changed. Reload it before generating again."
+            )
 
-    settings = _load_settings(deps)
-    job_id = uuid4().hex
-    attachment_refs = list(payload.attachments)
-    if target_message_id is not None and not attachment_refs and chat is not None:
-        messages = list(chat.get("messages", ()))
-        try:
-            target_position = message_position(chat, target_message_id)
-        except ChatDomainError:
-            target_position = -1
-        if target_position > 0:
-            prior_user = messages[target_position - 1]
-            attachment_refs = [
-                ChatAttachment.model_validate(item)
-                for item in (prior_user.get("attachments") or [])
-            ]
-    generation_payload = payload.model_copy(
-        update={"thread_id": thread_id, "attachments": attachment_refs}
-    )
-    compute_observation = await _automatic_compute_observation(
-        request,
-        principal,
-        settings,
-        generation_payload,
-        job_id,
-    )
-    generation_snapshot = _generation_snapshot(
-        job_id,
-        generation_payload,
-        settings,
-        deps.models.list_installed(),
-        compute_observation=compute_observation,
-        attachments=_resolve_generation_attachments(
+        settings = await asyncio.to_thread(_load_settings, deps)
+        attachment_refs = list(payload.attachments)
+        if target_message_id is not None and not attachment_refs and chat is not None:
+            messages = list(chat.get("messages", ()))
+            try:
+                target_position = message_position(chat, target_message_id)
+            except ChatDomainError:
+                target_position = -1
+            if target_position > 0:
+                prior_user = messages[target_position - 1]
+                attachment_refs = [
+                    ChatAttachment.model_validate(item)
+                    for item in (prior_user.get("attachments") or [])
+                ]
+        generation_payload = payload.model_copy(
+            update={"thread_id": thread_id, "attachments": attachment_refs}
+        )
+        compute_observation = await _automatic_compute_observation(
+            request,
+            principal,
+            settings,
+            generation_payload,
+            reservation.snapshot.job_id,
+        )
+        installed_models = await asyncio.to_thread(deps.models.list_installed)
+        resolved_attachments = await asyncio.to_thread(
+            _resolve_generation_attachments,
             request,
             deps,
             principal,
             attachment_refs,
             settings=settings,
-        ),
-    )
-
-    user_message_id: str | None = None
-    if target_message_id is None:
-        user_message_id = deps.chats.add_message(
-            thread_id,
-            "user",
-            payload.user_input,
-            attachments=[attachment.model_dump(mode="json") for attachment in attachment_refs],
-            thread_title="New Chat" if chat is None else None,
+        )
+        generation_snapshot = _generation_snapshot(
+            reservation.snapshot.job_id,
+            generation_payload,
+            settings,
+            installed_models,
+            compute_observation=compute_observation,
+            attachments=resolved_attachments,
         )
 
-    def runner(sink, cancel_event):
-        result = deps.generation.generate(
-            generation_snapshot,
-            progress_sink=sink,
-            cancellation_event=cancel_event,
-            history_messages=history_messages,
-        )
-        # The generation service checks cancellation around its model work,
-        # but the API owns the following persistence and optional title work.
-        # Keep those side effects behind explicit checkpoints as well.
-        if cancel_event.is_set():
-            return {"cancelled": True}
-        if result.thoughts:
-            for delta in _chunks(result.thoughts):
+        user_message_id: str | None = None
+        prepared_history = history_messages
+
+        def prepare() -> Mapping[str, Any]:
+            nonlocal prepared_history, user_message_id
+            current_chat = deps.chats.get_chat(thread_id)
+            current_revision = (
+                chat_revision(current_chat) if current_chat is not None else 0
+            )
+            if (
+                payload.base_revision is not None
+                and current_revision != payload.base_revision
+            ):
+                raise ChatDomainError(
+                    "This chat changed. Reload it before generating again."
+                )
+            if target_message_id is not None:
+                if current_chat is None:
+                    raise ChatDomainError("Chat not found.")
+                current_messages = list(current_chat.get("messages", ()))
+                target_position = message_position(current_chat, target_message_id)
+                if (
+                    target_position != len(current_messages) - 1
+                    or current_messages[target_position].get("role") != "assistant"
+                ):
+                    raise ChatDomainError(
+                        "Only the final assistant response can be regenerated."
+                    )
+                if (
+                    target_position == 0
+                    or current_messages[target_position - 1].get("role") != "user"
+                ):
+                    raise ChatDomainError(
+                        "The selected response has no user turn to regenerate."
+                    )
+                prepared_history = current_messages[:target_position]
+            else:
+                user_message_id = deps.chats.add_message(
+                    thread_id,
+                    "user",
+                    payload.user_input,
+                    attachments=[
+                        attachment.model_dump(mode="json")
+                        for attachment in attachment_refs
+                    ],
+                    thread_title="New Chat" if current_chat is None else None,
+                )
+            return {"user_message_id": user_message_id}
+
+        def runner(sink, cancel_event):
+            result = deps.generation.generate(
+                generation_snapshot,
+                progress_sink=sink,
+                cancellation_event=cancel_event,
+                history_messages=prepared_history,
+            )
+            # The generation service checks cancellation around its model work,
+            # but the API owns the following persistence and optional title work.
+            # Keep those side effects behind explicit checkpoints as well.
+            if cancel_event.is_set():
+                return {"cancelled": True}
+            if result.thoughts:
+                for delta in _chunks(result.thoughts):
+                    if cancel_event.is_set():
+                        return {"cancelled": True}
+                    sink.publish_progress(
+                        "thinking_delta",
+                        "Reasoning available.",
+                        data={"delta": delta},
+                    )
+            for delta in _chunks(result.response):
                 if cancel_event.is_set():
                     return {"cancelled": True}
                 sink.publish_progress(
-                    "thinking_delta",
-                    "Reasoning available.",
+                    "content_delta",
+                    "Response content available.",
                     data={"delta": delta},
                 )
-        for delta in _chunks(result.response):
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            sink.publish_progress(
-                "content_delta",
-                "Response content available.",
-                data={"delta": delta},
-            )
 
-        for memo in result.memory_command.additions:
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            deps.memories.add_memo(memo)
-        if cancel_event.is_set():
-            return {"cancelled": True}
-        sink.publish_progress("persisting", "Saving the response.")
-        if cancel_event.is_set():
-            return {"cancelled": True}
-        if target_message_id is None:
-            assistant_message_id = deps.chats.add_message(
-                thread_id,
-                "assistant",
-                result.response,
-                thoughts=result.thoughts,
-            )
-        else:
-            deps.chats.replace_message(
-                thread_id,
-                target_message_id,
-                result.response,
-                thoughts=result.thoughts,
-            )
-            assistant_message_id = target_message_id
-
-        if cancel_event.is_set():
-            return {"cancelled": True}
-        updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
-        title = str(updated_chat.get("title") or "New Chat")
-        if target_message_id is None and title == "New Chat":
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            raw_title = None
-            title_generator = getattr(deps.generation, "generate_chat_title", None)
-            if callable(title_generator):
-                try:
-                    raw_title = title_generator(generation_snapshot, result.response)
-                except Exception as exc:  # optional title work must not fail a chat
-                    logging.warning(
-                        "Cortex chat title generation failed (%s).",
-                        type(exc).__name__,
-                    )
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            generated_title = normalize_title(raw_title, fallback="")
-            if (
-                not generated_title
-                or generated_title.casefold() in {"new chat", "untitled chat"}
-            ):
-                generated_title = title_from_first_message(payload.user_input)
-            if generated_title != title:
+            for memo in result.memory_command.additions:
                 if cancel_event.is_set():
                     return {"cancelled": True}
-                try:
-                    deps.chats.rename_chat(thread_id, generated_title)
-                    title = generated_title
-                except Exception as exc:
-                    logging.warning(
-                        "Cortex title update failed (%s).", type(exc).__name__
-                    )
-        if cancel_event.is_set():
-            return {"cancelled": True}
-        updated_chat = deps.chats.get_chat(thread_id) or updated_chat
-        return {
-            "thread_id": thread_id,
-            "user_message_id": user_message_id,
-            "assistant_message_id": assistant_message_id,
-            "chat_revision": chat_revision(updated_chat),
-            "title": str(updated_chat.get("title") or title),
-            "response": result.response,
-            "thoughts": result.thoughts,
-            "clear_requested": result.memory_command.clear_requested,
-        }
+                deps.memories.add_memo(memo)
+            if cancel_event.is_set():
+                return {"cancelled": True}
+            sink.publish_progress("persisting", "Saving the response.")
+            if cancel_event.is_set():
+                return {"cancelled": True}
+            if target_message_id is None:
+                assistant_message_id = deps.chats.add_message(
+                    thread_id,
+                    "assistant",
+                    result.response,
+                    thoughts=result.thoughts,
+                )
+            else:
+                deps.chats.replace_message(
+                    thread_id,
+                    target_message_id,
+                    result.response,
+                    thoughts=result.thoughts,
+                )
+                assistant_message_id = target_message_id
 
-    snapshot = await jobs.start(
-        kind="generation",
-        owner=principal.session_id,
-        thread_id=thread_id,
-        runner=runner,
-        request_id=payload.request_id,
-    )
-    return snapshot, user_message_id
+            if cancel_event.is_set():
+                return {"cancelled": True}
+            updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
+            title = str(updated_chat.get("title") or "New Chat")
+            if target_message_id is None and title == "New Chat":
+                if cancel_event.is_set():
+                    return {"cancelled": True}
+                raw_title = None
+                title_generator = getattr(
+                    deps.generation, "generate_chat_title", None
+                )
+                if callable(title_generator):
+                    try:
+                        raw_title = title_generator(
+                            generation_snapshot, result.response
+                        )
+                    except Exception as exc:  # optional title work must not fail a chat
+                        logging.warning(
+                            "Cortex chat title generation failed (%s).",
+                            type(exc).__name__,
+                        )
+                if cancel_event.is_set():
+                    return {"cancelled": True}
+                generated_title = normalize_title(raw_title, fallback="")
+                if (
+                    not generated_title
+                    or generated_title.casefold() in {"new chat", "untitled chat"}
+                ):
+                    generated_title = title_from_first_message(payload.user_input)
+                if generated_title != title:
+                    if cancel_event.is_set():
+                        return {"cancelled": True}
+                    try:
+                        deps.chats.rename_chat(thread_id, generated_title)
+                        title = generated_title
+                    except Exception as exc:
+                        logging.warning(
+                            "Cortex title update failed (%s).", type(exc).__name__
+                        )
+            if cancel_event.is_set():
+                return {"cancelled": True}
+            updated_chat = deps.chats.get_chat(thread_id) or updated_chat
+            return {
+                "thread_id": thread_id,
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "chat_revision": chat_revision(updated_chat),
+                "title": str(updated_chat.get("title") or title),
+                "response": result.response,
+                "thoughts": result.thoughts,
+                "clear_requested": result.memory_command.clear_requested,
+            }
+
+        snapshot, acceptance = jobs.start_reserved(
+            reservation,
+            owner=principal.session_id,
+            runner=runner,
+            prepare=prepare,
+        )
+        started = True
+        accepted_message_id = acceptance.get("user_message_id")
+        return snapshot, (
+            accepted_message_id if isinstance(accepted_message_id, str) else None
+        )
+    finally:
+        if not started:
+            jobs.abort_reservation(
+                reservation,
+                owner=principal.session_id,
+            )
 
 
 async def _automatic_compute_observation(
