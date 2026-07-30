@@ -234,12 +234,23 @@ def _response_code(message: BrokerMessage, operation: str) -> str:
     return str(message.body.get("schema_version", ""))
 
 
-def _bounded_cleanup(action: Any, timeout_seconds: float = 5.0) -> None:
+def _bounded_cleanup(action: Any, timeout_seconds: float = 5.0) -> BaseException | None:
+    """Run cleanup without leaking an exception from the daemon thread.
+
+    Native qualification cleanup can briefly race process-handle teardown on
+    Windows.  The caller still decides whether the cleanup completed, but an
+    exception must be returned to the caller instead of being printed by
+    ``threading`` as an unrelated traceback.
+    """
+
     finished = Queue(maxsize=1)
+    failure: list[BaseException] = []
 
     def run() -> None:
         try:
             action()
+        except BaseException as exc:  # pragma: no cover - platform-specific cleanup
+            failure.append(exc)
         finally:
             finished.put(True)
 
@@ -248,7 +259,8 @@ def _bounded_cleanup(action: Any, timeout_seconds: float = 5.0) -> None:
     try:
         finished.get(timeout=timeout_seconds)
     except Exception:
-        pass
+        return None
+    return failure[0] if failure else None
 
 
 def _install_ephemeral(source_root: Path, store_root: Path) -> SignedBundleInstaller:
