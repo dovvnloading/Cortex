@@ -187,6 +187,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
 });
 
 test("renders a structured workbench transcript with markdown and code blocks", async ({ page }) => {
+  await page.setViewportSize({ width: 764, height: 787 });
   const content = [
     "# Result",
     "",
@@ -195,9 +196,10 @@ test("renders a structured workbench transcript with markdown and code blocks", 
     "- Input was validated",
     "- Calculation was run locally",
     "",
-    "| Input | Output |",
-    "| --- | ---: |",
-    "| 6 × 7 | 42 |",
+    "| Aspect | What It Is | Key Points |",
+    "| --- | --- | --- |",
+    "| Shape | Almost spherical, but a bit flattened at the poles. | About 384000 km away; that is roughly one quarter the distance from Earth to the Sun. |",
+    "| Why it matters | It provides a testing ground for lunar missions. | Its geology helps us study planetary evolution. |",
     "",
     "```python",
     "value = 6 * 7",
@@ -243,7 +245,20 @@ test("renders a structured workbench transcript with markdown and code blocks", 
   await expect(page.getByRole("article", { name: "Cortex message" }).getByText("Cortex")).toBeVisible();
   await expect(page.getByRole("article", { name: "Your message" }).getByText("You")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Result", level: 1 })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "42" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Aspect" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Shape" })).toBeVisible();
+  const tableLayout = await page.locator(".markdown-table-wrap table").evaluate((node) => {
+    const firstRow = node.querySelector("tr");
+    const firstCell = firstRow?.firstElementChild;
+    return {
+      firstColumnWidth: firstCell?.getBoundingClientRect().width ?? 0,
+      tableWidth: node.getBoundingClientRect().width,
+      wrapperWidth: node.parentElement?.getBoundingClientRect().width ?? 0,
+      wrapperScrollWidth: node.parentElement?.scrollWidth ?? 0,
+    };
+  });
+  expect(tableLayout.firstColumnWidth).toBeGreaterThan(120);
+  expect(tableLayout.wrapperScrollWidth).toBeGreaterThanOrEqual(tableLayout.wrapperWidth);
   await expect(page.getByRole("button", { name: "Copy python code" })).toBeVisible();
   await expect(page.getByText("Reasoning")).toBeVisible();
   await expect(page.getByText("Sources")).toBeVisible();
