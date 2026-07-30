@@ -149,6 +149,30 @@ def _run(command: list[str], *, cwd: Path) -> None:
         ) from exc
 
 
+def _stage_frontend_source(frontend_root: Path) -> Path:
+    """Copy build inputs beside the source tree so live installs stay untouched."""
+    staging = frontend_root.parent / f".cortex-frontend-build-{uuid.uuid4().hex}"
+    try:
+        shutil.copytree(
+            frontend_root,
+            staging,
+            ignore=shutil.ignore_patterns(
+                "node_modules",
+                "dist",
+                ".cortex-*",
+                "coverage",
+                "test-results",
+                "playwright-report",
+            ),
+        )
+    except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise FrontendBuildError(
+            "Could not stage frontend sources for an isolated build."
+        ) from exc
+    return staging
+
+
 def _install_if_needed(frontend_root: Path, expected_lock_digest: str) -> None:
     node_modules = frontend_root / "node_modules"
     marker = node_modules / INSTALL_MANIFEST_NAME
@@ -179,15 +203,15 @@ def build_frontend(
     lock = lock_digest(frontend_root)
     node_major = _major_version("node")
     npm_major = _major_version("npm")
-    _install_if_needed(frontend_root, lock)
-
-    staging = frontend_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
+    build_root = _stage_frontend_source(frontend_root)
+    staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
     dist = frontend_root / "dist"
     backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
     try:
+        _install_if_needed(build_root, lock)
         _run(
             [_tool_name("npm"), "run", "build", "--", "--outDir", str(staging)],
-            cwd=frontend_root,
+            cwd=build_root,
         )
         if not (staging / "index.html").is_file():
             raise FrontendBuildError("Frontend build completed without index.html.")
@@ -221,6 +245,8 @@ def build_frontend(
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+        if build_root.exists():
+            shutil.rmtree(build_root, ignore_errors=True)
         if backup.exists() and not dist.exists():
             os.replace(backup, dist)
 

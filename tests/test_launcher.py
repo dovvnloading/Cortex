@@ -431,6 +431,57 @@ def test_frontend_build_replaces_bundle_atomically_and_records_manifest(
     assert not list(root.glob(".cortex-dist-*"))
 
 
+def test_frontend_build_stages_sources_outside_live_node_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    installed_roots: list[Path] = []
+    monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
+
+    def fake_install(frontend_root: Path, _expected_lock_digest: str) -> None:
+        installed_roots.append(frontend_root)
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        assert installed_roots == [cwd]
+        assert cwd != root
+        assert (cwd / "src" / "App.tsx").is_file()
+        output = Path(command[-1])
+        output.mkdir(parents=True)
+        (output / "index.html").write_text("isolated", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_install_if_needed", fake_install)
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    dist = frontend_module.build_frontend(root)
+
+    assert dist == root / "dist"
+    assert (dist / "index.html").read_text(encoding="utf-8") == "isolated"
+    assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_frontend_install_failure_leaves_live_node_modules_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    live_install = root / "node_modules"
+    live_install.mkdir()
+    sentinel = live_install / "still-running.node"
+    sentinel.write_bytes(b"live")
+    monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
+
+    def fail_run(_command: list[str], *, cwd: Path) -> None:
+        assert cwd != root
+        raise FrontendBuildError("synthetic npm failure")
+
+    monkeypatch.setattr(frontend_module, "_run", fail_run)
+
+    with pytest.raises(FrontendBuildError, match="synthetic npm failure"):
+        frontend_module.build_frontend(root)
+
+    assert sentinel.read_bytes() == b"live"
+    assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
 def test_frontend_build_failure_preserves_existing_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

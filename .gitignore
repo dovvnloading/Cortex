@@ -18,6 +18,7 @@ frontend/coverage/
 frontend/test-results/
 frontend/playwright-report/
 frontend/.cortex-*
+/.cortex-frontend-build-*/
 
 # Local application data
 *.sqlite
