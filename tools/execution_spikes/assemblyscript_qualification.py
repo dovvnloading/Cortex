@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,6 +22,7 @@ from uuid import uuid4
 
 
 VERSION = "0.28.19"
+BLOCKED = "blocked"
 TARBALL_SHA512 = (
     "C8E02501BF44B2B234D2851A7FAA944ED4DC61879E946DA20B77F52E7038E575"
     "1E4A532BA763B6145E4B963E0FF98F3866222587F722104A4E68FC3098E2AAF2"

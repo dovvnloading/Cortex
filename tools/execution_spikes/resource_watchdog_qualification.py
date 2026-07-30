@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "tools" / "execution_spikes"))
 
-from cortex_backend.execution.resource_accounting import (
+from cortex_backend.execution.resource_accounting import (  # noqa: E402
     ResourceAccountingError,
     ResourceBudget,
     ResourceGovernor,

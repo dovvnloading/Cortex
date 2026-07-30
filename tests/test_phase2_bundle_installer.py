@@ -146,7 +146,7 @@ def test_rollback_requires_explicit_authorization_and_recovery_is_explicit(tmp_p
     source = tmp_path / "incoming"
     installer = SignedBundleInstaller(tmp_path / "store", keys)
     _source(source, b"version one")
-    first = installer.install(
+    installer.install(
         _payload(signer, content=b"version one"),
         source,
     )
