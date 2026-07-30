@@ -45,6 +45,20 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByRole("button", { name: "Dismiss completed background task notification" })).toBeVisible();
   });
 
+  it("groups repeated completed task notifications into one row", () => {
+    render(
+      <ExecutionTaskTray
+        tasks={[
+          { ...task, status: "succeeded", can_cancel: false, message: "Chat attachment staged." },
+          { ...task, job_id: "job-2", status: "succeeded", can_cancel: false, message: "Chat attachment staged." },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("2 × Chat attachment staged.")).toBeVisible();
+  });
+
   it("renders pending approval as a non-modal action card without a spinner", async () => {
     const user = userEvent.setup();
     let finishDecision: (() => void) | undefined;
