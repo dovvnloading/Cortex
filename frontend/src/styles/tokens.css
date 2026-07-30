@@ -351,12 +351,12 @@ a { color: inherit; text-decoration: none; }
 .composer-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-attachment-remove { display: inline-grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--text-faint); }
 .composer-attachment-remove:hover:not(:disabled), .composer-attachment-remove:focus-visible { background: var(--surface-hover); color: var(--text); outline: 0; }
-.composer-utility-row { grid-column: 1; grid-row: 4; display: flex; align-items: center; min-width: 0; gap: 7px; overflow: hidden; }
+.composer-utility-row { grid-column: 1; grid-row: 4; display: flex; align-items: center; min-width: 0; gap: 7px; overflow: visible; }
 .composer-attachment-button { display: inline-grid; flex: 0 0 27px; place-items: center; width: 27px; height: 27px; border-radius: 7px; color: var(--text-faint); cursor: pointer; }
 .composer-attachment-button:hover, .composer-attachment-button:focus-within { background: var(--surface-soft); color: var(--text); }
 .composer-attachment-button-busy { cursor: wait; color: var(--accent); }
 .composer-attachment-message { grid-column: 1; grid-row: 3; align-self: center; min-width: 0; max-width: calc(100% - 4px); overflow: hidden; padding: 0 4px; color: var(--danger); font-size: 0.7rem; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-.composer-model-control { display: flex; flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: hidden; }
+.composer-model-control { display: flex; flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: visible; }
 .composer-meta { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: 100%; gap: 8px; margin-left: auto; overflow: hidden; }
 .composer-primary-control { grid-column: 2; grid-row: 1 / span 4; align-self: end; justify-self: end; display: inline-grid; place-items: center; width: 36px; height: 36px; margin-bottom: 0; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-soft); color: var(--text-faint); box-shadow: none; transition: background 160ms ease, border-color 160ms ease, color 160ms ease; }
 .composer-primary-control-ready { border-color: var(--accent); background: var(--accent); color: #fff; }
