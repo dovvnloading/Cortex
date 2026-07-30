@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import type { ChatResponse, ChatSummary, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -8,6 +7,7 @@ import { LocalSetup } from "../components/LocalSetup";
 import { Onboarding } from "../components/Onboarding";
 import { SettingsPanel, type SettingsPanelProps } from "../components/SettingsPanel";
 import { localModelNames } from "../lib/localModels";
+import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
@@ -58,6 +58,8 @@ export function App({ api: providedApi }: Props) {
 
 function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onSessionExpired: () => void }) {
   const { notify } = useToast();
+  const pathname = usePathname();
+  const route = parseAppRoute(pathname);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemResponse | null>(null);
@@ -110,6 +112,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const resolved = theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : theme === "system" ? "light" : theme;
     document.documentElement.dataset.theme = resolved;
   }, [theme]);
+
+  useEffect(() => {
+    if (route.kind === "not-found") navigate("/chat/new", { replace: true });
+  }, [route.kind]);
 
   useEffect(() => {
     if (!system?.execution_preview_available) {
@@ -289,16 +295,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   }
 
   return (
-    <BrowserRouter>
-      <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
-        <Routes>
-          <Route path="/settings" element={<SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />} />
-          <Route path="/chat/new" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
-          <Route path="/chat/:threadId" element={<ChatRoute api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />} />
-          <Route path="*" element={<Navigate to="/chat/new" replace />} />
-        </Routes>
-      </AppShell>
-    </BrowserRouter>
+    <AppShell chats={chats} activeChatId={activeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onSelectChat={setActiveChatId} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      {route.kind === "settings"
+        ? <SettingsRoute activeChatId={activeChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />
+        : <ChatRoute threadId={route.kind === "chat" ? route.threadId : null} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} onForked={(chat) => { setActiveChatId(chat.id); updateChatSummary(setChats, chat); }} />}
+    </AppShell>
   );
 }
 
@@ -314,10 +315,9 @@ function updateModelProgress(
   setProgress({ model, status, percent });
 }
 
-function ChatRoute({ api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onChatChanged, onForked }: { api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
-  const { threadId } = useParams();
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onChatChanged, onForked }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void }) {
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId ?? null} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(`/chat/${id}`, { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(`/chat/${chat.id}`); }} />;
+  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} />;
 }
 
 function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {

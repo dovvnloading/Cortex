@@ -1,6 +1,5 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { BrowserRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatSummary, ModelResponse } from "../../../contracts/cortex-api";
 import { AppShell } from "./AppShell";
@@ -10,7 +9,6 @@ describe("AppShell", () => {
     const chat: ChatSummary = { id: "chat-1", title: "**AI Purpose Explained**", timestamp: "2026-01-01T00:00:00Z" };
 
     render(
-      <BrowserRouter>
         <AppShell
           chats={[chat]}
           activeChatId={chat.id}
@@ -21,8 +19,7 @@ describe("AppShell", () => {
           onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
         >
           <div>Chat content</div>
-        </AppShell>
-      </BrowserRouter>,
+        </AppShell>,
     );
 
     expect(screen.getByRole("heading", { name: "AI Purpose Explained" })).toBeVisible();
@@ -36,7 +33,6 @@ describe("AppShell", () => {
     const onSelectChat = vi.fn();
 
     render(
-      <BrowserRouter>
         <AppShell
           chats={[chat]}
           activeChatId={chat.id}
@@ -47,8 +43,7 @@ describe("AppShell", () => {
           onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
         >
           <div>Chat content</div>
-        </AppShell>
-      </BrowserRouter>,
+        </AppShell>,
     );
 
     await user.click(screen.getByRole("button", { name: "New thread" }));
@@ -62,7 +57,6 @@ describe("AppShell", () => {
     const onDeleteChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue();
 
     render(
-      <BrowserRouter>
         <AppShell
           chats={[chat]}
           activeChatId={chat.id}
@@ -73,8 +67,7 @@ describe("AppShell", () => {
           onDeleteChat={onDeleteChat}
         >
           <div>Chat content</div>
-        </AppShell>
-      </BrowserRouter>,
+        </AppShell>,
     );
 
     await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
