@@ -11,7 +11,7 @@ type Props = {
   activeChatId: string | null;
   modelConnection: ModelResponse["connection"];
   theme: "light" | "dark" | "system";
-  onSelectChat: (id: string | null) => void;
+  onOpenSettings: () => void;
   onRenameChat: (id: string, title: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
   executionTasks?: ExecutionTaskSummary[];
@@ -25,7 +25,7 @@ export function AppShell({
   activeChatId,
   modelConnection,
   theme,
-  onSelectChat,
+  onOpenSettings,
   onRenameChat,
   onDeleteChat,
   executionTasks = [],
@@ -63,13 +63,11 @@ export function AppShell({
   }, []);
 
   const createChat = () => {
-    onSelectChat(null);
     navigate("/chat/new");
     closeSidebarOnCompactLayout();
   };
 
   const selectChat = (id: string) => {
-    onSelectChat(id);
     navigate(chatPath(id));
     closeSidebarOnCompactLayout();
   };
@@ -102,6 +100,7 @@ export function AppShell({
             aria-label="Settings"
             aria-current={isSettings ? "page" : undefined}
             title={modelConnection?.message ?? "Settings"}
+            onClick={onOpenSettings}
           >
             <Settings aria-hidden="true" size={17} />
             <span className={`connection-indicator ${modelConnection?.success ? "connection-connected" : "connection-error"}`} aria-hidden="true" />
