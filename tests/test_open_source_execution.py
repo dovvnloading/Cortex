@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 import time
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -20,6 +21,33 @@ from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaS
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
+INSTALLATION_PRINCIPAL_ID = "a" * 64
+
+
+class _ImmediateScratchCoordinator:
+    """Deterministic coordinator seam for generation-observation coverage."""
+
+    scratch_available = True
+
+    def __init__(self) -> None:
+        self.repository = SimpleNamespace(
+            installation_principal_id=INSTALLATION_PRINCIPAL_ID
+        )
+        self.request = None
+        self.wait_timeout: float | None = None
+        self.closed = False
+
+    def start_scratch(self, request):
+        self.request = request
+        return SimpleNamespace(job_id="automatic-scratch")
+
+    def wait(self, job_id: str, *, timeout: float):
+        assert job_id == "automatic-scratch"
+        self.wait_timeout = timeout
+        return SimpleNamespace(status="succeeded", result={"value": "81"})
+
+    def shutdown(self) -> None:
+        self.closed = True
 
 
 def _session(client: TestClient, app) -> dict[str, str]:
@@ -147,10 +175,11 @@ def test_local_profile_runs_scratch_and_fixed_image_recipe_end_to_end(tmp_path):
         assert download.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_explicit_math_request_adds_a_verified_local_observation_to_generation(tmp_path):
+def test_explicit_math_request_adds_a_verified_local_observation_to_generation():
     state = FakeOllamaState()
     dependencies = build_demo_dependencies(ollama_state=state)
     captured = []
+    coordinator = _ImmediateScratchCoordinator()
     dependencies.generation = GenerationService(
         history_loader=lambda thread_id: (dependencies.chats.get_chat(thread_id) or {}).get(
             "messages", []
@@ -159,15 +188,11 @@ def test_explicit_math_request_adds_a_verified_local_observation_to_generation(t
         engine_factory=lambda snapshot: captured.append(snapshot)
         or FakeGenerationEngine(state),
     )
-    repository = ExecutionRepository(
-        tmp_path / "execution.sqlite",
-        tmp_path / "artifacts",
-    )
     app = create_app(
         dependencies,
         allowed_hosts=ALLOWED_HOSTS,
-        execution_lifecycle=build_execution_lifecycle(repository, profile="local"),
-        installation_principal_id=repository.installation_principal_id,
+        execution_coordinator=coordinator,
+        installation_principal_id=INSTALLATION_PRINCIPAL_ID,
     )
     with TestClient(app) as client:
         headers = _session(client, app)
@@ -189,4 +214,8 @@ def test_explicit_math_request_adds_a_verified_local_observation_to_generation(t
             raise AssertionError("generation did not finish")
     assert generation.json()["status"] == "succeeded"
     assert captured
+    assert coordinator.request is not None
+    assert coordinator.request.expression == "9 * 9"
+    assert coordinator.wait_timeout is not None
+    assert coordinator.closed is True
     assert "9 * 9 = 81" in (captured[0].user_system_instructions or "")
