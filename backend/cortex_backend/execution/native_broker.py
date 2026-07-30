@@ -22,7 +22,7 @@ import secrets
 import struct
 import sys
 from time import sleep
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -850,13 +850,14 @@ class NativeBrokerServer:
                 server_pid=os.getpid(),
                 client_pid=peer.process_id,
             )
-            authorization = lambda message: authorize_message(
-                message,
-                peer=peer,
-                peer_policy=self.config.peer_policy,
-                expected_principal_id=expected_principal_id,
-                owner_for_job=owner_for_job,
-            )
+            def authorization(message: BrokerMessage) -> None:
+                authorize_message(
+                    message,
+                    peer=peer,
+                    peer_policy=self.config.peer_policy,
+                    expected_principal_id=expected_principal_id,
+                    owner_for_job=owner_for_job,
+                )
             pipe = _PipeIO(win, handle)
             return NativeBrokerConnection(
                 pipe,
@@ -935,11 +936,12 @@ class NativeBrokerClient:
             # The client cannot safely invent a server token identity. The pipe
             # DACL and expected server PID bind the transport; responses are then
             # bound to the trusted installation/job without a fake PeerIdentity.
-            authorization = lambda message: _authorize_principal_and_owner(
-                message,
-                expected_principal_id=expected_principal_id,
-                owner_for_job=owner_for_job,
-            )
+            def authorization(message: BrokerMessage) -> None:
+                _authorize_principal_and_owner(
+                    message,
+                    expected_principal_id=expected_principal_id,
+                    owner_for_job=owner_for_job,
+                )
             return NativeBrokerConnection(
                 pipe,
                 peer=None,

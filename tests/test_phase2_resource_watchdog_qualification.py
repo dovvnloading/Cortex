@@ -6,7 +6,8 @@ import tools.execution_spikes.resource_watchdog_qualification as qualification
 
 
 def test_resource_watchdog_report_is_reproducible_without_native_details(monkeypatch):
-    green = lambda: {"name": "native", "status": "pass"}
+    def green():
+        return {"name": "native", "status": "pass"}
     monkeypatch.setattr(qualification, "_native_job_accounting", green)
     monkeypatch.setattr(qualification, "_native_tree_reaping", green)
 

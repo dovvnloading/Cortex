@@ -188,7 +188,7 @@ class GenerationServiceTests(unittest.TestCase):
             engine_factory=lambda snapshot: engine,
         )
 
-        result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+        service.generate(_snapshot(), progress_sink=_ProgressRecorder())
 
         self.assertIsNone(engine.title_history)
 

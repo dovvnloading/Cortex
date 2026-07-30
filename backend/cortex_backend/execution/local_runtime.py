@@ -15,7 +15,7 @@ validated output.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 import json
 import multiprocessing
 from threading import Event, Lock, Thread
