@@ -135,6 +135,7 @@ class RenameChatRequest(APIModel):
 class AddMessageRequest(APIModel):
     role: ChatRole
     content: str = Field(min_length=1, max_length=100_000)
+    base_revision: int | None = Field(default=None, ge=0)
     sources: list[Any] | None = None
     thoughts: str | None = Field(default=None, max_length=100_000)
     attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
@@ -460,6 +461,7 @@ class RegenerationRequest(APIModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     message_id: str = Field(min_length=1, max_length=200)
     user_input: str | None = Field(default=None, max_length=100_000)
+    base_revision: int | None = Field(default=None, ge=0)
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
 
 

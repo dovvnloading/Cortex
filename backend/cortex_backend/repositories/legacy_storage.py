@@ -339,15 +339,18 @@ class DatabaseManager:
         thoughts: str | None = None,
         attachments: list | None = None,
         thread_title: str | None = None,
+        expected_revision: int | None = None,
     ):
         """Adds a new message to a specific chat thread."""
         try:
             with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 if thread_title is not None:
                     conn.execute(
                         "INSERT OR IGNORE INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
                         (thread_id, thread_title, _utc_now().isoformat()),
                     )
+                self._check_chat_revision(conn, thread_id, expected_revision)
                 conn.execute("""
                     INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -367,11 +370,35 @@ class DatabaseManager:
                 )
                 return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         except PersistenceError as exc:
+            if exc.operation == "chat_revision_conflict":
+                raise
             raise PersistenceError(
                 f"Failed to add message to thread {thread_id}.",
                 operation="add_message",
                 cause=exc,
             ) from exc
+
+    @staticmethod
+    def _check_chat_revision(
+        conn: sqlite3.Connection,
+        thread_id: str,
+        expected_revision: int | None,
+    ) -> None:
+        if expected_revision is None:
+            return
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        actual_revision = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()[0]
+        )
+        if actual_revision != expected_revision:
+            raise PersistenceError(
+                f"Chat revision changed (expected {expected_revision}, found {actual_revision}).",
+                operation="chat_revision_conflict",
+            )
 
     def load_chat(self, thread_id: str) -> dict | None:
         """Loads a full chat thread (metadata and messages) from the database."""
@@ -457,10 +484,13 @@ class DatabaseManager:
         sources: list | None = None,
         thoughts: str | None = None,
         attachments: list | None = None,
+        expected_revision: int | None = None,
     ) -> None:
         """Replace one assistant response without disturbing its user turn."""
         try:
             with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._check_chat_revision(conn, thread_id, expected_revision)
                 cursor = conn.execute(
                     """
                     UPDATE messages
@@ -487,6 +517,8 @@ class DatabaseManager:
                     (_utc_now().isoformat(), thread_id),
                 )
         except PersistenceError as exc:
+            if exc.operation == "chat_revision_conflict":
+                raise
             raise PersistenceError(
                 f"Failed to replace message {message_id}.",
                 operation="replace_message",

@@ -3,6 +3,7 @@
 from .chats import (
     ChatRepository,
     ChatRepositoryError,
+    ChatRevisionConflict,
     InMemoryChatRepository,
     LegacyDatabaseChatRepository,
 )
@@ -24,6 +25,7 @@ from .settings import (
 __all__ = [
     "ChatRepository",
     "ChatRepositoryError",
+    "ChatRevisionConflict",
     "InMemoryChatRepository",
     "LegacyDatabaseChatRepository",
     "MemoryRepository",

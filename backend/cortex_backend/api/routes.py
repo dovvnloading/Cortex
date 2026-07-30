@@ -27,7 +27,7 @@ from cortex_backend.services.chat import (
     title_from_first_message,
 )
 from cortex_backend.core.settings import CortexSettings
-from cortex_backend.repositories.chats import ChatRepositoryError
+from cortex_backend.repositories.chats import ChatRepositoryError, ChatRevisionConflict
 from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.services.attachments import (
@@ -347,10 +347,13 @@ def build_router() -> APIRouter:
                 thoughts=payload.thoughts,
                 attachments=[attachment.model_dump(mode="json") for attachment in attachment_refs],
                 thread_title="New Chat" if existing is None else None,
+                expected_revision=payload.base_revision,
             )
             chat = deps.chats.get_chat(thread_id)
         except ChatAttachmentError as exc:
             _raise_chat_attachment_error(exc)
+        except ChatRevisionConflict as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ChatDomainError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except Exception as exc:
@@ -1133,11 +1136,19 @@ def build_router() -> APIRouter:
                         raise ChatDomainError(
                             "A regeneration request needs user input."
                         )
+                    current_revision = chat_revision(chat)
+                    if (
+                        payload.base_revision is not None
+                        and payload.base_revision != current_revision
+                    ):
+                        raise ChatDomainError(
+                            "This chat changed. Reload it before regenerating."
+                        )
                     generation_payload = GenerationRequest(
                         request_id=payload.request_id,
                         thread_id=thread_id,
                         user_input=user_input,
-                        base_revision=chat_revision(chat),
+                        base_revision=current_revision,
                         attachments=payload.attachments,
                     )
                     snapshot, _ = await _start_generation_job(
@@ -1163,6 +1174,8 @@ def build_router() -> APIRouter:
                 detail=str(exc),
             ) from exc
         except JobConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ChatRevisionConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ChatDomainError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1424,6 +1437,7 @@ async def _start_generation_job(
     try:
         chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
         current_revision = chat_revision(chat) if chat is not None else 0
+        admission_revision = current_revision
         if (
             payload.base_revision is not None
             and current_revision != payload.base_revision
@@ -1475,18 +1489,16 @@ async def _start_generation_job(
         )
 
         user_message_id: str | None = None
+        prepared_revision: int | None = None
         prepared_history = history_messages
 
         def prepare() -> Mapping[str, Any]:
-            nonlocal prepared_history, user_message_id
+            nonlocal prepared_history, prepared_revision, user_message_id
             current_chat = deps.chats.get_chat(thread_id)
             current_revision = (
                 chat_revision(current_chat) if current_chat is not None else 0
             )
-            if (
-                payload.base_revision is not None
-                and current_revision != payload.base_revision
-            ):
+            if current_revision != admission_revision:
                 raise ChatDomainError(
                     "This chat changed. Reload it before generating again."
                 )
@@ -1510,6 +1522,7 @@ async def _start_generation_job(
                         "The selected response has no user turn to regenerate."
                     )
                 prepared_history = current_messages[:target_position]
+                prepared_revision = current_revision
             else:
                 user_message_id = deps.chats.add_message(
                     thread_id,
@@ -1520,7 +1533,12 @@ async def _start_generation_job(
                         for attachment in attachment_refs
                     ],
                     thread_title="New Chat" if current_chat is None else None,
+                    expected_revision=admission_revision,
                 )
+                updated_chat = deps.chats.get_chat(thread_id)
+                if updated_chat is None:
+                    raise ChatRepositoryError("Chat did not persist the user message.")
+                prepared_revision = chat_revision(updated_chat)
             return {"user_message_id": user_message_id}
 
         def runner(sink, cancel_event):
@@ -1568,6 +1586,7 @@ async def _start_generation_job(
                     "assistant",
                     result.response,
                     thoughts=result.thoughts,
+                    expected_revision=prepared_revision,
                 )
             else:
                 deps.chats.replace_message(
@@ -1575,6 +1594,7 @@ async def _start_generation_job(
                     target_message_id,
                     result.response,
                     thoughts=result.thoughts,
+                    expected_revision=prepared_revision,
                 )
                 assistant_message_id = target_message_id
 
