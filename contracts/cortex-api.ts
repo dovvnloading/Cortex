@@ -8,6 +8,7 @@ export interface AddMemoryRequest {
 export interface AddMessageRequest {
   role: "user" | "assistant" | "system";
   content: string;
+  base_revision?: number | null;
   sources?: Array<unknown> | null;
   thoughts?: string | null;
   attachments?: Array<ChatAttachment> | null;
@@ -326,6 +327,7 @@ export interface RegenerationRequest {
   request_id?: string | null;
   message_id: string;
   user_input?: string | null;
+  base_revision?: number | null;
   attachments?: Array<ChatAttachment>;
 }
 

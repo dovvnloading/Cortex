@@ -35,6 +35,18 @@
             ],
             "title": "Attachments"
           },
+          "base_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Revision"
+          },
           "content": {
             "maxLength": 100000,
             "minLength": 1,
@@ -1935,6 +1947,18 @@
             "maxItems": 8,
             "title": "Attachments",
             "type": "array"
+          },
+          "base_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Revision"
           },
           "message_id": {
             "maxLength": 200,

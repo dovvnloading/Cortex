@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any, Protocol
 
 
 class ChatRepositoryError(RuntimeError):
     """Safe failure raised by a chat repository."""
+
+
+class ChatRevisionConflict(ChatRepositoryError):
+    """The chat changed after the caller read its expected revision."""
 
 
 class ChatRepository(Protocol):
@@ -30,6 +35,7 @@ class ChatRepository(Protocol):
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
         thread_title: str | None = None,
+        expected_revision: int | None = None,
     ) -> str: ...
 
     def rename_chat(self, thread_id: str, title: str) -> None: ...
@@ -47,6 +53,7 @@ class ChatRepository(Protocol):
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        expected_revision: int | None = None,
     ) -> None: ...
 
 
@@ -68,7 +75,12 @@ class LegacyDatabaseChatRepository:
     def add_message(
         self, thread_id: str, role: str, content: str, **kwargs: Any
     ) -> str:
-        result = self._database.add_message(thread_id, role, content, **kwargs)
+        try:
+            result = self._database.add_message(thread_id, role, content, **kwargs)
+        except Exception as exc:
+            if getattr(exc, "operation", None) == "chat_revision_conflict":
+                raise ChatRevisionConflict(str(exc)) from exc
+            raise
         if result is None:
             chat = self._database.load_chat(thread_id) or {}
             messages = chat.get("messages", [])
@@ -108,21 +120,29 @@ class LegacyDatabaseChatRepository:
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        expected_revision: int | None = None,
     ) -> None:
-        self._database.replace_message(
-            thread_id,
-            int(message_id),
-            content,
-            sources=sources,
-            thoughts=thoughts,
-            attachments=attachments,
-        )
+        try:
+            self._database.replace_message(
+                thread_id,
+                int(message_id),
+                content,
+                sources=sources,
+                thoughts=thoughts,
+                attachments=attachments,
+                expected_revision=expected_revision,
+            )
+        except Exception as exc:
+            if getattr(exc, "operation", None) == "chat_revision_conflict":
+                raise ChatRevisionConflict(str(exc)) from exc
+            raise
 
 
 class InMemoryChatRepository:
     """Deterministic repository used by factory and API tests."""
 
     def __init__(self, chats: list[dict[str, Any]] | None = None):
+        self._lock = RLock()
         self._chats: dict[str, dict[str, Any]] = {}
         self._next_message_id = 1
         for chat in chats or []:
@@ -153,28 +173,45 @@ class InMemoryChatRepository:
         return datetime.now(timezone.utc).isoformat()
 
     def list_summaries(self) -> list[dict[str, Any]]:
-        return [
-            {key: chat.get(key) for key in ("id", "title", "timestamp")}
-            for chat in sorted(
-                self._chats.values(),
-                key=lambda item: str(item.get("timestamp", "")),
-                reverse=True,
-            )
-        ]
+        with self._lock:
+            return [
+                {key: chat.get(key) for key in ("id", "title", "timestamp")}
+                for chat in sorted(
+                    self._chats.values(),
+                    key=lambda item: str(item.get("timestamp", "")),
+                    reverse=True,
+                )
+            ]
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
-        chat = self._chats.get(thread_id)
-        return deepcopy(chat) if chat is not None else None
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            return deepcopy(chat) if chat is not None else None
 
     def create_chat(self, thread_id: str, title: str) -> None:
-        if thread_id in self._chats:
-            raise ChatRepositoryError("Chat already exists.")
-        self._chats[thread_id] = {
-            "id": thread_id,
-            "title": title,
-            "timestamp": self._timestamp(),
-            "messages": [],
-        }
+        with self._lock:
+            if thread_id in self._chats:
+                raise ChatRepositoryError("Chat already exists.")
+            self._chats[thread_id] = {
+                "id": thread_id,
+                "title": title,
+                "timestamp": self._timestamp(),
+                "messages": [],
+            }
+
+    @staticmethod
+    def _check_expected_revision(
+        chat: dict[str, Any], expected_revision: int | None
+    ) -> None:
+        if expected_revision is None:
+            return
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        actual_revision = len(chat.get("messages", ()))
+        if actual_revision != expected_revision:
+            raise ChatRevisionConflict(
+                f"Chat revision changed (expected {expected_revision}, found {actual_revision})."
+            )
 
     def add_message(
         self,
@@ -186,63 +223,73 @@ class InMemoryChatRepository:
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
         thread_title: str | None = None,
+        expected_revision: int | None = None,
     ) -> str:
-        chat = self._chats.get(thread_id)
-        if chat is None:
-            if thread_title is None:
-                raise ChatRepositoryError("Chat does not exist.")
-            self.create_chat(thread_id, thread_title)
-            chat = self._chats[thread_id]
-        message_id = self._new_message_id()
-        chat["messages"].append(
-            {
-                "id": message_id,
-                "role": role,
-                "content": content,
-                "timestamp": self._timestamp(),
-                "sources": deepcopy(sources),
-                "thoughts": thoughts,
-                "attachments": deepcopy(attachments),
-            }
-        )
-        chat["timestamp"] = self._timestamp()
-        return message_id
-
-    def rename_chat(self, thread_id: str, title: str) -> None:
-        chat = self._chats.get(thread_id)
-        if chat is None:
-            raise ChatRepositoryError("Chat does not exist.")
-        chat["title"] = title
-        chat["timestamp"] = self._timestamp()
-
-    def delete_chat(self, thread_id: str) -> None:
-        self._chats.pop(thread_id, None)
-
-    def fork_chat(self, thread_id: str, message_id: str, new_thread_id: str) -> None:
-        source = self._chats.get(thread_id)
-        if source is None:
-            raise ChatRepositoryError("Chat does not exist.")
-        try:
-            position = next(
-                index for index, item in enumerate(source["messages"])
-                if str(item.get("id")) == str(message_id)
-            )
-        except StopIteration as exc:
-            raise ChatRepositoryError("Message does not exist.") from exc
-        copied = deepcopy(source)
-        copied["id"] = new_thread_id
-        copied["title"] = f"Fork of {source.get('title') or 'Untitled Chat'}"
-        copied["timestamp"] = self._timestamp()
-        copied["messages"] = []
-        for message in source["messages"][: position + 1]:
-            copied["messages"].append(
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                if expected_revision not in (None, 0):
+                    raise ChatRevisionConflict(
+                        f"Chat revision changed (expected {expected_revision}, found 0)."
+                    )
+                if thread_title is None:
+                    raise ChatRepositoryError("Chat does not exist.")
+                self.create_chat(thread_id, thread_title)
+                chat = self._chats[thread_id]
+            self._check_expected_revision(chat, expected_revision)
+            message_id = self._new_message_id()
+            chat["messages"].append(
                 {
-                    **deepcopy(message),
-                    "id": self._new_message_id(),
+                    "id": message_id,
+                    "role": role,
+                    "content": content,
                     "timestamp": self._timestamp(),
+                    "sources": deepcopy(sources),
+                    "thoughts": thoughts,
+                    "attachments": deepcopy(attachments),
                 }
             )
-        self._chats[new_thread_id] = copied
+            chat["timestamp"] = self._timestamp()
+            return message_id
+
+    def rename_chat(self, thread_id: str, title: str) -> None:
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                raise ChatRepositoryError("Chat does not exist.")
+            chat["title"] = title
+            chat["timestamp"] = self._timestamp()
+
+    def delete_chat(self, thread_id: str) -> None:
+        with self._lock:
+            self._chats.pop(thread_id, None)
+
+    def fork_chat(self, thread_id: str, message_id: str, new_thread_id: str) -> None:
+        with self._lock:
+            source = self._chats.get(thread_id)
+            if source is None:
+                raise ChatRepositoryError("Chat does not exist.")
+            try:
+                position = next(
+                    index for index, item in enumerate(source["messages"])
+                    if str(item.get("id")) == str(message_id)
+                )
+            except StopIteration as exc:
+                raise ChatRepositoryError("Message does not exist.") from exc
+            copied = deepcopy(source)
+            copied["id"] = new_thread_id
+            copied["title"] = f"Fork of {source.get('title') or 'Untitled Chat'}"
+            copied["timestamp"] = self._timestamp()
+            copied["messages"] = []
+            for message in source["messages"][: position + 1]:
+                copied["messages"].append(
+                    {
+                        **deepcopy(message),
+                        "id": self._new_message_id(),
+                        "timestamp": self._timestamp(),
+                    }
+                )
+            self._chats[new_thread_id] = copied
 
     def replace_message(
         self,
@@ -253,22 +300,25 @@ class InMemoryChatRepository:
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        expected_revision: int | None = None,
     ) -> None:
-        chat = self._chats.get(thread_id)
-        if chat is None:
-            raise ChatRepositoryError("Chat does not exist.")
-        for message in chat["messages"]:
-            if str(message.get("id")) == str(message_id):
-                if message.get("role") != "assistant":
-                    raise ChatRepositoryError("Only assistant messages can be replaced.")
-                message.update(
-                    content=content,
-                    sources=deepcopy(sources),
-                    thoughts=thoughts,
-                    timestamp=self._timestamp(),
-                )
-                if attachments is not None:
-                    message["attachments"] = deepcopy(attachments)
-                chat["timestamp"] = self._timestamp()
-                return
-        raise ChatRepositoryError("Message does not exist.")
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                raise ChatRepositoryError("Chat does not exist.")
+            self._check_expected_revision(chat, expected_revision)
+            for message in chat["messages"]:
+                if str(message.get("id")) == str(message_id):
+                    if message.get("role") != "assistant":
+                        raise ChatRepositoryError("Only assistant messages can be replaced.")
+                    message.update(
+                        content=content,
+                        sources=deepcopy(sources),
+                        thoughts=thoughts,
+                        timestamp=self._timestamp(),
+                    )
+                    if attachments is not None:
+                        message["attachments"] = deepcopy(attachments)
+                    chat["timestamp"] = self._timestamp()
+                    return
+            raise ChatRepositoryError("Message does not exist.")
