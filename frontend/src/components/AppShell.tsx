@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Pencil, Plus, Settings, Trash2 } from "lucide-react";
 import type { ChatSummary, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../contracts/cortex-api";
 import { displayChatTitle } from "../lib/chatTitle";
+import { chatPath, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
+import { NavigationLink } from "./NavigationLink";
 
 type Props = {
   chats: ChatSummary[];
@@ -33,12 +34,12 @@ export function AppShell({
   children,
 }: Props) {
   const navigate = useNavigate();
-  const location = useLocation();
+  const pathname = usePathname();
   const [sidebarVisible, setSidebarVisible] = useState(() => !isCompactWindow());
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
 
-  const isSettings = location.pathname === "/settings";
+  const isSettings = parseAppRoute(pathname).kind === "settings";
   const activeTitle = isSettings
     ? "Settings"
     : activeChatId
@@ -69,7 +70,7 @@ export function AppShell({
 
   const selectChat = (id: string) => {
     onSelectChat(id);
-    navigate(`/chat/${id}`);
+    navigate(chatPath(id));
     closeSidebarOnCompactLayout();
   };
 
@@ -95,15 +96,16 @@ export function AppShell({
             <span className="runtime-status-dot" aria-hidden="true" />
             {modelConnection?.success ? "Ollama online" : "Ollama offline"}
           </span>
-          <NavLink
+          <NavigationLink
             to="/settings"
-            className={({ isActive }) => `window-control settings-control ${isActive ? "window-control-active" : ""}`}
+            className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}
             aria-label="Settings"
+            aria-current={isSettings ? "page" : undefined}
             title={modelConnection?.message ?? "Settings"}
           >
             <Settings aria-hidden="true" size={17} />
             <span className={`connection-indicator ${modelConnection?.success ? "connection-connected" : "connection-error"}`} aria-hidden="true" />
-          </NavLink>
+          </NavigationLink>
         </div>
       </header>
 
