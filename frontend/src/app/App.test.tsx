@@ -159,6 +159,12 @@ describe("App", () => {
       created_at: "2026-07-21T18:00:01Z",
       updated_at: "2026-07-21T18:00:02Z",
     };
+    const malformedTask = {
+      ...oldTask,
+      job_id: "malformed-attachment",
+      message: "Malformed legacy attachment staged.",
+      updated_at: "not-a-timestamp",
+    };
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
@@ -166,7 +172,7 @@ describe("App", () => {
       if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
       if (url.endsWith("/memories")) return json({ memos: [] });
       if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
-      if (url.includes("/execution/tasks")) return json({ tasks: [currentTask, oldTask] });
+      if (url.includes("/execution/tasks")) return json({ tasks: [currentTask, oldTask, malformedTask] });
       return json({ detail: "Unexpected test route." }, 404);
     });
 
@@ -174,5 +180,6 @@ describe("App", () => {
 
     expect(await screen.findByText("Current attachment staged.")).toBeVisible();
     expect(screen.queryByText("Old attachment staged.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Malformed legacy attachment staged.")).not.toBeInTheDocument();
   });
 });

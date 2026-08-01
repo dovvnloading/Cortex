@@ -2,7 +2,7 @@ import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatAttachment } from "../../../contracts/cortex-api";
+import type { ChatAttachment, CodeExecutionRequest } from "../../../contracts/cortex-api";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 
 function deferred<T>() {
@@ -25,6 +25,8 @@ function ComposerHarness({
   onAddAttachments,
   onRemoveAttachment,
   imageInputBlocked = null,
+  codeExecutionAvailable = false,
+  onRunCode,
 }: {
   initialValue?: string;
   phase?: ComposerPhase;
@@ -35,6 +37,8 @@ function ComposerHarness({
   onAddAttachments?: (files: File[]) => Promise<void> | void;
   onRemoveAttachment?: (attachmentId: string) => void;
   imageInputBlocked?: string | null;
+  codeExecutionAvailable?: boolean;
+  onRunCode?: (payload: CodeExecutionRequest) => Promise<void>;
 }) {
   const [value, setValue] = useState(initialValue);
   return (
@@ -48,6 +52,8 @@ function ComposerHarness({
       onAddAttachments={onAddAttachments}
       onRemoveAttachment={onRemoveAttachment}
       imageInputBlocked={imageInputBlocked}
+      codeExecutionAvailable={codeExecutionAvailable}
+      onRunCode={onRunCode}
       onValueChange={setValue}
       onSubmit={async () => {
         const accepted = await onSubmit();
@@ -188,5 +194,30 @@ describe("MessageComposer", () => {
     expect(screen.getByText("photo.png")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("cannot accept images");
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("keeps code permissions off by default and submits an explicit approval request", async () => {
+    const user = userEvent.setup();
+    const onRunCode = vi.fn<(payload: CodeExecutionRequest) => Promise<void>>().mockResolvedValue(undefined);
+    render(<ComposerHarness codeExecutionAvailable onRunCode={onRunCode} />);
+
+    await user.click(screen.getByRole("button", { name: "Prepare a local code task" }));
+    expect(screen.getByRole("region", { name: "Local code task" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Files capability" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Processes capability" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Network capability" })).not.toBeChecked();
+    expect(screen.getByText("No access")).toBeVisible();
+
+    await user.click(screen.getByRole("checkbox", { name: "Files capability" }));
+    expect(screen.getByRole("note")).toHaveTextContent("access your machine");
+    await user.click(screen.getByRole("button", { name: "Request approval" }));
+
+    await waitFor(() => expect(onRunCode).toHaveBeenCalledTimes(1));
+    expect(onRunCode.mock.calls[0][0]).toMatchObject({
+      language: "python",
+      intent_summary: "Run this local Python task",
+      capabilities: { filesystem: true, process: false, network: false },
+    });
+    expect(screen.queryByRole("region", { name: "Local code task" })).not.toBeInTheDocument();
   });
 });
