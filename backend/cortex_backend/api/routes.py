@@ -43,6 +43,12 @@ from cortex_backend.execution.attachment_staging import (
     AttachmentStagingService,
 )
 from cortex_backend.execution.artifact_boundary import ArtifactBoundary
+from cortex_backend.execution.code_execution import (
+    CODE_EXECUTION_PROFILE,
+    CodeCapabilities,
+    CodeExecutionError,
+    CodeExecutionRequest as CodeExecutionTaskRequest,
+)
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
@@ -81,6 +87,10 @@ from .schemas import (
     AttachmentStageRequest,
     ChatAttachment,
     ChatAttachmentStageRequest,
+    CodeCapabilitiesRequest,
+    CodeExecutionAccepted,
+    CodeExecutionRequest,
+    CodeExecutionSourceResponse,
     ExecutionAccepted,
     ExecutionApprovalDecisionRequest,
     ExecutionPreviewRequest,
@@ -195,6 +205,11 @@ def build_router() -> APIRouter:
                     "scratch_available",
                     False,
                 )
+            ),
+            code_execution_available=bool(
+                request.app.state.preview
+                and coordinator is not None
+                and getattr(coordinator, "code_execution_available", False)
             ),
             image_transform_available=bool(
                 request.app.state.preview
@@ -541,6 +556,59 @@ def build_router() -> APIRouter:
         )
 
     @router.post(
+        "/execution/code",
+        response_model=CodeExecutionAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_code_execution(
+        request: Request,
+        payload: CodeExecutionRequest,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> CodeExecutionAccepted:
+        """Queue one local Python run and pause until the user approves it."""
+
+        current_settings = _load_settings(dependencies(request))
+        if not current_settings.execution.code_execution_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Local code execution is disabled in Settings.",
+            )
+        coordinator = _code_coordinator(request)
+        try:
+            job = coordinator.start_code(
+                CodeExecutionTaskRequest(
+                    owner=_execution_owner(principal),
+                    request_id=payload.request_id,
+                    source=payload.source,
+                    intent_summary=payload.intent_summary,
+                    capabilities=payload.capabilities.to_runtime(),
+                )
+            )
+        except CodeExecutionError as exc:
+            detail = {
+                "request_conflict": "Code request conflicts with an existing request.",
+                "source_too_large": "Code is too large to run locally.",
+                "syntax_invalid": "The code could not be parsed safely.",
+                "syntax_not_allowed": "That code uses an unsupported construct.",
+            }.get(exc.code, "Code execution request is invalid.")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT if exc.code == "request_conflict" else status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=detail,
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Code execution request is invalid.") from exc
+        return CodeExecutionAccepted(
+            job_id=job.job_id,
+            request_id=job.request_id,
+            profile=CODE_EXECUTION_PROFILE,
+            status=job.status,
+            sequence=job.sequence,
+            approval_state=job.approval_state,
+            source_digest=str(job.payload.get("source_digest", "")),
+            capabilities=payload.capabilities,
+        )
+
+    @router.post(
         "/execution/recipe/image",
         response_model=RecipeImageTransformAccepted,
         status_code=status.HTTP_202_ACCEPTED,
@@ -741,6 +809,36 @@ def build_router() -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(repository, job)
+
+    @router.get(
+        "/execution/{job_id}/source",
+        response_model=CodeExecutionSourceResponse,
+    )
+    def execution_source(
+        job_id: str,
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> CodeExecutionSourceResponse:
+        repository = _execution_repository(request)
+        job = repository.get_job(job_id, owner=_execution_owner(principal))
+        if job is None or job.profile != CODE_EXECUTION_PROFILE:
+            raise HTTPException(status_code=404, detail="Code execution job not found.")
+        payload = job.payload
+        try:
+            capabilities = CodeCapabilitiesRequest.model_validate(payload.get("capabilities", {}))
+            source = str(payload["source"])
+            digest = str(payload["source_digest"])
+            intent = str(payload["intent_summary"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=500, detail="Code source metadata is unavailable.") from None
+        return CodeExecutionSourceResponse(
+            job_id=job.job_id,
+            language="python",
+            source=source,
+            source_digest=digest,
+            intent_summary=intent,
+            capabilities=capabilities,
+        )
 
     @router.post(
         "/execution/{job_id}/approval", response_model=ExecutionStatusResponse
@@ -1553,6 +1651,19 @@ async def _start_generation_job(
             # Keep those side effects behind explicit checkpoints as well.
             if cancel_event.is_set():
                 return {"cancelled": True}
+            code_execution_job_id = _queue_code_proposal(
+                request,
+                principal,
+                settings,
+                generation_snapshot.job_id,
+                result,
+            )
+            if code_execution_job_id:
+                sink.publish_progress(
+                    "code_approval",
+                    "A local code task is waiting for your approval.",
+                    data={"execution_job_id": code_execution_job_id},
+                )
             if result.thoughts:
                 for delta in _chunks(result.thoughts):
                     if cancel_event.is_set():
@@ -1649,6 +1760,7 @@ async def _start_generation_job(
                 "response": result.response,
                 "thoughts": result.thoughts,
                 "clear_requested": result.memory_command.clear_requested,
+                "code_execution_job_id": code_execution_job_id,
             }
 
         snapshot, acceptance = jobs.start_reserved(
@@ -1728,6 +1840,45 @@ async def _automatic_compute_observation(
         f"{expression} = {value}. Treat it as a reliable fact, explain it plainly, "
         "and do not claim to have run any other code."
     )
+
+
+def _queue_code_proposal(
+    request: Request,
+    principal: SessionPrincipal,
+    settings: CortexSettings,
+    generation_job_id: str,
+    result: Any,
+) -> str | None:
+    """Turn only a validated model proposal into a pending approval job."""
+
+    if not settings.execution.code_execution_enabled:
+        return None
+    proposal = getattr(result, "code_execution_proposal", None)
+    if proposal is None:
+        return None
+    coordinator = getattr(request.app.state, "execution_coordinator", None)
+    if (
+        coordinator is None
+        or not getattr(coordinator, "code_execution_available", False)
+        or not callable(getattr(coordinator, "start_code", None))
+    ):
+        return None
+    try:
+        job = coordinator.start_code(
+            CodeExecutionTaskRequest(
+                owner=_execution_owner(principal),
+                request_id=f"model-{generation_job_id}",
+                source=str(proposal.source),
+                intent_summary=str(proposal.intent_summary),
+                capabilities=CodeCapabilities.from_mapping(proposal.capabilities),
+            )
+        )
+        return job.job_id
+    except (CodeExecutionError, TypeError, ValueError) as exc:
+        logging.getLogger("cortex.execution").warning(
+            "Ignoring malformed model code proposal (%s).", type(exc).__name__
+        )
+        return None
 
 
 def _chunks(value: str, size: int = 80):
@@ -2042,6 +2193,21 @@ def _scratch_coordinator(request: Request):
     return coordinator
 
 
+def _code_coordinator(request: Request):
+    """Require the local approval-gated code capability explicitly."""
+
+    coordinator = _execution_runtime(request)
+    if (
+        not getattr(coordinator, "code_execution_available", False)
+        or not callable(getattr(coordinator, "start_code", None))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Local code execution is unavailable.",
+        )
+    return coordinator
+
+
 def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
     """Map internal recipe categories to stable, non-sensitive HTTP responses."""
 
@@ -2245,6 +2411,7 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
     event = _execution_latest_event(repository, job)
     approval = repository.get_approval(job.job_id, owner=job.owner)
     approval_state = approval.state if approval is not None else job.approval_state
+    code_fields = _code_job_fields(job)
     return ExecutionStatusResponse(
         job_id=job.job_id,
         request_id=job.request_id,
@@ -2266,11 +2433,13 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
         ),
         error=job.error,
         result=dict(job.result) if job.result is not None else None,
+        **code_fields,
     )
 
 
 def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
     response = _execution_status_response(repository, job)
+    code_fields = _code_job_fields(job, include_result=True)
     return ExecutionTaskSummary(
         job_id=response.job_id,
         profile=response.profile,
@@ -2284,7 +2453,32 @@ def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSumma
         can_cancel=response.can_cancel,
         created_at=datetime.fromisoformat(job.created_at),
         updated_at=datetime.fromisoformat(job.updated_at),
+        **code_fields,
     )
+
+
+def _code_job_fields(job: ExecutionJob, *, include_result: bool = False) -> dict[str, Any]:
+    if job.profile != CODE_EXECUTION_PROFILE:
+        return {}
+    payload = job.payload
+    capabilities = payload.get("capabilities")
+    fields: dict[str, Any] = {
+        "intent_summary": payload.get("intent_summary") if isinstance(payload.get("intent_summary"), str) else None,
+        "source_digest": payload.get("source_digest") if isinstance(payload.get("source_digest"), str) else None,
+        "capabilities": CodeCapabilitiesRequest.model_validate(capabilities or {}),
+    }
+    if include_result:
+        result = job.result if isinstance(job.result, Mapping) else None
+        result_summary: dict[str, Any] | None = None
+        if result is not None:
+            result_summary = dict(result)
+            for key in ("stdout", "stderr"):
+                value = result_summary.get(key)
+                if isinstance(value, str) and len(value) > 8_192:
+                    result_summary[key] = value[:8_192]
+                    result_summary["truncated"] = True
+        fields["result"] = result_summary
+    return fields
 
 
 def _last_event_cursor(request: Request) -> int:

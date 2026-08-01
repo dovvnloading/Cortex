@@ -49,6 +49,7 @@ class ExecutionSettings(_SettingsModel):
     """Small, user-visible controls for the bounded local execution tools."""
 
     automatic_compute: bool = True
+    code_execution_enabled: bool = True
 
 
 class MemorySettings(_SettingsModel):

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import type { ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../contracts/cortex-api";
+import type { CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../contracts/cortex-api";
 
 type ExecutionApprovalDecision = ExecutionApprovalDecisionRequest["decision"];
 
@@ -8,6 +8,7 @@ type Props = {
   tasks: ExecutionTaskSummary[];
   onCancel?: (jobId: string) => Promise<void>;
   onDecideApproval?: (jobId: string, decision: ExecutionApprovalDecision) => Promise<void>;
+  onLoadCodeSource?: (jobId: string) => Promise<CodeExecutionSourceResponse>;
 };
 
 type TaskGroup = {
@@ -18,10 +19,12 @@ type TaskGroup = {
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
-export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) {
+export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCodeSource }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(() => new Set());
   const [deciding, setDeciding] = useState<Map<string, ExecutionApprovalDecision>>(() => new Map());
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<string | null>(null);
+  const [codeSources, setCodeSources] = useState<Map<string, CodeExecutionSourceResponse>>(() => new Map());
+  const [loadingSource, setLoadingSource] = useState<Set<string>>(() => new Set());
   const taskGroups = groupTasks(tasks);
   const activeTasks = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)
     && !["pending", "denied", "expired"].includes(task.approval_state ?? "not_required"));
@@ -74,6 +77,23 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) 
     }
   };
 
+  const loadSource = async (jobId: string) => {
+    if (!onLoadCodeSource || codeSources.has(jobId) || loadingSource.has(jobId)) return;
+    setLoadingSource((current) => new Set(current).add(jobId));
+    try {
+      const source = await onLoadCodeSource(jobId);
+      setCodeSources((current) => new Map(current).set(jobId, source));
+    } catch {
+      // The source remains collapsed if it is no longer available.
+    } finally {
+      setLoadingSource((current) => {
+        const next = new Set(current);
+        next.delete(jobId);
+        return next;
+      });
+    }
+  };
+
   return (
     <aside className="execution-task-tray" aria-label="Background tasks">
       <div className="execution-task-tray-heading">
@@ -117,6 +137,18 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval }: Props) 
                   <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
                 </div>
                 <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
+                {task.profile === "code.exec.v1" && (
+                  <>
+                    {task.capabilities && <span className="execution-task-capabilities">{formatCapabilities(task.capabilities)}</span>}
+                    {task.capabilities && hasBroadCapabilities(task.capabilities) && <span className="execution-task-warning">High-risk local access · review before allowing</span>}
+                    {task.result && <pre className="execution-task-output">{formatCodeResult(task.result)}</pre>}
+                    {onLoadCodeSource && <details className="execution-task-code-details" onToggle={(event) => { if (event.currentTarget.open) void loadSource(task.job_id); }}>
+                      <summary>Review generated code</summary>
+                      {loadingSource.has(task.job_id) && <span>Loading source…</span>}
+                      {codeSources.get(task.job_id) && <><span>Digest {codeSources.get(task.job_id)?.source_digest.slice(0, 16)}…</span><pre>{codeSources.get(task.job_id)?.source}</pre></>}
+                    </details>}
+                  </>
+                )}
               </div>
               {approvalPending && onDecideApproval && (
                 <div className="execution-task-approval-actions" aria-label={`Approval actions for background task ${task.job_id}`}>
@@ -189,4 +221,20 @@ function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
 
 function formatTaskStatus(status: ExecutionTaskSummary["status"]): string {
   return status === "cancelling" ? "Stopping" : `${status[0].toUpperCase()}${status.slice(1)}`;
+}
+
+function formatCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): string {
+  const labels = Object.entries(capabilities).filter(([, enabled]) => enabled).map(([name]) => name);
+  return labels.length ? `Requested: ${labels.join(", ")}` : "No host access requested";
+}
+
+function hasBroadCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): boolean {
+  return Object.values(capabilities).some(Boolean);
+}
+
+function formatCodeResult(result: Record<string, unknown>): string {
+  const stdout = typeof result.stdout === "string" ? result.stdout : "";
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  const value = result.value === undefined || result.value === null ? "" : `Value: ${JSON.stringify(result.value)}`;
+  return [stdout && `Output:\n${stdout}`, stderr && `Errors:\n${stderr}`, value].filter(Boolean).join("\n\n") || "No output.";
 }

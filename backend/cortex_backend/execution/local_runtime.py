@@ -24,6 +24,17 @@ from typing import Any
 from uuid import uuid4
 
 from .artifact_boundary import ArtifactBoundary
+from .code_execution import (
+    CODE_EXECUTION_PAYLOAD_SCHEMA,
+    CODE_EXECUTION_PROFILE,
+    CodeCapabilities,
+    CodeExecutionError,
+    CodeExecutionRequest,
+    CodeExecutionResult,
+    MAX_CODE_TIMEOUT_SECONDS,
+    code_worker_main,
+    validate_code_source,
+)
 from .lifecycle import RuntimeHealth
 from .models import ExecutionJob, TerminalExecutionStatus
 from .recipe_coordinator import (
@@ -50,6 +61,7 @@ from .scratch_compute import (
 
 DEFAULT_SCRATCH_TIMEOUT_SECONDS = 3.0
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
+DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
 DEFAULT_CANCEL_GRACE_SECONDS = 0.35
 _RECIPE_PROCESS_ERROR = "worker_provider_failed"
 
@@ -339,6 +351,115 @@ class _LocalScratchAttempt:
             _stop_process(process, grace_seconds=self._cancel_grace_seconds)
 
 
+class _LocalCodeAttempt:
+    """Run one validated code request in a short-lived child process."""
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = DEFAULT_CODE_TIMEOUT_SECONDS,
+        cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
+    ) -> None:
+        if timeout_seconds <= 0 or cancel_grace_seconds <= 0:
+            raise ValueError("worker timeouts must be positive")
+        self._context = multiprocessing.get_context("spawn")
+        self._cancel_event = self._context.Event()
+        self._timeout_seconds = float(timeout_seconds)
+        self._cancel_grace_seconds = float(cancel_grace_seconds)
+        self._lock = Lock()
+        self._process: Any | None = None
+        self._closed = False
+
+    def evaluate(
+        self,
+        source: str,
+        capabilities: CodeCapabilities,
+        workspace: str,
+        cancel_event: Event,
+    ) -> CodeExecutionResult:
+        if self._closed:
+            raise CodeExecutionError("worker_closed")
+        validate_code_source(source)
+        receiver = sender = process = None
+        try:
+            receiver, sender = self._context.Pipe(duplex=False)
+            process = self._context.Process(
+                target=code_worker_main,
+                args=(sender, source, capabilities.as_dict(), workspace),
+                name="cortex-code",
+                daemon=True,
+            )
+            with self._lock:
+                if self._closed:
+                    raise CodeExecutionError("worker_closed")
+                self._process = process
+            process.start()
+            sender.close()
+            sender = None
+            deadline = time.monotonic() + self._timeout_seconds
+            cancelled_at: float | None = None
+            while True:
+                if cancel_event.is_set() or self._cancel_event.is_set():
+                    self._cancel_event.set()
+                    cancelled_at = cancelled_at or time.monotonic()
+                if receiver.poll(0.025):
+                    try:
+                        message = receiver.recv()
+                    except (EOFError, OSError):
+                        raise CodeExecutionError("worker_failed") from None
+                    return self._result_from_message(message)
+                now = time.monotonic()
+                if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
+                    raise CodeExecutionError("cancelled")
+                if now >= deadline:
+                    raise CodeExecutionError("worker_timeout")
+        finally:
+            if sender is not None:
+                try:
+                    sender.close()
+                except Exception:
+                    pass
+            if receiver is not None:
+                try:
+                    receiver.close()
+                except Exception:
+                    pass
+            if process is not None:
+                _stop_process(process, grace_seconds=self._cancel_grace_seconds)
+            with self._lock:
+                if self._process is process:
+                    self._process = None
+
+    @staticmethod
+    def _result_from_message(message: object) -> CodeExecutionResult:
+        if not isinstance(message, Mapping) or message.get("ok") is not True:
+            raise CodeExecutionError(str(message.get("code", "worker_failed")) if isinstance(message, Mapping) else "worker_failed")
+        result = message.get("result")
+        if not isinstance(result, Mapping):
+            raise CodeExecutionError("worker_output_invalid")
+        try:
+            return CodeExecutionResult(
+                stdout=str(result.get("stdout", "")),
+                stderr=str(result.get("stderr", "")),
+                value=result.get("value"),
+                truncated=bool(result.get("truncated", False)),
+                duration_ms=int(result.get("duration_ms", 0)),
+            )
+        except (TypeError, ValueError):
+            raise CodeExecutionError("worker_output_invalid") from None
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            process = self._process
+        self._cancel_event.set()
+        if process is not None:
+            _stop_process(process, grace_seconds=self._cancel_grace_seconds)
+
+
 class LocalExecutionCoordinator:
     """One lifecycle owner for the normal local image and compute profiles."""
 
@@ -350,6 +471,7 @@ class LocalExecutionCoordinator:
         supervisor_lease_seconds: float = 60.0,
         scratch_timeout_seconds: float = DEFAULT_SCRATCH_TIMEOUT_SECONDS,
         image_timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
+        code_timeout_seconds: float = DEFAULT_CODE_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(repository, ExecutionRepository):
             raise TypeError("repository must be an ExecutionRepository")
@@ -361,12 +483,17 @@ class LocalExecutionCoordinator:
         self.supervisor_lease_seconds = float(supervisor_lease_seconds)
         self.scratch_timeout_seconds = float(scratch_timeout_seconds)
         self.image_timeout_seconds = float(image_timeout_seconds)
+        self.code_timeout_seconds = min(float(code_timeout_seconds), MAX_CODE_TIMEOUT_SECONDS)
         self._supervisor_owner = f"local-supervisor-{uuid4().hex}"
         self._supervisor_lease_active = False
         self._scratch_lock = Lock()
         self._scratch_threads: dict[str, Thread] = {}
         self._scratch_cancel_events: dict[str, Event] = {}
         self._scratch_attempts: dict[str, _LocalScratchAttempt] = {}
+        self._code_lock = Lock()
+        self._code_threads: dict[str, Thread] = {}
+        self._code_cancel_events: dict[str, Event] = {}
+        self._code_attempts: dict[str, _LocalCodeAttempt] = {}
         self._recipe = RecipeExecutionCoordinator(
             repository,
             lambda job: LocalRecipeWorkerAttempt(
@@ -382,6 +509,10 @@ class LocalExecutionCoordinator:
 
     @property
     def scratch_available(self) -> bool:
+        return True
+
+    @property
+    def code_execution_available(self) -> bool:
         return True
 
     @property
@@ -436,6 +567,35 @@ class LocalExecutionCoordinator:
         self._launch_scratch(job.job_id, request)
         return job
 
+    def start_code(self, request: CodeExecutionRequest) -> ExecutionJob:
+        if not isinstance(request, CodeExecutionRequest):
+            raise TypeError("request must be a CodeExecutionRequest")
+        payload = request.payload()
+        job, created = self.repository.create_job(
+            job_id=uuid4().hex,
+            owner=request.owner,
+            request_id=request.request_id,
+            profile=CODE_EXECUTION_PROFILE,
+            payload=payload,
+        )
+        if not created:
+            if (
+                job.profile != CODE_EXECUTION_PROFILE
+                or self._canonical_payload(job.payload) != self._canonical_payload(payload)
+            ):
+                raise CodeExecutionError("request_conflict")
+            if job.status not in TerminalExecutionStatus and job.status != "cancelling":
+                self._launch_code(job.job_id)
+            return job
+        self.repository.request_approval(
+            job.job_id,
+            owner=request.owner,
+            scope_digest=request.source_digest,
+            reason=request.intent_summary.strip(),
+        )
+        self._launch_code(job.job_id)
+        return self.repository.get_job(job.job_id, owner=request.owner) or job
+
     def wait(self, job_id: str, *, timeout: float = 5.0) -> ExecutionJob:
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
@@ -465,6 +625,25 @@ class LocalExecutionCoordinator:
             if attempt is not None:
                 attempt.cancel()
             return self.repository.request_cancel(job_id)
+        if job.profile == CODE_EXECUTION_PROFILE:
+            if job.approval_state == "pending":
+                try:
+                    self.repository.decide_approval(
+                        job_id,
+                        owner=owner,
+                        decision="denied",
+                    )
+                except Exception:
+                    pass
+                return self.repository.get_job(job_id, owner=owner) or job
+            with self._code_lock:
+                event = self._code_cancel_events.get(job_id)
+                attempt = self._code_attempts.get(job_id)
+            if event is not None:
+                event.set()
+            if attempt is not None:
+                attempt.cancel()
+            return self.repository.request_cancel(job_id)
         return self.repository.request_cancel(job_id)
 
     def startup_recover(self) -> list[str]:
@@ -483,6 +662,13 @@ class LocalExecutionCoordinator:
             if job is None or job.profile != SCRATCH_COMPUTE_PROFILE:
                 continue
             self._recover_scratch(job)
+        try:
+            owner = self.repository.installation_principal_id
+            for job in self.repository.list_jobs(owner=owner, include_terminal=False, limit=200):
+                if job.profile == CODE_EXECUTION_PROFILE:
+                    self._launch_code(job.job_id)
+        except Exception:
+            pass
         return recovered
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
@@ -499,6 +685,16 @@ class LocalExecutionCoordinator:
         deadline = time.monotonic() + timeout
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        with self._code_lock:
+            code_events = list(self._code_cancel_events.values())
+            code_attempts = list(self._code_attempts.values())
+            code_threads = list(self._code_threads.values())
+        for event in code_events:
+            event.set()
+        for attempt in code_attempts:
+            attempt.cancel()
+        for thread in code_threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._recipe.shutdown(timeout=max(0.0, deadline - time.monotonic()))
         if self._supervisor_lease_active:
             self.repository.release_supervisor_lease(lease_owner=self._supervisor_owner)
@@ -514,6 +710,156 @@ class LocalExecutionCoordinator:
             "schema_version": SCRATCH_PAYLOAD_SCHEMA,
             "expression": request.expression.strip(),
         }
+
+    def _launch_code(self, job_id: str) -> None:
+        with self._code_lock:
+            existing = self._code_threads.get(job_id)
+            if existing is not None and existing.is_alive():
+                return
+            cancel_event = self._code_cancel_events.setdefault(job_id, Event())
+            thread = Thread(
+                target=self._run_code,
+                args=(job_id, cancel_event),
+                name=f"cortex-code-{job_id}",
+                daemon=True,
+            )
+            self._code_threads[job_id] = thread
+            thread.start()
+
+    def _run_code(self, job_id: str, cancel_event: Event) -> None:
+        lease_owner = f"code-coordinator-{uuid4().hex}"
+        attempt: _LocalCodeAttempt | None = None
+        with self._code_lock:
+            self._code_cancel_events[job_id] = cancel_event
+        try:
+            current = self.repository.get_job(job_id)
+            if current is None or current.profile != CODE_EXECUTION_PROFILE:
+                return
+            if current.approval_state == "expired":
+                self.repository.expire_approvals()
+                return
+            next_approval_expiry_check = 0.0
+            while current.approval_state == "pending" and not cancel_event.is_set():
+                now = time.monotonic()
+                if now >= next_approval_expiry_check:
+                    # Pending approvals must expire during a live coordinator,
+                    # not only during process startup/recovery.
+                    self.repository.expire_approvals()
+                    next_approval_expiry_check = now + 0.25
+                time.sleep(0.05)
+                current = self.repository.get_job(job_id)
+                if current is None:
+                    return
+            if current.approval_state == "expired":
+                self.repository.expire_approvals()
+                return
+            if cancel_event.is_set() or current.status in {"cancelled", "cancelling"} or current.approval_state in {"denied", "expired"}:
+                return
+            if current.approval_state != "approved":
+                self._finish_code_failure(job_id, cancel_event, "approval_required")
+                return
+            self.repository.claim_lease(
+                job_id,
+                lease_owner=lease_owner,
+                ttl_seconds=self.lease_seconds,
+            )
+            current = self.repository.get_job(job_id)
+            if current is None or current.status in {"cancelled", "cancelling"}:
+                return
+            request = self._code_request_from_job(current)
+            self.repository.transition(
+                job_id,
+                status="running",
+                event="code.started",
+                phase="prepare",
+                data={"message": "Local code execution started."},
+            )
+            self.repository.transition(
+                job_id,
+                status="running",
+                event="code.output",
+                phase="worker",
+                data={"message": "Running in an isolated local worker."},
+            )
+            attempt = _LocalCodeAttempt(timeout_seconds=self.code_timeout_seconds)
+            with self._code_lock:
+                self._code_attempts[job_id] = attempt
+            result = attempt.evaluate(
+                request.source,
+                request.capabilities,
+                str(self.repository.artifact_root),
+                cancel_event,
+            )
+            current = self.repository.get_job(job_id)
+            if cancel_event.is_set() or (current is not None and current.status == "cancelling"):
+                raise CodeExecutionError("cancelled")
+            payload = result.as_payload()
+            self.repository.transition(
+                job_id,
+                status="succeeded",
+                event="code.completed",
+                phase="completed",
+                data={"message": "Local code execution completed."},
+                result=payload,
+            )
+        except CodeExecutionError as exc:
+            self._finish_code_failure(job_id, cancel_event, exc.code)
+        except LeaseConflict:
+            self._finish_code_failure(job_id, cancel_event, "lease_unavailable")
+        except Exception:
+            self._finish_code_failure(job_id, cancel_event, "coordinator_failed")
+        finally:
+            if attempt is not None:
+                attempt.close()
+            with self._code_lock:
+                self._code_attempts.pop(job_id, None)
+                self._code_cancel_events.pop(job_id, None)
+                self._code_threads.pop(job_id, None)
+            try:
+                self.repository.release_lease(job_id, lease_owner=lease_owner)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _code_request_from_job(job: ExecutionJob) -> CodeExecutionRequest:
+        payload = job.payload
+        if payload.get("schema_version") != CODE_EXECUTION_PAYLOAD_SCHEMA or payload.get("language") != "python":
+            raise CodeExecutionError("recovery_invalid_payload")
+        source = payload.get("source")
+        intent = payload.get("intent_summary")
+        expected_digest = payload.get("source_digest")
+        if not isinstance(source, str) or not isinstance(intent, str):
+            raise CodeExecutionError("recovery_invalid_payload")
+        try:
+            request = CodeExecutionRequest(
+                owner=job.owner,
+                request_id=job.request_id,
+                source=source,
+                intent_summary=intent,
+                capabilities=CodeCapabilities.from_mapping(payload.get("capabilities")),
+            )
+            if expected_digest != request.source_digest:
+                raise CodeExecutionError("recovery_invalid_payload")
+            return request
+        except (CodeExecutionError, TypeError, ValueError):
+            raise CodeExecutionError("recovery_invalid_payload") from None
+
+    def _finish_code_failure(self, job_id: str, cancel_event: Event, failure_code: str) -> None:
+        current = self.repository.get_job(job_id)
+        if current is None or current.status in TerminalExecutionStatus:
+            return
+        cancelled = failure_code == "cancelled" or cancel_event.is_set() or current.status == "cancelling"
+        try:
+            self.repository.transition(
+                job_id,
+                status="cancelled" if cancelled else "failed",
+                event="code.cancelled" if cancelled else "code.failed",
+                phase="cancelled" if cancelled else "failed",
+                data={"message": "Local code execution was cancelled." if cancelled else "Local code execution failed safely."},
+                error="cancelled" if cancelled else failure_code,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _scratch_request_from_job(job: ExecutionJob) -> ScratchComputeRequest:
@@ -697,6 +1043,7 @@ class LocalExecutionCoordinator:
 
 
 __all__ = [
+    "DEFAULT_CODE_TIMEOUT_SECONDS",
     "DEFAULT_IMAGE_TIMEOUT_SECONDS",
     "DEFAULT_SCRATCH_TIMEOUT_SECONDS",
     "LocalExecutionCoordinator",

@@ -494,6 +494,172 @@
         "title": "ClearMemoryRequest",
         "type": "object"
       },
+      "CodeCapabilitiesRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "filesystem": {
+            "default": false,
+            "title": "Filesystem",
+            "type": "boolean"
+          },
+          "network": {
+            "default": false,
+            "title": "Network",
+            "type": "boolean"
+          },
+          "process": {
+            "default": false,
+            "title": "Process",
+            "type": "boolean"
+          }
+        },
+        "title": "CodeCapabilitiesRequest",
+        "type": "object"
+      },
+      "CodeExecutionAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_state": {
+            "default": "pending",
+            "enum": [
+              "not_required",
+              "pending",
+              "approved",
+              "denied",
+              "expired"
+            ],
+            "title": "Approval State",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/CodeCapabilitiesRequest"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "profile": {
+            "const": "code.exec.v1",
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source_digest": {
+            "title": "Source Digest",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id",
+          "profile",
+          "status",
+          "sequence",
+          "source_digest",
+          "capabilities"
+        ],
+        "title": "CodeExecutionAccepted",
+        "type": "object"
+      },
+      "CodeExecutionRequest": {
+        "additionalProperties": false,
+        "description": "One explicit, approval-gated Python execution request.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CodeCapabilitiesRequest"
+          },
+          "intent_summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Intent Summary",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "intent_summary"
+        ],
+        "title": "CodeExecutionRequest",
+        "type": "object"
+      },
+      "CodeExecutionSourceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CodeCapabilitiesRequest"
+          },
+          "intent_summary": {
+            "title": "Intent Summary",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_digest": {
+            "title": "Source Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "language",
+          "source",
+          "source_digest",
+          "intent_summary",
+          "capabilities"
+        ],
+        "title": "CodeExecutionSourceResponse",
+        "type": "object"
+      },
       "ConnectionResult": {
         "description": "User-facing outcome of the Ollama startup check.",
         "properties": {
@@ -876,7 +1042,14 @@
               "execution.recovered",
               "execution.completed",
               "execution.failed",
-              "execution.cancelled"
+              "execution.cancelled",
+              "execution.code.requested",
+              "execution.code.started",
+              "execution.code.output",
+              "execution.code.completed",
+              "execution.code.failed",
+              "execution.code.cancelled",
+              "execution.code.revoked"
             ],
             "title": "Event",
             "type": "string"
@@ -936,6 +1109,11 @@
             "default": true,
             "title": "Automatic Compute",
             "type": "boolean"
+          },
+          "code_execution_enabled": {
+            "default": true,
+            "title": "Code Execution Enabled",
+            "type": "boolean"
           }
         },
         "title": "ExecutionSettings",
@@ -984,6 +1162,16 @@
             "title": "Can Cancel",
             "type": "boolean"
           },
+          "capabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodeCapabilitiesRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "error": {
             "anyOf": [
               {
@@ -994,6 +1182,17 @@
               }
             ],
             "title": "Error"
+          },
+          "intent_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Summary"
           },
           "job_id": {
             "title": "Job Id",
@@ -1046,6 +1245,17 @@
           "sequence": {
             "title": "Sequence",
             "type": "integer"
+          },
+          "source_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Digest"
           },
           "status": {
             "enum": [
@@ -1130,10 +1340,31 @@
             "title": "Can Cancel",
             "type": "boolean"
           },
+          "capabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodeCapabilitiesRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "intent_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Summary"
           },
           "job_id": {
             "title": "Job Id",
@@ -1167,9 +1398,32 @@
             "title": "Profile",
             "type": "string"
           },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
           "sequence": {
             "title": "Sequence",
             "type": "integer"
+          },
+          "source_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Digest"
           },
           "status": {
             "enum": [
@@ -2435,6 +2689,11 @@
             "title": "Api Version",
             "type": "string"
           },
+          "code_execution_available": {
+            "default": false,
+            "title": "Code Execution Available",
+            "type": "boolean"
+          },
           "execution_preview_available": {
             "default": false,
             "title": "Execution Preview Available",
@@ -3011,6 +3270,45 @@
         "summary": "Stage Attachment"
       }
     },
+    "/api/v1/execution/code": {
+      "post": {
+        "description": "Queue one local Python run and pause until the user approves it.",
+        "operationId": "start_code_execution_api_v1_execution_code_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeExecutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeExecutionAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Code Execution"
+      }
+    },
     "/api/v1/execution/preview/fake": {
       "post": {
         "operationId": "start_fake_execution_api_v1_execution_preview_fake_post",
@@ -3337,6 +3635,45 @@
           }
         },
         "summary": "Execution Events"
+      }
+    },
+    "/api/v1/execution/{job_id}/source": {
+      "get": {
+        "operationId": "execution_source_api_v1_execution__job_id__source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeExecutionSourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execution Source"
       }
     },
     "/api/v1/generations": {

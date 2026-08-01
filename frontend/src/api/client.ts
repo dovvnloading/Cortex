@@ -6,6 +6,9 @@ import type {
   ChatAttachmentStageRequest,
   ChatResponse,
   ChatSummary,
+  CodeExecutionAccepted,
+  CodeExecutionRequest,
+  CodeExecutionSourceResponse,
   CreateChatRequest,
   DiagnosticsResponse,
   ExecutionSSEEvent,
@@ -254,6 +257,19 @@ export class CortexApi {
 
   executionStatus(jobId: string): Promise<ExecutionStatusResponse> {
     return this.request<ExecutionStatusResponse>(`/execution/${encodeURIComponent(jobId)}`);
+  }
+
+  startCodeExecution(payload: CodeExecutionRequest): Promise<CodeExecutionAccepted> {
+    return this.request<CodeExecutionAccepted>("/execution/code", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  executionSource(jobId: string): Promise<CodeExecutionSourceResponse> {
+    return this.request<CodeExecutionSourceResponse>(
+      `/execution/${encodeURIComponent(jobId)}/source`,
+    );
   }
 
   startScratchCompute(payload: ScratchComputeRequest): Promise<ScratchComputeAccepted> {

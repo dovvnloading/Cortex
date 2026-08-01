@@ -32,6 +32,12 @@ from cortex_backend.execution.scratch_compute import (
     ScratchComputeError,
     validate_scratch_expression,
 )
+from cortex_backend.execution.code_execution import (
+    CodeCapabilities,
+    CodeExecutionError,
+    MAX_CODE_SOURCE_BYTES,
+    validate_code_source,
+)
 
 
 class APIModel(BaseModel):
@@ -64,6 +70,7 @@ class SystemResponse(APIModel):
     session_required: bool = True
     execution_preview_available: bool = False
     scratch_compute_available: bool = False
+    code_execution_available: bool = False
     image_transform_available: bool = False
     started_at: datetime
     ollama_host: str = "http://127.0.0.1:11434"
@@ -232,6 +239,13 @@ ExecutionEventName = Literal[
     "execution.completed",
     "execution.failed",
     "execution.cancelled",
+    "execution.code.requested",
+    "execution.code.started",
+    "execution.code.output",
+    "execution.code.completed",
+    "execution.code.failed",
+    "execution.code.cancelled",
+    "execution.code.revoked",
 ]
 ExecutionApprovalState = Literal[
     "not_required",
@@ -267,6 +281,49 @@ class ScratchComputeRequest(APIModel):
             return validate_scratch_expression(value)
         except ScratchComputeError:
             raise ValueError("safe computation expression is invalid") from None
+
+
+class CodeCapabilitiesRequest(APIModel):
+    filesystem: bool = False
+    process: bool = False
+    network: bool = False
+
+    def to_runtime(self) -> CodeCapabilities:
+        return CodeCapabilities(
+            filesystem=self.filesystem,
+            process=self.process,
+            network=self.network,
+        )
+
+
+class CodeExecutionRequest(APIModel):
+    """One explicit, approval-gated Python execution request."""
+
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+        strict=True,
+    )
+    language: Literal["python"] = "python"
+    source: str = Field(min_length=1, max_length=MAX_CODE_SOURCE_BYTES, strict=True)
+    intent_summary: str = Field(min_length=1, max_length=500, strict=True)
+    capabilities: CodeCapabilitiesRequest = Field(default_factory=CodeCapabilitiesRequest)
+
+    @field_validator("source")
+    @classmethod
+    def _safe_source(cls, value: str) -> str:
+        try:
+            return validate_code_source(value)
+        except CodeExecutionError:
+            raise ValueError("code source is not allowed") from None
+
+    @field_validator("intent_summary")
+    @classmethod
+    def _summary(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("intent summary is required")
+        return value.strip()
 
 
 class RecipeImageTransformRequest(APIModel):
@@ -364,6 +421,26 @@ class ScratchComputeAccepted(APIModel):
     sequence: int
 
 
+class CodeExecutionAccepted(APIModel):
+    job_id: str
+    request_id: str
+    profile: Literal["code.exec.v1"]
+    status: ExecutionStatus
+    sequence: int
+    approval_state: ExecutionApprovalState = "pending"
+    source_digest: str
+    capabilities: CodeCapabilitiesRequest
+
+
+class CodeExecutionSourceResponse(APIModel):
+    job_id: str
+    language: Literal["python"]
+    source: str
+    source_digest: str
+    intent_summary: str
+    capabilities: CodeCapabilitiesRequest
+
+
 class RecipeImageTransformAccepted(APIModel):
     job_id: str
     request_id: str
@@ -403,6 +480,9 @@ class ExecutionStatusResponse(APIModel):
     can_cancel: bool = False
     error: str | None = None
     result: dict[str, Any] | None = None
+    intent_summary: str | None = None
+    source_digest: str | None = None
+    capabilities: CodeCapabilitiesRequest | None = None
 
 
 class ExecutionTaskSummary(APIModel):
@@ -418,6 +498,10 @@ class ExecutionTaskSummary(APIModel):
     can_cancel: bool = False
     created_at: datetime
     updated_at: datetime
+    intent_summary: str | None = None
+    source_digest: str | None = None
+    capabilities: CodeCapabilitiesRequest | None = None
+    result: dict[str, Any] | None = None
 
 
 class ExecutionTaskListResponse(APIModel):

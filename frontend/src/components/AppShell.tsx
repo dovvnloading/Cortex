@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Menu, Pencil, Plus, Settings, Trash2 } from "lucide-react";
-import type { ChatSummary, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../contracts/cortex-api";
+import type { ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../contracts/cortex-api";
 import { displayChatTitle } from "../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
@@ -17,6 +17,7 @@ type Props = {
   executionTasks?: ExecutionTaskSummary[];
   onCancelExecution?: (jobId: string) => Promise<void>;
   onDecideExecutionApproval?: (jobId: string, decision: ExecutionApprovalDecisionRequest["decision"]) => Promise<void>;
+  onLoadCodeSource?: (jobId: string) => Promise<CodeExecutionSourceResponse>;
   children: ReactNode;
 };
 
@@ -31,6 +32,7 @@ export function AppShell({
   executionTasks = [],
   onCancelExecution,
   onDecideExecutionApproval,
+  onLoadCodeSource,
   children,
 }: Props) {
   const navigate = useNavigate();
@@ -154,6 +156,7 @@ export function AppShell({
         tasks={executionTasks}
         onCancel={onCancelExecution}
         onDecideApproval={onDecideExecutionApproval}
+        onLoadCodeSource={onLoadCodeSource}
       />
     </div>
   );

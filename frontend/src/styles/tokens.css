@@ -354,6 +354,17 @@ a { color: inherit; text-decoration: none; }
 .composer-surface textarea { grid-column: 1; grid-row: 2; display: block; width: 100%; min-height: 46px; max-height: 188px; resize: none; border: 0; outline: 0; padding: 5px 4px 5px 0; background: transparent; color: var(--text); font-size: 0.9rem; line-height: 1.5; scrollbar-gutter: stable; }
 .composer-surface textarea::placeholder { color: var(--text-faint); }
 .composer-attachments { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: 6px; padding: 2px 4px 7px 0; }
+.composer-code-panel { grid-column: 1; grid-row: 2 / span 2; display: flex; flex-direction: column; gap: 8px; min-height: 190px; padding: 7px 5px 8px 0; }
+.composer-code-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; color: var(--text); font-size: 0.78rem; }
+.composer-code-panel-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.composer-code-panel-heading span { color: var(--text-faint); font-size: 0.68rem; }
+.composer-code-intent { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text); font-size: 0.74rem; outline: 0; }
+.composer-code-editor { width: 100%; min-height: 120px; max-height: 220px; resize: vertical; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #111416; color: #e9eef0; font: 0.76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; outline: 0; }
+.composer-code-editor:focus, .composer-code-intent:focus { border-color: var(--accent); }
+.composer-code-capabilities { display: flex; flex-wrap: wrap; gap: 8px; color: var(--text-muted); font-size: 0.68rem; }
+.composer-code-capabilities label { display: inline-flex; align-items: center; gap: 4px; }
+.composer-code-run { align-self: flex-start; min-height: 29px; padding: 0 9px; font-size: 0.72rem; }
+.composer-attachment-button-active { background: var(--surface-soft); color: var(--accent); }
 .composer-attachment { display: inline-flex; align-items: center; min-width: 0; max-width: min(100%, 230px); gap: 6px; min-height: 27px; padding: 0 6px 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text-muted); font-size: 0.71rem; }
 .composer-attachment > svg { flex: 0 0 auto; color: var(--accent); }
 .composer-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -373,6 +384,12 @@ a { color: inherit; text-decoration: none; }
 .composer-stop-control { border-color: var(--line-strong); background: var(--surface-soft); color: var(--text-muted); box-shadow: none; }
 .composer-stop-control:hover:not(:disabled) { border-color: var(--text-muted); background: var(--surface-hover); color: var(--text); }
 .composer-control-spinner, .local-model-menu-rescan-icon-pending { animation: spin 800ms linear infinite; }
+.execution-task-capabilities { color: var(--text-faint); font-size: 0.68rem; }
+.execution-task-warning { color: var(--warning, #d98b35); font-size: 0.68rem; font-weight: 620; }
+.execution-task-output { max-height: 130px; margin: 6px 0 0; padding: 7px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); color: var(--text-muted); font: 0.68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.execution-task-code-details { margin-top: 6px; color: var(--text-muted); font-size: 0.68rem; }
+.execution-task-code-details summary { cursor: pointer; color: var(--accent); }
+.execution-task-code-details pre { max-height: 180px; margin: 6px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: #111416; color: #e9eef0; font: 0.68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .composer-status { display: none; flex: 1 1 auto; min-width: 0; max-width: 100%; overflow: hidden; color: var(--text-faint); font-size: 0.68rem; font-weight: 590; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .composer-status-visible { display: block; }
 .composer-counter { flex: 0 0 auto; color: var(--text-faint); font-size: 0.66rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
