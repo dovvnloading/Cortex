@@ -95,7 +95,12 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
   return (
     <main className="local-setup" aria-labelledby="local-setup-title">
       <section className="local-setup-card local-setup-model-card">
-        <h1 id="local-setup-title">Select a local model</h1>
+        <div className="local-setup-model-heading">
+          <div>
+            <h1 id="local-setup-title">Select a local model</h1>
+            <p className="local-setup-model-count">{localModels.length} installed {localModels.length === 1 ? "model" : "models"}</p>
+          </div>
+        </div>
         <p className="lede">
           Choose an installed model for chat. You can change it later in Settings.
           {previousModel && !localModels.includes(previousModel) ? ` ${previousModel} is no longer available, so choose a replacement.` : ""}
@@ -117,7 +122,7 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
                 onKeyDown={(event) => handleModelChoiceKeyDown(event, index)}
                 onClick={() => { setSelection(model); setError(null); }}
               >
-                <span className="model-choice-icon"><Cpu aria-hidden="true" size={17} /></span>
+                <span className="model-choice-index" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
                 <span className="model-choice-copy"><strong>{model}</strong><small>{size ? `${size} installed locally` : "Installed locally"}</small></span>
                 {selected && <Check className="model-choice-check" aria-hidden="true" size={18} />}
               </button>
