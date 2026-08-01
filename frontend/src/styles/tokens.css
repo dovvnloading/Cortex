@@ -170,9 +170,11 @@ a { color: inherit; text-decoration: none; }
 .onboarding, .local-setup {
   position: relative;
   display: grid;
-  min-height: 100vh;
+  height: 100%;
+  min-height: 100dvh;
   place-items: center;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 28px;
   background: var(--bg);
 }
@@ -182,7 +184,7 @@ a { color: inherit; text-decoration: none; }
 .local-setup-card-alert { width: min(100%, 500px); }
 .brand-mark { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 24px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-soft); box-shadow: none; }
 .brand-mark img { width: 100%; height: 100%; object-fit: cover; }
-.onboarding h1, .fatal-state h1, .local-setup-heading h1, .local-setup-card > h1 { margin: 0; color: var(--text); font-size: clamp(1.85rem, 4vw, 2.45rem); letter-spacing: -0.052em; line-height: 1.06; }
+.onboarding h1, .fatal-state h1, .local-setup-heading h1, .local-setup-card > h1, .local-setup-model-heading h1 { margin: 0; color: var(--text); font-size: clamp(1.85rem, 4vw, 2.45rem); letter-spacing: -0.052em; line-height: 1.06; }
 .lede { margin: 13px 0 24px; font-size: 0.94rem; line-height: 1.65; }
 .privacy-note, .local-setup-status { display: flex; align-items: center; gap: 10px; margin: 20px 0; padding: 12px 13px; border: 1px solid color-mix(in srgb, var(--success) 32%, var(--line)); border-radius: 13px; background: var(--success-soft); color: var(--success); font-size: 0.81rem; line-height: 1.45; }
 .privacy-note { margin-bottom: 0; }
@@ -191,12 +193,17 @@ a { color: inherit; text-decoration: none; }
 .onboarding-auto-connect { display: flex; align-items: center; gap: 10px; min-height: 42px; margin-top: 18px; color: var(--text-muted); font-size: 0.84rem; font-weight: 650; }
 .onboarding-auto-connect .loading-spinner { width: 18px; height: 18px; border-width: 2px; }
 .local-setup-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-.local-setup-actions-bottom { justify-content: space-between; margin-top: 24px; }
-.model-choice-list { display: grid; gap: 9px; margin-top: 22px; }
-.model-choice { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; background: transparent; color: var(--text); text-align: left; transition: border-color 160ms ease, background 160ms ease; }
+.local-setup-model-card { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(100%, 680px); height: min(720px, calc(100dvh - 48px)); min-height: 0; padding: 30px; overflow: hidden; }
+.local-setup-model-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.local-setup-model-count { margin: 8px 0 0; color: var(--text-faint); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.local-setup-model-card > .lede { margin-bottom: 0; }
+.local-setup-actions-bottom { align-items: center; justify-content: space-between; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); background: var(--surface-elevated); }
+.model-choice-list { display: grid; align-content: start; gap: 7px; min-height: 0; margin-top: 18px; padding: 2px 6px 2px 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.model-choice { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 54px; border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; background: transparent; color: var(--text); text-align: left; transition: border-color 160ms ease, background 160ms ease, transform 160ms ease; }
 .model-choice:hover { border-color: var(--line-strong); background: var(--surface-soft); }
 .model-choice-selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
-.model-choice-icon { display: grid; flex: 0 0 34px; place-items: center; width: 34px; height: 34px; border-radius: 5px; background: var(--surface-soft); color: var(--accent); }
+.model-choice-index { display: grid; place-items: center; width: 30px; height: 30px; border-right: 1px solid var(--line); color: var(--text-faint); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; }
+.model-choice-selected .model-choice-index { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); }
 .model-choice-copy { display: grid; min-width: 0; gap: 3px; }
 .model-choice-copy strong { overflow: hidden; font-size: 0.85rem; text-overflow: ellipsis; white-space: nowrap; }
 .model-choice-copy small { color: var(--text-muted); font-size: 0.74rem; }
@@ -388,7 +395,7 @@ a { color: inherit; text-decoration: none; }
 .local-model-menu-single-label { padding-right: 4px; }
 .local-model-menu-rescan { display: inline-grid; flex: 0 0 27px; place-items: center; width: 27px; height: 27px; border: 0; border-radius: 8px; background: transparent; color: var(--text-faint); }
 .local-model-menu-rescan:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
-.local-model-menu-list { position: absolute; bottom: calc(100% + 10px); left: 0; display: grid; width: min(330px, calc(100vw - 40px)); max-height: min(260px, 42vh); overflow-y: auto; padding: 5px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-elevated); box-shadow: var(--shadow-md); }
+.local-model-menu-list { position: absolute; bottom: calc(100% + 10px); left: 0; display: grid; width: min(360px, calc(100vw - 40px)); max-height: min(320px, calc(100dvh - 150px)); overflow-y: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-elevated); box-shadow: var(--shadow-md); scrollbar-gutter: stable; }
 .local-model-menu-option { display: flex; align-items: center; justify-content: space-between; min-width: 0; min-height: 36px; gap: 10px; border: 0; border-radius: 5px; padding: 6px 8px; background: transparent; color: var(--text); font-size: 0.76rem; text-align: left; }
 .local-model-menu-option > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-model-menu-option:hover, .local-model-menu-option:focus-visible { background: var(--surface-hover); outline: 0; }

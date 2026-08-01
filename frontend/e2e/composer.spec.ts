@@ -2,18 +2,20 @@ import { expect, test, type Page } from "@playwright/test";
 
 type WorkspaceOptions = {
   models?: string[];
+  selectedModel?: string | null;
   connectionSuccess?: boolean;
   connectionMessage?: string;
 };
 
 async function stubWorkspace(page: Page, {
   models = ["local-chat:7b", "local-chat:13b"],
+  selectedModel = models[0] ?? null,
   connectionSuccess = true,
   connectionMessage = "Connected to local runtime.",
 }: WorkspaceOptions = {}) {
   let settings = {
     appearance: { theme: "dark" },
-    models: { chat: models[0] ?? null, title: null, translation: "translategemma:4b" },
+    models: { chat: selectedModel, title: null, translation: "translategemma:4b" },
     generation: { temperature: 0.7, num_ctx: 4096, seed: -1 },
     memory: { enabled: true },
     translation: { enabled: false },
@@ -48,6 +50,45 @@ async function stubWorkspace(page: Page, {
     });
   });
 }
+
+test("keeps the startup model picker usable when the inventory is taller than the viewport", async ({ page }) => {
+  const models = [
+    "gemma4:12b",
+    "granite4.1:8b",
+    "igors/gemma-4-EB4-it-heretic-GGUF:latest",
+    "ministral-3:8b",
+    "mxbai-embed-large:latest",
+    "nemotron-3-nano:4b",
+    "nomic-embed-text:latest",
+    "qwen3:8b",
+    "qwen3.5:9b",
+    "rnj-1:latest",
+    "translategemma:4b",
+  ];
+
+  await page.setViewportSize({ width: 800, height: 500 });
+  await stubWorkspace(page, { models, selectedModel: null });
+  await page.goto("/?bootstrap=launcher-token");
+
+  await expect(page.getByRole("heading", { name: "Select a local model" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: /translategemma:4b/i })).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const listNode = document.querySelector<HTMLElement>(".model-choice-list");
+    const footerNode = document.querySelector<HTMLElement>(".local-setup-actions-bottom");
+    return {
+      listScrolls: Boolean(listNode && listNode.scrollHeight > listNode.clientHeight),
+      footerBottom: footerNode?.getBoundingClientRect().bottom ?? 0,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(layout.listScrolls).toBe(true);
+  expect(layout.footerBottom).toBeLessThanOrEqual(layout.viewportHeight);
+
+  await page.getByRole("radio", { name: /translategemma:4b/i }).click();
+  await page.getByRole("button", { name: "Use selected model" }).click();
+  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+});
 
 test("keeps a multiline draft when generation acceptance fails", async ({ page }) => {
   let generationRequests = 0;
