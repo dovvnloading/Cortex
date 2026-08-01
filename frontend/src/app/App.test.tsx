@@ -11,10 +11,11 @@ describe("App", () => {
     window.history.replaceState({}, "", "/");
   });
 
-  it("starts at the authenticated local-session boundary", () => {
+  it("starts without exposing a manual sign-in boundary", () => {
     window.sessionStorage.clear();
     render(<App api={new CortexApi("/api/v1", window.fetch.bind(window))} />);
-    expect(screen.getByRole("heading", { name: "Connect to Cortex" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Start local workspace" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
   it("does not reuse a consumed bootstrap token after the local session expires", async () => {
@@ -36,9 +37,9 @@ describe("App", () => {
 
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher as unknown as typeof fetch)} /></ToastProvider>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Connect to Cortex" })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Opening local workspace" })).toBeVisible());
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/session/exchange"))).toHaveLength(1);
-    expect(screen.getByLabelText("Launcher token")).toHaveValue("");
+    expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
   it("keeps the shell selection aligned with browser route changes", async () => {

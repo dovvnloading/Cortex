@@ -44,7 +44,7 @@ export function App({ api: providedApi }: Props) {
             setBootstrapToken("");
             setSessionReady(true);
           } catch (error) {
-            setOnboardingError(error instanceof ApiError ? error.detail : "Could not connect to Cortex.");
+            setOnboardingError(error instanceof ApiError ? error.detail : "Could not open the local workspace.");
           } finally {
             setConnecting(false);
           }
@@ -101,7 +101,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       if (error instanceof ApiError && error.status === 401) {
         onSessionExpired();
       }
-      setLoadError(error instanceof ApiError ? error.detail : "Could not load the Cortex workspace.");
+      setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {
       setLoading(false);
     }

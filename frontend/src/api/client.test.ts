@@ -22,7 +22,7 @@ describe("CortexApi", () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 503 }));
     const api = new CortexApi("/api/v1", fetcher);
 
-    await expect(api.health()).rejects.toEqual(new ApiError(503, "Cortex API request failed."));
+    await expect(api.health()).rejects.toEqual(new ApiError(503, "The local workspace did not respond."));
   });
 
   it("parses ordered authenticated generation events from an SSE response", async () => {
