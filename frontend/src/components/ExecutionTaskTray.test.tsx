@@ -16,14 +16,27 @@ const task: ExecutionTaskSummary = {
   updated_at: "2026-07-21T00:00:01Z",
 };
 
+const codeTask: ExecutionTaskSummary = {
+  ...task,
+  job_id: "code-1",
+  profile: "code.exec.v1",
+  status: "succeeded",
+  phase: "completed",
+  message: "Local code execution completed.",
+  intent_summary: "Summarize the local data",
+  capabilities: { filesystem: false, process: false, network: false },
+  result: { stdout: "Rows: 3\n", stderr: "", value: { rows: 3 }, truncated: false },
+  can_cancel: false,
+};
+
 describe("ExecutionTaskTray", () => {
   it("announces active work and exposes an accessible Stop action", async () => {
     const user = userEvent.setup();
     const onCancel = vi.fn<(jobId: string) => Promise<void>>().mockResolvedValue();
     render(<ExecutionTaskTray tasks={[task]} onCancel={onCancel} />);
 
-    expect(screen.getByRole("complementary", { name: "Background tasks" })).toBeVisible();
-    expect(screen.getByRole("status")).toHaveTextContent("1 background task in progress.");
+    expect(screen.getByRole("complementary", { name: "Task activity" })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("1 local task is running.");
     expect(screen.getByRole("complementary").querySelector(".execution-task-spinner")).toBeInTheDocument();
     const stop = screen.getByRole("button", { name: "Stop background task job-1" });
     expect(stop).toBeEnabled();
@@ -34,7 +47,7 @@ describe("ExecutionTaskTray", () => {
   it("keeps terminal state visible without offering Stop", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<ExecutionTaskTray tasks={[{ ...task, status: "succeeded", can_cancel: false, message: "Complete" }]} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Background tasks complete.");
+    expect(screen.getByRole("status")).toHaveTextContent("The latest local task is complete.");
     expect(screen.queryByRole("button", { name: /Stop background task/ })).not.toBeInTheDocument();
     const dismiss = screen.getByRole("button", { name: "Dismiss completed background task notification" });
     expect(dismiss).toHaveAttribute("title", "Dismiss notification");
@@ -79,7 +92,7 @@ describe("ExecutionTaskTray", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("1 background task requires approval.");
+    expect(screen.getByRole("status")).toHaveTextContent("1 task requires your approval.");
     expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
     expect(screen.getByText(/Action required · artifact extended/)).toBeVisible();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -110,6 +123,42 @@ describe("ExecutionTaskTray", () => {
     await user.click(deny);
     expect(onDecideApproval).toHaveBeenCalledWith("job-1", "denied");
     await waitFor(() => expect(deny).toBeEnabled());
-    expect(screen.getByRole("status")).toHaveTextContent("requires approval");
+    expect(screen.getByRole("status")).toHaveTextContent("requires your approval");
+  });
+
+  it("renders a code result as a structured task card and loads source on demand", async () => {
+    const user = userEvent.setup();
+    const onLoadCodeSource = vi.fn().mockResolvedValue({
+      job_id: "code-1",
+      language: "python",
+      source: "print('Rows: 3')",
+      source_digest: "a".repeat(64),
+      intent_summary: "Summarize the local data",
+      capabilities: { filesystem: false, process: false, network: false },
+    });
+    render(<ExecutionTaskTray tasks={[codeTask]} onLoadCodeSource={onLoadCodeSource} />);
+
+    expect(screen.getByText("Summarize the local data")).toBeVisible();
+    expect(screen.getByText("No host access requested")).toBeVisible();
+    expect(screen.getByText("Output")).toBeVisible();
+    expect(screen.getByText("Rows: 3")).toBeVisible();
+
+    await user.click(screen.getByText("Inspect generated source"));
+    await waitFor(() => expect(onLoadCodeSource).toHaveBeenCalledWith("code-1"));
+    expect(await screen.findByText("print('Rows: 3')")).toBeVisible();
+  });
+
+  it("makes broad code access explicit before approval", () => {
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...codeTask, status: "queued", approval_state: "pending", approval_reason: "Prepare a local report", capabilities: { filesystem: true, process: true, network: false }, result: null }]}
+        onDecideApproval={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByText("Broad local access requested. Review the source before allowing.")).toBeVisible();
+    expect(screen.getByText("Files")).toBeVisible();
+    expect(screen.getByText("Processes")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeVisible();
   });
 });

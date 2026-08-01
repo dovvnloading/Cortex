@@ -377,10 +377,10 @@ function shouldShowExecutionTask(task: ExecutionTaskSummary, runtimeStartedAt: s
   }
   const taskUpdatedAt = Date.parse(task.updated_at);
   const runtimeStart = Date.parse(runtimeStartedAt);
-  // Keep malformed records visible rather than silently dropping a task the
-  // user may need to understand or dismiss. Valid terminal records are scoped
-  // to this backend lifetime so old completions are not replayed on startup.
-  return Number.isNaN(taskUpdatedAt) || Number.isNaN(runtimeStart) || taskUpdatedAt >= runtimeStart;
+  // Terminal records are scoped to this backend lifetime. A malformed
+  // timestamp cannot be safely scoped, so hide it instead of replaying stale
+  // completion notices every time the workspace starts.
+  return !Number.isNaN(taskUpdatedAt) && !Number.isNaN(runtimeStart) && taskUpdatedAt >= runtimeStart;
 }
 
 function apiMessage(error: unknown, fallback: string): string {

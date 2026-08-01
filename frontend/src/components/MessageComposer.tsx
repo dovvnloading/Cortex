@@ -1,4 +1,4 @@
-import { ArrowUp, Code2, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Play, Square, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, Code2, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Play, Square, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -84,6 +84,7 @@ export function MessageComposer({
   const [codeIntent, setCodeIntent] = useState("Run this local Python task");
   const [codeCapabilities, setCodeCapabilities] = useState<CodeCapabilities>({ filesystem: false, process: false, network: false });
   const [codeBusy, setCodeBusy] = useState(false);
+  const selectedCodeCapabilityCount = Object.values(codeCapabilities).filter(Boolean).length;
   const statusId = useId();
   const counterId = useId();
   const canSubmit = phase === "ready"
@@ -192,6 +193,7 @@ export function MessageComposer({
         capabilities: codeCapabilities,
       };
       await onRunCode(request);
+      setCodePanelOpen(false);
     } catch {
       // The workspace callback owns the user-visible error message.
     } finally {
@@ -256,22 +258,49 @@ export function MessageComposer({
           {codePanelOpen && (
             <section className="composer-code-panel" aria-label="Local code task">
               <div className="composer-code-panel-heading">
-                <div><strong>Local Python task</strong><span>Runs only after you approve it.</span></div>
+                <div>
+                  <span className="composer-code-eyebrow">LOCAL EXECUTION</span>
+                  <strong>Review a Python task</strong>
+                  <span>Nothing runs until you approve it.</span>
+                </div>
+                <span className="composer-code-language">Python</span>
                 <button className="icon-button icon-button-small" type="button" aria-label="Close code panel" onClick={() => setCodePanelOpen(false)}><X size={14} aria-hidden="true" /></button>
               </div>
-              <label className="sr-only" htmlFor="code-intent">Task summary</label>
-              <input id="code-intent" className="composer-code-intent" value={codeIntent} maxLength={500} onChange={(event) => setCodeIntent(event.target.value)} placeholder="What should this task do?" />
-              <label className="sr-only" htmlFor="code-source">Python source</label>
-              <textarea id="code-source" className="composer-code-editor" value={codeSource} maxLength={64 * 1024} onChange={(event) => setCodeSource(event.target.value)} spellCheck={false} />
-              <div className="composer-code-capabilities" aria-label="Requested capabilities">
-                {(Object.keys(codeCapabilities) as Array<keyof CodeCapabilities>).map((capability) => (
-                  <label key={capability}><input type="checkbox" checked={codeCapabilities[capability]} onChange={(event) => setCodeCapabilities((current) => ({ ...current, [capability]: event.target.checked }))} />{capability}</label>
-                ))}
+              <label className="composer-code-field" htmlFor="code-intent">
+                <span>Task summary</span>
+                <input id="code-intent" value={codeIntent} maxLength={500} onChange={(event) => setCodeIntent(event.target.value)} placeholder="What should this task do?" />
+              </label>
+              <label className="composer-code-field composer-code-source-field" htmlFor="code-source">
+                <span>Python source</span>
+                <textarea id="code-source" className="composer-code-editor" value={codeSource} maxLength={64 * 1024} onChange={(event) => setCodeSource(event.target.value)} spellCheck={false} />
+              </label>
+              <div className="composer-code-access">
+                <div className="composer-code-access-heading">
+                  <div><strong>Host access</strong><span>Off by default. Grant only what this task needs.</span></div>
+                  <span className="composer-code-access-count">{selectedCodeCapabilityCount ? `${selectedCodeCapabilityCount} selected` : "No access"}</span>
+                </div>
+                <div className="composer-code-capabilities" aria-label="Requested capabilities">
+                  <CapabilityToggle capability="filesystem" label="Files" description="Read or write local files" enabled={codeCapabilities.filesystem} onChange={(enabled) => setCodeCapabilities((current) => ({ ...current, filesystem: enabled }))} />
+                  <CapabilityToggle capability="process" label="Processes" description="Start a local command" enabled={codeCapabilities.process} onChange={(enabled) => setCodeCapabilities((current) => ({ ...current, process: enabled }))} />
+                  <CapabilityToggle capability="network" label="Network" description="Make HTTP requests" enabled={codeCapabilities.network} onChange={(enabled) => setCodeCapabilities((current) => ({ ...current, network: enabled }))} />
+                </div>
+                {selectedCodeCapabilityCount > 0 && (
+                  <div className="composer-code-access-warning" role="note">
+                    <AlertTriangle size={13} aria-hidden="true" />
+                    <span>This run can access your machine. Grant only the permissions it needs.</span>
+                  </div>
+                )}
               </div>
-              <button className="button button-secondary composer-code-run" type="button" onClick={() => void runCode()} disabled={codeBusy || !codeSource.trim() || !codeIntent.trim()}>
-                {codeBusy ? <LoaderCircle size={14} className="composer-control-spinner" aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
-                Request approval
-              </button>
+              <div className="composer-code-footer">
+                <span>Review the exact source again on the approval card.</span>
+                <div>
+                  <button className="button button-quiet" type="button" onClick={() => setCodePanelOpen(false)} disabled={codeBusy}>Cancel</button>
+                  <button className="button button-primary composer-code-run" type="button" onClick={() => void runCode()} disabled={codeBusy || !codeSource.trim() || !codeIntent.trim()}>
+                    {codeBusy ? <LoaderCircle size={14} className="composer-control-spinner" aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+                    Request approval
+                  </button>
+                </div>
+              </div>
             </section>
           )}
           {!codePanelOpen && <textarea
@@ -352,5 +381,36 @@ export function MessageComposer({
         </div>
       </form>
     </div>
+  );
+}
+
+function CapabilityToggle({
+  capability,
+  label,
+  description,
+  enabled,
+  onChange,
+}: {
+  capability: keyof CodeCapabilities;
+  label: string;
+  description: string;
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className={`composer-code-capability${enabled ? " composer-code-capability-active" : ""}`}>
+      <input
+        type="checkbox"
+        checked={enabled}
+        aria-label={`${label} capability`}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+      <span className="composer-code-capability-state" aria-hidden="true">{enabled ? "On" : "Off"}</span>
+      <span className="sr-only">{capability}</span>
+    </label>
   );
 }

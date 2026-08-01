@@ -1,5 +1,5 @@
+import { AlertTriangle, Check, ChevronDown, Code2, X } from "lucide-react";
 import { useState } from "react";
-import { X } from "lucide-react";
 import type { CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../contracts/cortex-api";
 
 type ExecutionApprovalDecision = ExecutionApprovalDecisionRequest["decision"];
@@ -36,14 +36,13 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
     .sort()
     .join("|");
   const completionDismissed = !hasLiveWork && Boolean(completionKey) && dismissedCompletionKey === completionKey;
-  if (!tasks.length) return null;
-  if (completionDismissed) return null;
+  if (!tasks.length || completionDismissed) return null;
 
   const announce = pendingApprovals.length
-    ? `${pendingApprovals.length} background task${pendingApprovals.length === 1 ? " requires" : "s require"} approval.`
+    ? `${pendingApprovals.length} task${pendingApprovals.length === 1 ? " requires" : "s require"} your approval.`
     : activeTasks.length
-    ? `${activeTasks.length} background task${activeTasks.length === 1 ? "" : "s"} in progress.`
-    : "Background tasks complete.";
+      ? `${activeTasks.length} local task${activeTasks.length === 1 ? " is" : "s are"} running.`
+      : "The latest local task is complete.";
 
   const stop = async (jobId: string) => {
     if (!onCancel || cancelling.has(jobId)) return;
@@ -95,11 +94,14 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
   };
 
   return (
-    <aside className="execution-task-tray" aria-label="Background tasks">
+    <aside className={`execution-task-tray${hasLiveWork ? " execution-task-tray-active" : ""}`} aria-label="Task activity">
       <div className="execution-task-tray-heading">
-        <h2>Background tasks</h2>
+        <div className="execution-task-tray-title">
+          <span className="execution-task-tray-kicker">TASK ACTIVITY</span>
+          <h2>{pendingApprovals.length ? "Review before running" : hasLiveWork ? "Running locally" : "Recent activity"}</h2>
+        </div>
         <div className="execution-task-tray-controls">
-          <span className="execution-task-tray-count" aria-hidden="true">{tasks.length}</span>
+          <span className="execution-task-tray-count" aria-label={`${tasks.length} task${tasks.length === 1 ? "" : "s"}`}>{tasks.length}</span>
           {!hasLiveWork && Boolean(completionKey) && (
             <button
               className="execution-task-tray-dismiss"
@@ -125,52 +127,37 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
           const isCancelling = cancelling.has(task.job_id) || task.status === "cancelling";
           const taskMessage = task.message || task.phase || "Working";
           const displayMessage = group.count > 1 ? `${group.count} × ${taskMessage}` : taskMessage;
+          const isCodeTask = task.profile === "code.exec.v1";
+
           return (
             <li
-              className={`execution-task ${approvalPending ? "execution-task-approval" : ""}`}
+              className={`execution-task ${approvalPending ? "execution-task-approval" : ""} ${isCodeTask ? "execution-task-code" : ""}`}
               key={group.key}
               aria-busy={approvalDecision ? "true" : undefined}
             >
-              <div className="execution-task-copy">
-                <div className="execution-task-label">
-                  {showsWorking && <span className="loading-spinner execution-task-spinner" aria-hidden="true" />}
-                  <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
+              {isCodeTask ? (
+                <CodeTaskSummary
+                  task={task}
+                  approvalPending={approvalPending}
+                  approvalDecision={approvalDecision}
+                  showsWorking={showsWorking}
+                  groupCount={group.count}
+                  codeSource={codeSources.get(task.job_id)}
+                  loadingSource={loadingSource.has(task.job_id)}
+                  onLoadSource={onLoadCodeSource ? () => void loadSource(task.job_id) : undefined}
+                  onDecideApproval={onDecideApproval ? (decision) => void decide(task.job_id, decision) : undefined}
+                />
+              ) : (
+                <div className="execution-task-copy">
+                  <div className="execution-task-label">
+                    {showsWorking && <span className="loading-spinner execution-task-spinner" aria-hidden="true" />}
+                    <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
+                  </div>
+                  <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
                 </div>
-                <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
-                {task.profile === "code.exec.v1" && (
-                  <>
-                    {task.capabilities && <span className="execution-task-capabilities">{formatCapabilities(task.capabilities)}</span>}
-                    {task.capabilities && hasBroadCapabilities(task.capabilities) && <span className="execution-task-warning">High-risk local access · review before allowing</span>}
-                    {task.result && <pre className="execution-task-output">{formatCodeResult(task.result)}</pre>}
-                    {onLoadCodeSource && <details className="execution-task-code-details" onToggle={(event) => { if (event.currentTarget.open) void loadSource(task.job_id); }}>
-                      <summary>Review generated code</summary>
-                      {loadingSource.has(task.job_id) && <span>Loading source…</span>}
-                      {codeSources.get(task.job_id) && <><span>Digest {codeSources.get(task.job_id)?.source_digest.slice(0, 16)}…</span><pre>{codeSources.get(task.job_id)?.source}</pre></>}
-                    </details>}
-                  </>
-                )}
-              </div>
-              {approvalPending && onDecideApproval && (
-                <div className="execution-task-approval-actions" aria-label={`Approval actions for background task ${task.job_id}`}>
-                  <button
-                    className="button button-primary execution-task-decision"
-                    type="button"
-                    onClick={() => void decide(task.job_id, "approved")}
-                    disabled={Boolean(approvalDecision)}
-                    aria-label={`Allow background task ${task.job_id} once`}
-                  >
-                    {approvalDecision === "approved" ? "Allowing…" : "Allow once"}
-                  </button>
-                  <button
-                    className="button button-secondary execution-task-decision"
-                    type="button"
-                    onClick={() => void decide(task.job_id, "denied")}
-                    disabled={Boolean(approvalDecision)}
-                    aria-label={`Deny background task ${task.job_id}`}
-                  >
-                    {approvalDecision === "denied" ? "Denying…" : "Deny"}
-                  </button>
-                </div>
+              )}
+              {!isCodeTask && approvalPending && onDecideApproval && (
+                <ApprovalActions task={task} decision={approvalDecision} onDecide={(value) => void decide(task.job_id, value)} />
               )}
               {canStop && (
                 <button
@@ -191,6 +178,99 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
   );
 }
 
+function CodeTaskSummary({
+  task,
+  approvalPending,
+  approvalDecision,
+  showsWorking,
+  groupCount,
+  codeSource,
+  loadingSource,
+  onLoadSource,
+  onDecideApproval,
+}: {
+  task: ExecutionTaskSummary;
+  approvalPending: boolean;
+  approvalDecision?: ExecutionApprovalDecision;
+  showsWorking: boolean;
+  groupCount: number;
+  codeSource?: CodeExecutionSourceResponse;
+  loadingSource: boolean;
+  onLoadSource?: () => void;
+  onDecideApproval?: (decision: ExecutionApprovalDecision) => void;
+}) {
+  const title = task.intent_summary || task.approval_reason || task.message || "Local Python task";
+  const status = approvalPending ? "Approval needed" : formatTaskStatus(task.status);
+  return (
+    <div className="execution-task-code-content">
+      <div className="execution-task-code-heading">
+        <div className="execution-task-code-title">
+          <span className="execution-task-code-icon" aria-hidden="true"><Code2 size={15} /></span>
+          <div>
+            <strong>{groupCount > 1 ? `${groupCount} × ${title}` : title}</strong>
+            <span>{status}</span>
+          </div>
+        </div>
+        {approvalPending ? <span className="execution-task-state execution-task-state-review">Review</span> : showsWorking ? <span className="execution-task-state execution-task-state-running">Running</span> : <span className="execution-task-state execution-task-state-complete"><Check size={12} aria-hidden="true" />Complete</span>}
+      </div>
+      {task.capabilities && (
+        <div className="execution-task-capability-row" aria-label="Requested host access">
+          {formatCapabilities(task.capabilities).map((capability) => <span key={capability} className="execution-task-capability">{capability}</span>)}
+        </div>
+      )}
+      {task.capabilities && hasBroadCapabilities(task.capabilities) && (
+        <div className="execution-task-warning" role="note"><AlertTriangle size={13} aria-hidden="true" /><span>Broad local access requested. Review the source before allowing.</span></div>
+      )}
+      {task.status === "failed" && task.message && (
+        <div className="execution-task-failure" role="alert"><AlertTriangle size={13} aria-hidden="true" /><span>{task.message}</span></div>
+      )}
+      {task.result && <CodeResult result={task.result} />}
+      {onLoadSource && (
+        <details className="execution-task-code-details" onToggle={(event) => { if (event.currentTarget.open) onLoadSource(); }}>
+          <summary><ChevronDown size={13} aria-hidden="true" />Inspect generated source</summary>
+          {loadingSource && <span className="execution-task-source-loading">Loading source…</span>}
+          {codeSource && <div className="execution-task-source">
+            <span>Digest {codeSource.source_digest.slice(0, 16)}…</span>
+            <pre>{codeSource.source}</pre>
+          </div>}
+        </details>
+      )}
+      {approvalPending && onDecideApproval && <ApprovalActions task={task} decision={approvalDecision} onDecide={onDecideApproval} />}
+    </div>
+  );
+}
+
+function ApprovalActions({ task, decision, onDecide }: { task: ExecutionTaskSummary; decision?: ExecutionApprovalDecision; onDecide: (decision: ExecutionApprovalDecision) => void }) {
+  return (
+    <div className="execution-task-approval-actions" aria-label={`Approval actions for background task ${task.job_id}`}>
+      <button className="button button-primary execution-task-decision" type="button" onClick={() => onDecide("approved")} disabled={Boolean(decision)} aria-label={`Allow background task ${task.job_id} once`}>
+        {decision === "approved" ? "Allowing…" : "Allow once"}
+      </button>
+      <button className="button button-secondary execution-task-decision" type="button" onClick={() => onDecide("denied")} disabled={Boolean(decision)} aria-label={`Deny background task ${task.job_id}`}>
+        {decision === "denied" ? "Denying…" : "Deny"}
+      </button>
+    </div>
+  );
+}
+
+function CodeResult({ result }: { result: Record<string, unknown> }) {
+  const stdout = typeof result.stdout === "string" ? result.stdout : "";
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  const value = result.value === undefined || result.value === null ? "" : JSON.stringify(result.value);
+  const duration = typeof result.duration_ms === "number" && Number.isFinite(result.duration_ms)
+    ? `${Math.max(0, Math.round(result.duration_ms))} ms`
+    : null;
+  return (
+    <div className="execution-task-result">
+      <div className="execution-task-result-heading"><span>Result</span><span>{duration && <span className="execution-task-result-duration">{duration}</span>} {result.truncated === true && <span className="execution-task-result-truncated">Output truncated</span>}</span></div>
+      {stdout && <div><span className="execution-task-result-label">Output</span><pre>{stdout}</pre></div>}
+      {stderr && <div><span className="execution-task-result-label execution-task-result-error">Errors</span><pre className="execution-task-result-stderr">{stderr}</pre></div>}
+      {value && <div><span className="execution-task-result-label">Value</span><pre>{value}</pre></div>}
+      {!stdout && !stderr && !value && <span className="execution-task-result-empty">No output returned.</span>}
+    </div>
+  );
+}
+
 function formatApprovalMeta(task: ExecutionTaskSummary): string {
   const profile = task.profile.replace(/\.v\d+$/, "").replaceAll(".", " ");
   if (!task.approval_expires_at) return `Action required · ${profile}`;
@@ -206,15 +286,12 @@ function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
   for (const task of tasks) {
     const approvalPending = task.approval_state === "pending";
     const terminal = !ACTIVE_STATUSES.has(task.status) && !approvalPending;
-    const key = terminal
-      ? JSON.stringify(["terminal", task.profile, task.status, task.phase ?? "", task.message ?? ""])
-      : `job:${task.job_id}`;
+    const key = task.profile === "code.exec.v1" || !terminal
+      ? `job:${task.job_id}`
+      : JSON.stringify(["terminal", task.profile, task.status, task.phase ?? "", task.message ?? ""]);
     const existing = groups.get(key);
-    if (existing) {
-      existing.count += 1;
-    } else {
-      groups.set(key, { key, task, count: 1 });
-    }
+    if (existing) existing.count += 1;
+    else groups.set(key, { key, task, count: 1 });
   }
   return [...groups.values()];
 }
@@ -223,18 +300,12 @@ function formatTaskStatus(status: ExecutionTaskSummary["status"]): string {
   return status === "cancelling" ? "Stopping" : `${status[0].toUpperCase()}${status.slice(1)}`;
 }
 
-function formatCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): string {
-  const labels = Object.entries(capabilities).filter(([, enabled]) => enabled).map(([name]) => name);
-  return labels.length ? `Requested: ${labels.join(", ")}` : "No host access requested";
+function formatCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): string[] {
+  const labels: Record<string, string> = { filesystem: "Files", process: "Processes", network: "Network" };
+  const requested = Object.entries(capabilities).filter(([, enabled]) => enabled).map(([name]) => labels[name] ?? name);
+  return requested.length ? requested : ["No host access requested"];
 }
 
 function hasBroadCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): boolean {
   return Object.values(capabilities).some(Boolean);
-}
-
-function formatCodeResult(result: Record<string, unknown>): string {
-  const stdout = typeof result.stdout === "string" ? result.stdout : "";
-  const stderr = typeof result.stderr === "string" ? result.stderr : "";
-  const value = result.value === undefined || result.value === null ? "" : `Value: ${JSON.stringify(result.value)}`;
-  return [stdout && `Output:\n${stdout}`, stderr && `Errors:\n${stderr}`, value].filter(Boolean).join("\n\n") || "No output.";
 }

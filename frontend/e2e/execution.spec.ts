@@ -82,7 +82,7 @@ test("does not replay old completions and groups repeated task notifications", a
   await page.goto("/?bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
-  const tray = page.getByRole("complementary", { name: "Background tasks" });
+  const tray = page.getByRole("complementary", { name: "Task activity" });
   await expect(tray).toBeVisible();
   await expect(tray.getByText("2 × Chat attachment staged.")).toBeVisible();
   await expect(tray.getByText("Old attachment staged.")).toHaveCount(0);
