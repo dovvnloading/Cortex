@@ -457,6 +457,6 @@ export class CortexApi {
     if (body?.detail && typeof body.detail.message === "string") {
       return body.detail.message;
     }
-    return "Cortex API request failed.";
+    return "The local workspace did not respond.";
   }
 }
