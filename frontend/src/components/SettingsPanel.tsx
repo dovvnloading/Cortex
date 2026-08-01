@@ -145,8 +145,12 @@ export function SettingsPanel({
                   />
                 </div>
                 <label className="toggle-row" htmlFor="automatic-compute">
-                  <span><strong id="automatic-compute-label">Use safe computation automatically</strong><small id="automatic-compute-description">For explicit math requests, Cortex verifies the result locally before responding. It never runs Python, shell commands, or network requests.</small></span>
+                  <span><strong id="automatic-compute-label">Use safe computation automatically</strong><small id="automatic-compute-description">For explicit math requests, Cortex verifies the result locally before responding. General code always requires a separate approval.</small></span>
                   <input id="automatic-compute" type="checkbox" aria-labelledby="automatic-compute-label" aria-describedby="automatic-compute-description" checked={execution.automatic_compute ?? true} onChange={(event) => update({ execution: { ...execution, automatic_compute: event.target.checked } })} />
+                </label>
+                <label className="toggle-row" htmlFor="code-execution-enabled">
+                  <span><strong id="code-execution-enabled-label">Allow local code requests</strong><small id="code-execution-enabled-description">Cortex may prepare a local Python task, but every run still pauses for your one-time approval.</small></span>
+                  <input id="code-execution-enabled" type="checkbox" aria-labelledby="code-execution-enabled-label" aria-describedby="code-execution-enabled-description" checked={execution.code_execution_enabled ?? true} onChange={(event) => update({ execution: { ...execution, code_execution_enabled: event.target.checked } })} />
                 </label>
               </div>
             </section>

@@ -87,6 +87,40 @@ export interface ClearMemoryRequest {
   confirmation_intent?: "clear_permanent_memory" | null;
 }
 
+export interface CodeCapabilitiesRequest {
+  filesystem?: boolean;
+  process?: boolean;
+  network?: boolean;
+}
+
+export interface CodeExecutionAccepted {
+  job_id: string;
+  request_id: string;
+  profile: "code.exec.v1";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  sequence: number;
+  approval_state?: "not_required" | "pending" | "approved" | "denied" | "expired";
+  source_digest: string;
+  capabilities: CodeCapabilitiesRequest;
+}
+
+export interface CodeExecutionRequest {
+  request_id: string;
+  language?: "python";
+  source: string;
+  intent_summary: string;
+  capabilities?: CodeCapabilitiesRequest;
+}
+
+export interface CodeExecutionSourceResponse {
+  job_id: string;
+  language: "python";
+  source: string;
+  source_digest: string;
+  intent_summary: string;
+  capabilities: CodeCapabilitiesRequest;
+}
+
 export interface ConnectionResult {
   success: boolean;
   status: "connecting" | "connected" | "error";
@@ -160,6 +194,7 @@ export interface ExecutionPreviewRequest {
 
 export interface ExecutionSettings {
   automatic_compute?: boolean;
+  code_execution_enabled?: boolean;
 }
 
 export interface ExecutionStatusResponse {
@@ -176,6 +211,9 @@ export interface ExecutionStatusResponse {
   can_cancel?: boolean;
   error?: string | null;
   result?: Record<string, unknown> | null;
+  intent_summary?: string | null;
+  source_digest?: string | null;
+  capabilities?: CodeCapabilitiesRequest | null;
 }
 
 export interface ExecutionTaskListResponse {
@@ -195,6 +233,10 @@ export interface ExecutionTaskSummary {
   can_cancel?: boolean;
   created_at: string;
   updated_at: string;
+  intent_summary?: string | null;
+  source_digest?: string | null;
+  capabilities?: CodeCapabilitiesRequest | null;
+  result?: Record<string, unknown> | null;
 }
 
 export interface ForkRequest {
@@ -420,6 +462,7 @@ export interface SystemResponse {
   session_required?: boolean;
   execution_preview_available?: boolean;
   scratch_compute_available?: boolean;
+  code_execution_available?: boolean;
   image_transform_available?: boolean;
   started_at: string;
   ollama_host?: string;
@@ -443,7 +486,7 @@ export interface ExecutionSSEEvent {
   id: number;
   sequence: number;
   job_id: string;
-  event: "execution.queued" | "execution.started" | "execution.progress" | "execution.cancelling" | "execution.recovered" | "execution.completed" | "execution.failed" | "execution.cancelled";
+  event: "execution.queued" | "execution.started" | "execution.progress" | "execution.cancelling" | "execution.recovered" | "execution.completed" | "execution.failed" | "execution.cancelled" | "execution.code.requested" | "execution.code.started" | "execution.code.output" | "execution.code.completed" | "execution.code.failed" | "execution.code.cancelled" | "execution.code.revoked";
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   phase?: string | null;
   data?: Record<string, unknown>;

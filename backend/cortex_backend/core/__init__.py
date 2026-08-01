@@ -2,6 +2,7 @@
 
 from .paths import AppPathError, AppPaths
 from .generation import (
+    CodeExecutionProposal,
     ConnectionResult,
     ConnectionStatus,
     GenerationResult,
@@ -27,6 +28,7 @@ __all__ = [
     "AppPaths",
     "ConnectionResult",
     "ConnectionStatus",
+    "CodeExecutionProposal",
     "AppearanceSettings",
     "CortexSettings",
     "ExecutionSettings",

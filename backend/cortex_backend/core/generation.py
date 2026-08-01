@@ -118,6 +118,15 @@ class MemoryCommand:
 
 
 @dataclass(frozen=True)
+class CodeExecutionProposal:
+    """Strict model proposal for a user-approved local code task."""
+
+    source: str
+    intent_summary: str
+    capabilities: Mapping[str, bool] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GenerationAttachment:
     """Resolved attachment data supplied to one model generation call.
 

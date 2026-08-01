@@ -16,10 +16,17 @@ import sys
 from collections.abc import Sequence
 
 from cortex_backend.core.generation import (
+    CodeExecutionProposal,
     GenerationAttachment,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+)
+from cortex_backend.execution.code_execution import (
+    CodeCapabilities,
+    CodeExecutionError,
+    MAX_CODE_SOURCE_BYTES,
+    validate_code_source,
 )
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
 
@@ -106,6 +113,14 @@ class PromptTemplate:
                         containing system and user roles with their respective content.
         """
         system_content = PromptTemplate._load_system_prompt()
+
+        system_content += (
+            "\n\n## LOCAL CODE TASKS\n"
+            "Cortex can prepare a local Python task when the user explicitly asks you to perform a computation or automation. "
+            "Never execute code from ordinary prose or fenced code blocks. If a run is genuinely needed, append exactly one "
+            "<code_execution_request> JSON block with language, source, intent_summary, and capabilities fields. "
+            "The user must approve the task before it runs. Keep the visible answer concise and do not claim the task ran."
+        )
 
         if memories_enabled:
             system_content += "\n" + PromptTemplate._load_memory_prompt()
@@ -241,6 +256,7 @@ class SynthesisAgent:
         self.title_model = title_model
         self.translation_model = translation_model
         self.ollama_client = ollama_client
+        self.last_code_proposal: CodeExecutionProposal | None = None
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
 
     @staticmethod
@@ -515,8 +531,21 @@ class SynthesisAgent:
             validated structured memory command.
         """
         command = MemoryCommand()
+        self.last_code_proposal = None
         thoughts = thoughts_text
         text_to_clean = response_text
+
+        code_pattern = re.compile(r"<code_execution_request>\s*(.*?)\s*</code_execution_request>", re.DOTALL | re.IGNORECASE)
+        code_matches = code_pattern.findall(text_to_clean)
+        if len(code_matches) == 1:
+            self.last_code_proposal = self._parse_code_execution_proposal(code_matches[0])
+        elif len(code_matches) > 1:
+            logging.warning("Ignoring multiple code execution request blocks in one response.")
+        if code_matches and self.last_code_proposal is not None:
+            # Only a validated, single proposal is removed from the visible
+            # response. Malformed or duplicate envelopes remain visible as a
+            # non-executable suggestion so the user can see what was rejected.
+            text_to_clean = re.sub(code_pattern, "", text_to_clean)
         
         if not thoughts:
             think_pattern = re.compile(r'Thinking\.\.\.\s*(.*?)\s*\.\.\.done thinking\.', re.DOTALL)
@@ -544,6 +573,33 @@ class SynthesisAgent:
         final_answer = cleaned_text.strip()
         
         return final_answer, thoughts, command
+
+    @staticmethod
+    def _parse_code_execution_proposal(raw_request: str) -> CodeExecutionProposal | None:
+        if len(raw_request.encode("utf-8")) > MAX_CODE_SOURCE_BYTES + 2048:
+            logging.warning("Ignoring oversized code execution request.")
+            return None
+        try:
+            payload = json.loads(raw_request)
+            if not isinstance(payload, dict) or set(payload) - {"language", "source", "intent_summary", "capabilities"}:
+                raise ValueError("invalid fields")
+            if payload.get("language", "python") != "python":
+                raise ValueError("unsupported language")
+            source = payload.get("source")
+            intent = payload.get("intent_summary")
+            capabilities = payload.get("capabilities", {})
+            if not isinstance(source, str) or not isinstance(intent, str) or not isinstance(capabilities, dict):
+                raise ValueError("invalid values")
+            validate_code_source(source)
+            grants = CodeCapabilities.from_mapping(capabilities)
+            return CodeExecutionProposal(
+                source=source,
+                intent_summary=intent.strip(),
+                capabilities=grants.as_dict(),
+            )
+        except (CodeExecutionError, TypeError, ValueError, json.JSONDecodeError):
+            logging.warning("Ignoring malformed code execution request.")
+            return None
 
     @staticmethod
     def _parse_memory_command(raw_command: str) -> MemoryCommand:

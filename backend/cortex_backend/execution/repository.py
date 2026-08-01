@@ -595,7 +595,7 @@ class ExecutionRepository:
             self._append_event_connection(
                 connection,
                 job_id=job_id,
-                event="progress",
+                event="code.requested" if job["profile"] == "code.exec.v1" else "progress",
                 status=job["status"],
                 phase="approval",
                 data={"message": "Approval required.", "approval_state": "pending"},
@@ -619,7 +619,7 @@ class ExecutionRepository:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT j.owner, j.status, a.state, a.expires_at
+                SELECT j.owner, j.profile, j.status, a.state, a.expires_at
                 FROM execution_jobs j
                 LEFT JOIN execution_approvals a ON a.job_id = j.job_id
                 WHERE j.job_id = ?
@@ -643,7 +643,11 @@ class ExecutionRepository:
                 persisted_state = decision
                 message = f"Approval {decision}."
             terminal = persisted_state in {"denied", "expired"}
-            event = "cancelled" if terminal else "progress"
+            event = (
+                "code.cancelled" if terminal and row["profile"] == "code.exec.v1"
+                else "cancelled" if terminal
+                else "progress"
+            )
             status: ExecutionStatus = "cancelled" if terminal else row["status"]
             connection.execute(
                 "UPDATE execution_approvals SET state = ?, decided_at = ? WHERE job_id = ?",
@@ -674,7 +678,7 @@ class ExecutionRepository:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT a.job_id, j.status FROM execution_approvals a
+                SELECT a.job_id, j.profile, j.status FROM execution_approvals a
                 JOIN execution_jobs j ON j.job_id = a.job_id
                 WHERE a.state = 'pending' AND a.expires_at <= ?
                   AND j.status NOT IN ('succeeded', 'failed', 'cancelled')
@@ -694,7 +698,7 @@ class ExecutionRepository:
                 self._append_event_connection(
                     connection,
                     job_id=job_id,
-                    event="cancelled",
+                    event="code.cancelled" if row["profile"] == "code.exec.v1" else "cancelled",
                     status="cancelled",
                     phase="approval",
                     data={"message": "Approval expired.", "approval_state": "expired"},

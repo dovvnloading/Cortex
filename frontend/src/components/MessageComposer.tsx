@@ -1,4 +1,4 @@
-import { ArrowUp, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, Code2, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Play, Square, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -10,7 +10,9 @@ import {
   type KeyboardEvent,
 } from "react";
 import { LocalModelMenu } from "./LocalModelMenu";
-import type { ChatAttachment } from "../../../contracts/cortex-api";
+import type { ChatAttachment, CodeCapabilitiesRequest, CodeExecutionRequest } from "../../../contracts/cortex-api";
+
+type CodeCapabilities = Required<CodeCapabilitiesRequest>;
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
 
@@ -37,6 +39,8 @@ export type MessageComposerProps = {
   imageInputBlocked?: string | null;
   onAddAttachments?: (files: File[]) => Promise<void> | void;
   onRemoveAttachment?: (attachmentId: string) => void;
+  codeExecutionAvailable?: boolean;
+  onRunCode?: (payload: CodeExecutionRequest) => Promise<void>;
 };
 
 const MAX_MESSAGE_LENGTH = 100_000;
@@ -65,6 +69,8 @@ export function MessageComposer({
   imageInputBlocked = null,
   onAddAttachments,
   onRemoveAttachment,
+  codeExecutionAvailable = false,
+  onRunCode,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -73,6 +79,11 @@ export function MessageComposer({
   const composingRef = useRef(false);
   const [submissionPending, setSubmissionPending] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [codePanelOpen, setCodePanelOpen] = useState(false);
+  const [codeSource, setCodeSource] = useState("print('Hello from Cortex')\n");
+  const [codeIntent, setCodeIntent] = useState("Run this local Python task");
+  const [codeCapabilities, setCodeCapabilities] = useState<CodeCapabilities>({ filesystem: false, process: false, network: false });
+  const [codeBusy, setCodeBusy] = useState(false);
   const statusId = useId();
   const counterId = useId();
   const canSubmit = phase === "ready"
@@ -169,6 +180,25 @@ export function MessageComposer({
     if (files.length && onAddAttachments) void onAddAttachments(files);
   };
 
+  const runCode = async () => {
+    if (!onRunCode || !codeSource.trim() || !codeIntent.trim() || codeBusy) return;
+    setCodeBusy(true);
+    try {
+      const request: CodeExecutionRequest = {
+        request_id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        language: "python",
+        source: codeSource,
+        intent_summary: codeIntent.trim(),
+        capabilities: codeCapabilities,
+      };
+      await onRunCode(request);
+    } catch {
+      // The workspace callback owns the user-visible error message.
+    } finally {
+      setCodeBusy(false);
+    }
+  };
+
   const status = phase === "starting"
     ? "Starting response"
     : phase === "stopping"
@@ -223,7 +253,28 @@ export function MessageComposer({
               ))}
             </div>
           )}
-          <textarea
+          {codePanelOpen && (
+            <section className="composer-code-panel" aria-label="Local code task">
+              <div className="composer-code-panel-heading">
+                <div><strong>Local Python task</strong><span>Runs only after you approve it.</span></div>
+                <button className="icon-button icon-button-small" type="button" aria-label="Close code panel" onClick={() => setCodePanelOpen(false)}><X size={14} aria-hidden="true" /></button>
+              </div>
+              <label className="sr-only" htmlFor="code-intent">Task summary</label>
+              <input id="code-intent" className="composer-code-intent" value={codeIntent} maxLength={500} onChange={(event) => setCodeIntent(event.target.value)} placeholder="What should this task do?" />
+              <label className="sr-only" htmlFor="code-source">Python source</label>
+              <textarea id="code-source" className="composer-code-editor" value={codeSource} maxLength={64 * 1024} onChange={(event) => setCodeSource(event.target.value)} spellCheck={false} />
+              <div className="composer-code-capabilities" aria-label="Requested capabilities">
+                {(Object.keys(codeCapabilities) as Array<keyof CodeCapabilities>).map((capability) => (
+                  <label key={capability}><input type="checkbox" checked={codeCapabilities[capability]} onChange={(event) => setCodeCapabilities((current) => ({ ...current, [capability]: event.target.checked }))} />{capability}</label>
+                ))}
+              </div>
+              <button className="button button-secondary composer-code-run" type="button" onClick={() => void runCode()} disabled={codeBusy || !codeSource.trim() || !codeIntent.trim()}>
+                {codeBusy ? <LoaderCircle size={14} className="composer-control-spinner" aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+                Request approval
+              </button>
+            </section>
+          )}
+          {!codePanelOpen && <textarea
             ref={textareaRef}
             id="chat-composer"
             value={value}
@@ -236,7 +287,7 @@ export function MessageComposer({
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
-          />
+          />}
 
           <div className="composer-utility-row">
             <label className={`composer-attachment-button${attachmentsBusy ? " composer-attachment-button-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
@@ -252,6 +303,7 @@ export function MessageComposer({
                 disabled={attachmentsBusy || !onAddAttachments}
               />
             </label>
+            {codeExecutionAvailable && onRunCode && <button className={`composer-attachment-button${codePanelOpen ? " composer-attachment-button-active" : ""}`} type="button" title="Prepare a local code task" aria-label="Prepare a local code task" onClick={() => setCodePanelOpen((open) => !open)} disabled={phase !== "ready" || modelBusy}><Code2 size={15} aria-hidden="true" /><span className="sr-only">Code</span></button>}
             <div className="composer-model-control">
               <LocalModelMenu
                 models={localModels}

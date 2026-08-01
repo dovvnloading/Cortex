@@ -9,6 +9,7 @@ from threading import Event
 from typing import Any, Protocol
 
 from cortex_backend.core.generation import (
+    CodeExecutionProposal,
     GenerationAttachment,
     GenerationSnapshot,
     MemoryCommand,
@@ -72,6 +73,7 @@ class GenerationServiceResult:
     response: str
     thoughts: str | None
     memory_command: MemoryCommand
+    code_execution_proposal: CodeExecutionProposal | None = None
 
 
 class GenerationService:
@@ -160,6 +162,10 @@ class GenerationService:
         if not snapshot.memories_enabled:
             memory_command = MemoryCommand()
 
+        proposal = getattr(engine, "last_code_proposal", None)
+        if not isinstance(proposal, CodeExecutionProposal):
+            proposal = None
+
         if snapshot.translation_enabled:
             self._check_cancelled(cancellation_event)
             self._publish(
@@ -190,6 +196,7 @@ class GenerationService:
             response=response,
             thoughts=thoughts,
             memory_command=memory_command,
+            code_execution_proposal=proposal,
         )
 
     def generate_chat_title(
