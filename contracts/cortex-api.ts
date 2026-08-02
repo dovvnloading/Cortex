@@ -66,6 +66,7 @@ export interface ChatMessage {
   sources?: Array<unknown> | null;
   thoughts?: string | null;
   attachments?: Array<ChatAttachment> | null;
+  stats?: GenerationStats | null;
 }
 
 export interface ChatResponse {
@@ -252,19 +253,41 @@ export interface GenerationEvent {
   data?: Record<string, unknown>;
 }
 
+export interface GenerationOptionsOverride {
+  temperature?: number | null;
+  top_p?: number | null;
+  top_k?: number | null;
+  repeat_penalty?: number | null;
+  num_ctx?: number | null;
+  seed?: number | null;
+}
+
 export interface GenerationRequest {
   request_id?: string | null;
   thread_id?: string | null;
   user_input: string;
   base_revision?: number | null;
   attachments?: Array<ChatAttachment>;
+  options?: GenerationOptionsOverride | null;
 }
 
 export interface GenerationSettings {
   temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  repeat_penalty?: number;
   num_ctx?: number;
   seed?: number;
   system_instructions?: string;
+}
+
+export interface GenerationStats {
+  prompt_eval_count?: number | null;
+  eval_count?: number | null;
+  prompt_eval_duration_ms?: number | null;
+  eval_duration_ms?: number | null;
+  total_duration_ms?: number | null;
+  tokens_per_second?: number | null;
 }
 
 export interface GrayscaleStep {
@@ -298,6 +321,10 @@ export interface InstalledModel {
   modified_at?: string | null;
   capabilities?: Array<string>;
   supports_vision?: boolean | null;
+  parameter_size?: string | null;
+  quantization_level?: string | null;
+  family?: string | null;
+  context_length?: number | null;
 }
 
 export interface JobAccepted {
@@ -371,6 +398,7 @@ export interface RegenerationRequest {
   user_input?: string | null;
   base_revision?: number | null;
   attachments?: Array<ChatAttachment>;
+  options?: GenerationOptionsOverride | null;
 }
 
 export interface RenameChatRequest {

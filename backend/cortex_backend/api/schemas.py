@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cortex_backend.core.generation import ConnectionResult
-from cortex_backend.core.settings import CortexSettings
+from cortex_backend.core.settings import CortexSettings, GenerationOptionsOverride
 from cortex_backend.execution.recipe_coordinator import (
     DEFAULT_RECIPE_RETENTION_SECONDS,
     MAX_RECIPE_RETENTION_SECONDS,
@@ -107,6 +107,15 @@ class ChatAttachmentStageRequest(APIModel):
     content_base64: str = Field(min_length=4, max_length=((MAX_CHAT_ATTACHMENT_BYTES * 4) // 3) + 16, strict=True)
 
 
+class GenerationStats(APIModel):
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    prompt_eval_duration_ms: float | None = None
+    eval_duration_ms: float | None = None
+    total_duration_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
 class ChatMessage(APIModel):
     id: str | None = None
     role: ChatRole
@@ -115,6 +124,7 @@ class ChatMessage(APIModel):
     sources: list[Any] | None = None
     thoughts: str | None = None
     attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
+    stats: GenerationStats | None = None
 
     @model_validator(mode="after")
     def assistant_only_thoughts(self) -> "ChatMessage":
@@ -220,6 +230,10 @@ class InstalledModel(APIModel):
     modified_at: str | None = None
     capabilities: tuple[str, ...] = ()
     supports_vision: bool | None = None
+    parameter_size: str | None = None
+    quantization_level: str | None = None
+    family: str | None = None
+    context_length: int | None = None
 
 
 class ModelResponse(APIModel):
@@ -549,6 +563,9 @@ class GenerationRequest(APIModel):
     user_input: str = Field(min_length=1, max_length=100_000)
     base_revision: int | None = Field(default=None, ge=0)
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
+    # Per-turn generation parameter overrides. Unset fields fall back to the
+    # standing GenerationSettings defaults; this does not persist to Settings.
+    options: GenerationOptionsOverride | None = None
 
 
 class ForkRequest(APIModel):
@@ -561,6 +578,7 @@ class RegenerationRequest(APIModel):
     user_input: str | None = Field(default=None, max_length=100_000)
     base_revision: int | None = Field(default=None, ge=0)
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
+    options: GenerationOptionsOverride | None = None
 
 
 class JobAccepted(APIModel):

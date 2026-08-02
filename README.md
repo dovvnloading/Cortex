@@ -19,11 +19,26 @@ isolated profile and are not part of the repository.
 ## What Cortex provides
 
 - **Local chat.** Stream responses from an installed Ollama model with Markdown,
-  reasoning details, sources, code-block copy controls, retry/regenerate, and
-  forked threads.
+  syntax-highlighted fenced code, reasoning details, sources, code-block copy
+  controls, retry/regenerate, and forked threads. Long transcripts render in a
+  virtualized list so scroll performance stays smooth regardless of history
+  length.
 - **Composer model control.** Inspect the local inventory, switch models without
   leaving the composer, refresh the inventory, and stage local image or text
   attachments.
+- **Per-chat generation parameters.** Temperature, top-p, top-k, repeat penalty,
+  and context window default to the values in Settings but can be overridden
+  for a single conversation from the composer, without changing the standing
+  default. Each response shows its token count and tokens/sec once generation
+  finishes.
+- **Model details.** The Models panel shows each installed model's parameter
+  size, quantization, and context length alongside its name, read from Ollama's
+  existing model-detail response.
+- **Keyboard-first navigation.** A command palette (Ctrl/Cmd+K) reaches new
+  chat, settings, theme, model switching, and recent chats; `?` opens a
+  shortcuts reference. The sidebar also supports searching chats by title.
+- **Transcript export.** Any conversation can be exported as Markdown or JSON
+  from the workspace header.
 - **Durable context.** Threads live in SQLite; permanent memories use atomic
   local JSON storage. Existing JSON chat history and Windows settings are read
   additively during migration without rewriting the legacy source.

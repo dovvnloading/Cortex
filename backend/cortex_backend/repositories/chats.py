@@ -49,6 +49,7 @@ class ChatRepository(Protocol):
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        stats: dict[str, Any] | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
     ) -> str: ...
@@ -68,6 +69,7 @@ class ChatRepository(Protocol):
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
     ) -> None: ...
 
@@ -136,6 +138,7 @@ class LegacyDatabaseChatRepository:
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
     ) -> None:
         try:
@@ -146,6 +149,7 @@ class LegacyDatabaseChatRepository:
                 sources=sources,
                 thoughts=thoughts,
                 attachments=attachments,
+                stats=stats,
                 expected_revision=expected_revision,
             )
         except Exception as exc:
@@ -239,6 +243,7 @@ class InMemoryChatRepository:
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        stats: dict[str, Any] | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
     ) -> str:
@@ -264,6 +269,7 @@ class InMemoryChatRepository:
                     "sources": deepcopy(sources),
                     "thoughts": _assistant_thoughts(role, thoughts),
                     "attachments": deepcopy(attachments),
+                    "stats": deepcopy(stats) if role == "assistant" else None,
                 }
             )
             chat["timestamp"] = self._timestamp()
@@ -317,6 +323,7 @@ class InMemoryChatRepository:
         sources: list[Any] | None = None,
         thoughts: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
     ) -> None:
         with self._lock:
@@ -332,6 +339,7 @@ class InMemoryChatRepository:
                         content=content,
                         sources=deepcopy(sources),
                         thoughts=thoughts,
+                        stats=deepcopy(stats),
                         timestamp=self._timestamp(),
                     )
                     if attachments is not None:

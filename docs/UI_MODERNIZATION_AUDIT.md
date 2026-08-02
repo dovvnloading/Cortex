@@ -91,3 +91,68 @@ in a windowed executable where no console stream exists. The launcher now skips
 only that console-oriented logging configuration when the stream is absent. A
 regression test covers the condition; the package launch is verified separately
 as the final gate.
+
+## Addendum: frontend harness refactor
+
+A later, larger pass turned the frontend from a chat client into a workbench
+for working with local models, following the plan in
+`docs/FRONTEND_HARNESS_REFACTOR_PLAN.md` (kept local, not pushed to GitHub).
+Unlike the modernization above, this pass **did** change the API contract
+(new `GenerationOptionsOverride`, `GenerationStats`, and extended
+`InstalledModel` fields) and persistence (`messages.generation_stats_json`,
+an additive SQLite migration) — noted here so this file doesn't silently
+become inaccurate on that point.
+
+**Structural change:** `frontend/src/components/*` was reorganized into
+`frontend/src/features/{chat,models,settings,shell,command-palette,markdown}/`,
+plus new `stores/` (Zustand), `hooks/`, and `shared/ui/` (Base UI wrappers)
+directories. Every path in the "Implementation map" above is stale; the
+current equivalents are `features/shell/AppShell.tsx`,
+`features/chat/ChatPage.tsx`, `features/markdown/SafeMarkdown.tsx`,
+`features/chat/MessageComposer.tsx`, and `features/settings/SettingsPanel.tsx`.
+
+**New surfaces**, held to the same visual rules as above (no glass, no
+gradients, no dashboard card grid, text-led over iconography):
+
+- Per-chat generation parameter overrides (`GenerationParamsPopover`) and a
+  quiet, `--text-faint` token/tok-per-second chip per response
+  (`MessageStats`) — off by default in visual weight, matching the existing
+  `<time>` treatment, not a metrics dashboard.
+- A model info line (parameter size, quantization, context length) in the
+  Models panel, sourced from an `/api/show` response the backend already
+  fetched — no new Ollama round trip.
+- A virtualized transcript (`react-virtuoso`, `MessageList.tsx`) that only
+  activates above 40 messages; below that threshold the DOM is byte-for-byte
+  the same plain scrollable div as before.
+- Syntax-highlighted fenced code (`rehype-highlight`) that is skipped while a
+  message is still streaming and applied once on completion, so it never
+  re-tokenizes a growing code block mid-stream.
+- A command palette (`cmdk`, Ctrl/Cmd+K) and a keyboard-shortcuts reference
+  (`?`), sidebar chat search, and Markdown/JSON transcript export.
+- `shared/ui/Select` and `shared/ui/Dialog` (Base UI) replace the
+  `RoundedPicker` combobox duplicated between Settings and AppShell's
+  rename/delete dialogs, and pick up focus-trapping the hand-rolled versions
+  didn't have. `LocalModelMenu` was deliberately **not** migrated: it has
+  async reject-and-reopen selection and an adjacent rescan action a plain
+  select doesn't model, so it stays purpose-built rather than forced onto a
+  primitive that would either lose behavior or need as much wrapping as it
+  saves.
+
+**Verification:** typecheck, lint (ESLint + ruff), the full Vitest suite
+(139 tests), Playwright e2e (17 specs, including a new virtualized-transcript
+spec and a command-palette spec), the production Vite build, and the backend
+pytest suite (417 tests) all pass. Contracts were regenerated via
+`tools/generate_contracts.py` and match the CI drift check. **Not run in this
+pass:** the native Windows package build
+(`packaging/build_windows.ps1` → PyInstaller → WebView2 bootstrapper signature
+check) — that step is orthogonal to the code changes made here (nothing in
+`packaging/`, the launcher, or the PyInstaller spec was touched) but should
+still be run before treating this as release-ready, per this project's own
+release gate above.
+
+The production JS bundle grew from ~134 KB to ~276 KB gzipped across the five
+new dependencies (`zustand`, `react-virtuoso`, `rehype-highlight`, `cmdk`,
+`@base-ui/react`). `rehype-highlight` already defaults to `lowlight`'s
+"common" ~37-language subset, not the full ~190-language set, so there was no
+easy further trim without cutting real language support; the growth is
+attributable to genuine new capability rather than obvious waste.

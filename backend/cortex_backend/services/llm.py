@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     GenerationAttachment,
+    GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
@@ -37,6 +38,38 @@ def _get_asset_path(filename: str) -> Path:
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "assets" / filename
     return Path(__file__).resolve().parents[3] / "assets" / filename
+
+
+def _ns_to_ms(value: object) -> float | None:
+    """Convert an Ollama duration (nanoseconds) to milliseconds."""
+    if not isinstance(value, (int, float)):
+        return None
+    return round(value / 1_000_000, 1)
+
+
+def _extract_stats(response: dict) -> GenerationStats | None:
+    """Pull token/timing usage off a raw Ollama chat response, if present.
+
+    Ollama reports these fields at the top level of the response, not under
+    ``message``. A fresh/unsupported backend may omit them entirely, in
+    which case there is nothing meaningful to show and this returns None.
+    """
+    eval_count = response.get("eval_count")
+    eval_duration = response.get("eval_duration")
+    total_duration = response.get("total_duration")
+    if eval_count is None and total_duration is None:
+        return None
+    tokens_per_second = None
+    if isinstance(eval_count, (int, float)) and isinstance(eval_duration, (int, float)) and eval_duration:
+        tokens_per_second = round(eval_count / (eval_duration / 1_000_000_000), 1)
+    return GenerationStats(
+        prompt_eval_count=response.get("prompt_eval_count"),
+        eval_count=eval_count,
+        prompt_eval_duration_ms=_ns_to_ms(response.get("prompt_eval_duration")),
+        eval_duration_ms=_ns_to_ms(eval_duration),
+        total_duration_ms=_ns_to_ms(total_duration),
+        tokens_per_second=tokens_per_second,
+    )
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -466,7 +499,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         options: dict | None = None,
         attachments: Sequence[GenerationAttachment] = (),
-    ) -> tuple[str, str | None, MemoryCommand]:
+    ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """
         Generates a synthesized response and extracts thoughts and commands.
 
@@ -483,6 +516,7 @@ class SynthesisAgent:
             - str: The final, user-facing answer, cleaned of all special tags.
             - str | None: The content of the reasoning/thinking block.
             - MemoryCommand: A validated set of requested memory actions.
+            - GenerationStats | None: Token/timing usage, if the backend reported it.
         """
         api_options = options.copy() if options is not None else {}
         fitted_attachments = self.fit_attachments_to_context(
@@ -521,9 +555,10 @@ class SynthesisAgent:
             message_obj = response.get('message', {})
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')
+            stats = _extract_stats(response)
 
             final_answer, thoughts, commands = self._parse_and_clean_response(main_content, thinking_content)
-            return self._format_response(final_answer), thoughts, commands
+            return self._format_response(final_answer), thoughts, commands, stats
 
         except Exception as e:
             logging.error("LLM generation failed (%s).", type(e).__name__)

@@ -12,6 +12,7 @@ from cortex_backend.core.generation import (
     CodeExecutionProposal,
     GenerationAttachment,
     GenerationSnapshot,
+    GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
@@ -57,7 +58,7 @@ class GenerationEngine(Protocol):
         user_system_instructions: str | None,
         options: dict[str, Any],
         attachments: Sequence[GenerationAttachment] = (),
-    ) -> tuple[str, str | None, MemoryCommand]:
+    ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """Generate a response and validated memory command."""
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
@@ -76,6 +77,7 @@ class GenerationServiceResult:
     thoughts: str | None
     memory_command: MemoryCommand
     code_execution_proposal: CodeExecutionProposal | None = None
+    stats: GenerationStats | None = None
 
 
 class GenerationService:
@@ -155,7 +157,7 @@ class GenerationService:
         # do not use attachments; real engines receive the resolved payload.
         if snapshot.attachments:
             generate_kwargs["attachments"] = snapshot.attachments
-        response, thoughts, memory_command = engine.generate(
+        response, thoughts, memory_command, stats = engine.generate(
             **generate_kwargs,
         )
         if not isinstance(memory_command, MemoryCommand):
@@ -203,6 +205,7 @@ class GenerationService:
             thoughts=thoughts,
             memory_command=memory_command,
             code_execution_proposal=proposal,
+            stats=stats,
         )
 
     def generate_chat_title(

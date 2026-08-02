@@ -40,9 +40,37 @@ class ModelSettings(_SettingsModel):
 
 class GenerationSettings(_SettingsModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.9, ge=0.0, le=1.0)
+    top_k: int = Field(default=40, ge=0, le=200)
+    repeat_penalty: float = Field(default=1.1, ge=0.5, le=2.0)
     num_ctx: int = Field(default=4096, ge=2048, le=16384)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
     system_instructions: str = Field(default="", max_length=1800)
+
+
+# The subset of GenerationSettings that a single request may override for
+# just that turn, without changing the standing global default. Kept as a
+# tuple (not derived from the model) so the merge order in routes.py is
+# explicit and doesn't silently pick up unrelated future settings fields.
+GENERATION_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "repeat_penalty",
+    "num_ctx",
+    "seed",
+)
+
+
+class GenerationOptionsOverride(_SettingsModel):
+    """Optional per-request overrides. Unset fields fall back to GenerationSettings."""
+
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=0, le=200)
+    repeat_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
+    num_ctx: int | None = Field(default=None, ge=2048, le=16384)
+    seed: int | None = Field(default=None, ge=-1, le=2147483647)
 
 
 class ExecutionSettings(_SettingsModel):

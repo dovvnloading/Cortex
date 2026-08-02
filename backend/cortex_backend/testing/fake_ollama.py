@@ -11,9 +11,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from cortex_backend.core.generation import (
+    GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+)
+
+FAKE_GENERATION_STATS = GenerationStats(
+    prompt_eval_count=24,
+    eval_count=48,
+    prompt_eval_duration_ms=120.0,
+    eval_duration_ms=480.0,
+    total_duration_ms=620.0,
+    tokens_per_second=100.0,
 )
 
 
@@ -41,6 +51,22 @@ class FakeOllamaState:
     disconnect_after_chunks: int | None = None
     fail_pull_stream: bool = False
     model_capabilities: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    model_details: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+DEFAULT_MODEL_SHOW_DETAILS: dict[str, Any] = {
+    "details": {"family": "llama", "parameter_size": "8.0B", "quantization_level": "Q4_K_M"},
+    "model_info": {"llama.context_length": 8192},
+}
+
+
+def _show_payload(state: "FakeOllamaState", model: str) -> dict[str, Any]:
+    overrides = state.model_details.get(model, DEFAULT_MODEL_SHOW_DETAILS)
+    return {
+        "capabilities": list(state.model_capabilities.get(model, ("completion",))),
+        "details": overrides.get("details", DEFAULT_MODEL_SHOW_DETAILS["details"]),
+        "model_info": overrides.get("model_info", DEFAULT_MODEL_SHOW_DETAILS["model_info"]),
+    }
 
 
 class FakeOllamaGateway:
@@ -76,7 +102,7 @@ class FakeOllamaGateway:
         return updates()
 
     def show(self, model: str) -> dict[str, Any]:
-        return {"capabilities": list(self.state.model_capabilities.get(model, ("completion",)))}
+        return _show_payload(self.state, model)
 
 
 class FakeGenerationEngine:
@@ -140,7 +166,7 @@ class FakeGenerationEngine:
         user_system_instructions: str | None,
         options: dict[str, Any],
         attachments: tuple[Any, ...] = (),
-    ) -> tuple[str, str | None, MemoryCommand]:
+    ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del (
             chat_history,
             permanent_memories,
@@ -158,11 +184,11 @@ class FakeGenerationEngine:
             )
         if query.startswith("!remember "):
             memo = query.removeprefix("!remember ").strip()
-            return f"Echo: {query}", None, MemoryCommand(additions=(memo,))
+            return f"Echo: {query}", None, MemoryCommand(additions=(memo,)), FAKE_GENERATION_STATS
         if query.strip() == "!clear-memory":
-            return "Echo: clear request", None, MemoryCommand(clear_requested=True)
+            return "Echo: clear request", None, MemoryCommand(clear_requested=True), FAKE_GENERATION_STATS
         response = self.state.generation_response or f"Echo: {query}"
-        return response, self.state.generation_thoughts, MemoryCommand()
+        return response, self.state.generation_thoughts, MemoryCommand(), FAKE_GENERATION_STATS
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         if self.state.fail_translation or target_language == "!fail":
@@ -207,7 +233,7 @@ def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:
         model = payload.get("model")
         if not isinstance(model, str) or model not in fake_state.installed_models:
             raise HTTPException(status_code=404, detail="fake model not found")
-        return {"capabilities": list(fake_state.model_capabilities.get(model, ("completion",)))}
+        return _show_payload(fake_state, model)
 
     @app.post("/api/generate", response_model=None)
     def generate(payload: dict[str, Any]) -> dict[str, str] | StreamingResponse:
@@ -239,7 +265,15 @@ def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:
             json.dumps({"message": {"content": part}, "done": False})
             for part in _fake_chunks(content)
         )
-        chunks.append(json.dumps({"message": {}, "done": True}))
+        chunks.append(json.dumps({
+            "message": {},
+            "done": True,
+            "prompt_eval_count": 24,
+            "eval_count": 48,
+            "prompt_eval_duration": 120_000_000,
+            "eval_duration": 480_000_000,
+            "total_duration": 620_000_000,
+        }))
         if fake_state.disconnect_after_chunks is not None:
             chunks = chunks[: max(0, fake_state.disconnect_after_chunks)]
         return StreamingResponse(

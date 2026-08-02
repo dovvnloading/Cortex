@@ -380,6 +380,16 @@
             ],
             "title": "Sources"
           },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerationStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "thoughts": {
             "anyOf": [
               {
@@ -1524,6 +1534,92 @@
         "title": "GenerationEvent",
         "type": "object"
       },
+      "GenerationOptionsOverride": {
+        "additionalProperties": false,
+        "description": "Optional per-request overrides. Unset fields fall back to GenerationSettings.",
+        "properties": {
+          "num_ctx": {
+            "anyOf": [
+              {
+                "maximum": 16384.0,
+                "minimum": 2048.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Ctx"
+          },
+          "repeat_penalty": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.5,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeat Penalty"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "maximum": 2147483647.0,
+                "minimum": -1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "maximum": 200.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          }
+        },
+        "title": "GenerationOptionsOverride",
+        "type": "object"
+      },
       "GenerationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1546,6 +1642,16 @@
               }
             ],
             "title": "Base Revision"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerationOptionsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "request_id": {
             "anyOf": [
@@ -1596,6 +1702,13 @@
             "title": "Num Ctx",
             "type": "integer"
           },
+          "repeat_penalty": {
+            "default": 1.1,
+            "maximum": 2.0,
+            "minimum": 0.5,
+            "title": "Repeat Penalty",
+            "type": "number"
+          },
           "seed": {
             "default": -1,
             "maximum": 2147483647.0,
@@ -1615,9 +1728,96 @@
             "minimum": 0.0,
             "title": "Temperature",
             "type": "number"
+          },
+          "top_k": {
+            "default": 40,
+            "maximum": 200.0,
+            "minimum": 0.0,
+            "title": "Top K",
+            "type": "integer"
+          },
+          "top_p": {
+            "default": 0.9,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Top P",
+            "type": "number"
           }
         },
         "title": "GenerationSettings",
+        "type": "object"
+      },
+      "GenerationStats": {
+        "additionalProperties": false,
+        "properties": {
+          "eval_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Count"
+          },
+          "eval_duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Duration Ms"
+          },
+          "prompt_eval_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Eval Count"
+          },
+          "prompt_eval_duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Eval Duration Ms"
+          },
+          "tokens_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Per Second"
+          },
+          "total_duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Duration Ms"
+          }
+        },
+        "title": "GenerationStats",
         "type": "object"
       },
       "GrayscaleStep": {
@@ -1770,6 +1970,28 @@
             "title": "Capabilities",
             "type": "array"
           },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
           "modified_at": {
             "anyOf": [
               {
@@ -1784,6 +2006,28 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "parameter_size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parameter Size"
+          },
+          "quantization_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantization Level"
           },
           "size": {
             "anyOf": [
@@ -2219,6 +2463,16 @@
             "minLength": 1,
             "title": "Message Id",
             "type": "string"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerationOptionsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "request_id": {
             "anyOf": [
