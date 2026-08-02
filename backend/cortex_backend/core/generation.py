@@ -192,3 +192,7 @@ class GenerationSnapshot:
     target_language: str
     user_system_instructions: str | None
     attachments: tuple[GenerationAttachment, ...] = field(default_factory=tuple)
+    # The API computes this from the current turn and Settings.  It is carried
+    # with the immutable job so prompt injection and proposal handling use the
+    # same decision even if Settings change while a job is running.
+    code_execution_eligible: bool = False

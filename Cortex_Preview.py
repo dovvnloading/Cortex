@@ -91,6 +91,7 @@ def build_preview_app(
             snapshot.title_model,
             snapshot.translation_model,
             client,
+            code_execution_eligible=snapshot.code_execution_eligible,
         ),
     )
     dependencies = BackendDependencies(

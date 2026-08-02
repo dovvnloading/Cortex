@@ -9,6 +9,7 @@ import sys
 import unittest
 
 from cortex_backend.core.generation import (
+    CodeExecutionProposal,
     GenerationSnapshot,
     MemoryCommand,
     ModelOperationError,
@@ -43,7 +44,9 @@ class _FakeEngine:
         query: str,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> list[str]:
+        del code_execution_eligible
         self.memory_inputs = list(memories)
         return list(memories)
 
@@ -56,7 +59,9 @@ class _FakeEngine:
         memories_enabled: bool,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> str:
+        del code_execution_eligible
         self.history_messages = messages
         return "formatted history"
 
@@ -153,6 +158,24 @@ class GenerationServiceTests(unittest.TestCase):
 
         self.assertEqual(result.memory_command, MemoryCommand())
         self.assertIsNone(engine.memory_inputs)
+
+    def test_ineligible_generation_discards_a_model_code_proposal(self):
+        engine = _FakeEngine()
+        engine.last_code_proposal = CodeExecutionProposal(
+            source="print('should not queue')",
+            intent_summary="Test proposal",
+        )
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(
+            _snapshot(memories_enabled=False, translation_enabled=False),
+        )
+
+        self.assertIsNone(result.code_execution_proposal)
 
     def test_new_turn_generates_a_bounded_chat_title_without_affecting_response(self):
         engine = _FakeEngine()
