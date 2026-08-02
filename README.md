@@ -12,21 +12,9 @@ The interface is deliberately small: a thread list, a focused transcript, a
 composer with a local model picker, and settings for model, memory, appearance,
 and execution controls.
 
-![Cortex project brief chat](docs/images/cortex-project-brief.png)
-
-*A durable local conversation with Markdown tables rendered in the transcript.*
-
-![Cortex bounded Python conversation](docs/images/cortex-bounded-python.png)
-
-*Code in a conversation is reviewable text. Fenced code never runs by itself.*
-
-![Cortex settings](docs/images/cortex-settings.png)
-
-*General settings keep safe computation separate from approval-gated code requests.*
-
-The screenshots were captured from an isolated local data directory using the
-Python desktop runtime and the machine's Ollama service. They contain only
-curated sample conversations.
+Screenshots are intentionally omitted while the curated capture set is being
+finalized. The examples used for the next capture pass are staged locally in an
+isolated profile and are not part of the repository.
 
 ## What Cortex provides
 
