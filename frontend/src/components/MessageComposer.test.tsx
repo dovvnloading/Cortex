@@ -196,28 +196,48 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 
-  it("keeps code permissions off by default and submits an explicit approval request", async () => {
+  it("opens an editor-first code workspace and submits an explicit approval request", async () => {
     const user = userEvent.setup();
     const onRunCode = vi.fn<(payload: CodeExecutionRequest) => Promise<void>>().mockResolvedValue(undefined);
     render(<ComposerHarness codeExecutionAvailable onRunCode={onRunCode} />);
 
-    await user.click(screen.getByRole("button", { name: "Prepare a local code task" }));
-    expect(screen.getByRole("region", { name: "Local code task" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Open code workspace" }));
+    expect(screen.getByRole("region", { name: "Code workspace" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review & request" })).toBeDisabled();
+    expect(screen.getByText("Sandboxed by default")).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Files capability" })).not.toBeVisible();
+
+    await user.type(screen.getByRole("textbox", { name: "Python source" }), "print('hello')");
+    await user.type(screen.getByRole("textbox", { name: "Run intent" }), "Print a greeting");
+
+    await user.click(screen.getByText("Permissions"));
     expect(screen.getByRole("checkbox", { name: "Files capability" })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Processes capability" })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Network capability" })).not.toBeChecked();
-    expect(screen.getByText("No access")).toBeVisible();
 
     await user.click(screen.getByRole("checkbox", { name: "Files capability" }));
     expect(screen.getByRole("note")).toHaveTextContent("access your machine");
-    await user.click(screen.getByRole("button", { name: "Request approval" }));
+    await user.click(screen.getByRole("button", { name: "Review & request" }));
 
     await waitFor(() => expect(onRunCode).toHaveBeenCalledTimes(1));
     expect(onRunCode.mock.calls[0][0]).toMatchObject({
       language: "python",
-      intent_summary: "Run this local Python task",
+      source: "print('hello')",
+      intent_summary: "Print a greeting",
       capabilities: { filesystem: true, process: false, network: false },
     });
-    expect(screen.queryByRole("region", { name: "Local code task" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Code workspace" })).not.toBeInTheDocument();
+  });
+
+  it("keeps editor navigation inside the source field", async () => {
+    render(<ComposerHarness codeExecutionAvailable onRunCode={vi.fn().mockResolvedValue(undefined)} />);
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open code workspace" }));
+    const source = screen.getByRole("textbox", { name: "Python source" });
+    await userEvent.setup().type(source, "if ready:");
+    fireEvent.keyDown(source, { key: "Tab" });
+
+    await waitFor(() => expect(source).toHaveValue("if ready:    "));
+    expect(source).toHaveFocus();
   });
 });
