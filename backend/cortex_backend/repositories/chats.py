@@ -16,6 +16,21 @@ class ChatRevisionConflict(ChatRepositoryError):
     """The chat changed after the caller read its expected revision."""
 
 
+def _assistant_thoughts(role: str, thoughts: str | None) -> str | None:
+    """Keep reasoning metadata scoped to assistant messages only."""
+    return thoughts if role == "assistant" else None
+
+
+def _sanitize_chat_messages(chat: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Remove legacy reasoning fields that were attached to non-assistant rows."""
+    if chat is None:
+        return None
+    for message in chat.get("messages", []):
+        if message.get("role") != "assistant":
+            message["thoughts"] = None
+    return chat
+
+
 class ChatRepository(Protocol):
     """Durable chat operations required by the versioned API."""
 
@@ -67,7 +82,7 @@ class LegacyDatabaseChatRepository:
         return self._database.get_all_chats_summary()
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
-        return self._database.load_chat(thread_id)
+        return _sanitize_chat_messages(self._database.load_chat(thread_id))
 
     def create_chat(self, thread_id: str, title: str) -> None:
         self._database.create_chat(thread_id, title)
@@ -75,6 +90,7 @@ class LegacyDatabaseChatRepository:
     def add_message(
         self, thread_id: str, role: str, content: str, **kwargs: Any
     ) -> str:
+        kwargs["thoughts"] = _assistant_thoughts(role, kwargs.get("thoughts"))
         try:
             result = self._database.add_message(thread_id, role, content, **kwargs)
         except Exception as exc:
@@ -148,6 +164,7 @@ class InMemoryChatRepository:
         for chat in chats or []:
             copied = deepcopy(chat)
             for message in copied.get("messages", []):
+                message["thoughts"] = _assistant_thoughts(message.get("role", ""), message.get("thoughts"))
                 if message.get("id") is None:
                     message["id"] = self._new_message_id()
                 else:
@@ -186,7 +203,7 @@ class InMemoryChatRepository:
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
         with self._lock:
             chat = self._chats.get(thread_id)
-            return deepcopy(chat) if chat is not None else None
+            return _sanitize_chat_messages(deepcopy(chat)) if chat is not None else None
 
     def create_chat(self, thread_id: str, title: str) -> None:
         with self._lock:
@@ -245,7 +262,7 @@ class InMemoryChatRepository:
                     "content": content,
                     "timestamp": self._timestamp(),
                     "sources": deepcopy(sources),
-                    "thoughts": thoughts,
+                    "thoughts": _assistant_thoughts(role, thoughts),
                     "attachments": deepcopy(attachments),
                 }
             )
