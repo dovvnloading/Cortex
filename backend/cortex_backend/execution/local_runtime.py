@@ -16,8 +16,11 @@ validated output.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hmac
 import json
 import multiprocessing
+import os
+import shutil
 from threading import Event, Lock, Thread
 import time
 from typing import Any
@@ -27,11 +30,16 @@ from .artifact_boundary import ArtifactBoundary
 from .code_execution import (
     CODE_EXECUTION_PAYLOAD_SCHEMA,
     CODE_EXECUTION_PROFILE,
+    CODE_EXECUTION_RESULT_SCHEMA,
     CodeCapabilities,
     CodeExecutionError,
     CodeExecutionRequest,
     CodeExecutionResult,
+    MAX_CODE_MEMORY_BYTES,
+    MAX_CODE_OUTPUT_BYTES,
+    MAX_CODE_VALUE_BYTES,
     MAX_CODE_TIMEOUT_SECONDS,
+    _WindowsProcessJob,
     code_worker_main,
     validate_code_source,
 )
@@ -381,6 +389,7 @@ class _LocalCodeAttempt:
             raise CodeExecutionError("worker_closed")
         validate_code_source(source)
         receiver = sender = process = None
+        worker_job: _WindowsProcessJob | None = None
         try:
             receiver, sender = self._context.Pipe(duplex=False)
             process = self._context.Process(
@@ -394,6 +403,13 @@ class _LocalCodeAttempt:
                     raise CodeExecutionError("worker_closed")
                 self._process = process
             process.start()
+            if os.name == "nt":
+                worker_job = _WindowsProcessJob(
+                    process,
+                    memory_limit=MAX_CODE_MEMORY_BYTES,
+                    active_process_limit=4,
+                    cpu_seconds=self._timeout_seconds + 1.0,
+                )
             sender.close()
             sender = None
             deadline = time.monotonic() + self._timeout_seconds
@@ -424,6 +440,8 @@ class _LocalCodeAttempt:
                     receiver.close()
                 except Exception:
                     pass
+            if worker_job is not None:
+                worker_job.close()
             if process is not None:
                 _stop_process(process, grace_seconds=self._cancel_grace_seconds)
             with self._lock:
@@ -433,19 +451,35 @@ class _LocalCodeAttempt:
     @staticmethod
     def _result_from_message(message: object) -> CodeExecutionResult:
         if not isinstance(message, Mapping) or message.get("ok") is not True:
-            raise CodeExecutionError(str(message.get("code", "worker_failed")) if isinstance(message, Mapping) else "worker_failed")
+            code = message.get("code") if isinstance(message, Mapping) else None
+            if not isinstance(code, str) or not code.isidentifier() or len(code) > 64:
+                code = "worker_failed"
+            raise CodeExecutionError(code)
         result = message.get("result")
-        if not isinstance(result, Mapping):
+        if not isinstance(result, Mapping) or result.get("schema_version") != CODE_EXECUTION_RESULT_SCHEMA:
             raise CodeExecutionError("worker_output_invalid")
         try:
+            stdout = result.get("stdout")
+            stderr = result.get("stderr")
+            truncated = result.get("truncated")
+            duration_ms = result.get("duration_ms")
+            if not isinstance(stdout, str) or not isinstance(stderr, str):
+                raise CodeExecutionError("worker_output_invalid")
+            if len(stdout.encode("utf-8", errors="replace")) > MAX_CODE_OUTPUT_BYTES or len(stderr.encode("utf-8", errors="replace")) > MAX_CODE_OUTPUT_BYTES:
+                raise CodeExecutionError("worker_output_invalid")
+            if type(truncated) is not bool or type(duration_ms) is not int or not 0 <= duration_ms <= int(MAX_CODE_TIMEOUT_SECONDS * 1_000):
+                raise CodeExecutionError("worker_output_invalid")
+            value = result.get("value")
+            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_CODE_VALUE_BYTES:
+                raise CodeExecutionError("worker_output_invalid")
             return CodeExecutionResult(
-                stdout=str(result.get("stdout", "")),
-                stderr=str(result.get("stderr", "")),
-                value=result.get("value"),
-                truncated=bool(result.get("truncated", False)),
-                duration_ms=int(result.get("duration_ms", 0)),
+                stdout=stdout,
+                stderr=stderr,
+                value=value,
+                truncated=truncated,
+                duration_ms=duration_ms,
             )
-        except (TypeError, ValueError):
+        except (CodeExecutionError, TypeError, ValueError, OverflowError):
             raise CodeExecutionError("worker_output_invalid") from None
 
     def cancel(self) -> None:
@@ -587,14 +621,69 @@ class LocalExecutionCoordinator:
             if job.status not in TerminalExecutionStatus and job.status != "cancelling":
                 self._launch_code(job.job_id)
             return job
-        self.repository.request_approval(
-            job.job_id,
-            owner=request.owner,
-            scope_digest=request.source_digest,
-            reason=request.intent_summary.strip(),
-        )
+        try:
+            self.repository.request_approval(
+                job.job_id,
+                owner=request.owner,
+                scope_digest=request.approval_scope_digest,
+                reason=request.intent_summary.strip(),
+            )
+        except Exception as exc:
+            try:
+                self.repository.transition(
+                    job.job_id,
+                    status="failed",
+                    event="code.failed",
+                    phase="approval",
+                    data={"message": "Code execution approval could not be created."},
+                    error="approval_unavailable",
+                )
+            except Exception:
+                pass
+            if isinstance(exc, CodeExecutionError):
+                raise
+            raise CodeExecutionError("approval_unavailable") from None
         self._launch_code(job.job_id)
         return self.repository.get_job(job.job_id, owner=request.owner) or job
+
+    def _code_workspace(self, job_id: str) -> str:
+        """Create one non-shared workspace for a single approved run."""
+
+        root = self.repository.artifact_root / ".code_workspaces"
+        try:
+            if root.exists() and (root.is_symlink() or getattr(root, "is_junction", lambda: False)()):
+                raise CodeExecutionError("workspace_invalid")
+            root.mkdir(parents=True, exist_ok=True)
+            workspace = root / job_id
+            if workspace.exists() and (workspace.is_symlink() or getattr(workspace, "is_junction", lambda: False)()):
+                raise CodeExecutionError("workspace_invalid")
+            workspace.mkdir(parents=True, exist_ok=True)
+            resolved = workspace.resolve(strict=True)
+            artifact_root = self.repository.artifact_root.resolve(strict=True)
+            if not resolved.is_relative_to(artifact_root) or not resolved.is_dir():
+                raise CodeExecutionError("workspace_invalid")
+            return str(resolved)
+        except CodeExecutionError:
+            raise
+        except (OSError, RuntimeError):
+            raise CodeExecutionError("workspace_invalid") from None
+
+    def _cleanup_code_workspace(self, job_id: str) -> None:
+        root = self.repository.artifact_root / ".code_workspaces"
+        workspace = root / job_id
+        try:
+            if not workspace.exists():
+                return
+            if workspace.is_symlink() or getattr(workspace, "is_junction", lambda: False)():
+                raise CodeExecutionError("workspace_invalid")
+            resolved = workspace.resolve(strict=True)
+            if not resolved.is_relative_to(root.resolve(strict=True)):
+                raise CodeExecutionError("workspace_invalid")
+            shutil.rmtree(resolved)
+        except CodeExecutionError:
+            raise
+        except (OSError, RuntimeError):
+            raise CodeExecutionError("workspace_cleanup_failed") from None
 
     def wait(self, job_id: str, *, timeout: float = 5.0) -> ExecutionJob:
         if timeout < 0:
@@ -767,6 +856,16 @@ class LocalExecutionCoordinator:
             if current is None or current.status in {"cancelled", "cancelling"}:
                 return
             request = self._code_request_from_job(current)
+            workspace = self._code_workspace(job_id)
+            approval_scope = self.repository.get_approval_scope_digest(
+                job_id,
+                owner=current.owner,
+            )
+            if approval_scope is None or not hmac.compare_digest(
+                approval_scope,
+                request.approval_scope_digest,
+            ):
+                raise CodeExecutionError("approval_scope_mismatch")
             self.repository.transition(
                 job_id,
                 status="running",
@@ -787,7 +886,7 @@ class LocalExecutionCoordinator:
             result = attempt.evaluate(
                 request.source,
                 request.capabilities,
-                str(self.repository.artifact_root),
+                workspace,
                 cancel_event,
             )
             current = self.repository.get_job(job_id)
@@ -818,6 +917,13 @@ class LocalExecutionCoordinator:
             try:
                 self.repository.release_lease(job_id, lease_owner=lease_owner)
             except Exception:
+                pass
+            try:
+                self._cleanup_code_workspace(job_id)
+            except CodeExecutionError:
+                # Cleanup failure never reopens the job or grants access; the
+                # orphan remains under the validated artifact root for a later
+                # maintenance pass.
                 pass
 
     @staticmethod

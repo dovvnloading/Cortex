@@ -30,6 +30,7 @@ from .models import (
 
 SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
+MAX_APPROVAL_TTL_SECONDS = 300.0
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,99}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
@@ -383,6 +384,12 @@ class ExecutionRepository:
                 raise ExecutionRepositoryError("Execution job does not exist.")
             if row["status"] != expected_status:
                 raise ExecutionRepositoryError("Execution payload is no longer mutable.")
+            approval = connection.execute(
+                "SELECT 1 FROM execution_approvals WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if approval is not None:
+                raise ExecutionRepositoryError("Execution payload is no longer mutable.")
             lease = connection.execute(
                 "SELECT 1 FROM execution_leases WHERE job_id = ?", (job_id,)
             ).fetchone()
@@ -547,6 +554,31 @@ class ExecutionRepository:
             expires_at=row["expires_at"],
         )
 
+    def get_approval_scope_digest(
+        self, job_id: str, *, owner: str | None = None
+    ) -> str | None:
+        """Return the immutable approval scope for an owned job.
+
+        The digest is intentionally kept out of the public approval record,
+        but the worker must compare it with the persisted source/capability
+        scope immediately before launch so stale consent can never be reused.
+        """
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.scope_digest, j.owner
+                FROM execution_approvals a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        if row is None or (owner is not None and row["owner"] != owner):
+            return None
+        value = row["scope_digest"]
+        return value if isinstance(value, str) else None
+
     def request_approval(
         self,
         job_id: str,
@@ -562,8 +594,8 @@ class ExecutionRepository:
             raise ValueError("scope_digest and reason are required")
         if len(scope_digest) > 128 or len(reason) > 500:
             raise ValueError("approval scope or reason exceeds its size limit")
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if ttl_seconds <= 0 or ttl_seconds > MAX_APPROVAL_TTL_SECONDS:
+            raise ValueError("ttl_seconds must be between 0 and 300 seconds")
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=ttl_seconds)
         with self.connect() as connection:

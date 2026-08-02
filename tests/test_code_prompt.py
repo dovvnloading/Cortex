@@ -118,3 +118,13 @@ def test_ineligible_agent_does_not_accept_a_spontaneous_execution_envelope() -> 
 
     assert agent.last_code_proposal is None
     assert "code_execution_request" in visible
+
+
+def test_agent_defaults_to_fail_closed_for_code_proposals() -> None:
+    agent = SynthesisAgent("model", "model", "model", object())
+    visible, _, _ = agent._parse_and_clean_response(
+        '<code_execution_request>{"language":"python","source":"print(1)","intent_summary":"Print 1","capabilities":{}}</code_execution_request>',
+        None,
+    )
+    assert agent.last_code_proposal is None
+    assert "code_execution_request" in visible

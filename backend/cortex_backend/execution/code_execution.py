@@ -11,20 +11,32 @@ from __future__ import annotations
 
 import ast
 import builtins
+from collections.abc import Callable
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 import io
+import ipaddress
+import json
 import math
 import os
 from pathlib import Path
+import re
+import socket
 import subprocess
 import sys
 import signal
-from threading import Lock as ThreadLock, Thread
+from threading import Event as ThreadEvent, Lock as ThreadLock, Thread
 import time
 from typing import Any, Mapping
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    Request as UrlRequest,
+    build_opener,
+    ProxyHandler,
+)
 
 
 CODE_EXECUTION_PROFILE = "code.exec.v1"
@@ -38,6 +50,45 @@ MAX_CODE_LOOP_ITERATIONS = 10_000
 MAX_CODE_TOTAL_ITERATIONS = 100_000
 MAX_CODE_TIMEOUT_SECONDS = 10.0
 MAX_CODE_MEMORY_BYTES = 256 * 1024 * 1024
+MAX_CODE_VALUE_BYTES = 64 * 1024
+MAX_CODE_PATH_CHARS = 4096
+MAX_CODE_FILE_BYTES = 1 * 1024 * 1024
+MAX_CODE_FILE_OPERATIONS = 32
+MAX_CODE_PROCESS_OPERATIONS = 4
+MAX_CODE_PROCESS_ARGUMENTS = 64
+MAX_CODE_PROCESS_ARGUMENT_CHARS = 4096
+MAX_CODE_PROCESS_ARGUMENT_BYTES = 16 * 1024
+MAX_CODE_NETWORK_REQUESTS = 4
+MAX_CODE_NETWORK_URL_CHARS = 2048
+MAX_CODE_NETWORK_RESPONSE_BYTES = MAX_CODE_OUTPUT_BYTES
+MAX_CODE_TRACE_EVENTS = 2_000_000
+MAX_CODE_LIST_ENTRIES = 2048
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_SAFE_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_SAFE_ENCODINGS = frozenset({"utf-8", "utf8", "utf-16", "utf-16-le", "utf-16-be", "latin-1", "ascii"})
+_DISALLOWED_NAMES = frozenset(
+    {
+        "__builtins__",
+        "__import__",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "input",
+        "breakpoint",
+        "globals",
+        "locals",
+        "vars",
+        "dir",
+        "help",
+        "memoryview",
+        "getattr",
+        "setattr",
+        "delattr",
+        "object",
+        "type",
+    }
+)
 
 
 class CodeExecutionError(RuntimeError):
@@ -91,8 +142,10 @@ class CodeExecutionRequest:
     capabilities: CodeCapabilities = CodeCapabilities()
 
     def __post_init__(self) -> None:
-        if not self.owner or not self.request_id:
-            raise ValueError("owner and request_id are required")
+        if not isinstance(self.owner, str) or _SAFE_OWNER.fullmatch(self.owner) is None:
+            raise ValueError("owner is invalid")
+        if not isinstance(self.request_id, str) or _SAFE_REQUEST_ID.fullmatch(self.request_id) is None:
+            raise ValueError("request_id is invalid")
         if not isinstance(self.source, str) or not self.source.strip():
             raise CodeExecutionError("source_empty")
         if len(self.source.encode("utf-8")) > MAX_CODE_SOURCE_BYTES:
@@ -101,6 +154,10 @@ class CodeExecutionRequest:
             raise CodeExecutionError("intent_invalid")
         if len(self.intent_summary) > 500:
             raise CodeExecutionError("intent_invalid")
+        if any(ord(char) < 32 and char not in "\t" for char in self.intent_summary):
+            raise CodeExecutionError("intent_invalid")
+        if not isinstance(self.capabilities, CodeCapabilities):
+            raise CodeExecutionError("capabilities_invalid")
         validate_code_source(self.source)
 
     @property
@@ -108,6 +165,22 @@ class CodeExecutionRequest:
         import hashlib
 
         return hashlib.sha256(self.source.encode("utf-8")).hexdigest()
+
+    @property
+    def approval_scope_digest(self) -> str:
+        """Bind consent to source and the exact capability grant."""
+
+        import hashlib
+
+        scope = json.dumps(
+            {
+                "capabilities": self.capabilities.as_dict(),
+                "source_digest": self.source_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(scope).hexdigest()
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -289,15 +362,27 @@ class _CodeValidator(ast.NodeVisitor):
     def visit_BinOp(self, node: ast.BinOp) -> Any:
         if not isinstance(node.op, _ALLOWED_BINOPS):
             raise CodeExecutionError("operator_not_allowed")
-        if isinstance(node.op, ast.Pow) and isinstance(node.right, ast.Constant) and isinstance(node.right.value, int) and abs(node.right.value) > 10_000:
-            raise CodeExecutionError("exponent_too_large")
+        if isinstance(node.op, ast.Pow):
+            if (
+                not isinstance(node.right, ast.Constant)
+                or type(node.right.value) is not int
+                or not 0 <= node.right.value <= 1_000
+            ):
+                raise CodeExecutionError("exponent_too_large")
         if (
             isinstance(node.op, ast.Mult)
             and isinstance(node.right, ast.Constant)
-            and isinstance(node.right.value, int)
+            and type(node.right.value) is int
             and abs(node.right.value) > MAX_CODE_TOTAL_ITERATIONS
         ):
             raise CodeExecutionError("sequence_too_large")
+        if (
+            isinstance(node.op, ast.Mult)
+            and isinstance(node.left, ast.Constant)
+            and isinstance(node.left.value, (str, list, tuple, set, dict))
+            and not isinstance(node.right, ast.Constant)
+        ):
+            raise CodeExecutionError("sequence_bound_required")
         return self.generic_visit(node)
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
@@ -308,6 +393,21 @@ class _CodeValidator(ast.NodeVisitor):
     def visit_Compare(self, node: ast.Compare) -> Any:
         if any(not isinstance(item, _ALLOWED_CMPOPS) for item in node.ops):
             raise CodeExecutionError("comparison_not_allowed")
+        return self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        # Do not expose the interpreter's implicit ``__builtins__`` mapping or
+        # names that could become dangerous if the allow-list grows later.
+        if node.id in _DISALLOWED_NAMES or node.id.startswith("__"):
+            raise CodeExecutionError("name_not_allowed")
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> Any:
+        value = node.value
+        if value is not None and type(value) not in {bool, int, float, str}:
+            raise CodeExecutionError("constant_not_allowed")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise CodeExecutionError("constant_not_allowed")
         return self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> Any:
@@ -361,7 +461,7 @@ def _cortex_attribute_chain(node: ast.AST) -> tuple[str, ...] | None:
 def _constant_range_bound(node: ast.Call) -> int | None:
     values: list[int] = []
     for argument in node.args:
-        if not isinstance(argument, ast.Constant) or not isinstance(argument.value, int):
+        if not isinstance(argument, ast.Constant) or type(argument.value) is not int:
             return None
         values.append(argument.value)
     if not 1 <= len(values) <= 3:
@@ -379,6 +479,8 @@ def validate_code_source(source: str) -> str:
         raise CodeExecutionError("source_empty")
     if len(source.encode("utf-8")) > MAX_CODE_SOURCE_BYTES:
         raise CodeExecutionError("source_too_large")
+    if "\x00" in source or source.count("\n") > 2_048:
+        raise CodeExecutionError("source_too_complex")
     try:
         tree = ast.parse(source, mode="exec")
     except (SyntaxError, ValueError):
@@ -387,52 +489,255 @@ def validate_code_source(source: str) -> str:
     return source
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """Treat links and Windows junctions as untrusted broker path hops."""
+
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
+def _secure_workspace(value: str | os.PathLike[str]) -> Path:
+    """Resolve one existing, non-link directory used by a single worker."""
+
+    try:
+        candidate = Path(value)
+    except (TypeError, ValueError):
+        raise CodeExecutionError("workspace_invalid") from None
+    if not candidate.is_absolute() or len(str(candidate)) > MAX_CODE_PATH_CHARS:
+        raise CodeExecutionError("workspace_invalid")
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_dir() or _is_reparse_point(resolved):
+            raise CodeExecutionError("workspace_invalid")
+        cursor = resolved
+        while True:
+            if _is_reparse_point(cursor):
+                raise CodeExecutionError("workspace_invalid")
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+    except CodeExecutionError:
+        raise
+    except (OSError, RuntimeError):
+        raise CodeExecutionError("workspace_invalid") from None
+    return resolved
+
+
+def _secure_workspace_path(root: Path, value: str, *, directory: bool = False) -> Path:
+    """Resolve a broker path without allowing traversal or reparse hops."""
+
+    if not isinstance(value, str) or not value or len(value) > MAX_CODE_PATH_CHARS or "\x00" in value:
+        raise ValueError("filesystem path is invalid")
+    if value.startswith(("~", "\\\\")):
+        raise PermissionError("filesystem path is outside the run workspace")
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        cursor = candidate
+        while True:
+            if _is_reparse_point(cursor):
+                raise PermissionError("filesystem path uses a link")
+            if cursor == root or cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        resolved = candidate.resolve(strict=False)
+    except PermissionError:
+        raise
+    except (OSError, RuntimeError):
+        raise PermissionError("filesystem path is unavailable") from None
+    if not resolved.is_relative_to(root):
+        raise PermissionError("filesystem path is outside the run workspace")
+    if directory and resolved.exists() and not resolved.is_dir():
+        raise ValueError("filesystem directory is invalid")
+    if resolved.exists() and _is_reparse_point(resolved):
+        raise PermissionError("filesystem path uses a link")
+    return resolved
+
+
+@dataclass(slots=True)
+class _CapabilityBudget:
+    file_operations: int = 0
+    file_bytes_read: int = 0
+    file_bytes_written: int = 0
+    process_operations: int = 0
+    network_requests: int = 0
+
+    def take_file(self) -> None:
+        self.file_operations += 1
+        if self.file_operations > MAX_CODE_FILE_OPERATIONS:
+            raise CodeExecutionError("filesystem_limit")
+
+    def take_process(self) -> None:
+        self.process_operations += 1
+        if self.process_operations > MAX_CODE_PROCESS_OPERATIONS:
+            raise CodeExecutionError("process_limit")
+
+    def take_network(self) -> None:
+        self.network_requests += 1
+        if self.network_requests > MAX_CODE_NETWORK_REQUESTS:
+            raise CodeExecutionError("network_limit")
+
+
 class _CapabilityRuntime:
     def __init__(self, capabilities: CodeCapabilities, workspace: str) -> None:
         self.capabilities = capabilities
-        self.workspace = Path(workspace)
-        self.fs = _FilesystemCapability(capabilities.filesystem, self.workspace)
-        self.process = _ProcessCapability(capabilities.process, self.workspace)
-        self.net = _NetworkCapability(capabilities.network)
+        self.workspace = _secure_workspace(workspace)
+        budget = _CapabilityBudget()
+        self.fs = _FilesystemCapability(capabilities.filesystem, self.workspace, budget)
+        self.process = _ProcessCapability(capabilities.process, self.workspace, budget)
+        self.net = _NetworkCapability(capabilities.network, budget)
         self.network = self.net
 
 
 class _FilesystemCapability:
-    def __init__(self, enabled: bool, workspace: Path) -> None:
+    def __init__(self, enabled: bool, workspace: Path, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self.workspace = workspace
+        self._budget = budget
 
     def _check(self) -> None:
         if not self.enabled:
             raise PermissionError("filesystem capability was not approved")
+        self._budget.take_file()
+
+    @staticmethod
+    def _encoding(value: str) -> str:
+        if not isinstance(value, str) or value.casefold() not in _SAFE_ENCODINGS:
+            raise ValueError("filesystem encoding is not allowed")
+        return value
 
     def read_text(self, path: str, encoding: str = "utf-8") -> str:
         self._check()
-        return Path(path).expanduser().read_text(encoding=encoding)
+        target = _secure_workspace_path(self.workspace, path)
+        encoding = self._encoding(encoding)
+        try:
+            info = target.lstat()
+            identity = (
+                int(getattr(info, "st_dev", 0)),
+                int(getattr(info, "st_ino", 0)),
+                int(info.st_size),
+                int(getattr(info, "st_mtime_ns", 0)),
+                int(getattr(info, "st_ctime_ns", 0)),
+                int(getattr(info, "st_nlink", 1)),
+            )
+            if not target.is_file() or identity[-1] != 1:
+                raise ValueError("filesystem target is not a regular file")
+            if info.st_size > MAX_CODE_FILE_BYTES:
+                raise CodeExecutionError("filesystem_limit")
+            with target.open("rb") as stream:
+                raw = stream.read(MAX_CODE_FILE_BYTES + 1)
+            after = target.lstat()
+            after_identity = (
+                int(getattr(after, "st_dev", 0)),
+                int(getattr(after, "st_ino", 0)),
+                int(after.st_size),
+                int(getattr(after, "st_mtime_ns", 0)),
+                int(getattr(after, "st_ctime_ns", 0)),
+                int(getattr(after, "st_nlink", 1)),
+            )
+            if identity != after_identity or len(raw) > MAX_CODE_FILE_BYTES:
+                raise CodeExecutionError("filesystem_changed")
+            self._budget.file_bytes_read += len(raw)
+            if self._budget.file_bytes_read > MAX_CODE_FILE_BYTES * 4:
+                raise CodeExecutionError("filesystem_limit")
+            return raw.decode(encoding)
+        except (CodeExecutionError, PermissionError, ValueError):
+            raise
+        except (OSError, UnicodeError):
+            raise CodeExecutionError("filesystem_read_failed") from None
 
     def write_text(self, path: str, content: str, encoding: str = "utf-8") -> int:
         self._check()
-        target = Path(path).expanduser()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(str(content), encoding=encoding)
-        return len(str(content))
+        target = _secure_workspace_path(self.workspace, path)
+        encoding = self._encoding(encoding)
+        text = str(content)
+        try:
+            raw = text.encode(encoding)
+        except UnicodeError:
+            raise CodeExecutionError("filesystem_write_failed") from None
+        if len(raw) > MAX_CODE_FILE_BYTES:
+            raise CodeExecutionError("filesystem_limit")
+        self._budget.file_bytes_written += len(raw)
+        if self._budget.file_bytes_written > MAX_CODE_FILE_BYTES * 4:
+            raise CodeExecutionError("filesystem_limit")
+        parent = target.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        _secure_workspace_path(self.workspace, str(parent), directory=True)
+        if target.exists():
+            if _is_reparse_point(target):
+                raise PermissionError("filesystem target uses a link")
+            try:
+                if int(getattr(target.lstat(), "st_nlink", 1)) != 1:
+                    raise PermissionError("filesystem target is shared")
+            except OSError:
+                raise CodeExecutionError("filesystem_write_failed") from None
+        try:
+            with target.open("wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            info = target.lstat()
+            if not target.is_file() or int(getattr(info, "st_nlink", 1)) != 1:
+                raise CodeExecutionError("filesystem_write_failed")
+        except (CodeExecutionError, PermissionError):
+            raise
+        except OSError:
+            raise CodeExecutionError("filesystem_write_failed") from None
+        return len(text)
 
     def listdir(self, path: str = ".") -> list[str]:
         self._check()
-        return sorted(item.name for item in Path(path).expanduser().iterdir())
+        target = _secure_workspace_path(self.workspace, path, directory=True)
+        names: list[str] = []
+        try:
+            for item in target.iterdir():
+                if _is_reparse_point(item):
+                    raise PermissionError("filesystem directory contains a link")
+                names.append(item.name)
+                if len(names) > MAX_CODE_LIST_ENTRIES:
+                    raise CodeExecutionError("filesystem_limit")
+        except (CodeExecutionError, PermissionError):
+            raise
+        except OSError:
+            raise CodeExecutionError("filesystem_list_failed") from None
+        return sorted(names)
 
 
 class _ProcessCapability:
-    def __init__(self, enabled: bool, workspace: Path) -> None:
+    def __init__(self, enabled: bool, workspace: Path, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self.workspace = workspace
+        self._budget = budget
 
     def run(self, args: list[str] | tuple[str, ...], timeout: float = 5.0) -> dict[str, Any]:
         if not self.enabled:
             raise PermissionError("process capability was not approved")
-        if not isinstance(args, (list, tuple)) or not args or any(not isinstance(item, str) for item in args):
-            raise ValueError("process arguments must be a non-empty string list")
-        timeout = max(0.1, min(float(timeout), 5.0))
+        if not isinstance(args, (list, tuple)) or not args or len(args) > MAX_CODE_PROCESS_ARGUMENTS:
+            raise ValueError("process arguments are invalid")
+        if any(
+            not isinstance(item, str)
+            or not item
+            or len(item) > MAX_CODE_PROCESS_ARGUMENT_CHARS
+            or "\x00" in item
+            or any(ord(char) < 32 and char not in "\t" for char in item)
+            for item in args
+        ):
+            raise ValueError("process arguments are invalid")
+        if sum(len(item.encode("utf-8")) for item in args) > MAX_CODE_PROCESS_ARGUMENT_BYTES:
+            raise ValueError("process arguments are too large")
+        if isinstance(timeout, bool):
+            raise ValueError("process timeout is invalid")
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            raise ValueError("process timeout is invalid") from None
+        if not math.isfinite(timeout):
+            raise ValueError("process timeout is invalid")
+        self._budget.take_process()
+        timeout = max(0.1, min(timeout, 5.0))
         completed = _run_brokered_process(list(args), workspace=self.workspace, timeout=timeout)
         return {
             "returncode": completed["returncode"],
@@ -485,11 +790,23 @@ class _WindowsProcessJob:
     the job and tears down any descendants spawned by the approved process.
     """
 
+    _PROCESS_TIME = 0x00000002
+    _ACTIVE_PROCESS = 0x00000008
+    _PROCESS_MEMORY = 0x00000100
     _KILL_ON_CLOSE = 0x00002000
     _EXTENDED_LIMIT_INFORMATION = 9
 
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(
+        self,
+        process: Any,
+        *,
+        memory_limit: int = MAX_CODE_MEMORY_BYTES,
+        active_process_limit: int = 8,
+        cpu_seconds: float = MAX_CODE_TIMEOUT_SECONDS + 1.0,
+    ) -> None:
         if os.name != "nt":
+            raise CodeExecutionError("process_isolation_unavailable")
+        if memory_limit <= 0 or active_process_limit <= 0 or not math.isfinite(cpu_seconds) or cpu_seconds <= 0:
             raise CodeExecutionError("process_isolation_unavailable")
         kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
@@ -511,14 +828,30 @@ class _WindowsProcessJob:
         self._kernel32 = kernel32
         self._handle = handle
         limits = _WindowsJobExtendedLimitInformation()
-        limits.basic_limit_information.limit_flags = self._KILL_ON_CLOSE
+        limits.basic_limit_information.limit_flags = (
+            self._KILL_ON_CLOSE
+            | self._PROCESS_TIME
+            | self._ACTIVE_PROCESS
+            | self._PROCESS_MEMORY
+        )
+        limits.basic_limit_information.per_process_user_time = int(cpu_seconds * 10_000_000)
+        limits.basic_limit_information.active_process_limit = active_process_limit
+        limits.process_memory_limit = memory_limit
+        process_handle = getattr(process, "_handle", None)
+        if process_handle is None:
+            process_handle = getattr(getattr(process, "_popen", None), "_handle", None)
+        if process_handle is None:
+            process_handle = getattr(process, "sentinel", None)
+        if process_handle is None:
+            self.close()
+            raise CodeExecutionError("process_isolation_unavailable")
         try:
             if not kernel32.SetInformationJobObject(
                 handle,
                 self._EXTENDED_LIMIT_INFORMATION,
                 ctypes.byref(limits),
                 ctypes.sizeof(limits),
-            ) or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process._handle)):
+            ) or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process_handle)):
                 raise CodeExecutionError("process_isolation_unavailable")
         except Exception:
             self.close()
@@ -550,10 +883,12 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
         kwargs["start_new_session"] = True
     process = subprocess.Popen(args, **kwargs)
     job: _WindowsProcessJob | None = None
+    readers: list[Thread] = []
     try:
         if os.name == "nt":
             job = _WindowsProcessJob(process)
         output_lock = ThreadLock()
+        output_exceeded = ThreadEvent()
         remaining = MAX_CODE_OUTPUT_BYTES
         truncated = False
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -574,6 +909,7 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
                         remaining -= take
                         if take < len(chunk):
                             truncated = True
+                            output_exceeded.set()
             finally:
                 stream.close()
 
@@ -583,11 +919,16 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
         ]
         for reader in readers:
             reader.start()
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_brokered_process(process, job)
-            raise CodeExecutionError("process_timeout") from exc
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            if output_exceeded.is_set():
+                _terminate_brokered_process(process, job)
+                raise CodeExecutionError("process_output_limit")
+            if time.monotonic() >= deadline:
+                _terminate_brokered_process(process, job)
+                raise CodeExecutionError("process_timeout")
+            time.sleep(0.01)
+        process.wait()
         for reader in readers:
             reader.join(timeout=1.0)
         return {
@@ -601,6 +942,8 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
             _terminate_brokered_process(process, job)
         raise
     finally:
+        for reader in readers:
+            reader.join(timeout=1.0)
         if job is not None:
             job.close()
         try:
@@ -626,19 +969,105 @@ def _terminate_brokered_process(process: subprocess.Popen[bytes], job: _WindowsP
         pass
 
 
+def _validate_network_url(url: str) -> str:
+    if not isinstance(url, str) or len(url) > MAX_CODE_NETWORK_URL_CHARS:
+        raise ValueError("network URL is invalid")
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("network URL is invalid") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or "\x00" in url
+        or "%" in host
+    ):
+        raise ValueError("network URL is invalid")
+    if port is not None and not 1 <= port <= 65_535:
+        raise ValueError("network URL is invalid")
+    normalized_host = host.rstrip(".").casefold()
+    if (
+        normalized_host in {"localhost", "localhost.localdomain"}
+        or normalized_host.endswith((".localhost", ".local", ".internal"))
+    ):
+        raise PermissionError("network host is not public")
+    try:
+        addresses = socket.getaddrinfo(
+            normalized_host,
+            port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        raise CodeExecutionError("network_host_unavailable") from None
+    if not addresses:
+        raise CodeExecutionError("network_host_unavailable")
+    for address in addresses:
+        try:
+            resolved = ipaddress.ip_address(address[4][0])
+        except (ValueError, IndexError):
+            raise CodeExecutionError("network_host_unavailable") from None
+        if (
+            resolved.is_private
+            or resolved.is_loopback
+            or resolved.is_link_local
+            or resolved.is_multicast
+            or resolved.is_reserved
+            or resolved.is_unspecified
+        ):
+            raise PermissionError("network host is not public")
+    return url
+
+
+class _SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        _validate_network_url(urljoin(request.full_url, newurl))
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
 class _NetworkCapability:
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
+        self._budget = budget
 
     def get(self, url: str, timeout: float = 5.0) -> str:
         if not self.enabled:
             raise PermissionError("network capability was not approved")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            raise ValueError("network access requires an http or https URL")
-        timeout = max(0.1, min(float(timeout), 5.0))
-        request = UrlRequest(url, headers={"User-Agent": "Cortex-local-code/1"})
-        with urlopen(request, timeout=timeout) as response:
-            return response.read(MAX_CODE_OUTPUT_BYTES + 1).decode("utf-8", errors="replace")[:MAX_CODE_OUTPUT_BYTES]
+        if isinstance(timeout, bool):
+            raise ValueError("network timeout is invalid")
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            raise ValueError("network timeout is invalid") from None
+        if not math.isfinite(timeout):
+            raise ValueError("network timeout is invalid")
+        safe_url = _validate_network_url(url)
+        self._budget.take_network()
+        timeout = max(0.1, min(timeout, 5.0))
+        opener = build_opener(_SafeRedirectHandler, ProxyHandler({}))
+        request = UrlRequest(safe_url, headers={"User-Agent": "Cortex-local-code/1"})
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                _validate_network_url(response.geturl())
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > MAX_CODE_NETWORK_RESPONSE_BYTES:
+                            raise CodeExecutionError("network_response_limit")
+                    except ValueError:
+                        raise CodeExecutionError("network_response_invalid") from None
+                content = response.read(MAX_CODE_NETWORK_RESPONSE_BYTES + 1)
+                if len(content) > MAX_CODE_NETWORK_RESPONSE_BYTES:
+                    raise CodeExecutionError("network_response_limit")
+                return content.decode("utf-8", errors="replace")
+        except CodeExecutionError:
+            raise
+        except (HTTPError, URLError, OSError, UnicodeError):
+            raise CodeExecutionError("network_request_failed") from None
 
 
 def _json_safe(value: Any, *, depth: int = 0) -> Any:
@@ -649,10 +1078,31 @@ def _json_safe(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
     if isinstance(value, Mapping):
-        return {str(key)[:100]: _json_safe(item, depth=depth + 1) for key, item in list(value.items())[:100]}
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 100:
+                break
+            result[str(key)[:100]] = _json_safe(item, depth=depth + 1)
+        return result
     if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item, depth=depth + 1) for item in list(value)[:100]]
+        result = []
+        for index, item in enumerate(value):
+            if index >= 100:
+                break
+            result.append(_json_safe(item, depth=depth + 1))
+        return result
     return str(value)[:1000]
+
+
+def _bounded_json_value(value: Any) -> tuple[Any, bool]:
+    safe = _json_safe(value)
+    try:
+        encoded = json.dumps(safe, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError):
+        return "[unavailable]", True
+    if len(encoded.encode("utf-8")) > MAX_CODE_VALUE_BYTES:
+        return "[truncated]", True
+    return safe, False
 
 
 def _bounded_text(value: str) -> tuple[str, bool]:
@@ -662,14 +1112,60 @@ def _bounded_text(value: str) -> tuple[str, bool]:
     return encoded[:MAX_CODE_OUTPUT_BYTES].decode("utf-8", errors="ignore"), True
 
 
+class _BoundedTextWriter(io.TextIOBase):
+    """Text sink that prevents untrusted code from growing output in memory."""
+
+    def __init__(self, maximum: int = MAX_CODE_OUTPUT_BYTES) -> None:
+        super().__init__()
+        self.maximum = maximum
+        self._size = 0
+        self._chunks: list[str] = []
+        self.truncated = False
+
+    def write(self, value: str) -> int:
+        text = str(value)
+        encoded = text.encode("utf-8", errors="replace")
+        remaining = self.maximum - self._size
+        if remaining <= 0:
+            self.truncated = True
+            return len(text)
+        if len(encoded) > remaining:
+            text = encoded[:remaining].decode("utf-8", errors="ignore")
+            self.truncated = True
+        self._chunks.append(text)
+        self._size += len(text.encode("utf-8", errors="replace"))
+        return len(value)
+
+    def getvalue(self) -> str:
+        return "".join(self._chunks)
+
+
+class _ExecutionGuard:
+    """Cooperative instruction watchdog for platforms without rlimit."""
+
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + MAX_CODE_TIMEOUT_SECONDS
+        self.events = 0
+
+    def trace(self, frame: Any, event: str, _arg: Any) -> Callable[..., Any]:
+        if frame.f_code.co_filename == "<cortex-code>":
+            if event == "call":
+                frame.f_trace_opcodes = True
+            elif event in {"line", "opcode"}:
+                self.events += 1
+                if self.events > MAX_CODE_TRACE_EVENTS or time.monotonic() >= self.deadline:
+                    raise CodeExecutionError("runtime_limit")
+        return self.trace
+
+
 def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = None, workspace: str | None = None) -> CodeExecutionResult:
     """Execute validated source inside a child process boundary."""
 
     validate_code_source(source)
     grants = CodeCapabilities.from_mapping(capabilities)
     started = time.monotonic()
-    stdout = io.StringIO()
-    stderr = io.StringIO()
+    stdout = _BoundedTextWriter()
+    stderr = _BoundedTextWriter()
     runtime = _CapabilityRuntime(grants, workspace or os.getcwd())
     _apply_resource_limits()
     globals_dict: dict[str, Any] = {
@@ -678,24 +1174,33 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     }
     locals_dict: dict[str, Any] = {}
     old_stdout, old_stderr = sys.stdout, sys.stderr
+    old_trace = sys.gettrace()
+    guard = _ExecutionGuard()
     try:
         sys.stdout, sys.stderr = stdout, stderr
+        sys.settrace(guard.trace)
         exec(compile(source, "<cortex-code>", "exec"), globals_dict, locals_dict)
     except CodeExecutionError:
         raise
+    except MemoryError:
+        raise CodeExecutionError("memory_limit") from None
+    except RecursionError:
+        raise CodeExecutionError("runtime_limit") from None
     except Exception as exc:
         raise CodeExecutionError("runtime_error", f"{type(exc).__name__}: {exc}") from exc
     finally:
         sys.stdout, sys.stderr = old_stdout, old_stderr
+        sys.settrace(old_trace)
     out, out_truncated = _bounded_text(stdout.getvalue())
     err, err_truncated = _bounded_text(stderr.getvalue())
     value = locals_dict.get("_result", locals_dict.get("result"))
+    safe_value, value_truncated = _bounded_json_value(value)
     return CodeExecutionResult(
         stdout=out,
         stderr=err,
-        value=_json_safe(value),
-        truncated=out_truncated or err_truncated,
-        duration_ms=int((time.monotonic() - started) * 1000),
+        value=safe_value,
+        truncated=stdout.truncated or stderr.truncated or out_truncated or err_truncated or value_truncated,
+        duration_ms=min(MAX_CODE_TIMEOUT_SECONDS * 1_000, int((time.monotonic() - started) * 1000)),
     )
 
 
@@ -714,8 +1219,18 @@ def _apply_resource_limits() -> None:
         return
 
 
+def _scrub_worker_environment() -> None:
+    """Remove inherited credentials/proxy settings before broker calls."""
+
+    system_root = os.environ.get("SystemRoot") if os.name == "nt" else None
+    os.environ.clear()
+    if system_root:
+        os.environ["SystemRoot"] = system_root
+
+
 def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, Any], workspace: str) -> None:
     try:
+        _scrub_worker_environment()
         result = run_code_in_worker(source, capabilities, workspace)
         connection.send({"ok": True, "result": result.as_payload()})
     except CodeExecutionError as exc:
