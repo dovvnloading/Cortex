@@ -4,13 +4,34 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from cortex_backend.repositories.chats import LegacyDatabaseChatRepository
+from cortex_backend.api.schemas import AddMessageRequest, ChatMessage
+from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.legacy_storage import DatabaseManager
 from cortex_backend.core.generation import GenerationAttachment
 from cortex_backend.services.llm import SynthesisAgent
 
 
 class ChatCorrectnessTests(unittest.TestCase):
+    def test_reasoning_metadata_is_scoped_to_assistant_messages(self):
+        user_response = ChatMessage(role="user", content="Question", thoughts="must not leak")
+        user_request = AddMessageRequest(role="user", content="Question", thoughts="must not persist")
+        self.assertIsNone(user_response.thoughts)
+        self.assertIsNone(user_request.thoughts)
+
+        repository = InMemoryChatRepository(
+            [{
+                "id": "thread-1",
+                "title": "Topic",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "messages": [{"role": "user", "content": "Question", "thoughts": "legacy leak"}],
+            }]
+        )
+        loaded = repository.get_chat("thread-1")
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(loaded["messages"][0]["thoughts"])
+        repository.add_message("thread-1", "user", "Follow-up", thoughts="another leak")
+        self.assertIsNone(repository.get_chat("thread-1")["messages"][-1]["thoughts"])
+
     def test_generated_new_chat_title_is_normalized(self):
         self.assertEqual(SynthesisAgent.normalize_title('  "New Chat"  '), "New Chat")
         self.assertEqual(SynthesisAgent.normalize_title("**AI Purpose Explained**"), "AI Purpose Explained")

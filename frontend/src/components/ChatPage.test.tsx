@@ -80,7 +80,7 @@ describe("ChatPage composer integration", () => {
       timestamp: "2026-01-01T00:00:00Z",
       revision: 2,
       messages: [
-        { id: "m-1", role: "user", content: "Show me the result." },
+        { id: "m-1", role: "user", content: "Show me the result.", thoughts: "This must never render in the user bubble." },
         {
           id: "m-2",
           role: "assistant",
@@ -102,6 +102,7 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("heading", { name: "Result", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
     expect(screen.getByText("Reasoning")).toBeInTheDocument();
+    expect(screen.queryByText("This must never render in the user bubble.")).not.toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
     expect(screen.getByText("result.md")).toBeInTheDocument();
   });

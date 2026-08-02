@@ -343,6 +343,8 @@ class DatabaseManager:
     ):
         """Adds a new message to a specific chat thread."""
         try:
+            if role != "assistant":
+                thoughts = None
             with self.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if thread_title is not None:

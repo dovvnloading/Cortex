@@ -116,6 +116,13 @@ class ChatMessage(APIModel):
     thoughts: str | None = None
     attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
 
+    @model_validator(mode="after")
+    def assistant_only_thoughts(self) -> "ChatMessage":
+        """Reasoning metadata is never part of a user or system message."""
+        if self.role != "assistant":
+            self.thoughts = None
+        return self
+
 
 class ChatSummary(APIModel):
     id: str
@@ -146,6 +153,13 @@ class AddMessageRequest(APIModel):
     sources: list[Any] | None = None
     thoughts: str | None = Field(default=None, max_length=100_000)
     attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
+
+    @model_validator(mode="after")
+    def assistant_only_thoughts(self) -> "AddMessageRequest":
+        """Ignore client-supplied reasoning metadata on non-assistant messages."""
+        if self.role != "assistant":
+            self.thoughts = None
+        return self
 
 
 class SettingsMigrationReport(APIModel):
