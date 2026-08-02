@@ -529,15 +529,6 @@ export function ChatPage({
     <section className="chat-page" aria-labelledby="chat-title">
       <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
       <div className="transcript" ref={transcriptRef} onScroll={updateTranscriptPosition}>
-        {messages.length === 0 && !activeJobForCurrentThread && (
-          <section className="chat-welcome" aria-label="Start a new conversation">
-            <h1>New thread</h1>
-            <p>
-              Ask a question or check a calculation using the model on this device.
-            </p>
-            {selectedModel && <span className="chat-welcome-model">{selectedModel}</span>}
-          </section>
-        )}
         {messages.map((message, index) => (
           <MessageCard
             key={message.id ?? `${message.role}-${index}`}

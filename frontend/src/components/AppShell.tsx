@@ -92,10 +92,6 @@ export function AppShell({
           </div>
         </div>
         <div className="window-actions">
-          <span className={`runtime-status ${modelConnection?.success ? "runtime-status-ready" : "runtime-status-error"}`} title={modelConnection?.message ?? undefined}>
-            <span className="runtime-status-dot" aria-hidden="true" />
-            {modelConnection?.success ? "Ollama online" : "Ollama offline"}
-          </span>
           <NavigationLink
             to="/settings"
             className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}
@@ -138,12 +134,6 @@ export function AppShell({
                 </div>
               </div>
             )) : <p className="sidebar-empty">No threads yet.</p>}
-          </div>
-          <div className="sidebar-footer">
-            <span className={`sidebar-runtime ${modelConnection?.success ? "sidebar-runtime-ready" : "sidebar-runtime-error"}`}>
-              <span aria-hidden="true" />
-              {modelConnection?.success ? "Connected locally" : "Local runtime unavailable"}
-            </span>
           </div>
         </aside>
 

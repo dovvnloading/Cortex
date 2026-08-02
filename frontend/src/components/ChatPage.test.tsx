@@ -64,13 +64,12 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
 describe("ChatPage composer integration", () => {
   afterEach(() => window.sessionStorage.clear());
 
-  it("keeps a blank conversation free of preset prompt suggestions", async () => {
+  it("keeps a blank conversation focused on the composer", async () => {
     renderChat(chatApi());
 
-    await screen.findByRole("heading", { name: "New thread" });
+    await screen.findByLabelText("Message Cortex");
 
-    expect(screen.queryByText("Think through a decision")).not.toBeInTheDocument();
-    expect(screen.queryByText("Check a calculation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
   });
 
