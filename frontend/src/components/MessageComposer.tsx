@@ -1,4 +1,4 @@
-import { ArrowUp, Code2, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Square, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -10,10 +10,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { LocalModelMenu } from "./LocalModelMenu";
-import { CodeWorkspace } from "./CodeWorkspace";
-import type { ChatAttachment, CodeCapabilitiesRequest, CodeExecutionRequest } from "../../../contracts/cortex-api";
-
-type CodeCapabilities = Required<CodeCapabilitiesRequest>;
+import type { ChatAttachment } from "../../../contracts/cortex-api";
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
 
@@ -40,8 +37,6 @@ export type MessageComposerProps = {
   imageInputBlocked?: string | null;
   onAddAttachments?: (files: File[]) => Promise<void> | void;
   onRemoveAttachment?: (attachmentId: string) => void;
-  codeExecutionAvailable?: boolean;
-  onRunCode?: (payload: CodeExecutionRequest) => Promise<void>;
 };
 
 const MAX_MESSAGE_LENGTH = 100_000;
@@ -70,8 +65,6 @@ export function MessageComposer({
   imageInputBlocked = null,
   onAddAttachments,
   onRemoveAttachment,
-  codeExecutionAvailable = false,
-  onRunCode,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -80,11 +73,6 @@ export function MessageComposer({
   const composingRef = useRef(false);
   const [submissionPending, setSubmissionPending] = useState(false);
   const [focused, setFocused] = useState(false);
-  const [codePanelOpen, setCodePanelOpen] = useState(false);
-  const [codeSource, setCodeSource] = useState("");
-  const [codeIntent, setCodeIntent] = useState("");
-  const [codeCapabilities, setCodeCapabilities] = useState<CodeCapabilities>({ filesystem: false, process: false, network: false });
-  const [codeBusy, setCodeBusy] = useState(false);
   const statusId = useId();
   const counterId = useId();
   const canSubmit = phase === "ready"
@@ -181,26 +169,6 @@ export function MessageComposer({
     if (files.length && onAddAttachments) void onAddAttachments(files);
   };
 
-  const runCode = async () => {
-    if (!onRunCode || !codeSource.trim() || !codeIntent.trim() || codeBusy) return;
-    setCodeBusy(true);
-    try {
-      const request: CodeExecutionRequest = {
-        request_id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-        language: "python",
-        source: codeSource,
-        intent_summary: codeIntent.trim(),
-        capabilities: codeCapabilities,
-      };
-      await onRunCode(request);
-      setCodePanelOpen(false);
-    } catch {
-      // The workspace callback owns the user-visible error message.
-    } finally {
-      setCodeBusy(false);
-    }
-  };
-
   const status = phase === "starting"
     ? "Starting response"
     : phase === "stopping"
@@ -224,10 +192,10 @@ export function MessageComposer({
           </span>
         </div>
       )}
-      <form className={`composer${codePanelOpen ? " composer-code-mode" : ""}`} onSubmit={handleSubmit}>
+      <form className="composer" onSubmit={handleSubmit}>
         <div
           ref={surfaceRef}
-          className={`composer-surface composer-phase-${phase}${codePanelOpen ? " composer-code-open" : ""}`}
+          className={`composer-surface composer-phase-${phase}`}
           onFocus={() => setFocused(true)}
           onBlur={handleSurfaceBlur}
           onMouseDown={(event) => {
@@ -255,20 +223,7 @@ export function MessageComposer({
               ))}
             </div>
           )}
-          {codePanelOpen && (
-            <CodeWorkspace
-              source={codeSource}
-              intent={codeIntent}
-              capabilities={codeCapabilities}
-              busy={codeBusy}
-              onSourceChange={setCodeSource}
-              onIntentChange={setCodeIntent}
-              onCapabilityChange={(capability, enabled) => setCodeCapabilities((current) => ({ ...current, [capability]: enabled }))}
-              onRun={() => void runCode()}
-              onClose={() => setCodePanelOpen(false)}
-            />
-          )}
-          {!codePanelOpen && <textarea
+          <textarea
             ref={textareaRef}
             id="chat-composer"
             value={value}
@@ -281,7 +236,7 @@ export function MessageComposer({
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
-          />}
+          />
 
           <div className="composer-utility-row">
             <label className={`composer-attachment-button${attachmentsBusy ? " composer-attachment-button-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
@@ -297,7 +252,6 @@ export function MessageComposer({
                 disabled={attachmentsBusy || !onAddAttachments}
               />
             </label>
-            {codeExecutionAvailable && onRunCode && <button className={`composer-attachment-button composer-code-toggle${codePanelOpen ? " composer-attachment-button-active" : ""}`} type="button" title="Open code workspace" aria-label="Open code workspace" onClick={() => setCodePanelOpen((open) => !open)} disabled={phase !== "ready" || modelBusy}><Code2 size={15} aria-hidden="true" /><span>Code</span></button>}
             <div className="composer-model-control">
               <LocalModelMenu
                 models={localModels}
