@@ -10,19 +10,31 @@ frontend process; Cortex does not open the user's installed browser.
 
 The interface is deliberately small: a thread list, a focused transcript, a
 composer with a local model picker, and settings for model, memory, appearance,
-and execution controls.
+and execution controls. The examples below use conversations with a clear
+decision to make, a boundary to review, or a claim to test.
 
-![Cortex project brief chat](docs/images/cortex-project-brief.png)
+![Cortex product direction chat](docs/images/cortex-product-direction.png)
 
-*A durable local conversation with Markdown tables rendered in the transcript.*
+*Product direction: turn “local-first” into observable promises, explicit
+capability boundaries, and controls a new user can verify in the first five
+minutes.*
 
-![Cortex bounded Python conversation](docs/images/cortex-bounded-python.png)
+![Cortex bounded data audit chat](docs/images/cortex-bounded-data-audit.png)
 
-*Code in a conversation is reviewable text. Fenced code never runs by itself.*
+*Bounded audit: define a one-time, read-only Markdown review with a named
+directory, no network or child process, bounded output, and a source digest
+before any execution request is considered.*
+
+![Cortex runtime trust model chat](docs/images/cortex-runtime-trust-model.png)
+
+*Runtime trust model: separate storage, loopback services, the embedded window,
+the model process, and optional execution so each guarantee has a test and an
+honest disclosure.*
 
 ![Cortex settings](docs/images/cortex-settings.png)
 
-*General settings keep safe computation separate from approval-gated code requests.*
+*Settings make model, memory, appearance, and execution controls visible without
+turning the conversation into an administration screen.*
 
 The screenshots were captured from an isolated local data directory using the
 Python desktop runtime and the machine's Ollama service. They contain only
