@@ -29,6 +29,8 @@ describe("AppShell", () => {
     expect(screen.getByRole("heading", { name: "AI Purpose Explained" })).toBeVisible();
     expect(screen.getByRole("button", { name: "AI Purpose Explained" })).toBeVisible();
     expect(screen.queryByText("**AI Purpose Explained**")).not.toBeInTheDocument();
+    expect(screen.queryByText("Ollama online")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connected locally")).not.toBeInTheDocument();
   });
 
   it("navigates to a new thread without maintaining a second selection state", async () => {
