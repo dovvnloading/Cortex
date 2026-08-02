@@ -1,26 +1,15 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { Check, Info, X } from "lucide-react";
+import type { ReactNode } from "react";
+import { useUiStore } from "../stores/useUiStore";
 
-type ToastKind = "success" | "error" | "info";
-type Toast = { id: number; kind: ToastKind; message: string };
-type ToastContextValue = { notify: (message: string, kind?: ToastKind) => void };
-
-const ToastContext = createContext<ToastContextValue | null>(null);
+export { useToast } from "../stores/useUiStore";
 
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const notify = useCallback((message: string, kind: ToastKind = "info") => {
-    const id = Date.now() + Math.random();
-    setToasts((current) => [...current, { id, kind, message }]);
-    window.setTimeout(() => {
-      setToasts((current) => current.filter((toast) => toast.id !== id));
-    }, 4500);
-  }, []);
-  const value = useMemo(() => ({ notify }), [notify]);
+  const toasts = useUiStore((state) => state.toasts);
 
   return (
-    <ToastContext.Provider value={value}>
+    <>
       {children}
       <div className="toast-region" aria-live="polite" aria-atomic="true">
         {toasts.map((toast) => (
@@ -32,14 +21,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           </div>
         ))}
       </div>
-    </ToastContext.Provider>
+    </>
   );
-}
-
-export function useToast(): ToastContextValue {
-  const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error("useToast must be used inside ToastProvider");
-  }
-  return context;
 }

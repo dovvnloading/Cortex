@@ -162,7 +162,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();
   await page.getByRole("button", { name: "AI Model", exact: true }).click();
-  await page.getByRole("button", { name: "Chat model" }).click();
+  await page.getByRole("combobox", { name: "Chat model" }).click();
   await page.getByRole("option", { name: "local-chat:7b" }).click();
   await page.getByLabel("System instructions").fill("Be concise.");
   await page.getByRole("button", { name: "Save settings" }).click();

@@ -27,7 +27,11 @@ from cortex_backend.services.chat import (
     title_from_first_message,
 )
 from cortex_backend.services.code_prompt import should_offer_code_execution
-from cortex_backend.core.settings import CortexSettings
+from cortex_backend.core.settings import (
+    CortexSettings,
+    GENERATION_OVERRIDE_FIELDS,
+    GenerationOptionsOverride,
+)
 from cortex_backend.repositories.chats import ChatRepositoryError, ChatRevisionConflict
 from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
@@ -1249,6 +1253,7 @@ def build_router() -> APIRouter:
                         user_input=user_input,
                         base_revision=current_revision,
                         attachments=payload.attachments,
+                        options=payload.options,
                     )
                     snapshot, _ = await _start_generation_job(
                         request,
@@ -1692,12 +1697,14 @@ async def _start_generation_job(
             sink.publish_progress("persisting", "Saving the response.")
             if cancel_event.is_set():
                 return {"cancelled": True}
+            stats_payload = asdict(result.stats) if result.stats else None
             if target_message_id is None:
                 assistant_message_id = deps.chats.add_message(
                     thread_id,
                     "assistant",
                     result.response,
                     thoughts=result.thoughts,
+                    stats=stats_payload,
                     expected_revision=prepared_revision,
                 )
             else:
@@ -1706,6 +1713,7 @@ async def _start_generation_job(
                     target_message_id,
                     result.response,
                     thoughts=result.thoughts,
+                    stats=stats_payload,
                     expected_revision=prepared_revision,
                 )
                 assistant_message_id = target_message_id
@@ -1762,6 +1770,7 @@ async def _start_generation_job(
                 "thoughts": result.thoughts,
                 "clear_requested": result.memory_command.clear_requested,
                 "code_execution_job_id": code_execution_job_id,
+                "stats": stats_payload,
             }
 
         snapshot, acceptance = jobs.start_reserved(
@@ -1985,10 +1994,36 @@ def _model_response(
                 modified_at=model.modified_at,
                 capabilities=model.capabilities,
                 supports_vision=model.supports_vision,
+                parameter_size=model.parameter_size,
+                quantization_level=model.quantization_level,
+                family=model.family,
+                context_length=model.context_length,
             )
             for model in models
         ),
     )
+
+
+def _merged_model_options(
+    settings: CortexSettings,
+    override: GenerationOptionsOverride | None,
+) -> dict[str, float | int]:
+    """Layer a per-request override on top of the standing generation defaults.
+
+    Bounds are validated once, on GenerationSettings/GenerationOptionsOverride's
+    own field definitions, so an override can't smuggle a value past what the
+    global setting itself would allow.
+    """
+    merged: dict[str, float | int] = {
+        field_name: getattr(settings.generation, field_name)
+        for field_name in GENERATION_OVERRIDE_FIELDS
+    }
+    if override is not None:
+        for field_name in GENERATION_OVERRIDE_FIELDS:
+            value = getattr(override, field_name, None)
+            if value is not None:
+                merged[field_name] = value
+    return merged
 
 
 def _generation_snapshot(
@@ -2029,11 +2064,7 @@ def _generation_snapshot(
         model=chat_model,
         title_model=title_model,
         translation_model=settings.models.translation,
-        model_options={
-            "temperature": settings.generation.temperature,
-            "num_ctx": settings.generation.num_ctx,
-            "seed": settings.generation.seed,
-        },
+        model_options=_merged_model_options(settings, payload.options),
         memories_enabled=settings.memory.enabled,
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
@@ -2068,6 +2099,7 @@ def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
             "sources": message.get("sources"),
             "thoughts": message.get("thoughts"),
             "attachments": message.get("attachments"),
+            "stats": message.get("stats"),
         }
         for message in chat.get("messages", [])
     ]

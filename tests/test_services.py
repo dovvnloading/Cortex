@@ -11,6 +11,7 @@ import unittest
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     GenerationSnapshot,
+    GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
@@ -74,9 +75,10 @@ class _FakeEngine:
         memories_enabled: bool,
         user_system_instructions: str | None,
         options: dict,
-    ) -> tuple[str, str | None, MemoryCommand]:
+    ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         self.options = options
-        return "response", "thoughts", MemoryCommand(("remember tea",), False)
+        stats = GenerationStats(eval_count=10, eval_duration_ms=100.0, tokens_per_second=100.0)
+        return "response", "thoughts", MemoryCommand(("remember tea",), False), stats
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         return self.translation
@@ -279,6 +281,65 @@ class ModelServiceTests(unittest.TestCase):
         self.assertEqual(inventory[0].capabilities, ("completion",))
         self.assertTrue(inventory[1].supports_vision)
         self.assertEqual(inventory[1].capabilities, ("completion", "vision"))
+
+    def test_inventory_derives_model_details_from_the_same_show_response(self):
+        class DetailedGateway:
+            def list(self):
+                return {"models": [{"name": "qwen3:8b"}]}
+
+            def show(self, model: str):
+                return {
+                    "capabilities": ["completion"],
+                    "details": {"family": "qwen3", "parameter_size": "8.0B", "quantization_level": "Q4_K_M"},
+                    "model_info": {"qwen3.context_length": 40960, "unrelated.context_length": 999},
+                }
+
+        inventory, _ = ModelService(DetailedGateway()).inventory()
+
+        self.assertEqual(inventory[0].parameter_size, "8.0B")
+        self.assertEqual(inventory[0].quantization_level, "Q4_K_M")
+        self.assertEqual(inventory[0].family, "qwen3")
+        self.assertEqual(inventory[0].context_length, 40960)
+
+    def test_show_details_tolerates_a_response_missing_details_and_model_info(self):
+        class MinimalGateway:
+            def list(self):
+                return {"models": [{"name": "qwen3:8b"}]}
+
+            def show(self, model: str):
+                return {"capabilities": ["completion"]}
+
+        details = ModelService(MinimalGateway()).show_details("qwen3:8b")
+
+        self.assertIsNotNone(details)
+        self.assertEqual(details.capabilities, ("completion",))
+        self.assertIsNone(details.parameter_size)
+        self.assertIsNone(details.quantization_level)
+        self.assertIsNone(details.family)
+        self.assertIsNone(details.context_length)
+
+    def test_show_details_is_none_without_a_family_prefixed_context_length(self):
+        class NoContextLengthGateway:
+            def list(self):
+                return {"models": []}
+
+            def show(self, model: str):
+                return {"capabilities": [], "details": {"family": "qwen3"}, "model_info": {}}
+
+        details = ModelService(NoContextLengthGateway()).show_details("qwen3:8b")
+
+        self.assertIsNotNone(details)
+        self.assertEqual(details.family, "qwen3")
+        self.assertIsNone(details.context_length)
+
+    def test_show_details_is_none_when_the_gateway_has_no_show_method(self):
+        class ListOnlyGateway:
+            def list(self):
+                return {"models": []}
+
+        self.assertIsNone(ModelService(ListOnlyGateway()).show_details("anything"))
+        self.assertIsNone(ModelService(ListOnlyGateway()).capabilities("anything"))
+        self.assertIsNone(ModelService(ListOnlyGateway()).model_supports_vision("anything"))
 
     def test_extracts_legacy_object_and_current_dict_model_shapes(self):
         class ModelEntry:

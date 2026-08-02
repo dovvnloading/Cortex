@@ -1,0 +1,537 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
+import { ApiError, CortexApi } from "../../api/client";
+import { displayChatTitle } from "../../lib/chatTitle";
+import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
+import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
+import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
+import { useSettingsStore } from "../../stores/useSettingsStore";
+import { MessageComposer, type ComposerPhase } from "./MessageComposer";
+import { MessageIdentity } from "./MessageCard";
+import { MessageList, type MessageListHandle } from "./MessageList";
+import { SafeMarkdown } from "../markdown/SafeMarkdown";
+
+const DEFAULT_GENERATION_SETTINGS = {
+  temperature: 0.7,
+  top_p: 0.9,
+  top_k: 40,
+  repeat_penalty: 1.1,
+  num_ctx: 4096,
+  seed: -1,
+  system_instructions: "",
+};
+
+type Props = {
+  api: CortexApi;
+  threadId: string | null;
+  runtimeReady: boolean;
+  runtimeMessage: string | null;
+  localModels: readonly string[];
+  selectedModel: string | null;
+  selectedModelSupportsVision?: boolean | null;
+  modelBusy: boolean;
+  onSelectModel: (model: string) => Promise<boolean>;
+  onRescanModels: () => Promise<void>;
+  onThreadCreated: (threadId: string) => void;
+  onChatChanged: (chat: ChatResponse) => void;
+  onForked: (chat: ChatResponse) => void;
+};
+
+type ScopedError = {
+  message: string;
+  threadId: string | null;
+};
+
+type ChatLoadState = {
+  threadId: string | null;
+  loading: boolean;
+  error: string | null;
+};
+
+const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS = 8;
+
+export function ChatPage({
+  api,
+  threadId,
+  runtimeReady,
+  runtimeMessage,
+  localModels,
+  selectedModel,
+  selectedModelSupportsVision = null,
+  modelBusy,
+  onSelectModel,
+  onRescanModels,
+  onThreadCreated,
+  onChatChanged,
+  onForked,
+}: Props) {
+  const generation = useChatStore((state) => state.generation);
+  const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
+  const setThreadOptions = useChatStore((state) => state.setThreadOptions);
+  const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
+  const { start, consume, stop } = useGenerationStream(api);
+  const [chat, setChat] = useState<ChatResponse | null>(null);
+  const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => ({
+    [composerDraftKey(threadId)]: readComposerDraft(threadId),
+  }));
+  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, ChatAttachment[]>>(() => ({
+    [composerAttachmentKey(threadId)]: readComposerAttachments(threadId),
+  }));
+  const [lastPrompt, setLastPrompt] = useState("");
+  const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>([]);
+  const [chatLoad, setChatLoad] = useState<ChatLoadState>({
+    threadId,
+    loading: true,
+    error: null,
+  });
+  const [generationError, setGenerationError] = useState<ScopedError | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [forkingMessage, setForkingMessage] = useState<string | null>(null);
+  const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const startingRef = useRef(false);
+  const stoppingRef = useRef(false);
+  const messageListRef = useRef<MessageListHandle>(null);
+  const isNearTranscriptEnd = useRef(true);
+  const viewThreadIdRef = useRef<string | null>(threadId);
+  const chatRequestVersionsRef = useRef(new Map<string | null, number>());
+  const initialMountRef = useRef(true);
+  const draftsRef = useRef(drafts);
+  const attachmentDraftsRef = useRef(attachmentDrafts);
+
+  const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
+    setGenerationError({ threadId: failedThreadId, message });
+  }, []);
+
+  const loadChat = useCallback(async ({ preserveCurrent = false }: { preserveCurrent?: boolean } = {}) => {
+    const requestedThreadId = threadId;
+    const requestVersion = (chatRequestVersionsRef.current.get(requestedThreadId) ?? 0) + 1;
+    chatRequestVersionsRef.current.set(requestedThreadId, requestVersion);
+    const isLatestRequest = () => chatRequestVersionsRef.current.get(requestedThreadId) === requestVersion;
+    if (!preserveCurrent) {
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: true,
+        error: null,
+      });
+    }
+    try {
+      const next = requestedThreadId ? await api.chat(requestedThreadId) : null;
+      if (viewThreadIdRef.current !== requestedThreadId || !isLatestRequest()) return;
+      setChat(next);
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: false,
+        error: null,
+      });
+    } catch (requestError) {
+      if (viewThreadIdRef.current !== requestedThreadId || !isLatestRequest() || preserveCurrent) return;
+      setChat(null);
+      setChatLoad({
+        threadId: requestedThreadId,
+        loading: false,
+        error: requestError instanceof ApiError ? requestError.detail : "Could not load this chat.",
+      });
+    }
+  }, [api, threadId]);
+
+  useEffect(() => stop, [stop]);
+
+  const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
+
+  // Mirror the fully-loaded, currently-viewed chat into the global store so
+  // chrome outside ChatPage (the AppShell header's export control) can read
+  // it without prop-drilling. Cleared on unmount so a Settings round-trip
+  // doesn't leave a stale chat exported from the header.
+  useEffect(() => {
+    useChatStore.getState().setActiveChat(currentChat);
+    return () => useChatStore.getState().setActiveChat(null);
+  }, [currentChat]);
+
+  useEffect(() => {
+    if (isNearTranscriptEnd.current) {
+      messageListRef.current?.scrollToBottom();
+    }
+  }, [currentChat?.messages?.length, generation.partialContent, generation.partialThoughts]);
+
+  // New tokens while scrolled away from the bottom surface a "jump to
+  // latest" affordance instead of yanking the viewport down.
+  useEffect(() => {
+    if (!isNearTranscriptEnd.current && (generation.partialContent || generation.partialThoughts)) {
+      setShowJumpToLatest(true);
+    }
+  }, [generation.partialContent, generation.partialThoughts]);
+
+  const messages = useMemo(
+    () => currentChat?.messages ?? [],
+    [currentChat?.messages],
+  );
+  const draftScope = composerDraftKey(threadId);
+  const draft = drafts[draftScope] ?? readComposerDraft(threadId);
+  const attachmentScope = composerAttachmentKey(threadId);
+  const attachments = attachmentDrafts[attachmentScope] ?? readComposerAttachments(threadId);
+  const threadOptionsKey = threadId ?? NEW_THREAD_OPTIONS_KEY;
+  const threadOptions = generationOptionsByThread[threadOptionsKey] ?? null;
+  const finalAssistantId = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null,
+    [messages],
+  );
+  const displayedThreadId = threadId ?? resolvedThreadId;
+  const activeJobForCurrentThread = Boolean(generation.jobId && generation.threadId === displayedThreadId);
+  const generationElsewhere = Boolean(generation.jobId && !activeJobForCurrentThread);
+  const visibleGenerationError = generationError && generationError.threadId === displayedThreadId
+    ? generationError.message
+    : null;
+  const composerPhase: ComposerPhase = !runtimeReady
+    ? "unavailable"
+    : generation.phase === "stopping"
+      ? "stopping"
+      : generation.jobId
+        ? "generating"
+        : starting
+          ? "starting"
+          : "ready";
+
+  async function reconcileChat(id: string): Promise<void> {
+    const requestVersion = (chatRequestVersionsRef.current.get(id) ?? 0) + 1;
+    chatRequestVersionsRef.current.set(id, requestVersion);
+    const isLatestRequest = () => chatRequestVersionsRef.current.get(id) === requestVersion;
+    try {
+      const next = await api.chat(id);
+      if (!isLatestRequest()) return;
+      onChatChanged(next);
+      if (viewThreadIdRef.current === id) {
+        setChat(next);
+        setChatLoad({
+          threadId: id,
+          loading: false,
+          error: null,
+        });
+      }
+    } catch {
+      if (!isLatestRequest()) return;
+      setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
+    }
+  }
+
+  useEffect(() => {
+    viewThreadIdRef.current = threadId;
+    isNearTranscriptEnd.current = true;
+    const preserveCurrent = Boolean(
+      threadId !== null
+      && chat?.id === threadId
+      && chatLoad.threadId === threadId
+      && !chatLoad.loading
+      && !chatLoad.error,
+    );
+    const timer = window.setTimeout(() => {
+      setShowJumpToLatest(false);
+      setResolvedThreadId(threadId);
+      void loadChat({ preserveCurrent });
+      const stored = readActiveJob();
+      if (stored) {
+        const job: PersistedJob = initialMountRef.current ? { ...stored, lastEventId: 0 } : stored;
+        initialMountRef.current = false;
+        if (useChatStore.getState().generation.jobId !== job.jobId) {
+          useChatStore.getState().beginGeneration(job.jobId, job.threadId);
+        }
+        void consume(job, reconcileChat, reportGenerationFailure);
+      } else {
+        initialMountRef.current = false;
+        const current = useChatStore.getState().generation;
+        if (current.jobId !== null) useChatStore.getState().endGeneration(current.jobId);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // The event consumer intentionally survives route changes. A generation
+    // is global to the local backend, while a route is merely a view of it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, loadChat]);
+
+  const startGeneration = async (prompt: string, regenerateMessageId?: string, suppliedAttachments: readonly ChatAttachment[] = attachments): Promise<boolean> => {
+    const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
+    if (!input || generation.jobId || startingRef.current) return false;
+    if (!runtimeReady) {
+      setGenerationError({
+        threadId,
+        message: runtimeMessage ?? "The local runtime is unavailable. Rescan local models after it is running.",
+      });
+      return false;
+    }
+
+    startingRef.current = true;
+    setStarting(true);
+    setLastPrompt(input);
+    setLastAttachments([...suppliedAttachments]);
+    setGenerationError(null);
+    try {
+      const requestId = createRequestId();
+      const options = threadOptions ?? undefined;
+      const accepted = regenerateMessageId
+        ? await api.regenerate(threadId ?? "", { request_id: requestId, message_id: regenerateMessageId, user_input: input, attachments: [...suppliedAttachments], options })
+        : await api.generate({ request_id: requestId, thread_id: threadId, user_input: input, attachments: [...suppliedAttachments], base_revision: currentChat?.revision ?? 0, options });
+      const jobThreadId = accepted.thread_id ?? threadId;
+      if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
+
+      setResolvedThreadId(jobThreadId);
+      start(accepted.job_id, jobThreadId, reconcileChat, reportGenerationFailure);
+      if (!regenerateMessageId) {
+        setChat((current) => ({
+          id: jobThreadId,
+          title: current?.id === jobThreadId ? current.title : "New Chat",
+          timestamp: current?.id === jobThreadId ? current.timestamp : new Date().toISOString(),
+          revision: (
+            current?.id === jobThreadId ? current.revision ?? 0 : 0
+          ) + 1,
+          messages: accepted.user_message_id
+            && current?.id === jobThreadId
+            && current.messages?.some((message) => message.id === accepted.user_message_id)
+            ? current.messages
+            : [
+                ...(current?.id === jobThreadId ? current.messages ?? [] : []),
+                {
+                  id: accepted.user_message_id ?? undefined,
+                  role: "user",
+                  content: input,
+                  attachments: [...suppliedAttachments],
+                },
+              ],
+        }));
+        setChatLoad({
+          threadId: jobThreadId,
+          loading: false,
+          error: null,
+        });
+      }
+      if (!threadId) onThreadCreated(jobThreadId);
+      return true;
+    } catch (requestError) {
+      setGenerationError({
+        threadId,
+        message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
+      });
+      return false;
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
+    }
+  };
+
+  const submitDraft = async (): Promise<boolean> => {
+    const submittedDraft = draft;
+    const submittedAttachments = attachments;
+    const submittedScope = draftScope;
+    const submittedThreadId = threadId;
+    const accepted = await startGeneration(submittedDraft, undefined, submittedAttachments);
+    const currentDraft = draftsRef.current[submittedScope] ?? readComposerDraft(submittedThreadId);
+    if (accepted && currentDraft === submittedDraft) {
+      const nextDrafts = { ...draftsRef.current, [submittedScope]: "" };
+      draftsRef.current = nextDrafts;
+      setDrafts(nextDrafts);
+      writeComposerDraft(submittedThreadId, "");
+      const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: [] };
+      attachmentDraftsRef.current = nextAttachments;
+      setAttachmentDrafts(nextAttachments);
+      writeComposerAttachments(submittedThreadId, []);
+    }
+    return accepted;
+  };
+
+  const cancel = async (): Promise<void> => {
+    const active = useChatStore.getState().generation;
+    if (!active.jobId || stoppingRef.current) return;
+    const jobId = active.jobId;
+    const jobThreadId = active.threadId;
+    stoppingRef.current = true;
+    useChatStore.getState().markStopping(jobId);
+    useChatStore.getState().setStatusText(jobId, "Stopping response...");
+    try {
+      await api.cancelGeneration(jobId);
+    } catch (requestError) {
+      useChatStore.getState().revertStopping(jobId);
+      setGenerationError({
+        threadId: jobThreadId,
+        message: requestError instanceof ApiError ? requestError.detail : "Could not stop the response.",
+      });
+    } finally {
+      stoppingRef.current = false;
+    }
+  };
+
+  const retryLastPrompt = async (): Promise<boolean> => {
+    if (!lastPrompt) return false;
+    return startGeneration(lastPrompt, undefined, lastAttachments);
+  };
+
+  const fork = async (message: ChatMessage) => {
+    if (!threadId || !message.id || forkingMessage || generation.jobId || starting) return;
+    setForkingMessage(message.id);
+    try {
+      const forked = await api.forkChat(threadId, message.id);
+      onForked(forked);
+    } catch (requestError) {
+      setGenerationError({
+        threadId,
+        message: requestError instanceof ApiError ? requestError.detail : "Could not fork this chat.",
+      });
+    } finally {
+      setForkingMessage(null);
+    }
+  };
+
+  const updateDraft = (nextDraft: string) => {
+    const nextDrafts = { ...draftsRef.current, [draftScope]: nextDraft };
+    draftsRef.current = nextDrafts;
+    setDrafts(nextDrafts);
+    writeComposerDraft(threadId, nextDraft);
+  };
+
+  const addAttachments = async (files: File[]): Promise<void> => {
+    if (attachmentsBusy || !files.length) return;
+    setAttachmentsBusy(true);
+    setAttachmentError(null);
+    try {
+      const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - attachments.length);
+      if (!remaining) throw new Error("A message can include at most eight attachments.");
+      let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+      const staged: ChatAttachment[] = [];
+      for (const file of files.slice(0, remaining)) {
+        if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+          throw new Error(`${file.name} is empty or larger than 10 MB.`);
+        }
+        if (totalBytes + file.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+          throw new Error("The combined attachment size is too large for one message.");
+        }
+        const contentBase64 = await fileToBase64(file);
+        const attachment = await api.stageChatAttachment({
+          request_id: createRequestId(),
+          filename: file.name,
+          content_base64: contentBase64,
+        });
+        staged.push(attachment);
+        totalBytes += attachment.size;
+      }
+      const next = [...attachments, ...staged];
+      const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: next };
+      attachmentDraftsRef.current = nextAttachments;
+      setAttachmentDrafts(nextAttachments);
+      writeComposerAttachments(threadId, next);
+    } catch (error) {
+      setAttachmentError(error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "The attachment could not be uploaded.");
+    } finally {
+      setAttachmentsBusy(false);
+    }
+  };
+
+  const removeAttachment = (attachmentId: string) => {
+    const next = attachments.filter((attachment) => attachment.attachment_id !== attachmentId);
+    const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: next };
+    attachmentDraftsRef.current = nextAttachments;
+    setAttachmentDrafts(nextAttachments);
+    writeComposerAttachments(threadId, next);
+    setAttachmentError(null);
+  };
+
+  const imageInputBlocked = attachments.some((attachment) => attachment.kind === "image")
+    && selectedModelSupportsVision === false
+    ? `Selected model "${selectedModel ?? "this model"}" cannot accept images. Choose a vision model or remove the image.`
+    : null;
+
+  const handleNearEndChange = (isNearEnd: boolean) => {
+    isNearTranscriptEnd.current = isNearEnd;
+    if (isNearEnd) setShowJumpToLatest(false);
+  };
+
+  const jumpToLatest = () => {
+    messageListRef.current?.scrollToBottom();
+    isNearTranscriptEnd.current = true;
+    setShowJumpToLatest(false);
+  };
+
+  if (chatLoad.threadId !== threadId || chatLoad.loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
+  if (chatLoad.error) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{chatLoad.error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
+
+  return (
+    <section className="chat-page" aria-labelledby="chat-title">
+      <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
+      <MessageList
+        ref={messageListRef}
+        messages={messages}
+        isStreaming={activeJobForCurrentThread}
+        finalAssistantId={finalAssistantId}
+        busy={Boolean(generation.jobId) || starting}
+        forkingMessageId={forkingMessage}
+        onRegenerate={(message, index) => void startGeneration(lastPrompt || messages[index - 1]?.content || "", message.id ?? undefined)}
+        onFork={(message) => void fork(message)}
+        onNearEndChange={handleNearEndChange}
+        trailingContent={
+          <>
+            {activeJobForCurrentThread && !generation.partialContent && !generation.partialThoughts && <GenerationStatus status={generation.statusText} />}
+            {activeJobForCurrentThread && (generation.partialContent || generation.partialThoughts) && (
+              <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress">
+                <MessageIdentity role="assistant" />
+                <div className="message-bubble">
+                  {generation.partialThoughts && <details className="reasoning" open><summary><span>Reasoning</span><span className="disclosure-hint">Live</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={false} /></div></div></details>}
+                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={false} /></div>}
+                  <span className="streaming-caret" aria-hidden="true" />
+                </div>
+              </article>
+            )}
+          </>
+        }
+      />
+      <div className="input-container composer-dock">
+        {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}>Jump to latest</button>}
+        <MessageComposer
+          value={draft}
+          phase={composerPhase}
+          selectedModel={selectedModel}
+          attachments={attachments}
+          attachmentsBusy={attachmentsBusy}
+          attachmentError={attachmentError}
+          imageInputBlocked={imageInputBlocked}
+          onAddAttachments={addAttachments}
+          onRemoveAttachment={removeAttachment}
+          localModels={localModels}
+          runtimeMessage={runtimeMessage}
+          generationElsewhere={generationElsewhere}
+          modelBusy={modelBusy}
+          error={visibleGenerationError}
+          onValueChange={updateDraft}
+          onSubmit={submitDraft}
+          onStop={cancel}
+          onSelectModel={onSelectModel}
+          onRescanModels={onRescanModels}
+          onRetry={lastPrompt ? retryLastPrompt : undefined}
+          onDismissError={() => setGenerationError(null)}
+          generationOptions={threadOptions}
+          generationDefaults={generationDefaults}
+          onGenerationOptionsChange={(next) => setThreadOptions(threadOptionsKey, next)}
+        />
+      </div>
+    </section>
+  );
+}
+
+function GenerationStatus({ status }: { status: string }) {
+  return <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><MessageIdentity role="assistant" /><div className="message-bubble"><div className="generation-status" role="status"><span className="loading-spinner" aria-hidden="true" />{humanizeGenerationStatus(status)}</div></div></article>;
+}
+
+function createRequestId(): string {
+  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}

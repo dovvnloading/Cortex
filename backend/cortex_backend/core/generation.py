@@ -105,6 +105,22 @@ class ConnectionResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationStats:
+    """Token/timing usage reported by the model for one completed turn.
+
+    Ollama reports duration fields in nanoseconds; these are normalized to
+    milliseconds here so nothing downstream has to know the source unit.
+    """
+
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    prompt_eval_duration_ms: float | None = None
+    eval_duration_ms: float | None = None
+    total_duration_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
 @dataclass(frozen=True)
 class MemoryCommand:
     """Validated, model-requested permanent-memory actions."""

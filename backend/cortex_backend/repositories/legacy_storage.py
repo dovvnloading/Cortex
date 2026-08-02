@@ -51,7 +51,7 @@ class MigrationResult:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(
         self,
@@ -152,6 +152,8 @@ class DatabaseManager:
             }
             if "attachments" not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+            if "generation_stats_json" not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN generation_stats_json TEXT")
             if version < self.SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
             logging.info("Database tables and indexes verified/created successfully.")
@@ -315,12 +317,13 @@ class DatabaseManager:
                         json.dumps(msg.get('sources')) if msg.get('sources') else None,
                         msg.get('thoughts'),
                         json.dumps(msg.get('attachments')) if msg.get('attachments') else None,
+                        json.dumps(msg.get('stats')) if msg.get('stats') else None,
                         msg_timestamp
                     ))
                 
                 conn.executemany("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, messages_to_insert)
                 logging.info(f"Successfully created forked chat {thread_id} with {len(messages)} messages.")
         except PersistenceError as exc:
@@ -338,6 +341,7 @@ class DatabaseManager:
         sources: list | None = None,
         thoughts: str | None = None,
         attachments: list | None = None,
+        stats: dict | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
     ):
@@ -345,6 +349,7 @@ class DatabaseManager:
         try:
             if role != "assistant":
                 thoughts = None
+                stats = None
             with self.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if thread_title is not None:
@@ -354,8 +359,8 @@ class DatabaseManager:
                     )
                 self._check_chat_revision(conn, thread_id, expected_revision)
                 conn.execute("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     thread_id,
                     role,
@@ -363,6 +368,7 @@ class DatabaseManager:
                     json.dumps(sources) if sources else None,
                     thoughts,
                     json.dumps(attachments) if attachments else None,
+                    json.dumps(stats) if stats else None,
                     _utc_now().isoformat()
                 ))
                 # Update the thread's main timestamp to reflect recent activity
@@ -415,7 +421,7 @@ class DatabaseManager:
                 chat_data = dict(thread_row)
                 
                 cursor.execute(
-                    "SELECT id, role, content, sources, thoughts, attachments, timestamp FROM messages "
+                    "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp FROM messages "
                     "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
@@ -426,6 +432,8 @@ class DatabaseManager:
                         msg_dict['sources'] = json.loads(msg_dict['sources'])
                     if msg_dict.get('attachments'):
                         msg_dict['attachments'] = json.loads(msg_dict['attachments'])
+                    stats_json = msg_dict.pop('generation_stats_json', None)
+                    msg_dict['stats'] = json.loads(stats_json) if stats_json else None
                     messages.append(msg_dict)
                 
                 chat_data['messages'] = messages
@@ -486,6 +494,7 @@ class DatabaseManager:
         sources: list | None = None,
         thoughts: str | None = None,
         attachments: list | None = None,
+        stats: dict | None = None,
         expected_revision: int | None = None,
     ) -> None:
         """Replace one assistant response without disturbing its user turn."""
@@ -496,7 +505,7 @@ class DatabaseManager:
                 cursor = conn.execute(
                     """
                     UPDATE messages
-                    SET content = ?, sources = ?, thoughts = ?, attachments = ?, timestamp = ?
+                    SET content = ?, sources = ?, thoughts = ?, attachments = ?, generation_stats_json = ?, timestamp = ?
                     WHERE id = ? AND thread_id = ? AND role = 'assistant'
                     """,
                     (
@@ -504,6 +513,7 @@ class DatabaseManager:
                         json.dumps(sources) if sources else None,
                         thoughts,
                         json.dumps(attachments) if attachments else None,
+                        json.dumps(stats) if stats else None,
                         _utc_now().isoformat(),
                         message_id,
                         thread_id,

@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { ChatResponse, ChatSummary, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
-import { AppShell } from "../components/AppShell";
-import { ChatPage } from "../components/ChatPage";
-import { LocalSetup } from "../components/LocalSetup";
-import { Onboarding } from "../components/Onboarding";
-import { SettingsPanel, type SettingsPanelProps } from "../components/SettingsPanel";
+import { AppShell } from "../features/shell/AppShell";
+import { CommandPalette } from "../features/command-palette/CommandPalette";
+import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
+import { ChatPage } from "../features/chat/ChatPage";
+import { LocalSetup } from "../features/shell/LocalSetup";
+import { Onboarding } from "../features/shell/Onboarding";
+import { SettingsPanel, type SettingsPanelProps } from "../features/settings/SettingsPanel";
 import { localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
+import { useChatStore } from "../stores/useChatStore";
+import { useModelStore, type ModelProgress } from "../stores/useModelStore";
+import { useSettingsStore } from "../stores/useSettingsStore";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
@@ -63,15 +68,22 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemResponse | null>(null);
-  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const chats = useChatStore((state) => state.chats);
+  const setChats = useChatStore((state) => state.setChats);
+  const upsertChatSummary = useChatStore((state) => state.upsertChatSummary);
   const [settingsReturnChatId, setSettingsReturnChatId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<CortexSettings | null>(null);
+  const settings = useSettingsStore((state) => state.settings);
+  const setSettings = useSettingsStore((state) => state.setSettings);
+  const saving = useSettingsStore((state) => state.saving);
+  const setSaving = useSettingsStore((state) => state.setSaving);
   const [memos, setMemos] = useState<string[]>([]);
-  const [models, setModels] = useState<ModelResponse | null>(null);
-  const [saving, setSaving] = useState(false);
+  const models = useModelStore((state) => state.models);
+  const setModels = useModelStore((state) => state.setModels);
   const [memoryBusy, setMemoryBusy] = useState(false);
-  const [modelBusy, setModelBusy] = useState(false);
-  const [modelProgress, setModelProgress] = useState<{ model: string; status: string; percent: number | null } | null>(null);
+  const modelBusy = useModelStore((state) => state.modelBusy);
+  const setModelBusy = useModelStore((state) => state.setModelBusy);
+  const modelProgress = useModelStore((state) => state.modelProgress);
+  const setModelProgress = useModelStore((state) => state.setModelProgress);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
   const chatsRef = useRef(chats);
@@ -105,7 +117,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     } finally {
       setLoading(false);
     }
-  }, [api, onSessionExpired]);
+  }, [api, onSessionExpired, setChats, setModels, setSettings]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
@@ -312,20 +324,34 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   }
 
   const routeChatId = route.kind === "chat" ? route.threadId : null;
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    void saveSettings({ ...settings, appearance: { ...settings.appearance, theme: next } });
+  };
 
   return (
-    <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat}>
-      {route.kind === "settings"
-        ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />
-        : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={(chat) => updateChatSummary(setChats, chat)} onForked={(chat) => updateChatSummary(setChats, chat)} />}
-    </AppShell>
+    <>
+      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+        {route.kind === "settings"
+          ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />
+          : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} />}
+      </AppShell>
+      <CommandPalette
+        chats={chats}
+        localModels={localModels}
+        selectedModel={selectedModel}
+        onNewChat={() => navigate("/chat/new")}
+        onOpenSettings={() => navigate("/settings")}
+        onToggleTheme={toggleTheme}
+        onSelectModel={(model) => void chooseLocalModel(model)}
+        onSelectChat={(id) => navigate(chatPath(id))}
+      />
+      <ShortcutsHelpDialog />
+    </>
   );
 }
 
-function updateModelProgress(
-  event: SSEEvent,
-  setProgress: Dispatch<SetStateAction<{ model: string; status: string; percent: number | null } | null>>,
-): void {
+function updateModelProgress(event: SSEEvent, setProgress: (progress: ModelProgress) => void): void {
   if (event.kind !== "progress") return;
   const data = event.data ?? {};
   const model = typeof data.model === "string" ? data.model : "local model inventory";
@@ -342,14 +368,6 @@ function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, s
 function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
   const navigate = useNavigate();
   return <SettingsPanel {...props} onClose={() => navigate(activeChatId ? chatPath(activeChatId) : "/chat/new")} />;
-}
-
-function updateChatSummary(setChats: Dispatch<SetStateAction<ChatSummary[]>>, chat: ChatResponse): void {
-  setChats((current) => {
-    const summary = { id: chat.id, title: chat.title, timestamp: chat.timestamp };
-    const next = current.filter((item) => item.id !== chat.id);
-    return [summary, ...next];
-  });
 }
 
 const ACTIVE_EXECUTION_STATUSES = new Set<ExecutionTaskSummary["status"]>([

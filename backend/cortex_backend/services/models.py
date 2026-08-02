@@ -33,6 +33,21 @@ class InstalledModel:
     modified_at: str | None = None
     capabilities: tuple[str, ...] = ()
     supports_vision: bool | None = None
+    parameter_size: str | None = None
+    quantization_level: str | None = None
+    family: str | None = None
+    context_length: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelShowDetails:
+    """Everything this app reads off one Ollama ``/api/show`` response."""
+
+    capabilities: tuple[str, ...]
+    parameter_size: str | None = None
+    quantization_level: str | None = None
+    family: str | None = None
+    context_length: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,14 +91,7 @@ class ModelService:
                     key=lambda item: item.name,
                 )
             )
-            models = tuple(
-                replace(
-                    item,
-                    capabilities=(capabilities := self.capabilities(item.name)) or (),
-                    supports_vision=(None if capabilities is None else "vision" in capabilities),
-                )
-                for item in raw_models
-            )
+            models = tuple(self._with_show_details(item) for item in raw_models)
         except Exception as exc:
             logging.error("Ollama model metadata listing failed (%s).", type(exc).__name__)
             return (), ConnectionResult.failed(
@@ -250,7 +258,20 @@ class ModelService:
         means capability detection is unavailable, while an empty tuple is a
         successful response that explicitly advertises no capabilities.
         """
+        details = self.show_details(model)
+        return None if details is None else details.capabilities
 
+    def model_supports_vision(self, model: str) -> bool | None:
+        capabilities = self.capabilities(model)
+        return None if capabilities is None else "vision" in capabilities
+
+    def show_details(self, model: str) -> ModelShowDetails | None:
+        """Read the full ``/api/show`` response this app cares about.
+
+        A single round trip already happens today (previously only to read
+        ``capabilities``); this reads the ``details``/``model_info`` fields
+        Ollama already returns in that same response instead of a second call.
+        """
         show = getattr(self._gateway, "show", None)
         if not callable(show):
             return None
@@ -259,17 +280,46 @@ class ModelService:
         except Exception as exc:
             logging.warning("Ollama capability probe failed (%s).", type(exc).__name__)
             return None
-        if isinstance(response, Mapping):
-            values = response.get("capabilities", ())
-        else:
-            values = getattr(response, "capabilities", ())
-        if not isinstance(values, (list, tuple, set)):
-            return ()
-        return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+        get = response.get if isinstance(response, Mapping) else lambda key, default=None: getattr(response, key, default)
+        values = get("capabilities", ())
+        capabilities = (
+            ()
+            if not isinstance(values, (list, tuple, set))
+            else tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+        )
+        details = get("details", {}) or {}
+        model_info = get("model_info", {}) or {}
+        details_get = details.get if isinstance(details, Mapping) else lambda key, default=None: getattr(details, key, default)
+        family = details_get("family")
+        family = str(family).strip() or None if family else None
+        context_length = None
+        if family and isinstance(model_info, Mapping):
+            raw_context_length = model_info.get(f"{family}.context_length")
+            if isinstance(raw_context_length, (int, float)):
+                context_length = int(raw_context_length)
+        parameter_size = details_get("parameter_size")
+        quantization_level = details_get("quantization_level")
+        return ModelShowDetails(
+            capabilities=capabilities,
+            parameter_size=str(parameter_size).strip() or None if parameter_size else None,
+            quantization_level=str(quantization_level).strip() or None if quantization_level else None,
+            family=family,
+            context_length=context_length,
+        )
 
-    def model_supports_vision(self, model: str) -> bool | None:
-        capabilities = self.capabilities(model)
-        return None if capabilities is None else "vision" in capabilities
+    def _with_show_details(self, item: InstalledModel) -> InstalledModel:
+        details = self.show_details(item.name)
+        if details is None:
+            return item
+        return replace(
+            item,
+            capabilities=details.capabilities,
+            supports_vision="vision" in details.capabilities,
+            parameter_size=details.parameter_size,
+            quantization_level=details.quantization_level,
+            family=details.family,
+            context_length=details.context_length,
+        )
 
     @staticmethod
     def _iter_updates(stream: Any) -> Iterable[Any]:
