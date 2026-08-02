@@ -2,7 +2,7 @@ import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatAttachment, CodeExecutionRequest } from "../../../contracts/cortex-api";
+import type { ChatAttachment } from "../../../contracts/cortex-api";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 
 function deferred<T>() {
@@ -25,8 +25,6 @@ function ComposerHarness({
   onAddAttachments,
   onRemoveAttachment,
   imageInputBlocked = null,
-  codeExecutionAvailable = false,
-  onRunCode,
 }: {
   initialValue?: string;
   phase?: ComposerPhase;
@@ -37,8 +35,6 @@ function ComposerHarness({
   onAddAttachments?: (files: File[]) => Promise<void> | void;
   onRemoveAttachment?: (attachmentId: string) => void;
   imageInputBlocked?: string | null;
-  codeExecutionAvailable?: boolean;
-  onRunCode?: (payload: CodeExecutionRequest) => Promise<void>;
 }) {
   const [value, setValue] = useState(initialValue);
   return (
@@ -52,8 +48,6 @@ function ComposerHarness({
       onAddAttachments={onAddAttachments}
       onRemoveAttachment={onRemoveAttachment}
       imageInputBlocked={imageInputBlocked}
-      codeExecutionAvailable={codeExecutionAvailable}
-      onRunCode={onRunCode}
       onValueChange={setValue}
       onSubmit={async () => {
         const accepted = await onSubmit();
@@ -196,48 +190,11 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 
-  it("opens an editor-first code workspace and submits an explicit approval request", async () => {
-    const user = userEvent.setup();
-    const onRunCode = vi.fn<(payload: CodeExecutionRequest) => Promise<void>>().mockResolvedValue(undefined);
-    render(<ComposerHarness codeExecutionAvailable onRunCode={onRunCode} />);
+  it("keeps coding requests in the normal chat flow instead of exposing an editor", () => {
+    render(<ComposerHarness />);
 
-    await user.click(screen.getByRole("button", { name: "Open code workspace" }));
-    expect(screen.getByRole("region", { name: "Code workspace" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review & request" })).toBeDisabled();
-    expect(screen.getByText("Sandboxed by default")).toBeVisible();
-    expect(screen.getByRole("checkbox", { name: "Files capability" })).not.toBeVisible();
-
-    await user.type(screen.getByRole("textbox", { name: "Python source" }), "print('hello')");
-    await user.type(screen.getByRole("textbox", { name: "Run intent" }), "Print a greeting");
-
-    await user.click(screen.getByText("Permissions"));
-    expect(screen.getByRole("checkbox", { name: "Files capability" })).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Processes capability" })).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Network capability" })).not.toBeChecked();
-
-    await user.click(screen.getByRole("checkbox", { name: "Files capability" }));
-    expect(screen.getByRole("note")).toHaveTextContent("access your machine");
-    await user.click(screen.getByRole("button", { name: "Review & request" }));
-
-    await waitFor(() => expect(onRunCode).toHaveBeenCalledTimes(1));
-    expect(onRunCode.mock.calls[0][0]).toMatchObject({
-      language: "python",
-      source: "print('hello')",
-      intent_summary: "Print a greeting",
-      capabilities: { filesystem: true, process: false, network: false },
-    });
+    expect(screen.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open code workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Code workspace" })).not.toBeInTheDocument();
-  });
-
-  it("keeps editor navigation inside the source field", async () => {
-    render(<ComposerHarness codeExecutionAvailable onRunCode={vi.fn().mockResolvedValue(undefined)} />);
-
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open code workspace" }));
-    const source = screen.getByRole("textbox", { name: "Python source" });
-    await userEvent.setup().type(source, "if ready:");
-    fireEvent.keyDown(source, { key: "Tab" });
-
-    await waitFor(() => expect(source).toHaveValue("if ready:    "));
-    expect(source).toHaveFocus();
   });
 });

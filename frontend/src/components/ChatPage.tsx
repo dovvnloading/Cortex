@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide-react";
-import type { ChatAttachment, ChatMessage, ChatResponse, CodeExecutionRequest } from "../../../contracts/cortex-api";
+import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../api/client";
 import { displayChatTitle } from "../lib/chatTitle";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../lib/composerDraft";
@@ -22,8 +22,6 @@ type Props = {
   onThreadCreated: (threadId: string) => void;
   onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
-  codeExecutionAvailable?: boolean;
-  onRunCode?: (payload: CodeExecutionRequest) => Promise<void>;
 };
 
 type GenerationState = {
@@ -62,8 +60,6 @@ export function ChatPage({
   onThreadCreated,
   onChatChanged,
   onForked,
-  codeExecutionAvailable = false,
-  onRunCode,
 }: Props) {
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
@@ -589,8 +585,6 @@ export function ChatPage({
           onRescanModels={onRescanModels}
           onRetry={lastPrompt ? retryLastPrompt : undefined}
           onDismissError={() => setGenerationError(null)}
-          codeExecutionAvailable={codeExecutionAvailable}
-          onRunCode={onRunCode}
         />
       </div>
     </section>
