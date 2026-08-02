@@ -54,6 +54,21 @@ describe("LocalModelMenu", () => {
     await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
   });
 
+  it("opens from a pointer click without relying on the browser's default click timing", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <LocalModelMenu
+        models={["local-chat:7b", "local-chat:13b"]}
+        selectedModel="local-chat:7b"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Selected local model: local-chat:7b" }));
+    expect(screen.getByRole("listbox", { name: "Discovered local models" })).toBeVisible();
+  });
+
   it("returns focus to the trigger when the menu closes with Escape", async () => {
     const user = userEvent.setup();
 

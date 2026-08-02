@@ -6,11 +6,13 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ChangeEvent,
+  type FocusEvent,
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { LocalModelMenu } from "./LocalModelMenu";
 import type { ChatAttachment } from "../../../contracts/cortex-api";
+import { LocalModelMenu } from "./LocalModelMenu";
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
 
@@ -40,8 +42,8 @@ export type MessageComposerProps = {
 };
 
 const MAX_MESSAGE_LENGTH = 100_000;
-const MIN_TEXTAREA_HEIGHT = 52;
-const MAX_TEXTAREA_HEIGHT = 188;
+const MIN_TEXTAREA_HEIGHT = 54;
+const MAX_TEXTAREA_HEIGHT = 200;
 
 export function MessageComposer({
   value,
@@ -75,6 +77,7 @@ export function MessageComposer({
   const [focused, setFocused] = useState(false);
   const statusId = useId();
   const counterId = useId();
+  const attachmentInputId = useId();
   const canSubmit = phase === "ready"
     && Boolean(value.trim() || attachments.length > 0)
     && !submissionPending
@@ -84,7 +87,6 @@ export function MessageComposer({
   const isGenerating = phase === "generating" || isStopping;
   const remaining = MAX_MESSAGE_LENGTH - value.length;
   const showCounter = remaining <= 1_000;
-  const attachmentInputId = useId();
 
   const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -159,33 +161,33 @@ export function MessageComposer({
     }
   };
 
-  const handleSurfaceBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+  const handleSurfaceBlur = (event: FocusEvent<HTMLDivElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
   };
 
-  const handleAttachmentChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAttachmentChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     if (files.length && onAddAttachments) void onAddAttachments(files);
   };
 
   const status = phase === "starting"
-    ? "Starting response"
+    ? "Starting response…"
     : phase === "stopping"
-      ? "Stopping response"
+      ? "Stopping response…"
       : phase === "generating"
-        ? generationElsewhere ? "Generating in another conversation" : "Generating"
+        ? generationElsewhere ? "Generating in another thread" : "Generating…"
         : phase === "unavailable"
           ? runtimeMessage ?? "The local runtime is unavailable."
           : focused
-            ? "Enter sends · Shift+Enter adds a line"
+            ? "Enter to send · Shift+Enter for a new line"
             : "";
 
   return (
     <div className="composer-area">
       {error && (
         <div className="composer-error" role="alert">
-          <span>{error}</span>
+          <span className="composer-error-copy">{error}</span>
           <span className="composer-error-actions">
             {onRetry && <button className="button button-quiet" type="button" onClick={() => { void Promise.resolve(onRetry()).finally(returnFocus); }}>Retry last message</button>}
             {onDismissError && <button className="button button-quiet" type="button" onClick={onDismissError}>Dismiss</button>}
@@ -223,80 +225,86 @@ export function MessageComposer({
               ))}
             </div>
           )}
-          <textarea
-            ref={textareaRef}
-            id="chat-composer"
-            value={value}
-            rows={1}
-            maxLength={MAX_MESSAGE_LENGTH}
-            enterKeyHint="send"
-            aria-describedby={`${statusId}${showCounter ? ` ${counterId}` : ""}`}
-            placeholder={phase === "unavailable" ? "Write a message while the local runtime reconnects" : "Message Cortex"}
-            onChange={(event) => onValueChange(event.target.value)}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={() => { composingRef.current = false; }}
-          />
 
-          <div className="composer-utility-row">
-            <label className={`composer-attachment-button${attachmentsBusy ? " composer-attachment-button-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
-              {attachmentsBusy ? <LoaderCircle size={15} className="composer-control-spinner" aria-hidden="true" /> : <Paperclip size={15} aria-hidden="true" />}
-              <span className="sr-only">Attach images or documents</span>
-              <input
-                id={attachmentInputId}
-                className="sr-only"
-                type="file"
-                multiple
-                accept="image/*,text/*,.md,.markdown,.rst,.adoc,.org,.text,.csv,.tsv,.json,.jsonl,.ndjson,.yaml,.yml,.toml,.ini,.conf,.cfg,.env,.editorconfig,.log,.lock,.diff,.patch,.rtf,.proto,.graphql,.gql,.tf,.hcl,.srt,.vtt,.plist,.xhtml,.map,.py,.js,.jsx,.ts,.tsx,.java,.c,.cc,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.sql,.sh,.bash,.bat,.ps1,.html,.xml,.css,.scss,.less,.vue,.swift,.kt,.kts,.tex,.ipynb"
-                onChange={handleAttachmentChange}
-                disabled={attachmentsBusy || !onAddAttachments}
-              />
-            </label>
-            <div className="composer-model-control">
-              <LocalModelMenu
-                models={localModels}
-                selectedModel={selectedModel}
-                onSelect={onSelectModel}
-                onRescan={onRescanModels}
-                disabled={phase !== "ready" || modelBusy}
-              />
-            </div>
-            <span className="composer-meta">
-              <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true">
-                {status}
-              </span>
-              {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} characters left</span>}
-            </span>
+          <div className="composer-writing-area">
+            <textarea
+              ref={textareaRef}
+              id="chat-composer"
+              value={value}
+              rows={1}
+              maxLength={MAX_MESSAGE_LENGTH}
+              enterKeyHint="send"
+              aria-describedby={`${statusId}${showCounter ? ` ${counterId}` : ""}`}
+              placeholder={phase === "unavailable" ? "Write a message while the local runtime reconnects" : "Message Cortex"}
+              onChange={(event) => onValueChange(event.target.value)}
+              onKeyDown={handleKeyDown}
+              onCompositionStart={() => { composingRef.current = true; }}
+              onCompositionEnd={() => { composingRef.current = false; }}
+            />
           </div>
 
           {(attachmentError || imageInputBlocked) && (
-            <div className="composer-attachment-message" role="alert">
-              {attachmentError ?? imageInputBlocked}
+            <div className="composer-inline-alert" role="alert">
+              <span>{attachmentError ?? imageInputBlocked}</span>
             </div>
           )}
 
-          {isGenerating ? (
-            <button
-              className="composer-primary-control composer-stop-control"
-              type="button"
-              aria-label={isStopping ? "Stopping response" : "Stop generating"}
-              title={isStopping ? "Stopping response" : "Stop generating"}
-              disabled={isStopping}
-              onClick={() => void stop()}
-            >
-              {isStopping ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : <Square aria-hidden="true" size={15} fill="currentColor" />}
-            </button>
-          ) : (
-            <button
-              className={`composer-primary-control${canSubmit ? " composer-primary-control-ready" : ""}`}
-              type="submit"
-              aria-label={phase === "starting" ? "Starting response" : "Send message"}
-              title={phase === "starting" ? "Starting response" : "Send message"}
-              disabled={!canSubmit}
-            >
-              {phase === "starting" ? <LoaderCircle aria-hidden="true" size={18} className="composer-control-spinner" /> : <ArrowUp aria-hidden="true" size={19} strokeWidth={2.25} />}
-            </button>
-          )}
+          <div className="composer-toolbar">
+            <div className="composer-toolbar-leading">
+              <label className={`composer-attach-control${attachmentsBusy ? " composer-attach-control-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
+                {attachmentsBusy ? <LoaderCircle size={15} className="composer-control-spinner" aria-hidden="true" /> : <Paperclip size={15} aria-hidden="true" />}
+                <span className="sr-only">Attach images or documents</span>
+                <input
+                  id={attachmentInputId}
+                  className="sr-only"
+                  type="file"
+                  multiple
+                  accept="image/*,text/*,.md,.markdown,.rst,.adoc,.org,.text,.csv,.tsv,.json,.jsonl,.ndjson,.yaml,.yml,.toml,.ini,.conf,.cfg,.env,.editorconfig,.log,.lock,.diff,.patch,.rtf,.proto,.graphql,.gql,.tf,.hcl,.srt,.vtt,.plist,.xhtml,.map,.py,.js,.jsx,.ts,.tsx,.java,.c,.cc,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.sql,.sh,.bash,.bat,.ps1,.html,.xml,.css,.scss,.less,.vue,.swift,.kt,.kts,.tex,.ipynb"
+                  onChange={handleAttachmentChange}
+                  disabled={attachmentsBusy || !onAddAttachments}
+                />
+              </label>
+              <span className="composer-toolbar-divider" aria-hidden="true" />
+              <div className="composer-model-control">
+                <LocalModelMenu
+                  models={localModels}
+                  selectedModel={selectedModel}
+                  onSelect={onSelectModel}
+                  onRescan={onRescanModels}
+                  disabled={phase !== "ready" || modelBusy}
+                />
+              </div>
+            </div>
+
+            <div className="composer-toolbar-trailing">
+              <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true" title={status || undefined}>
+                {status}
+              </span>
+              {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} left</span>}
+              {isGenerating ? (
+                <button
+                  className="composer-primary-control composer-stop-control"
+                  type="button"
+                  aria-label={isStopping ? "Stopping response" : "Stop generating"}
+                  title={isStopping ? "Stopping response" : "Stop generating"}
+                  disabled={isStopping}
+                  onClick={() => void stop()}
+                >
+                  {isStopping ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : <Square aria-hidden="true" size={15} fill="currentColor" />}
+                </button>
+              ) : (
+                <button
+                  className={`composer-primary-control${canSubmit ? " composer-primary-control-ready" : ""}`}
+                  type="submit"
+                  aria-label={phase === "starting" ? "Starting response" : "Send message"}
+                  title={phase === "starting" ? "Starting response" : "Send message"}
+                  disabled={!canSubmit}
+                >
+                  {phase === "starting" ? <LoaderCircle aria-hidden="true" size={18} className="composer-control-spinner" /> : <ArrowUp aria-hidden="true" size={19} strokeWidth={2.25} />}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </form>
     </div>

@@ -61,7 +61,7 @@ function ComposerHarness({
 }
 
 describe("MessageComposer", () => {
-  it("keeps the utility row quiet and model-focused", () => {
+  it("keeps the toolbar quiet and model-focused", () => {
     render(<ComposerHarness />);
 
     expect(screen.queryByText("LOCAL ENGINE")).not.toBeInTheDocument();
@@ -188,6 +188,25 @@ describe("MessageComposer", () => {
     expect(screen.getByText("photo.png")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("cannot accept images");
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("keeps optional context above a stable writing toolbar", () => {
+    const attachment: ChatAttachment = {
+      attachment_id: "document-1",
+      filename: "notes.md",
+      mime_type: "text/markdown",
+      size: 12,
+      sha256: "b".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const { container } = render(<ComposerHarness attachments={[attachment]} />);
+
+    expect(container.querySelector(".composer-attachments")).toBeInTheDocument();
+    expect(container.querySelector(".composer-writing-area")).toBeInTheDocument();
+    expect(container.querySelector(".composer-toolbar")).toBeInTheDocument();
+    expect(screen.getByText("Model")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   });
 
   it("keeps coding requests in the normal chat flow instead of exposing an editor", () => {
