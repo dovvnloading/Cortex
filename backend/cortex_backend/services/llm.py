@@ -38,6 +38,15 @@ def _get_asset_path(filename: str) -> Path:
         return Path(sys._MEIPASS) / "assets" / filename
     return Path(__file__).resolve().parents[3] / "assets" / filename
 
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate structured request field")
+        result[key] = value
+    return result
+
 class PromptTemplate:
     """Build system prompts, adding optional capability guidance just in time."""
     _system_prompt_cache = None
@@ -273,7 +282,7 @@ class SynthesisAgent:
         translation_model: str,
         ollama_client,
         *,
-        code_execution_eligible: bool = True,
+        code_execution_eligible: bool = False,
     ):
         """
         Initializes the SynthesisAgent.
@@ -623,7 +632,7 @@ class SynthesisAgent:
             logging.warning("Ignoring oversized code execution request.")
             return None
         try:
-            payload = json.loads(raw_request)
+            payload = json.loads(raw_request, object_pairs_hook=_reject_duplicate_json_keys)
             if not isinstance(payload, dict) or set(payload) - {"language", "source", "intent_summary", "capabilities"}:
                 raise ValueError("invalid fields")
             if payload.get("language", "python") != "python":
@@ -640,7 +649,7 @@ class SynthesisAgent:
                 intent_summary=intent.strip(),
                 capabilities=grants.as_dict(),
             )
-        except (CodeExecutionError, TypeError, ValueError, json.JSONDecodeError):
+        except (CodeExecutionError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
             logging.warning("Ignoring malformed code execution request.")
             return None
 

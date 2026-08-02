@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -36,11 +37,49 @@ def test_code_source_requires_bounded_constructs_and_explicit_capabilities() -> 
         run_code_in_worker("_result = [(i, j) for i in range(10000) for j in range(10000)]")
     with pytest.raises(CodeExecutionError, match="sequence_too_large"):
         run_code_in_worker("_result = 'x' * 100001")
+    with pytest.raises(CodeExecutionError, match="name_not_allowed"):
+        run_code_in_worker("_result = __builtins__")
+    with pytest.raises(CodeExecutionError, match="exponent_too_large"):
+        run_code_in_worker("exponent = 1001\n_result = 2 ** exponent")
     allowed = run_code_in_worker(
         "_result = cortex.fs.listdir('.')",
         CodeCapabilities(filesystem=True).as_dict(),
     )
     assert isinstance(allowed.value, list)
+
+
+def test_brokered_filesystem_is_scoped_and_budgeted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "inside.txt").write_text("safe", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("private", encoding="utf-8")
+
+    with pytest.raises(CodeExecutionError, match="PermissionError"):
+        run_code_in_worker(
+            "_result = cortex.fs.read_text('../outside.txt')",
+            {"filesystem": True},
+            str(workspace),
+        )
+    with pytest.raises(CodeExecutionError, match="filesystem_limit"):
+        run_code_in_worker(
+            "for i in range(33):\n cortex.fs.listdir('.')",
+            {"filesystem": True},
+            str(workspace),
+        )
+    result = run_code_in_worker(
+        "_result = cortex.fs.read_text('inside.txt')",
+        {"filesystem": True},
+        str(workspace),
+    )
+    assert result.value == "safe"
+
+
+def test_network_broker_rejects_private_targets() -> None:
+    with pytest.raises(CodeExecutionError, match="PermissionError"):
+        run_code_in_worker(
+            "_result = cortex.net.get('http://127.0.0.1:80')",
+            {"network": True},
+        )
 
 
 def test_code_execution_waits_for_one_time_approval_and_returns_structured_output(tmp_path) -> None:
@@ -70,6 +109,31 @@ def test_code_execution_waits_for_one_time_approval_and_returns_structured_outpu
     assert duplicate.job_id == job.job_id
     time.sleep(0.15)
     assert len(repository.events(job.job_id)) == event_count
+    coordinator.shutdown()
+    assert not (repository.artifact_root / ".code_workspaces" / job.job_id).exists()
+
+
+def test_approval_is_bound_to_the_exact_source_digest(tmp_path) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    owner = repository.installation_principal_id
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-scope-mismatch",
+            source="print('must fail closed')",
+            intent_summary="Verify approval binding.",
+        )
+    )
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_approvals SET scope_digest = ? WHERE job_id = ?",
+            ("0" * 64, job.job_id),
+        )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    completed = coordinator.wait(job.job_id, timeout=5.0)
+    assert completed.status == "failed"
+    assert completed.error == "approval_scope_mismatch"
     coordinator.shutdown()
 
 
@@ -161,7 +225,7 @@ def test_approved_process_capability_runs_through_the_worker(tmp_path) -> None:
 
 
 def test_model_only_proposes_code_from_the_structured_envelope() -> None:
-    agent = SynthesisAgent("model", "model", "model", object())
+    agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
     visible, _, _ = agent._parse_and_clean_response(
         "Here is the plan.\n<code_execution_request>{\"language\":\"python\",\"source\":\"print('x')\",\"intent_summary\":\"Print x\",\"capabilities\":{}}</code_execution_request>",
         None,
