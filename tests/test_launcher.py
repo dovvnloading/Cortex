@@ -105,6 +105,12 @@ def test_native_window_uses_private_isolated_edge_webview(
         "_apply_windows_dark_title_bar",
         lambda **kwargs: dark_title_bar_calls.append(kwargs) or True,
     )
+    window_icon_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_window_icon",
+        lambda **kwargs: window_icon_calls.append(kwargs) or True,
+    )
     monitored: list[object] = []
     storage = tmp_path / "private-webview"
     icon = tmp_path / "cortex.ico"
@@ -127,6 +133,7 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["icon"] == str(icon)
     assert loaded_urls == ["http://127.0.0.1:8765"]
     assert dark_title_bar_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex"}]
+    assert window_icon_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex", "icon_path": icon}]
     assert webview_settings["ALLOW_DOWNLOADS"] is False
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
 

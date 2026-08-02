@@ -1,53 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Cortex</title>
-  <desc id="desc">A conversation-shaped C surrounding a private local core.</desc>
+  <desc id="desc">A precise orange aperture mark on a graphite field.</desc>
   <defs>
-    <linearGradient id="surface" x1="24" y1="18" x2="232" y2="240" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#3a3a3a" />
-      <stop offset="0.52" stop-color="#2d2d2d" />
-      <stop offset="1" stop-color="#222222" />
+    <linearGradient id="field" x1="28" y1="20" x2="228" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#24272b" />
+      <stop offset="1" stop-color="#141619" />
     </linearGradient>
-    <linearGradient id="mark" x1="50" y1="48" x2="210" y2="210" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ff8c4c" />
-      <stop offset="1" stop-color="#ff6b35" />
+    <linearGradient id="mark" x1="54" y1="47" x2="201" y2="207" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9a5c" />
+      <stop offset="0.46" stop-color="#ff7540" />
+      <stop offset="1" stop-color="#e84f27" />
     </linearGradient>
-    <linearGradient id="core" x1="112" y1="106" x2="146" y2="150" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#e0e0e0" />
-      <stop offset="1" stop-color="#9ca3af" />
+    <linearGradient id="core" x1="108" y1="102" x2="151" y2="153" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f7f7f4" />
+      <stop offset="1" stop-color="#aeb4ba" />
     </linearGradient>
-    <radialGradient id="bloom" cx="0" cy="0" r="1" gradientTransform="translate(104 82) rotate(48) scale(154)">
-      <stop stop-color="#ff8c4c" stop-opacity="0.12" />
-      <stop offset="0.48" stop-color="#c75a28" stop-opacity="0.05" />
-      <stop offset="1" stop-color="#222222" stop-opacity="0" />
-    </radialGradient>
-    <filter id="depth" x="-20%" y="-20%" width="150%" height="160%" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="9" stdDeviation="10" flood-color="#02050a" flood-opacity="0.52" />
-    </filter>
-    <filter id="core-glow" x="-70%" y="-70%" width="240%" height="240%" color-interpolation-filters="sRGB">
-      <feGaussianBlur stdDeviation="5" result="blur" />
-      <feMerge>
-        <feMergeNode in="blur" />
-        <feMergeNode in="SourceGraphic" />
-      </feMerge>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#000" flood-opacity="0.42" />
     </filter>
   </defs>
 
-  <rect width="256" height="256" fill="#222222" />
-  <rect x="7" y="7" width="242" height="242" rx="54" fill="url(#surface)" />
-  <rect x="8.5" y="8.5" width="239" height="239" rx="52.5" fill="url(#bloom)" stroke="#505050" stroke-width="3" />
+  <rect width="256" height="256" rx="50" fill="#0d0f11" />
+  <rect x="10" y="10" width="236" height="236" rx="44" fill="url(#field)" stroke="#3b3f44" stroke-width="3" />
 
-  <g filter="url(#depth)">
-    <path d="M190 72C174 54 151 44 126 44c-47 0-84 37-84 84s37 84 84 84c26 0 49-11 65-30" fill="none" stroke="#02060c" stroke-opacity="0.46" stroke-width="36" stroke-linecap="round" />
-    <path d="M190 72C174 54 151 44 126 44c-47 0-84 37-84 84s37 84 84 84c26 0 49-11 65-30" fill="none" stroke="url(#mark)" stroke-width="27" stroke-linecap="round" />
-  </g>
+  <!-- One continuous, hard-edged aperture: a deliberate C without circuitry or stock tech motifs. -->
+  <path
+    d="M192 55H112c-46 0-83 37-83 73s37 73 83 73h80v-33h-78c-26 0-47-18-47-40s21-40 47-40h78Z"
+    fill="url(#mark)"
+    filter="url(#shadow)"
+  />
 
-  <path d="M128 104v10M105 128h10M128 142v10M141 115l7-7" fill="none" stroke="#9ca3af" stroke-opacity="0.72" stroke-width="4" stroke-linecap="round" />
-  <circle cx="128" cy="101" r="4.5" fill="#ff8c4c" />
-  <circle cx="102" cy="128" r="4.5" fill="#d9d9d9" />
-  <circle cx="128" cy="155" r="4.5" fill="#ff6b35" />
-  <circle cx="151" cy="105" r="4.5" fill="#c75a28" />
-
-  <path d="M128 111l15 8.5v17L128 145l-15-8.5v-17Z" fill="#ff8c4c" fill-opacity="0.18" filter="url(#core-glow)" />
-  <path d="M128 111l15 8.5v17L128 145l-15-8.5v-17Z" fill="url(#core)" />
-  <circle cx="128" cy="128" r="5.5" fill="#333333" />
+  <!-- The cut-through core gives the mark a clear focal point at small sizes. -->
+  <path d="m128 99 29 17v24l-29 17-29-17v-24Z" fill="#0d0f11" fill-opacity="0.62" />
+  <path d="m128 106 20 12v16l-20 12-20-12v-16Z" fill="url(#core)" />
+  <circle cx="128" cy="126" r="6" fill="#202327" />
 </svg>
