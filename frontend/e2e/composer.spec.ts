@@ -127,10 +127,10 @@ test("selects and persists a model from the composer picker", async ({ page }) =
   const option = page.getByRole("option", { name: "local-chat:13b" });
   await expect(option).toBeVisible();
   const overflow = await page.evaluate(() => ({
-    utilityRow: getComputedStyle(document.querySelector(".composer-utility-row")!).overflow,
+    toolbar: getComputedStyle(document.querySelector(".composer-toolbar-leading")!).overflow,
     modelControl: getComputedStyle(document.querySelector(".composer-model-control")!).overflow,
   }));
-  expect(overflow).toEqual({ utilityRow: "visible", modelControl: "visible" });
+  expect(overflow).toEqual({ toolbar: "visible", modelControl: "visible" });
 
   await option.click();
   await expect(page.getByRole("button", { name: "Selected local model: local-chat:13b" })).toBeVisible();
@@ -142,7 +142,9 @@ test("keeps composer model options inside a compact viewport", async ({ page }) 
   await stubWorkspace(page);
   await page.goto("/?bootstrap=launcher-token");
 
-  await page.getByRole("button", { name: "Selected local model: local-chat:7b" }).click();
+  const trigger = page.getByRole("button", { name: "Selected local model: local-chat:7b" });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
   const option = page.getByRole("option", { name: "local-chat:13b" });
   await expect(option).toBeVisible();
   const optionBox = await option.boundingBox();
@@ -239,7 +241,7 @@ test("clips a long runtime status before the send control", async ({ page }) => 
   await page.goto("/?bootstrap=launcher-token");
 
   const surface = page.locator(".composer-surface");
-  const meta = page.locator(".composer-meta");
+  const meta = page.locator(".composer-toolbar-trailing");
   const status = page.locator(".composer-status");
   const send = page.getByRole("button", { name: "Send message" });
   await expect(surface).toBeVisible();

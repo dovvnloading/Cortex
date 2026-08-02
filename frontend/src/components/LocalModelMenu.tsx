@@ -188,7 +188,10 @@ export function LocalModelMenu({
     return (
       <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${localModels[0]}`}>
         <span className="local-model-menu-single-label" title={localModels[0]}>
-          <span>{localModels[0]}</span>
+          <span>
+            <span className="local-model-menu-kicker">Model</span>
+            <span className="local-model-menu-name">{localModels[0]}</span>
+          </span>
         </span>
         {renderRescan()}
       </div>
@@ -208,13 +211,18 @@ export function LocalModelMenu({
         aria-expanded={menuOpen}
         aria-controls={listId}
         disabled={!canOpen}
-        onClick={() => {
-          if (menuOpen) closeMenu();
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !canOpen) return;
+          event.preventDefault();
+          if (menuOpen) closeMenu(true);
           else focusOption(initialIndex);
         }}
         onKeyDown={handleTriggerKeyDown}
       >
-        <span className="local-model-menu-trigger-label">{selected ?? (localModels.length ? "Select model" : "No local models")}</span>
+        <span className="local-model-menu-trigger-label">
+          <span className="local-model-menu-kicker">Model</span>
+          <span className="local-model-menu-name">{selected ?? (localModels.length ? "Select model" : "No local models")}</span>
+        </span>
         <ChevronDown aria-hidden="true" size={15} />
       </button>
       {renderRescan()}

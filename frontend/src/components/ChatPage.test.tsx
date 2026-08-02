@@ -368,7 +368,7 @@ describe("ChatPage composer integration", () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText("Generating in another conversation")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("Generating in another thread")).toBeVisible());
     expect(screen.getByRole("button", { name: "Stop generating" })).toBeVisible();
     expect(screen.getByLabelText("Message Cortex")).toBeEnabled();
   });
