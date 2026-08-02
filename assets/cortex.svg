@@ -1,37 +1,58 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Cortex</title>
-  <desc id="desc">A precise orange aperture mark on a graphite field.</desc>
+  <desc id="desc">A folded orange aperture with a focused light core.</desc>
   <defs>
-    <linearGradient id="field" x1="28" y1="20" x2="228" y2="236" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#24272b" />
-      <stop offset="1" stop-color="#141619" />
+    <linearGradient id="tile" x1="28" y1="18" x2="222" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#242a30" />
+      <stop offset="1" stop-color="#15191e" />
     </linearGradient>
-    <linearGradient id="mark" x1="54" y1="47" x2="201" y2="207" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ff9a5c" />
-      <stop offset="0.46" stop-color="#ff7540" />
-      <stop offset="1" stop-color="#e84f27" />
+    <linearGradient id="top" x1="67" y1="49" x2="151" y2="126" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff9815" />
+      <stop offset="1" stop-color="#fa6d06" />
     </linearGradient>
-    <linearGradient id="core" x1="108" y1="102" x2="151" y2="153" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#f7f7f4" />
-      <stop offset="1" stop-color="#aeb4ba" />
+    <linearGradient id="bottom" x1="68" y1="151" x2="152" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff8d08" />
+      <stop offset="1" stop-color="#f66a04" />
+    </linearGradient>
+    <linearGradient id="side" x1="192" y1="72" x2="157" y2="183" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e85d05" />
+      <stop offset="1" stop-color="#bd4307" />
+    </linearGradient>
+    <linearGradient id="left" x1="52" y1="106" x2="112" y2="164" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e76406" />
+      <stop offset="1" stop-color="#c74a06" />
+    </linearGradient>
+    <linearGradient id="opening" x1="92" y1="99" x2="160" y2="179" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20262c" />
+      <stop offset="1" stop-color="#101419" />
     </linearGradient>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#000" flood-opacity="0.42" />
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#000000" flood-opacity=".38" />
     </filter>
+    <clipPath id="mark-clip">
+      <path d="M52 97c1-7 6-12 13-15l75-32c8-3 16-2 23 3l37 28c5 4 8 10 8 17l6 59c1 8-2 15-8 21l-32 32c-7 7-17 9-26 5l-91-38c-9-4-14-12-13-22z" />
+    </clipPath>
   </defs>
 
-  <rect width="256" height="256" rx="50" fill="#0d0f11" />
-  <rect x="10" y="10" width="236" height="236" rx="44" fill="url(#field)" stroke="#3b3f44" stroke-width="3" />
+  <rect x="8" y="8" width="240" height="240" rx="46" fill="url(#tile)" />
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="45.25" fill="none" stroke="#343b43" stroke-width="1.5" />
 
-  <!-- One continuous, hard-edged aperture: a deliberate C without circuitry or stock tech motifs. -->
-  <path
-    d="M192 55H112c-46 0-83 37-83 73s37 73 83 73h80v-33h-78c-26 0-47-18-47-40s21-40 47-40h78Z"
-    fill="url(#mark)"
-    filter="url(#shadow)"
-  />
+  <g filter="url(#shadow)">
+    <!-- A single soft-edged silhouette keeps the mark readable at favicon size. -->
+    <path d="M52 97c1-7 6-12 13-15l75-32c8-3 16-2 23 3l37 28c5 4 8 10 8 17l6 59c1 8-2 15-8 21l-32 32c-7 7-17 9-26 5l-91-38c-9-4-14-12-13-22z" fill="url(#top)" />
 
-  <!-- The cut-through core gives the mark a clear focal point at small sizes. -->
-  <path d="m128 99 29 17v24l-29 17-29-17v-24Z" fill="#0d0f11" fill-opacity="0.62" />
-  <path d="m128 106 20 12v16l-20 12-20-12v-16Z" fill="url(#core)" />
-  <circle cx="128" cy="126" r="6" fill="#202327" />
+    <!-- Fold planes are deliberately broad and quiet, echoing the generated concept. -->
+    <g clip-path="url(#mark-clip)">
+      <path d="M47 95 142 48c8-4 15-3 22 2l39 29-113 48-48 21z" fill="url(#top)" />
+      <path d="m47 121 43-18 33 63-79-7z" fill="url(#left)" />
+      <path d="m143 80 60-20 9 107-43 40z" fill="url(#side)" />
+      <path d="m48 157 74 9 47 23-36 31-91-39z" fill="url(#bottom)" />
+    </g>
+
+    <!-- The offset opening gives the folded ribbon its identity. -->
+    <path d="M87 108 144 81 168 173 121 165Z" fill="url(#opening)" />
+    <path d="M87 108 144 81 168 173 121 165Z" fill="none" stroke="#0c1014" stroke-width="1.5" stroke-linejoin="round" opacity=".72" />
+    <circle cx="128" cy="126" r="13.5" fill="#fff8e9" />
+    <circle cx="124.5" cy="122.5" r="4" fill="#ffffff" opacity=".45" />
+  </g>
 </svg>
