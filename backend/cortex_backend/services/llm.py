@@ -29,6 +29,7 @@ from cortex_backend.execution.code_execution import (
     validate_code_source,
 )
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
+from cortex_backend.services.code_prompt import should_offer_code_execution
 
 
 def _get_asset_path(filename: str) -> Path:
@@ -38,9 +39,10 @@ def _get_asset_path(filename: str) -> Path:
     return Path(__file__).resolve().parents[3] / "assets" / filename
 
 class PromptTemplate:
-    """Manages the creation of detailed system prompts for the LLM."""
+    """Build system prompts, adding optional capability guidance just in time."""
     _system_prompt_cache = None
     _memory_prompt_cache = None
+    _code_execution_prompt_cache = None
 
     @staticmethod
     def _load_system_prompt() -> str:
@@ -88,6 +90,28 @@ class PromptTemplate:
             logging.critical(f"CRITICAL: Failed to read memory_prompt.txt: {e}")
             raise
 
+    @staticmethod
+    def _load_code_execution_prompt() -> str:
+        """Load the opt-in execution contract without adding it to chat by default."""
+        if PromptTemplate._code_execution_prompt_cache is not None:
+            return PromptTemplate._code_execution_prompt_cache
+
+        try:
+            prompt_path = _get_asset_path("code_execution_prompt.txt")
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                prompt = f.read()
+            PromptTemplate._code_execution_prompt_cache = prompt
+            logging.info("Successfully loaded and cached the JIT code prompt.")
+            return prompt
+        except FileNotFoundError:
+            logging.critical(
+                "CRITICAL: code_execution_prompt.txt not found."
+            )
+            raise
+        except Exception as exc:
+            logging.critical("CRITICAL: Failed to read JIT code prompt: %s", exc)
+            raise
+
 
     @staticmethod
     def build_synthesis_prompt(
@@ -97,6 +121,7 @@ class PromptTemplate:
         memories_enabled: bool,
         user_system_instructions: str | None,
         attachments: Sequence[GenerationAttachment] = (),
+        code_execution_eligible: bool | None = None,
     ) -> list[dict]:
         """
         Builds a structured prompt for a general-purpose AI assistant with memory capabilities.
@@ -114,13 +139,10 @@ class PromptTemplate:
         """
         system_content = PromptTemplate._load_system_prompt()
 
-        system_content += (
-            "\n\n## LOCAL CODE TASKS\n"
-            "Cortex can prepare a local Python task when the user explicitly asks you to perform a computation or automation. "
-            "Never execute code from ordinary prose or fenced code blocks. If a run is genuinely needed, append exactly one "
-            "<code_execution_request> JSON block with language, source, intent_summary, and capabilities fields. "
-            "The user must approve the task before it runs. Keep the visible answer concise and do not claim the task ran."
-        )
+        if code_execution_eligible is None:
+            code_execution_eligible = should_offer_code_execution(query)
+        if code_execution_eligible:
+            system_content += "\n\n" + PromptTemplate._load_code_execution_prompt()
 
         if memories_enabled:
             system_content += "\n" + PromptTemplate._load_memory_prompt()
@@ -241,8 +263,18 @@ class SynthesisAgent:
         title_model (str): The name of the model used for generating chat titles.
         translation_model (str): The name of the model used for translations.
         ollama_client: An instance of the Ollama client.
+        code_execution_eligible (bool): Whether this immutable turn may emit a
+            validated local execution proposal.
     """
-    def __init__(self, gen_model: str, title_model: str, translation_model: str, ollama_client):
+    def __init__(
+        self,
+        gen_model: str,
+        title_model: str,
+        translation_model: str,
+        ollama_client,
+        *,
+        code_execution_eligible: bool = True,
+    ):
         """
         Initializes the SynthesisAgent.
 
@@ -251,11 +283,14 @@ class SynthesisAgent:
             title_model (str): The identifier for the title generation model.
             translation_model (str): The identifier for the translation model.
             ollama_client: An initialized Ollama client instance.
+            code_execution_eligible (bool): Immutable per-turn admission for
+                the optional local code contract.
         """
         self.gen_model = gen_model
         self.title_model = title_model
         self.translation_model = translation_model
         self.ollama_client = ollama_client
+        self.code_execution_eligible = code_execution_eligible
         self.last_code_proposal: CodeExecutionProposal | None = None
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
 
@@ -281,6 +316,7 @@ class SynthesisAgent:
         memories_enabled: bool,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Bound reference text so documents cannot consume the answer budget.
 
@@ -297,6 +333,7 @@ class SynthesisAgent:
             permanent_memories,
             memories_enabled,
             user_system_instructions,
+            code_execution_eligible=code_execution_eligible,
         )
         base_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in base_prompt)
         available_tokens = max(
@@ -335,6 +372,7 @@ class SynthesisAgent:
         memories_enabled: bool,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> str:
         """Keep the newest history that fits beside prompts, memories, and output."""
         output_reservation = cls.output_token_reservation(num_ctx)
@@ -349,6 +387,7 @@ class SynthesisAgent:
                 permanent_memories,
                 memories_enabled,
                 user_system_instructions,
+                code_execution_eligible=code_execution_eligible,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
@@ -366,6 +405,7 @@ class SynthesisAgent:
         query: str,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> list[str]:
         """Keep the newest permanent memories that fit before chat history."""
         output_reservation = cls.output_token_reservation(num_ctx)
@@ -378,6 +418,7 @@ class SynthesisAgent:
                 candidate,
                 True,
                 user_system_instructions,
+                code_execution_eligible=code_execution_eligible,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
@@ -443,6 +484,7 @@ class SynthesisAgent:
             memories_enabled=memories_enabled,
             user_system_instructions=user_system_instructions,
             num_ctx=int(api_options.get("num_ctx", 4096)),
+            code_execution_eligible=self.code_execution_eligible,
         )
         prompt_messages = PromptTemplate.build_synthesis_prompt(
             query,
@@ -451,6 +493,7 @@ class SynthesisAgent:
             memories_enabled,
             user_system_instructions,
             fitted_attachments,
+            code_execution_eligible=self.code_execution_eligible,
         )
         
         logging.info(f"Generating response using Generator: '{self.gen_model}'. Options: {options}")
@@ -537,11 +580,11 @@ class SynthesisAgent:
 
         code_pattern = re.compile(r"<code_execution_request>\s*(.*?)\s*</code_execution_request>", re.DOTALL | re.IGNORECASE)
         code_matches = code_pattern.findall(text_to_clean)
-        if len(code_matches) == 1:
+        if self.code_execution_eligible and len(code_matches) == 1:
             self.last_code_proposal = self._parse_code_execution_proposal(code_matches[0])
-        elif len(code_matches) > 1:
+        elif self.code_execution_eligible and len(code_matches) > 1:
             logging.warning("Ignoring multiple code execution request blocks in one response.")
-        if code_matches and self.last_code_proposal is not None:
+        if self.code_execution_eligible and code_matches and self.last_code_proposal is not None:
             # Only a validated, single proposal is removed from the visible
             # response. Malformed or duplicate envelopes remain visible as a
             # non-executable suggestion so the user can see what was rejected.

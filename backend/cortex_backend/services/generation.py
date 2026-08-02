@@ -30,6 +30,7 @@ class GenerationEngine(Protocol):
         query: str,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> list[str]:
         """Fit permanent memories into the configured context budget."""
 
@@ -42,6 +43,7 @@ class GenerationEngine(Protocol):
         memories_enabled: bool,
         user_system_instructions: str | None,
         num_ctx: int,
+        code_execution_eligible: bool | None = None,
     ) -> str:
         """Format the retained history for the model prompt."""
 
@@ -115,6 +117,7 @@ class GenerationService:
                 query=snapshot.user_input,
                 user_system_instructions=snapshot.user_system_instructions,
                 num_ctx=num_ctx,
+                code_execution_eligible=snapshot.code_execution_eligible,
             )
         else:
             self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
@@ -136,6 +139,7 @@ class GenerationService:
             memories_enabled=snapshot.memories_enabled,
             user_system_instructions=snapshot.user_system_instructions,
             num_ctx=num_ctx,
+            code_execution_eligible=snapshot.code_execution_eligible,
         )
 
         self._check_cancelled(cancellation_event)
@@ -163,7 +167,9 @@ class GenerationService:
             memory_command = MemoryCommand()
 
         proposal = getattr(engine, "last_code_proposal", None)
-        if not isinstance(proposal, CodeExecutionProposal):
+        if not snapshot.code_execution_eligible or not isinstance(
+            proposal, CodeExecutionProposal
+        ):
             proposal = None
 
         if snapshot.translation_enabled:

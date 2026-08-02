@@ -26,6 +26,7 @@ from cortex_backend.services.chat import (
     normalize_title,
     title_from_first_message,
 )
+from cortex_backend.services.code_prompt import should_offer_code_execution
 from cortex_backend.core.settings import CortexSettings
 from cortex_backend.repositories.chats import ChatRepositoryError, ChatRevisionConflict
 from cortex_backend.repositories.settings import SettingsMigrationReport
@@ -2038,6 +2039,10 @@ def _generation_snapshot(
         target_language=settings.translation.target_language,
         user_system_instructions=instructions,
         attachments=attachments,
+        code_execution_eligible=(
+            settings.execution.code_execution_enabled
+            and should_offer_code_execution(payload.user_input)
+        ),
     )
 
 
