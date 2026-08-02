@@ -100,7 +100,11 @@ def run_desktop_window(
                 )
             if sys.platform == "win32":
                 _apply_windows_dark_title_bar(pid=os.getpid(), title=config.title)
-            if icon_path and not start_accepts_icon:
+            # Keep the native window and taskbar identity aligned even when
+            # pywebview accepts ``start(icon=...)``. Some WebView2 builds use
+            # the Python host icon for the top-level window until WM_SETICON
+            # is applied explicitly after the HWND exists.
+            if icon_path:
                 _apply_windows_window_icon(
                     pid=os.getpid(),
                     title=config.title,

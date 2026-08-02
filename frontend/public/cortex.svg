@@ -1,53 +1,58 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Cortex</title>
-  <desc id="desc">A conversation-shaped C surrounding a private local core.</desc>
+  <desc id="desc">A folded orange aperture with a focused light core.</desc>
   <defs>
-    <linearGradient id="surface" x1="24" y1="18" x2="232" y2="240" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#3a3a3a" />
-      <stop offset="0.52" stop-color="#2d2d2d" />
-      <stop offset="1" stop-color="#222222" />
+    <linearGradient id="tile" x1="28" y1="18" x2="222" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#242a30" />
+      <stop offset="1" stop-color="#15191e" />
     </linearGradient>
-    <linearGradient id="mark" x1="50" y1="48" x2="210" y2="210" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ff8c4c" />
-      <stop offset="1" stop-color="#ff6b35" />
+    <linearGradient id="top" x1="67" y1="49" x2="151" y2="126" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff9815" />
+      <stop offset="1" stop-color="#fa6d06" />
     </linearGradient>
-    <linearGradient id="core" x1="112" y1="106" x2="146" y2="150" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#e0e0e0" />
-      <stop offset="1" stop-color="#9ca3af" />
+    <linearGradient id="bottom" x1="68" y1="151" x2="152" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff8d08" />
+      <stop offset="1" stop-color="#f66a04" />
     </linearGradient>
-    <radialGradient id="bloom" cx="0" cy="0" r="1" gradientTransform="translate(104 82) rotate(48) scale(154)">
-      <stop stop-color="#ff8c4c" stop-opacity="0.12" />
-      <stop offset="0.48" stop-color="#c75a28" stop-opacity="0.05" />
-      <stop offset="1" stop-color="#222222" stop-opacity="0" />
-    </radialGradient>
-    <filter id="depth" x="-20%" y="-20%" width="150%" height="160%" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="9" stdDeviation="10" flood-color="#02050a" flood-opacity="0.52" />
+    <linearGradient id="side" x1="192" y1="72" x2="157" y2="183" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e85d05" />
+      <stop offset="1" stop-color="#bd4307" />
+    </linearGradient>
+    <linearGradient id="left" x1="52" y1="106" x2="112" y2="164" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e76406" />
+      <stop offset="1" stop-color="#c74a06" />
+    </linearGradient>
+    <linearGradient id="opening" x1="92" y1="99" x2="160" y2="179" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20262c" />
+      <stop offset="1" stop-color="#101419" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#000000" flood-opacity=".38" />
     </filter>
-    <filter id="core-glow" x="-70%" y="-70%" width="240%" height="240%" color-interpolation-filters="sRGB">
-      <feGaussianBlur stdDeviation="5" result="blur" />
-      <feMerge>
-        <feMergeNode in="blur" />
-        <feMergeNode in="SourceGraphic" />
-      </feMerge>
-    </filter>
+    <clipPath id="mark-clip">
+      <path d="M52 97c1-7 6-12 13-15l75-32c8-3 16-2 23 3l37 28c5 4 8 10 8 17l6 59c1 8-2 15-8 21l-32 32c-7 7-17 9-26 5l-91-38c-9-4-14-12-13-22z" />
+    </clipPath>
   </defs>
 
-  <rect width="256" height="256" fill="#222222" />
-  <rect x="7" y="7" width="242" height="242" rx="54" fill="url(#surface)" />
-  <rect x="8.5" y="8.5" width="239" height="239" rx="52.5" fill="url(#bloom)" stroke="#505050" stroke-width="3" />
+  <rect x="8" y="8" width="240" height="240" rx="46" fill="url(#tile)" />
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="45.25" fill="none" stroke="#343b43" stroke-width="1.5" />
 
-  <g filter="url(#depth)">
-    <path d="M190 72C174 54 151 44 126 44c-47 0-84 37-84 84s37 84 84 84c26 0 49-11 65-30" fill="none" stroke="#02060c" stroke-opacity="0.46" stroke-width="36" stroke-linecap="round" />
-    <path d="M190 72C174 54 151 44 126 44c-47 0-84 37-84 84s37 84 84 84c26 0 49-11 65-30" fill="none" stroke="url(#mark)" stroke-width="27" stroke-linecap="round" />
+  <g filter="url(#shadow)">
+    <!-- A single soft-edged silhouette keeps the mark readable at favicon size. -->
+    <path d="M52 97c1-7 6-12 13-15l75-32c8-3 16-2 23 3l37 28c5 4 8 10 8 17l6 59c1 8-2 15-8 21l-32 32c-7 7-17 9-26 5l-91-38c-9-4-14-12-13-22z" fill="url(#top)" />
+
+    <!-- Fold planes are deliberately broad and quiet, echoing the generated concept. -->
+    <g clip-path="url(#mark-clip)">
+      <path d="M47 95 142 48c8-4 15-3 22 2l39 29-113 48-48 21z" fill="url(#top)" />
+      <path d="m47 121 43-18 33 63-79-7z" fill="url(#left)" />
+      <path d="m143 80 60-20 9 107-43 40z" fill="url(#side)" />
+      <path d="m48 157 74 9 47 23-36 31-91-39z" fill="url(#bottom)" />
+    </g>
+
+    <!-- The offset opening gives the folded ribbon its identity. -->
+    <path d="M87 108 144 81 168 173 121 165Z" fill="url(#opening)" />
+    <path d="M87 108 144 81 168 173 121 165Z" fill="none" stroke="#0c1014" stroke-width="1.5" stroke-linejoin="round" opacity=".72" />
+    <circle cx="128" cy="126" r="13.5" fill="#fff8e9" />
+    <circle cx="124.5" cy="122.5" r="4" fill="#ffffff" opacity=".45" />
   </g>
-
-  <path d="M128 104v10M105 128h10M128 142v10M141 115l7-7" fill="none" stroke="#9ca3af" stroke-opacity="0.72" stroke-width="4" stroke-linecap="round" />
-  <circle cx="128" cy="101" r="4.5" fill="#ff8c4c" />
-  <circle cx="102" cy="128" r="4.5" fill="#d9d9d9" />
-  <circle cx="128" cy="155" r="4.5" fill="#ff6b35" />
-  <circle cx="151" cy="105" r="4.5" fill="#c75a28" />
-
-  <path d="M128 111l15 8.5v17L128 145l-15-8.5v-17Z" fill="#ff8c4c" fill-opacity="0.18" filter="url(#core-glow)" />
-  <path d="M128 111l15 8.5v17L128 145l-15-8.5v-17Z" fill="url(#core)" />
-  <circle cx="128" cy="128" r="5.5" fill="#333333" />
 </svg>
