@@ -384,7 +384,9 @@ def test_runtime_watchdog_captures_stalled_transform_and_closes():
         expected_principal_id=PRINCIPAL,
         job_id=JOB_ID,
         provider_factory=lambda: provider,
-        watchdog_timeout_ms=10,
+        # Leave enough room for Windows runner thread scheduling and broker
+        # setup before the intentionally stalled transform is active.
+        watchdog_timeout_ms=100,
     ).run()
 
     assert report.terminal_state == "failed"
