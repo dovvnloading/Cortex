@@ -156,8 +156,9 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   });
 
   await page.goto("/?bootstrap=launcher-token");
-  await page.getByRole("radio", { name: /local-chat:7b/i }).click();
-  await page.getByRole("button", { name: "Use selected model" }).click();
+  await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
+  await page.getByRole("button", { name: "Select a local model" }).click();
+  await page.getByRole("option", { name: /local-chat:7b/i }).click();
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Models and connectivity" })).toBeVisible();

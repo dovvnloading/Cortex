@@ -56,6 +56,7 @@ function ComposerHarness({
       }}
       onStop={onStop}
       onSelectModel={vi.fn().mockResolvedValue(true)}
+      onGenerationOptionsChange={vi.fn()}
     />
   );
 }
@@ -148,6 +149,8 @@ describe("MessageComposer", () => {
     await user.type(composer, "Write while reconnecting");
     expect(composer).toHaveValue("Write while reconnecting");
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Selected local model: local-chat:7b" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Generation parameters for this chat" })).toBeEnabled();
   });
 
   it("keeps a request error beside the composer", () => {
