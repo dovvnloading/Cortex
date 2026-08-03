@@ -42,6 +42,29 @@ describe("App", () => {
     expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
+  it("opens the workspace when the model service is unavailable", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: false, status: "error", message: "Ollama is not running." } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Ollama is unavailable" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
+  });
+
   it("keeps the shell selection aligned with browser route changes", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem("cortex.session.token", "local-session");
