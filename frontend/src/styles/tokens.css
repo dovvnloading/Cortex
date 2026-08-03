@@ -442,7 +442,7 @@ a { color: inherit; text-decoration: none; }
 .execution-task-code-title > div { display: grid; min-width: 0; gap: 2px; }
 .execution-task-code-title strong { overflow: hidden; color: var(--text); font-size: 0.79rem; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .execution-task-code-title span { color: var(--text-muted); font-size: 0.68rem; }
-.execution-task-code-icon { display: grid; flex: 0 0 28px; place-items: center; width: 28px; height: 28px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
+.execution-task-code-icon { display: grid; flex: 0 0 28px; place-items: center; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text-muted); }
 .execution-task-state { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 4px; padding: 4px 6px; border-radius: 5px; font-size: 0.59rem; font-weight: 760; letter-spacing: 0.04em; text-transform: uppercase; }
 .execution-task-state-review { background: var(--accent-soft); color: var(--accent); }
 .execution-task-state-running { background: var(--surface-soft); color: var(--text-muted); }
@@ -580,8 +580,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .empty-state { margin: 0 0 20px; color: var(--text-faint); font-size: 0.82rem; }
 
 /* Background-work, system, errors, and dialogs */
-.execution-task-tray { position: fixed; top: 64px; right: 20px; z-index: 40; width: min(390px, calc(100vw - 40px)); max-height: min(560px, calc(100vh - 88px)); overflow: auto; border: 1px solid var(--line-strong); border-top: 2px solid var(--accent); border-radius: 10px; padding: 15px; background: color-mix(in srgb, var(--surface-elevated) 96%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(18px); }
-.execution-task-tray-active { border-top-color: var(--accent); }
+.execution-task-tray { position: fixed; top: 64px; right: 20px; z-index: 40; width: min(390px, calc(100vw - 40px)); max-height: min(560px, calc(100vh - 88px)); overflow: auto; border: 1px solid var(--line-strong); border-top: 1px solid var(--line-strong); border-radius: 10px; padding: 15px; background: color-mix(in srgb, var(--surface-elevated) 96%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(18px); }
+.execution-task-tray-active { border-top-color: var(--line-strong); }
 .execution-task-tray-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .execution-task-tray-title { display: grid; gap: 3px; }
 .execution-task-tray-kicker { color: var(--accent); font-size: 0.58rem; font-weight: 800; letter-spacing: 0.12em; }
@@ -600,7 +600,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .execution-task-copy strong, .execution-task-copy span { overflow: hidden; color: var(--text); font-size: 0.76rem; text-overflow: ellipsis; white-space: nowrap; }
 .execution-task-copy span { color: var(--text-muted); font-size: 0.7rem; }
 .execution-task-stop { flex: 0 0 auto; min-height: 30px; padding: 0 9px; font-size: 0.72rem; }
-.execution-task-approval { border-top-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.execution-task-approval { border-top-color: var(--line); }
 .execution-task-approval-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 4px; }
 .execution-task-code .execution-task-approval-actions { justify-content: flex-start; margin-top: 1px; }
 .execution-task-decision { min-height: 32px; padding: 0 10px; font-size: 0.72rem; white-space: nowrap; }
