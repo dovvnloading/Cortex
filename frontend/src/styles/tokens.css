@@ -30,6 +30,7 @@
   --shadow-sm: 0 5px 18px rgba(33, 29, 24, 0.08);
   --shadow-md: 0 16px 42px rgba(33, 29, 24, 0.14);
   --shadow-lg: 0 24px 64px rgba(33, 29, 24, 0.18);
+  --spinner-duration: 3.2s;
   --radius-xs: 4px;
   --radius-sm: 7px;
   --radius-md: 10px;
@@ -429,7 +430,7 @@ a { color: inherit; text-decoration: none; }
 .composer-primary-control:disabled { background: var(--surface-soft); color: var(--text-faint); box-shadow: none; opacity: 1; }
 .composer-stop-control { border-color: var(--line-strong); background: var(--surface-soft); color: var(--text-muted); box-shadow: none; }
 .composer-stop-control:hover:not(:disabled) { border-color: var(--text-muted); background: var(--surface-hover); color: var(--text); }
-.composer-control-spinner, .local-model-menu-rescan-icon-pending { animation: spin 800ms linear infinite; }
+.composer-control-spinner, .local-model-menu-rescan-icon-pending { animation: spin var(--spinner-duration) linear infinite; }
 .execution-task-capabilities { color: var(--text-faint); font-size: 0.68rem; }
 .execution-task-warning { display: flex; align-items: flex-start; gap: 5px; color: var(--warning, #d98b35); font-size: 0.68rem; font-weight: 620; line-height: 1.35; }
 .execution-task-code-content { display: grid; min-width: 0; flex: 1; gap: 9px; }
@@ -601,7 +602,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .loading-state, .fatal-state { display: grid; min-height: 100vh; place-items: center; align-content: center; gap: 12px; padding: 24px; background: var(--bg); text-align: center; color: var(--text-muted); }
 .fatal-state h1 { color: var(--text); }
 .fatal-state p { max-width: 420px; margin: 0; line-height: 1.6; }
-.loading-spinner { width: 24px; height: 24px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
+.loading-spinner { width: 24px; height: 24px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin var(--spinner-duration) linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes blink { 50% { opacity: 0; } }
 .toast-region { position: fixed; z-index: 100; right: 20px; bottom: 20px; display: grid; gap: 9px; width: min(360px, calc(100vw - 40px)); }
