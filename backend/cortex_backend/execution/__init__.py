@@ -54,7 +54,12 @@ from .bundle_installer import (
     verify_keyring_update,
 )
 from .lifecycle import ExecutionLifecycle, LifecycleSnapshot, RuntimeHealth
-from .local_runtime import DEFAULT_CODE_TIMEOUT_SECONDS, LocalExecutionCoordinator, LocalRecipeWorkerAttempt
+from .local_runtime import (
+    DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
+    DEFAULT_CODE_TIMEOUT_SECONDS,
+    LocalExecutionCoordinator,
+    LocalRecipeWorkerAttempt,
+)
 from .code_execution import (
     CODE_EXECUTION_PAYLOAD_SCHEMA,
     CODE_EXECUTION_PROFILE,
@@ -265,6 +270,7 @@ __all__ = [
     "LocalExecutionCoordinator",
     "LocalRecipeWorkerAttempt",
     "DEFAULT_CODE_TIMEOUT_SECONDS",
+    "DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS",
     "CODE_EXECUTION_PAYLOAD_SCHEMA",
     "CODE_EXECUTION_PROFILE",
     "CODE_EXECUTION_RESULT_SCHEMA",

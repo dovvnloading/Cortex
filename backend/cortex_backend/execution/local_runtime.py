@@ -70,6 +70,10 @@ from .scratch_compute import (
 DEFAULT_SCRATCH_TIMEOUT_SECONDS = 3.0
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
 DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
+# Importing a frozen desktop process can take longer than evaluating a small
+# program. Keep that bootstrap grace separate from the code's wall-clock limit
+# so a healthy worker is not reported as a code timeout while it is starting.
+DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS = 15.0
 DEFAULT_CANCEL_GRACE_SECONDS = 0.35
 _RECIPE_PROCESS_ERROR = "worker_provider_failed"
 
@@ -366,13 +370,15 @@ class _LocalCodeAttempt:
         self,
         *,
         timeout_seconds: float = DEFAULT_CODE_TIMEOUT_SECONDS,
+        startup_timeout_seconds: float = DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
     ) -> None:
-        if timeout_seconds <= 0 or cancel_grace_seconds <= 0:
+        if timeout_seconds <= 0 or startup_timeout_seconds <= 0 or cancel_grace_seconds <= 0:
             raise ValueError("worker timeouts must be positive")
         self._context = multiprocessing.get_context("spawn")
         self._cancel_event = self._context.Event()
         self._timeout_seconds = float(timeout_seconds)
+        self._startup_timeout_seconds = float(startup_timeout_seconds)
         self._cancel_grace_seconds = float(cancel_grace_seconds)
         self._lock = Lock()
         self._process: Any | None = None
@@ -412,7 +418,8 @@ class _LocalCodeAttempt:
                 )
             sender.close()
             sender = None
-            deadline = time.monotonic() + self._timeout_seconds
+            startup_deadline = time.monotonic() + self._startup_timeout_seconds
+            deadline: float | None = None
             cancelled_at: float | None = None
             while True:
                 if cancel_event.is_set() or self._cancel_event.is_set():
@@ -423,11 +430,20 @@ class _LocalCodeAttempt:
                         message = receiver.recv()
                     except (EOFError, OSError):
                         raise CodeExecutionError("worker_failed") from None
+                    if (
+                        isinstance(message, Mapping)
+                        and message.get("ok") is True
+                        and message.get("event") == "ready"
+                    ):
+                        deadline = time.monotonic() + self._timeout_seconds
+                        continue
                     return self._result_from_message(message)
                 now = time.monotonic()
                 if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
                     raise CodeExecutionError("cancelled")
-                if now >= deadline:
+                if deadline is None and now >= startup_deadline:
+                    raise CodeExecutionError("worker_startup_timeout")
+                if deadline is not None and now >= deadline:
                     raise CodeExecutionError("worker_timeout")
         finally:
             if sender is not None:
@@ -1150,6 +1166,7 @@ class LocalExecutionCoordinator:
 
 __all__ = [
     "DEFAULT_CODE_TIMEOUT_SECONDS",
+    "DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS",
     "DEFAULT_IMAGE_TIMEOUT_SECONDS",
     "DEFAULT_SCRATCH_TIMEOUT_SECONDS",
     "LocalExecutionCoordinator",

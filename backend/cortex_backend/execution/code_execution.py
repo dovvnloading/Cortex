@@ -1261,6 +1261,11 @@ def _scrub_worker_environment() -> None:
 def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, Any], workspace: str) -> None:
     try:
         _scrub_worker_environment()
+        # Let the parent distinguish a slow process bootstrap from a program
+        # that exceeded its execution budget. This is especially important for
+        # frozen desktop launches, where importing the worker can be slower
+        # than running a small approved script.
+        connection.send({"ok": True, "event": "ready"})
         result = run_code_in_worker(source, capabilities, workspace)
         connection.send({"ok": True, "result": result.as_payload()})
     except CodeExecutionError as exc:

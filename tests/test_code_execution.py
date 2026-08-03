@@ -11,8 +11,11 @@ from cortex_backend.execution.code_execution import (
     CodeCapabilities,
     CodeExecutionError,
     CodeExecutionRequest,
+    CodeExecutionResult,
+    code_worker_main,
     run_code_in_worker,
 )
+from cortex_backend.execution import code_execution
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.services.llm import SynthesisAgent
@@ -46,6 +49,33 @@ def test_code_source_requires_bounded_constructs_and_explicit_capabilities() -> 
         CodeCapabilities(filesystem=True).as_dict(),
     )
     assert isinstance(allowed.value, list)
+
+
+def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_path: Path) -> None:
+    class _Connection:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+            self.closed = False
+
+        def send(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = _Connection()
+    monkeypatch.setattr(code_execution, "_scrub_worker_environment", lambda: None)
+    monkeypatch.setattr(
+        code_execution,
+        "run_code_in_worker",
+        lambda *_args: CodeExecutionResult(stdout="ok\n", stderr=""),
+    )
+
+    code_worker_main(connection, "print('ok')", {}, str(tmp_path))
+
+    assert connection.messages[0] == {"ok": True, "event": "ready"}
+    assert connection.messages[1]["ok"] is True
+    assert connection.closed is True
 
 
 def test_brokered_filesystem_is_scoped_and_budgeted(tmp_path: Path) -> None:

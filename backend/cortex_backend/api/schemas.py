@@ -524,6 +524,7 @@ class ExecutionTaskSummary(APIModel):
     approval_reason: str | None = None
     approval_expires_at: datetime | None = None
     can_cancel: bool = False
+    error: str | None = None
     created_at: datetime
     updated_at: datetime
     intent_summary: str | None = None

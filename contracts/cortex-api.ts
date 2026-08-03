@@ -232,6 +232,7 @@ export interface ExecutionTaskSummary {
   approval_reason?: string | null;
   approval_expires_at?: string | null;
   can_cancel?: boolean;
+  error?: string | null;
   created_at: string;
   updated_at: string;
   intent_summary?: string | null;

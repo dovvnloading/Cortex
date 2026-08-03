@@ -166,6 +166,45 @@ def test_preview_api_reuses_installation_owner_across_sessions_and_cancels_durab
         assert status.json()["can_cancel"] is False
 
 
+def test_task_list_keeps_code_failure_reason_for_diagnosis(tmp_path):
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        owner = _owner(app, headers)
+        repository = app.state.execution_coordinator.repository
+        repository.create_job(
+            job_id="code-failure-reason",
+            owner=owner,
+            request_id="request-code-failure-reason",
+            profile="code.exec.v1",
+            payload={
+                "schema_version": "code.execution.v1",
+                "language": "python",
+                "source": "print('diagnose')",
+                "intent_summary": "Diagnose a failed worker.",
+                "source_digest": "a" * 64,
+                "capabilities": {"filesystem": False, "process": False, "network": False},
+            },
+        )
+        repository.transition(
+            "code-failure-reason",
+            status="failed",
+            event="code.failed",
+            phase="failed",
+            data={"message": "Local code execution failed safely."},
+            error="worker_timeout",
+        )
+
+        tasks = client.get(
+            "/api/v1/execution/tasks?include_terminal=true",
+            headers=headers,
+        )
+
+        assert tasks.status_code == 200
+        task = next(item for item in tasks.json()["tasks"] if item["job_id"] == "code-failure-reason")
+        assert task["error"] == "worker_timeout"
+
+
 def test_approval_api_is_owner_scoped_exactly_once_and_redacted(tmp_path):
     app = _app(tmp_path)
     with TestClient(app) as client:
