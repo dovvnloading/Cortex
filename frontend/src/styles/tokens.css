@@ -189,6 +189,7 @@ a { color: inherit; text-decoration: none; }
 .select-item[data-selected] { background: var(--accent-soft); color: var(--accent); }
 .select-item[data-selected] small { color: inherit; opacity: 0.78; }
 .select-item-indicator { flex: 0 0 auto; }
+.popover-positioner { z-index: 60; }
 
 /* Entry and model-selection surfaces */
 .onboarding, .local-setup {

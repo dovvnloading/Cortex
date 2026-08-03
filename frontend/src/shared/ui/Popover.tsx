@@ -13,7 +13,7 @@ type PopoverContentProps = ComponentProps<typeof BasePopover.Popup> & { children
 export function PopoverContent({ children, ...props }: PopoverContentProps) {
   return (
     <BasePopover.Portal>
-      <BasePopover.Positioner sideOffset={8} align="end">
+      <BasePopover.Positioner className="popover-positioner" sideOffset={8} align="end">
         <BasePopover.Popup {...props}>{children}</BasePopover.Popup>
       </BasePopover.Positioner>
     </BasePopover.Portal>

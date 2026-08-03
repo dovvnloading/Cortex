@@ -90,6 +90,44 @@ test("keeps the workspace and composer picker usable when the inventory is talle
   await expect(page.getByRole("button", { name: "Selected local model: translategemma:4b" })).toBeVisible();
 });
 
+test("renders chat parameters above the composer surface", async ({ page }) => {
+  await stubWorkspace(page);
+  await page.goto("/?bootstrap=launcher-token");
+
+  await page.getByRole("button", { name: "Generation parameters for this chat" }).click();
+  await expect(page.getByRole("dialog", { name: "Generation parameters" })).toBeVisible();
+
+  const layering = await page.evaluate(() => {
+    const popover = document.querySelector<HTMLElement>(".params-popover");
+    const positioner = popover?.parentElement;
+    const composer = document.querySelector<HTMLElement>(".composer-dock");
+    if (!popover || !positioner || !composer) return { found: false as const };
+
+    const popoverRect = popover.getBoundingClientRect();
+    const composerRect = composer.getBoundingClientRect();
+    const left = Math.max(popoverRect.left, composerRect.left);
+    const right = Math.min(popoverRect.right, composerRect.right);
+    const top = Math.max(popoverRect.top, composerRect.top);
+    const bottom = Math.min(popoverRect.bottom, composerRect.bottom);
+    const overlaps = right > left && bottom > top;
+    const topElement = overlaps ? document.elementFromPoint((left + right) / 2, (top + bottom) / 2) : null;
+
+    return {
+      found: true as const,
+      positionerZIndex: Number.parseInt(getComputedStyle(positioner).zIndex, 10),
+      composerZIndex: Number.parseInt(getComputedStyle(composer).zIndex, 10),
+      overlaps,
+      topElementIsPopover: Boolean(topElement?.closest(".params-popover")),
+    };
+  });
+
+  expect(layering.found).toBe(true);
+  if (layering.found) {
+    expect(layering.positionerZIndex).toBeGreaterThan(layering.composerZIndex);
+    if (layering.overlaps) expect(layering.topElementIsPopover).toBe(true);
+  }
+});
+
 test("keeps a multiline draft when generation acceptance fails", async ({ page }) => {
   let generationRequests = 0;
   let submittedInput = "";
