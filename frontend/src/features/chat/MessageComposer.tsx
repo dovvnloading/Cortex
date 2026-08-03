@@ -100,6 +100,10 @@ export function MessageComposer({
     && !imageInputBlocked;
   const isStopping = phase === "stopping";
   const isGenerating = phase === "generating" || isStopping;
+  // Runtime availability gates sending, not workspace configuration. Users
+  // must still be able to choose a discovered model while the current model
+  // is missing or the local service is reconnecting.
+  const controlsLocked = phase === "starting" || isGenerating;
   const remaining = MAX_MESSAGE_LENGTH - value.length;
   const showCounter = remaining <= 1_000;
 
@@ -286,14 +290,14 @@ export function MessageComposer({
                   selectedModel={selectedModel}
                   onSelect={onSelectModel}
                   onRescan={onRescanModels}
-                  disabled={phase !== "ready" || modelBusy}
+                  disabled={controlsLocked || modelBusy}
                 />
               </div>
               {onGenerationOptionsChange && (
                 <GenerationParamsPopover
                   value={generationOptions}
                   defaults={generationDefaults}
-                  disabled={phase !== "ready"}
+                  disabled={controlsLocked}
                   onChange={onGenerationOptionsChange}
                 />
               )}

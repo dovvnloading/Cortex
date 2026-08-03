@@ -51,7 +51,7 @@ async function stubWorkspace(page: Page, {
   });
 }
 
-test("keeps the startup model picker usable when the inventory is taller than the viewport", async ({ page }) => {
+test("keeps the workspace and composer picker usable when the inventory is taller than the viewport", async ({ page }) => {
   const models = [
     "gemma4:12b",
     "granite4.1:8b",
@@ -70,24 +70,24 @@ test("keeps the startup model picker usable when the inventory is taller than th
   await stubWorkspace(page, { models, selectedModel: null });
   await page.goto("/?bootstrap=launcher-token");
 
-  await expect(page.getByRole("heading", { name: "Select a local model" })).toBeVisible();
-  await expect(page.getByRole("radio", { name: /translategemma:4b/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
+  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+  await page.getByRole("button", { name: "Select a local model" }).click();
+  await expect(page.getByRole("listbox", { name: "Discovered local models" })).toBeVisible();
 
   const layout = await page.evaluate(() => {
-    const listNode = document.querySelector<HTMLElement>(".model-choice-list");
-    const footerNode = document.querySelector<HTMLElement>(".local-setup-actions-bottom");
+    const listNode = document.querySelector<HTMLElement>(".local-model-menu-list");
     return {
       listScrolls: Boolean(listNode && listNode.scrollHeight > listNode.clientHeight),
-      footerBottom: footerNode?.getBoundingClientRect().bottom ?? 0,
+      listBottom: listNode?.getBoundingClientRect().bottom ?? 0,
       viewportHeight: window.innerHeight,
     };
   });
   expect(layout.listScrolls).toBe(true);
-  expect(layout.footerBottom).toBeLessThanOrEqual(layout.viewportHeight);
+  expect(layout.listBottom).toBeLessThanOrEqual(layout.viewportHeight);
 
-  await page.getByRole("radio", { name: /translategemma:4b/i }).click();
-  await page.getByRole("button", { name: "Use selected model" }).click();
-  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+  await page.getByRole("option", { name: /translategemma:4b/i }).click();
+  await expect(page.getByRole("button", { name: "Selected local model: translategemma:4b" })).toBeVisible();
 });
 
 test("keeps a multiline draft when generation acceptance fails", async ({ page }) => {
