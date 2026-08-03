@@ -102,6 +102,7 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("heading", { name: "Result", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
     expect(screen.getByText("Reasoning")).toBeInTheDocument();
+    expect(screen.getByText("Reasoning").closest("details")?.parentElement).toHaveClass("message-card");
     expect(screen.queryByText("This must never render in the user bubble.")).not.toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
     expect(screen.getByText("result.md")).toBeInTheDocument();
