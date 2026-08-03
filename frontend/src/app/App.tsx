@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
 import { ChatPage } from "../features/chat/ChatPage";
-import { LocalSetup } from "../features/shell/LocalSetup";
 import { Onboarding } from "../features/shell/Onboarding";
 import { SettingsPanel, type SettingsPanelProps } from "../features/settings/SettingsPanel";
 import { localModelNames } from "../lib/localModels";
@@ -16,6 +15,20 @@ import { useSettingsStore } from "../stores/useSettingsStore";
 import { useToast } from "./ToastProvider";
 
 type Props = { api?: CortexApi };
+
+const UNAVAILABLE_MODELS: ModelResponse = {
+  required_models: [],
+  optional_models: [],
+  installed_models: [],
+  missing_models: [],
+  optional_missing_models: [],
+  models: [],
+  connection: {
+    success: false,
+    status: "error",
+    message: "The model service is unavailable. You can continue browsing your workspace.",
+  },
+};
 
 function readBootstrapToken(): string {
   const searchToken = new URLSearchParams(window.location.search).get("bootstrap");
@@ -96,19 +109,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setLoading(true);
     setLoadError(null);
     try {
-      const [systemResponse, chatResponse, settingsResponse, memoryResponse, modelResponse] = await Promise.all([
+      const [systemResponse, chatResponse, settingsResponse, memoryResponse] = await Promise.all([
         api.system(),
         api.chats(),
         api.settings(),
         api.memories(),
-        api.models(),
       ]);
       setSystem(systemResponse);
       setChats(chatResponse);
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
-      setModels(modelResponse);
+      setModels(UNAVAILABLE_MODELS);
+      void api.models()
+        .then(setModels)
+        .catch((error) => {
+          if (error instanceof ApiError && error.status === 401) onSessionExpired();
+          else setModels(UNAVAILABLE_MODELS);
+        });
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         onSessionExpired();
@@ -315,13 +333,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const selectedModelSupportsVision = models.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
   const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
   const runtimeConnected = models.connection?.success ?? true;
-  const needsLocalSetup = runtimeConnected
-    ? !selectedModelAvailable
-    : !selectedModel;
-
-  if (needsLocalSetup) {
-    return <LocalSetup models={models} settings={settings} busy={modelBusy || saving} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onRescan={checkModels} onSelectModel={chooseLocalModel} />;
-  }
 
   const routeChatId = route.kind === "chat" ? route.threadId : null;
   const toggleTheme = () => {
