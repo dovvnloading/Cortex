@@ -72,6 +72,68 @@ def _extract_stats(response: dict) -> GenerationStats | None:
     )
 
 
+def _generation_failure_message(exc: Exception) -> tuple[str, str]:
+    """Turn an Ollama failure into safe, actionable user-facing guidance.
+
+    Ollama's response text is deliberately not surfaced or logged here: a
+    provider error can contain request-derived content.  Classifying only the
+    known operational cases gives the user a useful next step without leaking
+    chat text into a notification, event stream, or log.
+    """
+    status = getattr(exc, "status_code", None)
+    provider_error = getattr(exc, "error", "")
+    text = provider_error.lower() if isinstance(provider_error, str) else ""
+
+    if status == 404 or "model not found" in text or "not found" in text:
+        return (
+            "The selected local model is no longer installed. Choose an installed model and try again.",
+            "model_unavailable",
+        )
+    if "does not support image" in text or "does not support vision" in text:
+        return (
+            "The selected local model cannot use this image. Choose a vision-capable model or remove the image.",
+            "image_unsupported",
+        )
+    if "context length" in text or "context window" in text or "num_ctx" in text:
+        return (
+            "This conversation is too large for the model's current context setting. Start a new chat or increase the context limit.",
+            "context_limit",
+        )
+    if any(
+        marker in text
+        for marker in (
+            "out of memory",
+            "not enough memory",
+            "requires more system memory",
+            "failed to load model",
+            "unable to load model",
+        )
+    ):
+        return (
+            "The local model could not be loaded because the device does not have enough available memory. Close other heavy apps or choose a smaller model.",
+            "model_memory",
+        )
+    if "timeout" in text or "timed out" in text:
+        return (
+            "The local model did not respond in time. Retry the message or restart Ollama if it keeps happening.",
+            "model_timeout",
+        )
+    if "connection refused" in text or "connection reset" in text:
+        return (
+            "Cortex lost its connection to Ollama. Start or restart Ollama, then retry the message.",
+            "runtime_unavailable",
+        )
+    if isinstance(status, int):
+        return (
+            "Ollama rejected this request. Retry the message; if it repeats, restart Ollama or choose another model.",
+            f"ollama_http_{status}",
+        )
+    return (
+        "The local model could not complete this request. Retry the message; if it repeats, restart Ollama or choose another model.",
+        type(exc).__name__,
+    )
+
+
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -561,11 +623,18 @@ class SynthesisAgent:
             return self._format_response(final_answer), thoughts, commands, stats
 
         except Exception as e:
-            logging.error("LLM generation failed (%s).", type(e).__name__)
+            user_message, error_details = _generation_failure_message(e)
+            logging.error(
+                "LLM generation failed for model %r (%s; %s).",
+                self.gen_model,
+                type(e).__name__,
+                error_details,
+            )
             raise ModelOperationError(
-                "Generation failed. Please try again.",
+                user_message,
                 operation="generation",
                 cause=e,
+                error_details=error_details,
             ) from e
 
     def translate_text(self, text: str, target_language: str) -> TranslationResult:

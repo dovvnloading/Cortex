@@ -2,7 +2,7 @@
 
 import unittest
 
-from cortex_backend.core.generation import MemoryCommand, TranslationResult
+from cortex_backend.core.generation import MemoryCommand, ModelOperationError, TranslationResult
 from cortex_backend.repositories.legacy_storage import PermanentMemoryManager
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.services.memory_commands import apply_memory_command
@@ -28,6 +28,22 @@ class _FailingClient:
 class _ResponseClient:
     def chat(self, **kwargs):
         return {"message": {"content": "visible answer", "thinking": "private thoughts"}}
+
+
+class _OllamaResponseError(RuntimeError):
+    def __init__(self, error: str, status_code: int = 500):
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
+
+
+class _OllamaFailureClient:
+    def __init__(self, error: str, status_code: int = 500):
+        self.error = error
+        self.status_code = status_code
+
+    def chat(self, **kwargs):
+        raise _OllamaResponseError(self.error, self.status_code)
 
 
 class _TitleClient:
@@ -117,6 +133,47 @@ class BoundarySafetyTests(unittest.TestCase):
         self.assertNotIn("private user prompt", rendered_logs)
         self.assertNotIn("private history", rendered_logs)
         self.assertNotIn("private thoughts", rendered_logs)
+
+    def test_generation_failure_explains_local_model_memory_without_logging_provider_text(self):
+        import logging
+
+        private_provider_error = "model requires more system memory for private user prompt"
+        agent = SynthesisAgent(
+            "chat",
+            "title",
+            "translate",
+            _OllamaFailureClient(private_provider_error),
+        )
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger()
+        logger.addHandler(handler)
+        try:
+            with self.assertRaises(ModelOperationError) as raised:
+                agent.generate("private user prompt", "private history", [], False, None)
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertEqual(raised.exception.error_details, "model_memory")
+        self.assertIn("not have enough available memory", raised.exception.user_message)
+        rendered_logs = "\n".join(record.getMessage() for record in records)
+        self.assertNotIn(private_provider_error, rendered_logs)
+        self.assertNotIn("private user prompt", rendered_logs)
+
+    def test_generation_failure_reports_missing_model_as_a_recovery_action(self):
+        agent = SynthesisAgent(
+            "missing-model",
+            "title",
+            "translate",
+            _OllamaFailureClient("model 'missing-model' not found", 404),
+        )
+
+        with self.assertRaises(ModelOperationError) as raised:
+            agent.generate("hello", "No history available.", [], False, None)
+
+        self.assertEqual(raised.exception.error_details, "model_unavailable")
+        self.assertIn("no longer installed", raised.exception.user_message)
 
     def test_chat_title_generation_uses_the_title_model_and_normalizes_output(self):
         agent = SynthesisAgent("chat", "title", "translate", _TitleClient())

@@ -529,11 +529,15 @@ class JobRegistry:
                     or "Job failed. Please try again."
                 )
                 record.error = str(message)
+                error_details = getattr(exc, "error_details", None)
                 self._append_event(
                     record,
                     kind="error",
                     status="failed",
-                    data={"message": record.error, "details": type(exc).__name__},
+                    data={
+                        "message": record.error,
+                        "details": error_details or type(exc).__name__,
+                    },
                 )
         finally:
             with self._lock:

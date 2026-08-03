@@ -185,11 +185,18 @@ class TranslationResult:
 class ModelOperationError(RuntimeError):
     """Safe failure propagated from a model operation without raw content."""
 
-    def __init__(self, user_message: str, *, operation: str, cause: Exception | None = None):
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        operation: str,
+        cause: Exception | None = None,
+        error_details: str | None = None,
+    ):
         super().__init__(user_message)
         self.user_message = user_message
         self.operation = operation
-        self.error_details = type(cause).__name__ if cause else None
+        self.error_details = error_details or (type(cause).__name__ if cause else None)
 
 
 @dataclass(frozen=True)
