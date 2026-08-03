@@ -59,6 +59,19 @@ def test_explicit_local_tasks_receive_the_jit_contract(query: str) -> None:
     assert "capabilities" in system
 
 
+def test_python_output_request_receives_the_jit_contract() -> None:
+    query = 'Hi, can you print "hello" back in Python?'
+    assert should_offer_code_execution(query) is True
+    messages = PromptTemplate.build_synthesis_prompt(
+        query,
+        "No history available.",
+        [],
+        False,
+        None,
+    )
+    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" in messages[0]["content"]
+
+
 def test_explicit_eligibility_can_disable_guidance_even_for_a_matching_turn() -> None:
     messages = PromptTemplate.build_synthesis_prompt(
         "Please run this Python code.",

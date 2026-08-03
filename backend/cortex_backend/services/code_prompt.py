@@ -17,6 +17,10 @@ _REFERENTIAL_EXECUTION_RE = re.compile(
 _USE_CODE_RE = re.compile(
     r"\b(?:use|with|in)\s+(?:python|a python script|a script|code)\b\s+(?:to|and)\b"
 )
+_PYTHON_OUTPUT_RE = re.compile(
+    r"\b(?:print|output|return)\b.*\b(?:in|using|with)\s+python\b"
+    r"|\bpython\b.*\b(?:print|output|return)\b"
+)
 _COMPUTATION_RE = re.compile(
     r"\b(?:calculate|compute)\b.*\b(?:python|script|code|data|csv|json|spreadsheet|file|attachment)\b"
 )
@@ -63,6 +67,8 @@ def should_offer_code_execution(query: str) -> bool:
     if direct_execution:
         return True
     if _USE_CODE_RE.search(normalized):
+        return True
+    if _PYTHON_OUTPUT_RE.search(normalized):
         return True
     if _COMPUTATION_RE.search(normalized):
         return True

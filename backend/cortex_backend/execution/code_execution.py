@@ -132,6 +132,17 @@ class CodeCapabilities:
             "network": self.network,
         }
 
+    def restricted_to(self, required: "CodeCapabilities") -> "CodeCapabilities":
+        """Keep only grants the validated source can actually use."""
+
+        if not isinstance(required, CodeCapabilities):
+            raise TypeError("required capabilities must be CodeCapabilities")
+        return CodeCapabilities(
+            filesystem=self.filesystem and required.filesystem,
+            process=self.process and required.process,
+            network=self.network and required.network,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CodeExecutionRequest:
@@ -487,6 +498,25 @@ def validate_code_source(source: str) -> str:
         raise CodeExecutionError("syntax_invalid") from None
     _CodeValidator().visit(tree)
     return source
+
+
+def capabilities_required_by_source(source: str) -> CodeCapabilities:
+    """Return broker namespaces referenced by an already validated program."""
+
+    validate_code_source(source)
+    tree = ast.parse(source, mode="exec")
+    namespaces: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        chain = _cortex_attribute_chain(node)
+        if chain and len(chain) >= 2 and chain[0] == "cortex":
+            namespaces.add(chain[1])
+    return CodeCapabilities(
+        filesystem="fs" in namespaces,
+        process="process" in namespaces,
+        network=bool({"net", "network"} & namespaces),
+    )
 
 
 def _is_reparse_point(path: Path) -> bool:

@@ -237,6 +237,35 @@ def test_model_only_proposes_code_from_the_structured_envelope() -> None:
     agent._parse_and_clean_response("```python\nprint('not a request')\n```", None)
     assert agent.last_code_proposal is None
 
+
+def test_model_proposal_drops_unused_capabilities() -> None:
+    agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
+    visible, _, _ = agent._parse_and_clean_response(
+        "<code_execution_request>{\"language\":\"python\",\"source\":\"print('x')\",\"intent_summary\":\"Print x\",\"capabilities\":{\"filesystem\":true,\"process\":true,\"network\":true}}</code_execution_request>",
+        None,
+    )
+    assert visible == ""
+    assert agent.last_code_proposal is not None
+    assert agent.last_code_proposal.capabilities == {
+        "filesystem": False,
+        "process": False,
+        "network": False,
+    }
+
+
+def test_model_proposal_keeps_referenced_capability() -> None:
+    agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
+    agent._parse_and_clean_response(
+        "<code_execution_request>{\"language\":\"python\",\"source\":\"_result = cortex.process.run(['cmd', '/c', 'echo', 'x'])\",\"intent_summary\":\"Run x\",\"capabilities\":{\"process\":true}}</code_execution_request>",
+        None,
+    )
+    assert agent.last_code_proposal is not None
+    assert agent.last_code_proposal.capabilities == {
+        "filesystem": False,
+        "process": True,
+        "network": False,
+    }
+
     malformed, _, _ = agent._parse_and_clean_response(
         "<code_execution_request>{not-json}</code_execution_request>", None,
     )
