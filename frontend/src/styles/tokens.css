@@ -720,4 +720,5 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .loading-spinner, .composer-control-spinner, .local-model-menu-rescan-icon-pending { animation: none !important; }
 }
