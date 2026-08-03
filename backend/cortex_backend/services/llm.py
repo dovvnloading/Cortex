@@ -27,6 +27,7 @@ from cortex_backend.execution.code_execution import (
     CodeCapabilities,
     CodeExecutionError,
     MAX_CODE_SOURCE_BYTES,
+    capabilities_required_by_source,
     validate_code_source,
 )
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
@@ -747,7 +748,13 @@ class SynthesisAgent:
             if not isinstance(source, str) or not isinstance(intent, str) or not isinstance(capabilities, dict):
                 raise ValueError("invalid values")
             validate_code_source(source)
-            grants = CodeCapabilities.from_mapping(capabilities)
+            requested_grants = CodeCapabilities.from_mapping(capabilities)
+            required_grants = capabilities_required_by_source(source)
+            grants = requested_grants.restricted_to(required_grants)
+            if grants != requested_grants:
+                logging.warning(
+                    "Reducing model code capabilities to those referenced by the source."
+                )
             return CodeExecutionProposal(
                 source=source,
                 intent_summary=intent.strip(),
