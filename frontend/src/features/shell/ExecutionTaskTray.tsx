@@ -35,6 +35,11 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
     .map((task) => `${task.job_id}:${task.sequence}:${task.status}:${task.updated_at}`)
     .sort()
     .join("|");
+  const latestTerminalTask = tasks
+    .filter((task) => !ACTIVE_STATUSES.has(task.status) && task.approval_state !== "pending")
+    .reduce<ExecutionTaskSummary | null>((latest, task) => (
+      !latest || task.updated_at > latest.updated_at ? task : latest
+    ), null);
   const completionDismissed = !hasLiveWork && Boolean(completionKey) && dismissedCompletionKey === completionKey;
   if (!tasks.length || completionDismissed) return null;
 
@@ -42,6 +47,10 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
     ? `${pendingApprovals.length} task${pendingApprovals.length === 1 ? " requires" : "s require"} your approval.`
     : activeTasks.length
       ? `${activeTasks.length} local task${activeTasks.length === 1 ? " is" : "s are"} running.`
+      : latestTerminalTask?.status === "failed"
+        ? "The latest local task failed."
+        : latestTerminalTask?.status === "cancelled"
+          ? "The latest local task was cancelled."
       : "The latest local task is complete.";
 
   const stop = async (jobId: string) => {
@@ -211,7 +220,7 @@ function CodeTaskSummary({
             <span>{status}</span>
           </div>
         </div>
-        {approvalPending ? <span className="execution-task-state execution-task-state-review">Review</span> : showsWorking ? <span className="execution-task-state execution-task-state-running">Running</span> : <span className="execution-task-state execution-task-state-complete"><Check size={12} aria-hidden="true" />Complete</span>}
+        <CodeTaskState task={task} approvalPending={approvalPending} showsWorking={showsWorking} />
       </div>
       {task.capabilities && (
         <div className="execution-task-capability-row" aria-label="Requested host access">
@@ -221,8 +230,8 @@ function CodeTaskSummary({
       {task.capabilities && hasBroadCapabilities(task.capabilities) && (
         <div className="execution-task-warning" role="note"><AlertTriangle size={13} aria-hidden="true" /><span>Broad local access requested. Review the source before allowing.</span></div>
       )}
-      {task.status === "failed" && task.message && (
-        <div className="execution-task-failure" role="alert"><AlertTriangle size={13} aria-hidden="true" /><span>{task.message}</span></div>
+      {task.status === "failed" && (
+        <div className="execution-task-failure" role="alert"><AlertTriangle size={13} aria-hidden="true" /><span>{formatCodeFailure(task)}</span></div>
       )}
       {task.result && <CodeResult result={task.result} />}
       {onLoadSource && (
@@ -251,6 +260,30 @@ function ApprovalActions({ task, decision, onDecide }: { task: ExecutionTaskSumm
       </button>
     </div>
   );
+}
+
+function CodeTaskState({
+  task,
+  approvalPending,
+  showsWorking,
+}: {
+  task: ExecutionTaskSummary;
+  approvalPending: boolean;
+  showsWorking: boolean;
+}) {
+  if (approvalPending) {
+    return <span className="execution-task-state execution-task-state-review">Review</span>;
+  }
+  if (showsWorking) {
+    return <span className="execution-task-state execution-task-state-running">Running</span>;
+  }
+  if (task.status === "failed") {
+    return <span className="execution-task-state execution-task-state-failed"><AlertTriangle size={12} aria-hidden="true" />Failed</span>;
+  }
+  if (task.status === "cancelled") {
+    return <span className="execution-task-state execution-task-state-cancelled">Cancelled</span>;
+  }
+  return <span className="execution-task-state execution-task-state-complete"><Check size={12} aria-hidden="true" />Complete</span>;
 }
 
 function CodeResult({ result }: { result: Record<string, unknown> }) {
@@ -298,6 +331,21 @@ function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
 
 function formatTaskStatus(status: ExecutionTaskSummary["status"]): string {
   return status === "cancelling" ? "Stopping" : `${status[0].toUpperCase()}${status.slice(1)}`;
+}
+
+function formatCodeFailure(task: ExecutionTaskSummary): string {
+  const messages: Record<string, string> = {
+    worker_startup_timeout: "The isolated worker did not finish starting in time.",
+    worker_timeout: "The isolated worker timed out before returning output.",
+    worker_failed: "The isolated worker stopped before returning output.",
+    worker_output_invalid: "The isolated worker returned an invalid result.",
+    process_isolation_unavailable: "The required process isolation could not be established.",
+    runtime_limit: "The code exceeded the execution limits.",
+    memory_limit: "The code exceeded the memory limit.",
+  };
+  if (task.error && messages[task.error]) return messages[task.error];
+  if (task.message && task.message !== "Local code execution failed safely.") return task.message;
+  return "Local code execution failed safely.";
 }
 
 function formatCapabilities(capabilities: NonNullable<ExecutionTaskSummary["capabilities"]>): string[] {

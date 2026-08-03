@@ -58,6 +58,26 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByRole("button", { name: "Dismiss completed background task notification" })).toBeVisible();
   });
 
+  it("shows failed code runs as failed instead of complete and explains a timeout", () => {
+    render(
+      <ExecutionTaskTray
+        tasks={[{
+          ...codeTask,
+          status: "failed",
+          sequence: 6,
+          message: "Local code execution failed safely.",
+          error: "worker_timeout",
+          result: null,
+        }]}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("The latest local task failed.");
+    expect(screen.getByText("Failed", { selector: ".execution-task-state-failed" })).toBeVisible();
+    expect(screen.queryByText("Complete")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("timed out before returning output");
+  });
+
   it("groups repeated completed task notifications into one row", () => {
     render(
       <ExecutionTaskTray

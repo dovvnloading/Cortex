@@ -2488,6 +2488,7 @@ def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSumma
         approval_reason=response.approval_reason,
         approval_expires_at=response.approval_expires_at,
         can_cancel=response.can_cancel,
+        error=response.error,
         created_at=datetime.fromisoformat(job.created_at),
         updated_at=datetime.fromisoformat(job.updated_at),
         **code_fields,

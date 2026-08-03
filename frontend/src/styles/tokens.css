@@ -447,6 +447,8 @@ a { color: inherit; text-decoration: none; }
 .execution-task-state-review { background: var(--accent-soft); color: var(--accent); }
 .execution-task-state-running { background: var(--surface-soft); color: var(--text-muted); }
 .execution-task-state-complete { background: var(--success-soft); color: var(--success); }
+.execution-task-state-failed { background: var(--danger-soft); color: var(--danger); }
+.execution-task-state-cancelled { background: var(--surface-soft); color: var(--text-muted); }
 .execution-task-capability-row { display: flex; flex-wrap: wrap; gap: 5px; }
 .execution-task-capability { padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-soft); color: var(--text-muted); font-size: 0.62rem; font-weight: 680; }
 .execution-task-result { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }

@@ -1365,6 +1365,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
           "intent_summary": {
             "anyOf": [
               {
