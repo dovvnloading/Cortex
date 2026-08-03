@@ -49,9 +49,14 @@ async function main() {
         deviceScaleFactor: 1,
       });
       await page.setContent(
-        `<style>html,body{margin:0;width:100%;height:100%;overflow:hidden}svg{display:block;width:100%;height:100%}</style>${svg}`,
+        `<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}svg{display:block;width:100%;height:100%}</style>${svg}`,
       );
-      images.push({ size, png: await page.screenshot({ type: "png" }) });
+      images.push({
+        size,
+        // Preserve the SVG's transparent corners. A white page background here
+        // becomes an opaque white square in Windows titlebar icons.
+        png: await page.screenshot({ type: "png", omitBackground: true }),
+      });
       await page.close();
     }
     fs.writeFileSync(WINDOWS_ICON, buildIco(images));
