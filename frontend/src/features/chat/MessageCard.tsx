@@ -36,10 +36,10 @@ export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onF
       <MessageIdentity role={message.role} timestamp={message.timestamp} stats={message.stats} />
       <div className="message-bubble">
         <AttachmentList attachments={message.attachments} />
-        {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary><span>Reasoning</span><span className="disclosure-hint">Show details</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}
         <div className="markdown-body">{message.role === "user" ? <p>{message.content}</p> : <SafeMarkdown content={message.content} />}</div>
         {message.sources && message.sources.length > 0 && <details className="sources"><summary><span>Sources</span><span className="disclosure-hint">{message.sources.length} {message.sources.length === 1 ? "item" : "items"}</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></div></div></details>}
       </div>
+      {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary><span>Reasoning</span><span className="disclosure-hint">Show details</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}
       <div className="message-actions" aria-label="Message actions">
         <button className="icon-button icon-button-small" type="button" aria-label={copied ? "Message copied" : "Copy message"} title={copied ? "Copied" : "Copy message"} onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="message-action-feedback">Copied</span>}</button>
         {message.role === "assistant" && <>
