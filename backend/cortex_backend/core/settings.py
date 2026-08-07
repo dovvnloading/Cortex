@@ -31,11 +31,22 @@ class OnboardingSettings(_SettingsModel):
 
 class ModelSettings(_SettingsModel):
     # Chat and title models are selected from the models Ollama reports on
-    # this machine.  Keeping them unset until that scan happens avoids
-    # shipping a hidden, hard-coded model preference.
+    # this machine, or from local GGUF files (id "gguf:<filename>", see
+    # cortex_backend.llamacpp.model_directory). Keeping them unset until a
+    # scan happens avoids shipping a hidden, hard-coded model preference.
     chat: ModelTag | None = None
     title: ModelTag | None = None
     translation: ModelTag = "translategemma:4b"
+    # Folder scanned for .gguf files and used as the download destination for
+    # "download a model by URL/Hugging Face repo". None => AppPaths' default
+    # (created lazily on first use, not eagerly here).
+    gguf_directory: str | None = None
+
+
+class LlamaCppSettings(_SettingsModel):
+    # "auto" tries Vulkan (broad GPU support, no extra toolkit) first and
+    # falls back to the CPU build if Vulkan can't launch on this machine.
+    gpu_backend: Literal["auto", "vulkan", "cpu"] = "auto"
 
 
 class GenerationSettings(_SettingsModel):
@@ -105,6 +116,7 @@ class CortexSettings(_SettingsModel):
     appearance: AppearanceSettings = Field(default_factory=AppearanceSettings)
     onboarding: OnboardingSettings = Field(default_factory=OnboardingSettings)
     models: ModelSettings = Field(default_factory=ModelSettings)
+    llamacpp: LlamaCppSettings = Field(default_factory=LlamaCppSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)

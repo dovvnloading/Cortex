@@ -23,10 +23,12 @@ import type {
   GenerationEvent,
   GenerationRequest,
   ShutdownResponse,
+  HuggingFaceFileListResponse,
   JobAccepted,
   JobStatusResponse,
   HealthResponse,
   MemoryResponse,
+  ModelDownloadRequest,
   ModelPullRequest,
   ModelResponse,
   RegenerationRequest,
@@ -235,6 +237,18 @@ export class CortexApi {
   pullModel(model: string): Promise<JobAccepted> {
     const payload: ModelPullRequest = { model };
     return this.request<JobAccepted>("/models/pulls", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  listHuggingFaceGGUFFiles(repoId: string): Promise<HuggingFaceFileListResponse> {
+    const params = new URLSearchParams({ repo_id: repoId });
+    return this.request<HuggingFaceFileListResponse>(`/models/gguf/huggingface-files?${params.toString()}`);
+  }
+
+  downloadGGUFModel(payload: ModelDownloadRequest): Promise<JobAccepted> {
+    return this.request<JobAccepted>("/models/gguf/downloads", {
       method: "POST",
       body: JSON.stringify(payload),
     });

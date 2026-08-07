@@ -52,6 +52,11 @@ class FakeOllamaState:
     fail_pull_stream: bool = False
     model_capabilities: dict[str, tuple[str, ...]] = field(default_factory=dict)
     model_details: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # When set, FakeGenerationEngine reports these via set_status_callback
+    # during generate() -- exercises the same "loading_model" progress path
+    # a real locally-managed runtime (llama.cpp) uses, end to end through
+    # the real SSE event schema, not just the in-process ProgressEvent shape.
+    status_updates: tuple[str, ...] = ()
 
 
 DEFAULT_MODEL_SHOW_DETAILS: dict[str, Any] = {
@@ -110,6 +115,10 @@ class FakeGenerationEngine:
 
     def __init__(self, state: FakeOllamaState | None = None):
         self.state = state or FakeOllamaState()
+        self._status_callback = None
+
+    def set_status_callback(self, callback) -> None:
+        self._status_callback = callback
 
     def fit_memories_to_context(
         self,
@@ -175,6 +184,9 @@ class FakeGenerationEngine:
             options,
             attachments,
         )
+        if self.state.status_updates and self._status_callback is not None:
+            for message in self.state.status_updates:
+                self._status_callback(message)
         if self.state.generation_delay_seconds > 0:
             time.sleep(self.state.generation_delay_seconds)
         if self.state.fail_generation or query.strip() == "!fail":

@@ -40,6 +40,8 @@ describe("SettingsPanel", () => {
         setupUrl="https://ollama.com/download"
         onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
         onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
         onClose={vi.fn()}
       />,
     );
@@ -47,7 +49,7 @@ describe("SettingsPanel", () => {
     expect(screen.queryByRole("checkbox", { name: /follow-up suggestions/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "AI Model" }));
 
-    expect(screen.getByText(/Cortex scans the Ollama models installed on this PC/)).toBeVisible();
+    expect(screen.getByText(/Cortex lists models installed through Ollama and local \.gguf files/)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "Chat model tag" })).not.toBeInTheDocument();
     const picker = screen.getByRole("combobox", { name: "Chat model" });
     picker.focus();
@@ -94,6 +96,8 @@ describe("SettingsPanel", () => {
         setupUrl="https://ollama.com/download"
         onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
         onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
         onClose={vi.fn()}
       />,
     );
@@ -140,6 +144,8 @@ describe("SettingsPanel", () => {
         setupUrl="https://ollama.com/download"
         onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
         onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
         onClose={vi.fn()}
       />,
     );

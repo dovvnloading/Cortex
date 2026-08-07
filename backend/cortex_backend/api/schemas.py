@@ -63,6 +63,20 @@ class ShutdownResponse(APIModel):
     status: Literal["accepted"] = "accepted"
 
 
+class LlamaCppRuntimeStatus(APIModel):
+    """Local llama.cpp runtime state, additive alongside the Ollama-specific
+    ``ollama_host``/``ollama_setup_url`` fields below (left unchanged so no
+    existing caller needs to change)."""
+
+    state: Literal["idle", "downloading_binary", "starting", "ready", "stopping", "failed"] = "idle"
+    binary_present: bool = False
+    loaded_model: str | None = None
+    last_error: str | None = None
+    models_directory: str = ""
+    models_directory_exists: bool = True
+    active_backend: Literal["vulkan", "cpu"] | None = None
+
+
 class SystemResponse(APIModel):
     api_version: Literal["v1"] = "v1"
     status: Literal["ok"] = "ok"
@@ -75,6 +89,7 @@ class SystemResponse(APIModel):
     started_at: datetime
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_setup_url: str = "https://ollama.com/download"
+    llamacpp: LlamaCppRuntimeStatus = Field(default_factory=LlamaCppRuntimeStatus)
 
 
 class HealthResponse(APIModel):
@@ -222,6 +237,7 @@ class DiagnosticsResponse(APIModel):
     connection: ConnectionResult | None = None
     ollama_host: str
     ollama_setup_url: str
+    llamacpp: LlamaCppRuntimeStatus = Field(default_factory=LlamaCppRuntimeStatus)
 
 
 class InstalledModel(APIModel):
@@ -234,6 +250,7 @@ class InstalledModel(APIModel):
     quantization_level: str | None = None
     family: str | None = None
     context_length: int | None = None
+    source: Literal["ollama", "gguf"] = "ollama"
 
 
 class ModelResponse(APIModel):
@@ -248,6 +265,30 @@ class ModelResponse(APIModel):
 
 class ModelPullRequest(APIModel):
     model: str = Field(min_length=1, max_length=200)
+
+
+class ModelDownloadRequest(APIModel):
+    """Download a GGUF file by direct URL or Hugging Face repo id into the
+    configured models directory. Distinct from ModelPullRequest, which is
+    Ollama's registry-tag-pull concept and doesn't apply to GGUF files."""
+
+    source: Literal["url", "huggingface"]
+    url: str | None = Field(default=None, max_length=2000)
+    repo_id: str | None = Field(default=None, max_length=200, pattern=r"^[\w.\-]+/[\w.\-]+$")
+    filename: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def _validate_source_fields(self) -> "ModelDownloadRequest":
+        if self.source == "url" and not self.url:
+            raise ValueError("url is required when source is 'url'.")
+        if self.source == "huggingface" and not (self.repo_id and self.filename):
+            raise ValueError("repo_id and filename are required when source is 'huggingface'.")
+        return self
+
+
+class HuggingFaceFileListResponse(APIModel):
+    repo_id: str
+    files: tuple[str, ...] = ()
 
 
 ExecutionStatus = Literal[
@@ -547,7 +588,7 @@ class ExecutionSSEEvent(APIModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
-JobKind = Literal["generation", "models"]
+JobKind = Literal["generation", "models", "gguf_download"]
 JobStatus = Literal[
     "queued",
     "running",
@@ -618,6 +659,7 @@ GenerationEventName = Literal[
     "generation.thinking_delta",
     "generation.content_delta",
     "generation.translation_started",
+    "generation.loading_model",
     "generation.persisting",
     "generation.completed",
     "generation.failed",

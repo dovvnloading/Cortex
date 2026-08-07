@@ -126,6 +126,37 @@ def test_new_generation_persists_model_title_and_returns_it_in_completion_event(
         assert chat["title"] == "Cortex launch planning"
 
 
+def test_generation_surfaces_local_runtime_loading_status_over_sse():
+    """An engine that reports startup progress (e.g. a locally-managed
+    llama.cpp runtime downloading/starting) via set_status_callback must
+    reach the client as a real, schema-valid SSE event -- this is an
+    end-to-end regression test for the full ProgressEvent -> GenerationEvent
+    pipeline, not just the in-process phase list, since a phase can be valid
+    at the service layer while still being rejected by the API schema."""
+    state = FakeOllamaState(status_updates=("Downloading the local model runtime...", "Starting the local model..."))
+    app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "loading-1", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        loading_events = [event for event in events if event["event"] == "generation.loading_model"]
+        assert [event["data"].get("message") for event in loading_events] == [
+            "Downloading the local model runtime...",
+            "Starting the local model...",
+        ]
+        assert events[-1]["event"] == "generation.completed"
+
+
 def test_failed_generation_keeps_user_turn_without_successful_assistant():
     state = FakeOllamaState(fail_generation=True)
     app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))

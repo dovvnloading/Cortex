@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, MemoryResponse, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
@@ -7,7 +7,7 @@ import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDi
 import { ChatPage } from "../features/chat/ChatPage";
 import { Onboarding } from "../features/shell/Onboarding";
 import { SettingsPanel, type SettingsPanelProps } from "../features/settings/SettingsPanel";
-import { localModelNames } from "../lib/localModels";
+import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore, type ModelProgress } from "../stores/useModelStore";
@@ -274,20 +274,50 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
-  const runModelJob = async (accepted: JobAccepted, model = "local model inventory") => {
+  // `checkOllamaConnection`: the refreshed inventory's `connection` field
+  // reflects Ollama's reachability specifically -- a GGUF-only user with no
+  // Ollama running should never see an unrelated job (like a successful
+  // GGUF download) reported as failed just because Ollama is unreachable.
+  // `notifyOnSuccess`: callers that want their own, more specific success
+  // message (e.g. "modelname downloaded and selected") suppress the generic
+  // one here instead of showing both.
+  const runModelJob = async (
+    accepted: JobAccepted,
+    model = "local model inventory",
+    options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean } = {},
+  ): Promise<Record<string, unknown> | null> => {
+    const { checkOllamaConnection = true, notifyOnSuccess = true } = options;
     setModelBusy(true);
     setModelProgress({ model, status: "Starting...", percent: null });
+    let completedData: Record<string, unknown> | null = null;
+    let failureMessage: string | null = null;
     try {
-      await api.streamJob(accepted.job_id, (event) => updateModelProgress(event, setModelProgress));
+      await api.streamJob(accepted.job_id, (event) => {
+        updateModelProgress(event, setModelProgress);
+        if (event.kind === "completed") completedData = event.data ?? null;
+        if (event.kind === "error") {
+          const message = event.data?.message;
+          failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
+        }
+      });
+      if (failureMessage) {
+        notify(failureMessage, "error");
+        return null;
+      }
       const refreshedModels = await api.models();
       setModels(refreshedModels);
-      if (!refreshedModels.connection?.success) {
+      if (checkOllamaConnection && !refreshedModels.connection?.success) {
         notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
-        return;
+        return completedData;
       }
-      notify(model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
-    } catch (error) { notify(apiMessage(error, "Model operation failed."), "error"); }
-    finally { setModelBusy(false); }
+      if (notifyOnSuccess) {
+        notify(model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
+      }
+      return completedData;
+    } catch (error) {
+      notify(apiMessage(error, "Model operation failed."), "error");
+      return null;
+    } finally { setModelBusy(false); }
   };
 
   const checkModels = async () => {
@@ -298,6 +328,27 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const pullModel = async (model: string) => {
     try { await runModelJob(await api.pullModel(model), model); }
     catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
+  };
+
+  const downloadGGUFModel = async (request: ModelDownloadRequest) => {
+    const label = request.source === "huggingface" ? request.filename ?? "GGUF model" : "GGUF model";
+    let accepted: JobAccepted;
+    try {
+      accepted = await api.downloadGGUFModel(request);
+    } catch (error) {
+      notify(apiMessage(error, "Could not start the model download."), "error");
+      throw error;
+    }
+    const result = await runModelJob(accepted, label, { checkOllamaConnection: false, notifyOnSuccess: false });
+    const filename = result && typeof result.filename === "string" ? result.filename : null;
+    if (!filename) {
+      // runModelJob already showed the specific failure reason as a toast.
+      throw new Error("Model download failed.");
+    }
+    const selected = await chooseLocalModel(`gguf:${filename}`);
+    if (!selected) {
+      notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
+    }
   };
 
   const chooseLocalModel = async (model: string): Promise<boolean> => {
@@ -312,7 +363,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       });
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");
-      notify(`${model} is ready for local chat.`, "success");
+      notify(`${displayModelName(model)} is ready for local chat.`, "success");
       return true;
     } catch (error) {
       notify(apiMessage(error, "Could not save the local model selection."), "error");
@@ -332,7 +383,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const selectedModel = settings.models?.chat?.trim() || null;
   const selectedModelSupportsVision = models.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
   const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
-  const runtimeConnected = models.connection?.success ?? true;
+  // A GGUF-selected model runs through Cortex's own managed local runtime,
+  // not Ollama -- Ollama's connection state is irrelevant to it.
+  const runtimeConnected = isGGUFModel(selectedModel) || (models.connection?.success ?? true);
+  const llamacppStatus: LlamaCppRuntimeStatus = system.llamacpp ?? { state: "idle", binary_present: false, models_directory: "" };
   const routeChatId = route.kind === "chat" ? route.threadId : null;
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
@@ -343,7 +397,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     <>
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat}>
         {route.kind === "settings"
-          ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} />
+          ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
           : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} />}
       </AppShell>
       <CommandPalette

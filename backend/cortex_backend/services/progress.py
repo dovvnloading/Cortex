@@ -9,6 +9,7 @@ from typing import Literal, Protocol, runtime_checkable
 ProgressPhase = Literal[
     "analysis",
     "thoughts",
+    "loading_model",
     "translation",
 ]
 

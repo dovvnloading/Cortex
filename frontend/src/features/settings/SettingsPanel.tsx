@@ -1,7 +1,12 @@
 import { Save, X } from "lucide-react";
 import { useState } from "react";
-import type { CortexSettings, ModelResponse } from "../../../../contracts/cortex-api";
-import { localModelNames } from "../../lib/localModels";
+import type {
+  CortexSettings,
+  LlamaCppRuntimeStatus,
+  ModelDownloadRequest,
+  ModelResponse,
+} from "../../../../contracts/cortex-api";
+import { displayModelName, isGGUFModel, localModelNames } from "../../lib/localModels";
 import { Select } from "../../shared/ui/Select";
 import { MemoryPanel } from "./MemoryPanel";
 import { ModelsPanel } from "../models/ModelsPanel";
@@ -23,6 +28,8 @@ export type SettingsPanelProps = {
   setupUrl: string;
   onCheckModels: () => Promise<void>;
   onPullModel: (model: string) => Promise<void>;
+  llamacppStatus: LlamaCppRuntimeStatus;
+  onDownloadGGUF: (request: ModelDownloadRequest) => Promise<void>;
   onClose: () => void;
 };
 
@@ -51,6 +58,8 @@ export function SettingsPanel({
   setupUrl,
   onCheckModels,
   onPullModel,
+  llamacppStatus,
+  onDownloadGGUF,
   onClose,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
@@ -84,7 +93,11 @@ export function SettingsPanel({
     });
   };
 
-  const modelOptions = installedModels.map((model) => ({ value: model, label: model, detail: "Installed locally" }));
+  const modelOptions = installedModels.map((model) => ({
+    value: model,
+    label: isGGUFModel(model) ? `${displayModelName(model)} (GGUF)` : model,
+    detail: "Installed locally",
+  }));
   const saveDraft = () => onSave({
     ...draft,
     models: { ...modelSettings, chat: selectedChatModel || null, title: null },
@@ -158,7 +171,7 @@ export function SettingsPanel({
                 <h3 id="model-settings-title">Local model selection</h3>
               </div>
               <div className="settings-form">
-                <p className="model-selection-note">Cortex scans the Ollama models installed on this PC. Select the model to use for chat; automatic chat titles use the same local model.</p>
+                <p className="model-selection-note">Cortex lists models installed through Ollama and local .gguf files. Select the model to use for chat; automatic chat titles use the same local model.</p>
                 {installedModels.length > 0 ? (
                   <div className="field-label">
                     <span id="chat-model-label">Chat model</span>
@@ -167,7 +180,7 @@ export function SettingsPanel({
                 ) : (
                   <div className="model-selection-empty" role="status">
                     <strong>No local models found</strong>
-                    <span>Install a model with Ollama, then rescan this workspace.</span>
+                    <span>Install a model with Ollama, or add a .gguf file to your local models folder, then rescan this workspace.</span>
                     <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
                   </div>
                 )}
@@ -261,7 +274,20 @@ export function SettingsPanel({
           )}
 
           {section === "system" && (
-            <ModelsPanel models={models} busy={modelBusy} progress={modelProgress} setupUrl={setupUrl} onCheck={onCheckModels} />
+            <ModelsPanel
+              models={models}
+              busy={modelBusy}
+              progress={modelProgress}
+              setupUrl={setupUrl}
+              onCheck={onCheckModels}
+              llamacppStatus={llamacppStatus}
+              gguf={{
+                directory: modelSettings.gguf_directory ?? "",
+                onDirectoryChange: (value) => update({ models: { ...modelSettings, gguf_directory: value || null } }),
+                onDownload: onDownloadGGUF,
+                busy: modelBusy,
+              }}
+            />
           )}
         </div>
       </div>

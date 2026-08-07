@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
+import tempfile
 from pathlib import Path
 from collections.abc import Callable
 from typing import Iterable
@@ -27,9 +28,10 @@ from cortex_backend.repositories.settings import (
 )
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
-from cortex_backend.services.models import ModelService
+from cortex_backend.services.models import ModelCatalog, ModelService
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.lifecycle import ExecutionLifecycle
+from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from cortex_backend.testing.fake_ollama import (
     FakeGenerationEngine,
     FakeOllamaGateway,
@@ -48,7 +50,7 @@ class BackendDependencies:
     settings: SettingsRepository
     chats: ChatRepository
     memories: MemoryRepository
-    models: ModelService
+    models: ModelCatalog
     generation: GenerationService
     attachments: ChatAttachmentService | None = None
 
@@ -95,6 +97,8 @@ def create_app(
     execution_coordinator: DurableFakeCoordinator | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
     installation_principal_id: str | None = None,
+    llamacpp_manager: LlamaServerManager | None = None,
+    default_gguf_models_dir: Path | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -161,6 +165,8 @@ def create_app(
             elif app.state.execution_coordinator is not None:
                 app.state.execution_coordinator.shutdown()
             app.state.execution_coordinator = None
+            if app.state.llamacpp_manager is not None:
+                app.state.llamacpp_manager.stop()
 
     app = FastAPI(
         title="Cortex Local API",
@@ -195,6 +201,10 @@ def create_app(
         "CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434"
     )
     app.state.ollama_setup_url = "https://ollama.com/download"
+    app.state.llamacpp_manager = llamacpp_manager
+    app.state.default_gguf_models_dir = default_gguf_models_dir or (
+        Path(tempfile.gettempdir()) / "cortex-gguf-models"
+    )
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=list(allowed),

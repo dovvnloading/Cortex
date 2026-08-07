@@ -104,6 +104,16 @@ class AppPaths:
         """Keep native webview state isolated from every installed browser profile."""
         return self.data_dir / "webview"
 
+    @property
+    def llamacpp_runtime_dir(self) -> Path:
+        """Cached, app-managed llama-server binaries. Never user-facing."""
+        return self.data_dir / "llamacpp_runtime"
+
+    @property
+    def default_gguf_models_dir(self) -> Path:
+        """Default GGUF drop/download folder when ModelSettings.gguf_directory is unset."""
+        return self.data_dir / "gguf_models"
+
     def ensure_data_dir(self) -> Path:
         """Create the data root only when a caller explicitly requests it."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

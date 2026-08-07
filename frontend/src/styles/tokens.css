@@ -559,7 +559,18 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .model-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 .model-chip { padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--text-muted); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 0.73rem; }
 .model-info-row { display: inline-flex; align-items: baseline; gap: 8px; }
+.model-info-source { color: var(--text-faint); font-size: 0.66rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
 .model-info-detail { color: var(--text-faint); font-size: 0.72rem; }
+.gguf-runtime { display: grid; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.gguf-runtime-backend { margin: 0; color: var(--text-muted); font-size: 0.78rem; }
+.gguf-runtime-backend strong { color: var(--text); }
+.gguf-runtime-directory { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--text-muted); }
+.gguf-runtime-directory input { flex: 1 1 260px; min-width: 0; }
+.gguf-runtime-directory-hint { display: block; margin-top: -4px; color: var(--text-faint); font-size: 0.72rem; }
+.gguf-download-form { display: grid; gap: 10px; }
+.gguf-download-source-toggle { display: inline-flex; gap: 6px; }
+.gguf-download-fields { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.gguf-download-status { color: var(--text-muted); font-size: 0.76rem; }
 .model-missing { display: grid; gap: 9px; margin: 16px 0; padding: 13px; border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-left: 3px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--danger); font-size: 0.8rem; }
 .model-optional-missing { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); background: var(--accent-soft); color: var(--text-muted); }
 .model-progress { display: grid; gap: 7px; margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--text-muted); font-size: 0.78rem; }

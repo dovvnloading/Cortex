@@ -765,6 +765,9 @@
           "generation": {
             "$ref": "#/components/schemas/GenerationSettings"
           },
+          "llamacpp": {
+            "$ref": "#/components/schemas/LlamaCppSettings"
+          },
           "memory": {
             "$ref": "#/components/schemas/MemorySettings"
           },
@@ -887,6 +890,9 @@
             },
             "title": "Invalid Settings Keys",
             "type": "array"
+          },
+          "llamacpp": {
+            "$ref": "#/components/schemas/LlamaCppRuntimeStatus"
           },
           "migration": {
             "anyOf": [
@@ -1508,6 +1514,7 @@
               "generation.thinking_delta",
               "generation.content_delta",
               "generation.translation_started",
+              "generation.loading_model",
               "generation.persisting",
               "generation.completed",
               "generation.failed",
@@ -1892,6 +1899,28 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HuggingFaceFileListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "HuggingFaceFileListResponse",
+        "type": "object"
+      },
       "ImageTransformPlan": {
         "additionalProperties": false,
         "properties": {
@@ -2051,6 +2080,15 @@
             ],
             "title": "Size"
           },
+          "source": {
+            "default": "ollama",
+            "enum": [
+              "ollama",
+              "gguf"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "supports_vision": {
             "anyOf": [
               {
@@ -2079,7 +2117,8 @@
           "kind": {
             "enum": [
               "generation",
-              "models"
+              "models",
+              "gguf_download"
             ],
             "title": "Kind",
             "type": "string"
@@ -2148,7 +2187,8 @@
           "kind": {
             "enum": [
               "generation",
-              "models"
+              "models",
+              "gguf_download"
             ],
             "title": "Kind",
             "type": "string"
@@ -2202,6 +2242,96 @@
         "title": "JobStatusResponse",
         "type": "object"
       },
+      "LlamaCppRuntimeStatus": {
+        "additionalProperties": false,
+        "description": "Local llama.cpp runtime state, additive alongside the Ollama-specific\n``ollama_host``/``ollama_setup_url`` fields below (left unchanged so no\nexisting caller needs to change).",
+        "properties": {
+          "active_backend": {
+            "anyOf": [
+              {
+                "enum": [
+                  "vulkan",
+                  "cpu"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Backend"
+          },
+          "binary_present": {
+            "default": false,
+            "title": "Binary Present",
+            "type": "boolean"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "loaded_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loaded Model"
+          },
+          "models_directory": {
+            "default": "",
+            "title": "Models Directory",
+            "type": "string"
+          },
+          "models_directory_exists": {
+            "default": true,
+            "title": "Models Directory Exists",
+            "type": "boolean"
+          },
+          "state": {
+            "default": "idle",
+            "enum": [
+              "idle",
+              "downloading_binary",
+              "starting",
+              "ready",
+              "stopping",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "LlamaCppRuntimeStatus",
+        "type": "object"
+      },
+      "LlamaCppSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "gpu_backend": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "vulkan",
+              "cpu"
+            ],
+            "title": "Gpu Backend",
+            "type": "string"
+          }
+        },
+        "title": "LlamaCppSettings",
+        "type": "object"
+      },
       "MemoryResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2229,6 +2359,62 @@
           }
         },
         "title": "MemorySettings",
+        "type": "object"
+      },
+      "ModelDownloadRequest": {
+        "additionalProperties": false,
+        "description": "Download a GGUF file by direct URL or Hugging Face repo id into the\nconfigured models directory. Distinct from ModelPullRequest, which is\nOllama's registry-tag-pull concept and doesn't apply to GGUF files.",
+        "properties": {
+          "filename": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "pattern": "^[\\w.\\-]+/[\\w.\\-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "source": {
+            "enum": [
+              "url",
+              "huggingface"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "ModelDownloadRequest",
         "type": "object"
       },
       "ModelPullRequest": {
@@ -2329,6 +2515,17 @@
               }
             ],
             "title": "Chat"
+          },
+          "gguf_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gguf Directory"
           },
           "title": {
             "anyOf": [
@@ -2968,6 +3165,9 @@
             "default": false,
             "title": "Image Transform Available",
             "type": "boolean"
+          },
+          "llamacpp": {
+            "$ref": "#/components/schemas/LlamaCppRuntimeStatus"
           },
           "ollama_host": {
             "default": "http://127.0.0.1:11434",
@@ -4467,6 +4667,83 @@
           }
         },
         "summary": "List Models"
+      }
+    },
+    "/api/v1/models/gguf/downloads": {
+      "post": {
+        "operationId": "start_gguf_download_api_v1_models_gguf_downloads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Gguf Download"
+      }
+    },
+    "/api/v1/models/gguf/huggingface-files": {
+      "get": {
+        "operationId": "list_huggingface_files_api_v1_models_gguf_huggingface_files_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HuggingFaceFileListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Huggingface Files"
       }
     },
     "/api/v1/models/pulls": {

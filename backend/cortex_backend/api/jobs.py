@@ -13,7 +13,7 @@ from uuid import uuid4
 from cortex_backend.services.progress import ProgressEvent
 
 
-JobKind = Literal["generation", "models"]
+JobKind = Literal["generation", "models", "gguf_download"]
 JobStatus = Literal[
     "queued",
     "running",

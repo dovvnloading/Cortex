@@ -125,6 +125,16 @@ class GenerationService:
             self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
             engine = self._engine_factory(snapshot)
 
+        # Optional: lets an engine (e.g. one backed by a locally-managed
+        # llama.cpp runtime) report its own startup progress -- binary
+        # download, model load -- while generate() below blocks. Most
+        # engines don't need this and simply won't define the setter.
+        status_setter = getattr(engine, "set_status_callback", None)
+        if callable(status_setter):
+            status_setter(
+                lambda message: self._publish(sink, snapshot, "loading_model", message)
+            )
+
         self._check_cancelled(cancellation_event)
         loaded_history = (
             history_messages

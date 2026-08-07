@@ -23,6 +23,14 @@ from cortex_backend.execution.qualification import (  # noqa: E402
     build_execution_lifecycle,
 )
 from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
+from cortex_backend.llamacpp.binary_fetcher import BinaryFetcher  # noqa: E402
+from cortex_backend.llamacpp.binary_release import CURRENT_RELEASE  # noqa: E402
+from cortex_backend.llamacpp.chat_client import LlamaCppChatClient  # noqa: E402
+from cortex_backend.llamacpp.model_directory import (  # noqa: E402
+    GGUFModelDirectory,
+    resolve_configured_directory,
+)
+from cortex_backend.llamacpp.server_manager import LlamaServerManager  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
 from cortex_backend.repositories.legacy_storage import (  # noqa: E402
@@ -31,9 +39,11 @@ from cortex_backend.repositories.legacy_storage import (  # noqa: E402
 )
 from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository  # noqa: E402
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository  # noqa: E402
+from cortex_backend.services.chat_client import OllamaChatClient, RoutingChatClient  # noqa: E402
 from cortex_backend.services.generation import GenerationService  # noqa: E402
 from cortex_backend.services.attachments import ChatAttachmentService  # noqa: E402
 from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
+from cortex_backend.services.model_catalog import CombinedModelCatalog  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
 
 
@@ -80,7 +90,28 @@ def build_preview_app(
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
     client = ollama.Client(host=ollama_host)
 
-    model_service = ModelService(client)
+    def gguf_directory() -> Path:
+        # Re-read settings each call (cheap SQLite read, same pattern the API
+        # routes already use) so a Settings change takes effect immediately
+        # without restarting Cortex.
+        current = settings_repository.load().settings
+        return resolve_configured_directory(
+            current.models.gguf_directory, paths.default_gguf_models_dir
+        )
+
+    llamacpp_manager = LlamaServerManager(
+        runtime_dir=paths.llamacpp_runtime_dir,
+        fetcher=BinaryFetcher(paths.llamacpp_runtime_dir),
+        release=CURRENT_RELEASE,
+        gpu_backend_setting=lambda: settings_repository.load().settings.llamacpp.gpu_backend,
+        models_directory=gguf_directory,
+    )
+    gguf_model_directory = GGUFModelDirectory(gguf_directory)
+    model_catalog = CombinedModelCatalog(ModelService(client), gguf_model_directory)
+    routing_chat_client = RoutingChatClient(
+        OllamaChatClient(client),
+        LlamaCppChatClient(llamacpp_manager, models_directory=gguf_directory),
+    )
     generation_service = GenerationService(
         history_loader=lambda thread_id: (database.load_chat(thread_id) or {}).get(
             "messages", []
@@ -90,7 +121,7 @@ def build_preview_app(
             snapshot.model,
             snapshot.title_model,
             snapshot.translation_model,
-            client,
+            routing_chat_client,
             code_execution_eligible=snapshot.code_execution_eligible,
         ),
     )
@@ -98,7 +129,7 @@ def build_preview_app(
         settings=settings_repository,
         chats=LegacyDatabaseChatRepository(database),
         memories=LegacyPermanentMemoryRepository(permanent_memory),
-        models=model_service,
+        models=model_catalog,
         generation=generation_service,
         attachments=ChatAttachmentService(execution_repository),
     )
@@ -143,6 +174,8 @@ def build_preview_app(
         readiness_check=readiness_check,
         execution_lifecycle=execution_lifecycle,
         installation_principal_id=execution_repository.installation_principal_id,
+        llamacpp_manager=llamacpp_manager,
+        default_gguf_models_dir=paths.default_gguf_models_dir,
     )
     app.state.execution_repository = execution_repository
     app.state.required_paths = (

@@ -142,6 +142,7 @@ export interface CortexSettings {
   appearance?: AppearanceSettings;
   onboarding?: OnboardingSettings;
   models?: ModelSettings;
+  llamacpp?: LlamaCppSettings;
   generation?: GenerationSettings;
   execution?: ExecutionSettings;
   memory?: MemorySettings;
@@ -172,6 +173,7 @@ export interface DiagnosticsResponse {
   connection?: ConnectionResult | null;
   ollama_host: string;
   ollama_setup_url: string;
+  llamacpp?: LlamaCppRuntimeStatus;
 }
 
 export interface ExecutionAccepted {
@@ -247,7 +249,7 @@ export interface ForkRequest {
 
 export interface GenerationEvent {
   event_id: number;
-  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelling" | "generation.cancelled";
+  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.loading_model" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelling" | "generation.cancelled";
   job_id: string;
   thread_id: string;
   timestamp: string;
@@ -308,6 +310,11 @@ export interface HealthResponse {
   status?: "ok";
 }
 
+export interface HuggingFaceFileListResponse {
+  repo_id: string;
+  files?: Array<string>;
+}
+
 export interface ImageTransformPlan {
   schema_version: "artifact.transform.v1";
   input_artifact_id: string;
@@ -326,11 +333,12 @@ export interface InstalledModel {
   quantization_level?: string | null;
   family?: string | null;
   context_length?: number | null;
+  source?: "ollama" | "gguf";
 }
 
 export interface JobAccepted {
   job_id: string;
-  kind: "generation" | "models";
+  kind: "generation" | "models" | "gguf_download";
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   thread_id?: string | null;
   user_message_id?: string | null;
@@ -338,12 +346,26 @@ export interface JobAccepted {
 
 export interface JobStatusResponse {
   job_id: string;
-  kind: "generation" | "models";
+  kind: "generation" | "models" | "gguf_download";
   thread_id?: string | null;
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   sequence: number;
   error?: string | null;
   result?: Record<string, unknown> | null;
+}
+
+export interface LlamaCppRuntimeStatus {
+  state?: "idle" | "downloading_binary" | "starting" | "ready" | "stopping" | "failed";
+  binary_present?: boolean;
+  loaded_model?: string | null;
+  last_error?: string | null;
+  models_directory?: string;
+  models_directory_exists?: boolean;
+  active_backend?: "vulkan" | "cpu" | null;
+}
+
+export interface LlamaCppSettings {
+  gpu_backend?: "auto" | "vulkan" | "cpu";
 }
 
 export interface MemoryResponse {
@@ -352,6 +374,13 @@ export interface MemoryResponse {
 
 export interface MemorySettings {
   enabled?: boolean;
+}
+
+export interface ModelDownloadRequest {
+  source: "url" | "huggingface";
+  url?: string | null;
+  repo_id?: string | null;
+  filename?: string | null;
 }
 
 export interface ModelPullRequest {
@@ -372,6 +401,7 @@ export interface ModelSettings {
   chat?: string | null;
   title?: string | null;
   translation?: string;
+  gguf_directory?: string | null;
 }
 
 export interface OnboardingSettings {
@@ -496,6 +526,7 @@ export interface SystemResponse {
   started_at: string;
   ollama_host?: string;
   ollama_setup_url?: string;
+  llamacpp?: LlamaCppRuntimeStatus;
 }
 
 export interface TranslationSettings {

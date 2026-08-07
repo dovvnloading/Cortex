@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 import asyncio
 import base64
 import binascii
@@ -70,6 +71,13 @@ from cortex_backend.execution.repository import (
     ApprovalTransitionError,
     ExecutionRepositoryError,
 )
+from cortex_backend.llamacpp.download import (
+    DownloadSource,
+    GGUFDownloadError,
+    download_gguf,
+    list_huggingface_gguf_files,
+    resolve_download_url,
+)
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import (
@@ -113,9 +121,12 @@ from .schemas import (
     HandoffResponse,
     RegenerationRequest,
     HealthResponse,
+    HuggingFaceFileListResponse,
     JobAccepted,
     JobStatusResponse,
+    LlamaCppRuntimeStatus,
     MemoryResponse,
+    ModelDownloadRequest,
     ModelPullRequest,
     ModelResponse,
     InstalledModel,
@@ -228,6 +239,7 @@ def build_router() -> APIRouter:
             started_at=request.app.state.started_at,
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,
+            llamacpp=_llamacpp_status(request),
         )
 
     @router.post("/system/shutdown", response_model=ShutdownResponse)
@@ -262,6 +274,7 @@ def build_router() -> APIRouter:
             connection=connection,
             ollama_host=request.app.state.ollama_host,
             ollama_setup_url=request.app.state.ollama_setup_url,
+            llamacpp=_llamacpp_status(request),
         )
 
     @router.get("/chats", response_model=list[ChatSummary])
@@ -1018,7 +1031,7 @@ def build_router() -> APIRouter:
         def runner(sink, cancel_event):
             if cancel_event.is_set():
                 return {"cancelled": True}
-            sink.publish_progress("model_check", "Scanning local Ollama models.")
+            sink.publish_progress("model_check", "Scanning local models.")
             connection = deps.models.check(
                 required_models=required,
                 optional_models=optional,
@@ -1040,6 +1053,89 @@ def build_router() -> APIRouter:
         try:
             snapshot = await request.app.state.jobs.start(
                 kind="models",
+                owner=principal.session_id,
+                thread_id=None,
+                runner=runner,
+            )
+        except JobRegistryClosed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except JobConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
+        return _accepted(snapshot)
+
+    @router.get(
+        "/models/gguf/huggingface-files", response_model=HuggingFaceFileListResponse
+    )
+    def list_huggingface_files(
+        repo_id: str,
+        _: SessionPrincipal = Depends(require_session),
+    ) -> HuggingFaceFileListResponse:
+        try:
+            files = list_huggingface_gguf_files(repo_id)
+        except GGUFDownloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return HuggingFaceFileListResponse(repo_id=repo_id, files=files)
+
+    @router.post(
+        "/models/gguf/downloads",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def start_gguf_download(
+        payload: ModelDownloadRequest,
+        request: Request,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> JobAccepted:
+        # A new job kind, not "models": a multi-minute HF/URL download must
+        # not block Ollama rescans/pulls for its duration (JobRegistry allows
+        # only one active job per kind).
+        settings = _load_settings(deps)
+        directory = _gguf_directory(settings, request)
+        try:
+            url, filename = resolve_download_url(
+                DownloadSource(
+                    source=payload.source,
+                    url=payload.url,
+                    repo_id=payload.repo_id,
+                    filename=payload.filename,
+                )
+            )
+        except GGUFDownloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        def runner(sink, cancel_event):
+            sink.publish_progress("gguf_download", "starting", data={"filename": filename})
+
+            def publish(update) -> None:
+                sink.publish_progress(
+                    "gguf_download",
+                    update.status,
+                    data={
+                        "filename": update.filename,
+                        "completed": update.completed,
+                        "total": update.total,
+                        "percent": update.percent,
+                    },
+                )
+
+            download_gguf(
+                url,
+                filename,
+                directory,
+                progress_callback=publish,
+                cancellation_event=cancel_event,
+            )
+            return {"filename": filename}
+
+        try:
+            snapshot = await request.app.state.jobs.start(
+                kind="gguf_download",
                 owner=principal.session_id,
                 thread_id=None,
                 runner=runner,
@@ -1929,7 +2025,33 @@ def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str
         "content_delta": "generation.content_delta",
         "translation": "generation.translation_started",
         "persisting": "generation.persisting",
+        "loading_model": "generation.loading_model",
     }.get(phase or "", "generation.status")
+
+
+def _llamacpp_status(request: Request) -> LlamaCppRuntimeStatus:
+    manager = getattr(request.app.state, "llamacpp_manager", None)
+    if manager is None:
+        return LlamaCppRuntimeStatus()
+    live = manager.status
+    return LlamaCppRuntimeStatus(
+        state=live.state,
+        binary_present=live.binary_present,
+        loaded_model=live.loaded_model,
+        last_error=live.last_error,
+        models_directory=live.models_directory,
+        models_directory_exists=live.models_directory_exists,
+        active_backend=live.active_backend,
+    )
+
+
+def _gguf_directory(settings: CortexSettings, request: Request) -> Path:
+    from cortex_backend.llamacpp.model_directory import resolve_configured_directory
+
+    default_dir = getattr(request.app.state, "default_gguf_models_dir", None) or Path(
+        "gguf_models"
+    )
+    return resolve_configured_directory(settings.models.gguf_directory, default_dir)
 
 
 def _load_settings(deps: BackendDependenciesProtocol) -> CortexSettings:
@@ -1998,6 +2120,7 @@ def _model_response(
                 quantization_level=model.quantization_level,
                 family=model.family,
                 context_length=model.context_length,
+                source=model.source,
             )
             for model in models
         ),
@@ -2038,7 +2161,7 @@ def _generation_snapshot(
     chat_model = _selected_local_model(settings.models.chat, installed_models)
     if chat_model is None:
         raise ChatDomainError(
-            "No local Ollama model is available. Install one, then rescan Models in Settings."
+            "No local model is available. Install one in Ollama, or add a GGUF file, then rescan Models in Settings."
         )
     # Titles intentionally share the selected chat model. This keeps model
     # selection to one local, user-visible choice and avoids hidden defaults.

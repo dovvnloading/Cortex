@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from threading import Event
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from cortex_backend.core.generation import ConnectionResult
 
@@ -24,6 +24,45 @@ class ModelGateway(Protocol):
         """Return Ollama's model details, including capability metadata."""
 
 
+class ModelCatalog(Protocol):
+    """The exact ``deps.models`` surface api/routes.py actually calls.
+
+    ``ModelService`` (Ollama-only) satisfies this directly. A GGUF-aware
+    deployment injects ``CombinedModelCatalog`` (services/model_catalog.py)
+    instead, which merges Ollama with a local folder scan behind the same
+    surface -- routes.py needs no changes to support either.
+    """
+
+    def inventory(self) -> tuple[tuple["InstalledModel", ...], ConnectionResult]:
+        """Read one authoritative local inventory and its connection result."""
+
+    def list_installed(self) -> tuple[str, ...]:
+        """Return the exact installed model tags/ids in stable order."""
+
+    def pull_model(
+        self,
+        model: str,
+        *,
+        progress_callback: Callable[["ModelPullProgress"], None] | None = None,
+        cancellation_event: Event | None = None,
+        verify: bool = True,
+    ) -> bool:
+        """Pull one exact Ollama tag and normalize streamed progress."""
+
+    def check(
+        self,
+        *,
+        required_models: Iterable[str],
+        optional_models: Iterable[str] = (),
+        progress_callback: Callable[["ModelPullProgress"], None] | None = None,
+        cancellation_event: Event | None = None,
+    ) -> ConnectionResult:
+        """Verify required tags and report optional tags without pulling them."""
+
+    def model_supports_vision(self, model: str) -> bool | None:
+        """Return whether a model supports image input, or None if unknown."""
+
+
 @dataclass(frozen=True, slots=True)
 class InstalledModel:
     """Safe installed-model metadata returned by Ollama."""
@@ -37,6 +76,12 @@ class InstalledModel:
     quantization_level: str | None = None
     family: str | None = None
     context_length: int | None = None
+    # Which runtime serves this model. Defaulted so every existing (Ollama)
+    # construction site is unaffected; a GGUF entry sets source="gguf" and
+    # path to the resolved file location (server-local only -- never
+    # exposed on the API schema, which only ever needs the "gguf:<name>" id).
+    source: Literal["ollama", "gguf"] = "ollama"
+    path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

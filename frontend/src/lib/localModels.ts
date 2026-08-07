@@ -19,6 +19,18 @@ export function localModelNames(models: Pick<ModelResponse, "installed_models" |
   return Array.from(new Set(names)).sort((left, right) => left.localeCompare(right));
 }
 
+/** Ollama tags never contain this prefix, so it unambiguously identifies a
+ * locally-scanned GGUF model id (see backend `llamacpp/model_directory.py`). */
+export function isGGUFModel(name: string | null | undefined): boolean {
+  return Boolean(name && name.startsWith("gguf:"));
+}
+
+/** Strip the internal "gguf:" id prefix for user-facing text -- the prefix
+ * matters for backend routing, not for what a person reads in the UI. */
+export function displayModelName(name: string): string {
+  return isGGUFModel(name) ? name.slice("gguf:".length) : name;
+}
+
 export function formatModelSize(size: number | null | undefined): string | null {
   if (!size || size < 1) return null;
   const units = ["B", "KB", "MB", "GB", "TB"];

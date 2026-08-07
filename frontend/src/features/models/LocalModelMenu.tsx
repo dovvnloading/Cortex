@@ -1,5 +1,6 @@
 import { Check, ChevronDown, RefreshCw } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { displayModelName } from "../../lib/localModels";
 
 export type LocalModelMenuProps = {
   /**
@@ -186,11 +187,11 @@ export function LocalModelMenu({
 
   if (localModels.length === 1) {
     return (
-      <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${localModels[0]}`}>
-        <span className="local-model-menu-single-label" title={localModels[0]}>
+      <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${displayModelName(localModels[0])}`}>
+        <span className="local-model-menu-single-label" title={displayModelName(localModels[0])}>
           <span>
             <span className="local-model-menu-kicker">Model</span>
-            <span className="local-model-menu-name">{localModels[0]}</span>
+            <span className="local-model-menu-name">{displayModelName(localModels[0])}</span>
           </span>
         </span>
         {renderRescan()}
@@ -198,7 +199,7 @@ export function LocalModelMenu({
     );
   }
 
-  const triggerLabel = selected ? `Selected local model: ${selected}` : localModels.length ? "Select a local model" : "No local models available";
+  const triggerLabel = selected ? `Selected local model: ${displayModelName(selected)}` : localModels.length ? "Select a local model" : "No local models available";
 
   return (
     <div className={`local-model-menu${menuOpen ? " local-model-menu-open" : ""}`} ref={rootRef} aria-busy={selectionPending || rescanPending || undefined}>
@@ -221,7 +222,7 @@ export function LocalModelMenu({
       >
         <span className="local-model-menu-trigger-label">
           <span className="local-model-menu-kicker">Model</span>
-          <span className="local-model-menu-name">{selected ?? (localModels.length ? "Select model" : "No local models")}</span>
+          <span className="local-model-menu-name">{selected ? displayModelName(selected) : localModels.length ? "Select model" : "No local models"}</span>
         </span>
         <ChevronDown aria-hidden="true" size={15} />
       </button>
@@ -235,7 +236,7 @@ export function LocalModelMenu({
               className={`local-model-menu-option${model === selected ? " local-model-menu-option-selected" : ""}`}
               type="button"
               role="option"
-              aria-label={model}
+              aria-label={displayModelName(model)}
               aria-selected={model === selected}
               tabIndex={index === safeActiveIndex ? 0 : -1}
               disabled={interactionDisabled}
@@ -243,7 +244,7 @@ export function LocalModelMenu({
               onKeyDown={(event) => handleOptionKeyDown(event, index)}
               onClick={() => void selectModel(index)}
             >
-              <span>{model}</span>
+              <span>{displayModelName(model)}</span>
               {model === selected && <Check aria-hidden="true" size={15} />}
             </button>
           ))}

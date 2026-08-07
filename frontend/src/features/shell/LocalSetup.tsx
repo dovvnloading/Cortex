@@ -1,7 +1,7 @@
 import { Check, CircleAlert, Cpu, ExternalLink, RefreshCw } from "lucide-react";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { CortexSettings, ModelResponse } from "../../../../contracts/cortex-api";
-import { formatModelSize, localModelNames } from "../../lib/localModels";
+import { displayModelName, formatModelSize, isGGUFModel, localModelNames } from "../../lib/localModels";
 
 type Props = {
   models: ModelResponse;
@@ -19,6 +19,7 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
   const [error, setError] = useState<string | null>(null);
   const choiceRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const connectionReady = models.connection?.success ?? true;
+  const hasGGUFModels = localModels.some(isGGUFModel);
   const previousModel = settings.models?.chat?.trim() || null;
   const selectedModel = localModels.includes(selection) ? selection : "";
 
@@ -47,7 +48,7 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
     window.requestAnimationFrame(() => choiceRefs.current[nextIndex ?? index]?.focus());
   };
 
-  if (!connectionReady) {
+  if (!connectionReady && !hasGGUFModels) {
     return (
       <main className="local-setup" aria-labelledby="local-setup-title">
         <section className="local-setup-card local-setup-card-alert">
@@ -55,7 +56,7 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
             <CircleAlert aria-hidden="true" size={21} />
             <h1 id="local-setup-title">Ollama is unavailable</h1>
           </div>
-          <p className="lede">Start Ollama, then rescan to make your installed models available.</p>
+          <p className="lede">Start Ollama, then rescan to make your installed models available. Or add a .gguf file to your local models folder instead -- no separate install needed.</p>
           <div className="local-setup-status local-setup-status-alert" role="status">
             <span>{models.connection?.message ?? "Cortex could not reach Ollama."}</span>
           </div>
@@ -77,7 +78,7 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
       <main className="local-setup" aria-labelledby="local-setup-title">
         <section className="local-setup-card">
           <h1 id="local-setup-title">No local models found</h1>
-          <p className="lede">Install a model in Ollama, then rescan. Cortex will list it here.</p>
+          <p className="lede">Install a model in Ollama, or add a .gguf file to your local models folder, then rescan. Cortex will list it here.</p>
           <div className="local-setup-status" role="status"><Cpu aria-hidden="true" size={17} /> <span>Waiting for the local model inventory.</span></div>
           <div className="local-setup-actions">
             <button className="button button-secondary" type="button" onClick={() => void onRescan()} disabled={busy}>
@@ -123,7 +124,10 @@ export function LocalSetup({ models, settings, busy, setupUrl, onRescan, onSelec
                 onClick={() => { setSelection(model); setError(null); }}
               >
                 <span className="model-choice-index" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
-                <span className="model-choice-copy"><strong>{model}</strong><small>{size ? `${size} installed locally` : "Installed locally"}</small></span>
+                <span className="model-choice-copy">
+                  <strong>{displayModelName(model)}</strong>
+                  <small>{(isGGUFModel(model) ? "GGUF" : "Ollama") + (size ? ` · ${size}` : "")}</small>
+                </span>
                 {selected && <Check className="model-choice-check" aria-hidden="true" size={18} />}
               </button>
             );

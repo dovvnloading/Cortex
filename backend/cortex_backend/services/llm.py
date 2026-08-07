@@ -74,16 +74,30 @@ def _extract_stats(response: dict) -> GenerationStats | None:
 
 
 def _generation_failure_message(exc: Exception) -> tuple[str, str]:
-    """Turn an Ollama failure into safe, actionable user-facing guidance.
+    """Turn a model-runtime failure into safe, actionable user-facing guidance.
 
-    Ollama's response text is deliberately not surfaced or logged here: a
-    provider error can contain request-derived content.  Classifying only the
-    known operational cases gives the user a useful next step without leaking
-    chat text into a notification, event stream, or log.
+    The runtime's raw response text is deliberately not surfaced or logged
+    here: a provider error can contain request-derived content.  Classifying
+    only the known operational cases gives the user a useful next step
+    without leaking chat text into a notification, event stream, or log.
+
+    Copy is backend-aware: an exception carrying ``backend == "llamacpp"``
+    (see ``cortex_backend.llamacpp.errors``) gets runtime-neutral guidance
+    instead of "restart Ollama" -- a llama.cpp user never installed Ollama
+    and restarting it would be meaningless advice.  Real ``ollama`` client
+    exceptions never carry a ``backend`` attribute, so this defaults to
+    ``"ollama"`` and existing behavior is unchanged for them.
     """
     status = getattr(exc, "status_code", None)
     provider_error = getattr(exc, "error", "")
     text = provider_error.lower() if isinstance(provider_error, str) else ""
+    backend = getattr(exc, "backend", "ollama")
+    # Mid-sentence and sentence-start forms, since "the local model runtime"
+    # needs a capital when it opens a user-facing message but "Ollama" is
+    # already capitalized either way.
+    runtime_name = "Ollama" if backend == "ollama" else "the local model runtime"
+    runtime_name_title = "Ollama" if backend == "ollama" else "The local model runtime"
+    error_prefix = "ollama" if backend == "ollama" else "llamacpp"
 
     if status == 404 or "model not found" in text or "not found" in text:
         return (
@@ -116,21 +130,21 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
         )
     if "timeout" in text or "timed out" in text:
         return (
-            "The local model did not respond in time. Retry the message or restart Ollama if it keeps happening.",
+            f"The local model did not respond in time. Retry the message or restart {runtime_name} if it keeps happening.",
             "model_timeout",
         )
     if "connection refused" in text or "connection reset" in text:
         return (
-            "Cortex lost its connection to Ollama. Start or restart Ollama, then retry the message.",
+            f"Cortex lost its connection to {runtime_name}. Start or restart {runtime_name}, then retry the message.",
             "runtime_unavailable",
         )
     if isinstance(status, int):
         return (
-            "Ollama rejected this request. Retry the message; if it repeats, restart Ollama or choose another model.",
-            f"ollama_http_{status}",
+            f"{runtime_name_title} rejected this request. Retry the message; if it repeats, restart {runtime_name} or choose another model.",
+            f"{error_prefix}_http_{status}",
         )
     return (
-        "The local model could not complete this request. Retry the message; if it repeats, restart Ollama or choose another model.",
+        f"The local model could not complete this request. Retry the message; if it repeats, restart {runtime_name} or choose another model.",
         type(exc).__name__,
     )
 
@@ -359,15 +373,19 @@ class SynthesisAgent:
     """
     Invokes LLMs for synthesis, command parsing, and translation.
 
-    This class acts as an interface to the Ollama client, handling prompt creation,
-    API calls for response generation, parsing of special tags (like <memo> or
-    <clear_memory />), and chaining outputs through a translation model.
+    This class acts as an interface to a local model runtime, handling prompt
+    creation, API calls for response generation, parsing of special tags
+    (like <memo> or <clear_memory />), and chaining outputs through a
+    translation model. The runtime itself is abstracted behind a
+    :class:`~cortex_backend.services.chat_client.ChatClient` -- today that's
+    either a direct Ollama client or a :class:`RoutingChatClient` that also
+    dispatches to a locally-managed llama.cpp runtime for ``gguf:`` model ids.
 
     Attributes:
         gen_model (str): The name of the model used for generating chat responses.
         title_model (str): The name of the model used for generating chat titles.
         translation_model (str): The name of the model used for translations.
-        ollama_client: An instance of the Ollama client.
+        chat_client: A :class:`ChatClient` implementation.
         code_execution_eligible (bool): Whether this immutable turn may emit a
             validated local execution proposal.
     """
@@ -376,7 +394,7 @@ class SynthesisAgent:
         gen_model: str,
         title_model: str,
         translation_model: str,
-        ollama_client,
+        chat_client,
         *,
         code_execution_eligible: bool = False,
     ):
@@ -387,17 +405,28 @@ class SynthesisAgent:
             gen_model (str): The identifier for the primary generation model.
             title_model (str): The identifier for the title generation model.
             translation_model (str): The identifier for the translation model.
-            ollama_client: An initialized Ollama client instance.
+            chat_client: A ChatClient implementation (see services/chat_client.py).
             code_execution_eligible (bool): Immutable per-turn admission for
                 the optional local code contract.
         """
         self.gen_model = gen_model
         self.title_model = title_model
         self.translation_model = translation_model
-        self.ollama_client = ollama_client
+        self.chat_client = chat_client
         self.code_execution_eligible = code_execution_eligible
         self.last_code_proposal: CodeExecutionProposal | None = None
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
+
+    def set_status_callback(self, callback) -> None:
+        """Optional hook GenerationService sets before calling generate().
+
+        Forwarded to the chat client only if it supports one (today, a
+        RoutingChatClient/LlamaCppChatClient does, to surface local-runtime
+        startup progress; a bare ollama.Client does not need it).
+        """
+        setter = getattr(self.chat_client, "set_status_callback", None)
+        if callable(setter):
+            setter(callback)
 
     @staticmethod
     def estimate_tokens(value: str) -> int:
@@ -610,7 +639,7 @@ class SynthesisAgent:
             if 'num_ctx' in api_options:
                 api_options.setdefault('num_predict', self.output_token_reservation(api_options['num_ctx']))
 
-            response = self.ollama_client.chat(
+            response = self.chat_client.chat(
                 model=self.gen_model,
                 messages=prompt_messages,
                 options=api_options
@@ -657,7 +686,7 @@ class SynthesisAgent:
         prompt = f"Translate the following text into {target_language}. Provide only the translation, no introductory or concluding remarks.\n\nText:\n{text}"
         
         try:
-            response = self.ollama_client.chat(
+            response = self.chat_client.chat(
                 model=self.translation_model,
                 messages=[{'role': 'user', 'content': prompt}],
                 options={'temperature': 0.1}
@@ -824,7 +853,7 @@ class SynthesisAgent:
         prompt_messages = PromptTemplate.build_chat_title_prompt(chat_history)
         logging.info(f"Generating chat title using model '{self.title_model}'...")
         try:
-            response = self.ollama_client.chat(
+            response = self.chat_client.chat(
                 model=self.title_model,
                 messages=prompt_messages,
                 options={'temperature': 0.2}

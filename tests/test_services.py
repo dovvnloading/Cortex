@@ -88,6 +88,23 @@ class _FakeEngine:
         return self.title_response
 
 
+class _StatusReportingEngine(_FakeEngine):
+    """An engine that reports startup progress (e.g. a llama.cpp runtime
+    downloading/starting) via the optional set_status_callback hook."""
+
+    def __init__(self):
+        super().__init__()
+        self._status_callback = None
+
+    def set_status_callback(self, callback) -> None:
+        self._status_callback = callback
+
+    def generate(self, **kwargs):
+        if self._status_callback is not None:
+            self._status_callback("Starting the local model...")
+        return super().generate(**kwargs)
+
+
 class _FakeGateway:
     def __init__(self, listings: list[dict]):
         self.listings = iter(listings)
@@ -145,6 +162,26 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(engine.history_messages, [{"role": "assistant", "content": "old"}])
         self.assertEqual(engine.memory_inputs, ["remember tea"])
         self.assertEqual(engine.options["num_ctx"], 4096)
+
+    def test_engine_status_callback_reports_as_loading_model_progress(self):
+        """An engine backed by a locally-managed runtime (llama.cpp) can
+        report its own startup progress through the normal progress sink,
+        so a slow first launch doesn't look like Cortex has hung. Engines
+        that don't define set_status_callback (the common case) are
+        unaffected -- covered by every other test in this file, none of
+        which define it."""
+        engine = _StatusReportingEngine()
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(memories_enabled=False, translation_enabled=False), progress_sink=recorder)
+
+        loading_events = [event for event in recorder.events if event.phase == "loading_model"]
+        self.assertEqual([event.message for event in loading_events], ["Starting the local model..."])
 
     def test_disabled_memories_remove_model_requested_memory_actions(self):
         engine = _FakeEngine(translation=TranslationResult.succeeded("response"))
