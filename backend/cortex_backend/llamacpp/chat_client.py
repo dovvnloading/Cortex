@@ -50,7 +50,16 @@ class LlamaCppChatClient:
 
     def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
         model_path = resolve_gguf_path(self._models_directory(), model)
-        num_ctx = int(options.get("num_ctx", 4096))
+        # None means "no preference" -- title/translation calls pass a
+        # minimal options dict with no num_ctx at all. Since num_ctx is a
+        # launch-time flag for llama-server (unlike Ollama, where it's a
+        # per-request option), treating a missing value as "default to
+        # 4096" would force a full server restart on every such call
+        # whenever the real chat num_ctx differs from 4096 -- and then
+        # another restart back on the next real message. See
+        # LlamaServerManager.ensure_ready for how None is handled.
+        raw_num_ctx = options.get("num_ctx")
+        num_ctx = int(raw_num_ctx) if raw_num_ctx is not None else None
         handle = self._provider.ensure_ready(model_path, num_ctx=num_ctx, on_status=self._status_callback)
         body = _build_request_body(messages, options)
         started = time.monotonic()

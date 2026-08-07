@@ -119,7 +119,7 @@ class _StaticProvider:
         self._base_url = base_url
         self.received_on_status = None
 
-    def ensure_ready(self, model_path: Path, *, num_ctx: int, on_status=None) -> ServerHandle:
+    def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
         del num_ctx
         self.received_on_status = on_status
         return ServerHandle(base_url=self._base_url, model_path=model_path)

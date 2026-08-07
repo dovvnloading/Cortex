@@ -167,6 +167,25 @@ def test_ensure_ready_restarts_when_num_ctx_changes(tmp_path: Path) -> None:
     assert len(launcher.launch_args) == 2
 
 
+def test_ensure_ready_with_no_num_ctx_preference_reuses_the_running_server(tmp_path: Path) -> None:
+    """Regression test: title/translation calls pass num_ctx=None (they
+    don't carry the user's context-window setting). Treating that as "must
+    be 4096" would restart the server on every such call whenever the real
+    chat num_ctx differs from 4096 -- and then restart it right back on the
+    next real message, thrashing forever."""
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=6144)
+    manager.ensure_ready(model_path, num_ctx=None)  # e.g. a chat-title call
+    manager.ensure_ready(model_path, num_ctx=6144)  # next real message
+
+    assert len(launcher.launch_args) == 1
+    assert manager.status.state == "ready"
+
+
 def test_ensure_ready_restarts_when_model_changes(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     launcher = _QueueLauncher([_FakePopen(), _FakePopen()])

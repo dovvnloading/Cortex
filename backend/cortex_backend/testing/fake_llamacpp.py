@@ -38,7 +38,7 @@ class FakeLlamaServerProvider:
         self.state = state or FakeLlamaCppState()
         self.ensure_ready_calls: list[tuple[Path, int]] = []
 
-    def ensure_ready(self, model_path: Path, *, num_ctx: int, on_status=None) -> ServerHandle:
+    def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
         self.ensure_ready_calls.append((model_path, num_ctx))
         if on_status is not None:
             on_status("Starting the local model...")

@@ -41,6 +41,11 @@ _HEALTH_STATUS_CACHE_SECONDS = 5.0
 _SHUTDOWN_GRACE_SECONDS = 5.0
 _STATUS_REPEAT_SECONDS = 5.0
 _STDERR_TAIL_LINES = 200
+# Used only when a call with no num_ctx preference (title/translation) is
+# the very first thing to ever request this model -- i.e. there is no
+# already-loaded context size to inherit. In normal use the main chat call
+# establishes the real context size first, so this rarely matters.
+_DEFAULT_NUM_CTX = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +66,7 @@ class LlamaServerProvider(Protocol):
     process manager exists."""
 
     def ensure_ready(
-        self, model_path: Path, *, num_ctx: int, on_status: StatusCallback | None = None
+        self, model_path: Path, *, num_ctx: int | None, on_status: StatusCallback | None = None
     ) -> ServerHandle:
         ...
 
@@ -160,10 +165,19 @@ class LlamaServerManager:
     # -- public API -------------------------------------------------------
 
     def ensure_ready(
-        self, model_path: Path, *, num_ctx: int, on_status: StatusCallback | None = None
+        self, model_path: Path, *, num_ctx: int | None, on_status: StatusCallback | None = None
     ) -> ServerHandle:
-        """Block the caller's thread until a server serving ``model_path`` at
-        ``num_ctx`` is ready, reusing the current process if it already matches.
+        """Block the caller's thread until a server serving ``model_path`` is
+        ready, reusing the current process if it already matches.
+
+        ``num_ctx=None`` means "no preference" (used by title/translation
+        calls, which don't carry the user's context-window setting): it
+        reuses whatever context size is already loaded for this model
+        rather than forcing a specific one. Only an explicit, *different*
+        num_ctx triggers a restart -- num_ctx is a launch-time flag for
+        llama-server (unlike Ollama, where it's a per-request option), so
+        treating "unspecified" as "must be exactly 4096" would restart the
+        server on every title-generation call.
 
         ``on_status`` is called with short, user-facing progress strings only
         while real work is happening (binary download, process start) -- an
@@ -174,9 +188,14 @@ class LlamaServerManager:
             if self._is_reusable(model_path, num_ctx):
                 assert self._base_url is not None
                 return ServerHandle(base_url=self._base_url, model_path=model_path)
+            effective_num_ctx = (
+                num_ctx
+                if num_ctx is not None
+                else (self._loaded_num_ctx if self._loaded_model_path == model_path else _DEFAULT_NUM_CTX)
+            )
             if self._process is not None:
                 self._stop_locked()
-            return self._start_locked(model_path, num_ctx, on_status)
+            return self._start_locked(model_path, effective_num_ctx, on_status)
 
     @property
     def status(self) -> LlamaCppRuntimeStatus:
@@ -204,10 +223,12 @@ class LlamaServerManager:
 
     # -- internals ----------------------------------------------------------
 
-    def _is_reusable(self, model_path: Path, num_ctx: int) -> bool:
+    def _is_reusable(self, model_path: Path, num_ctx: int | None) -> bool:
         if self._state != "ready" or self._process is None:
             return False
-        if (self._loaded_model_path, self._loaded_num_ctx) != (model_path, num_ctx):
+        if self._loaded_model_path != model_path:
+            return False
+        if num_ctx is not None and self._loaded_num_ctx != num_ctx:
             return False
         if self._process.poll() is not None:
             self._state = "failed"
