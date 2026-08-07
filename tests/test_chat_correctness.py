@@ -11,6 +11,18 @@ from cortex_backend.core.generation import GenerationAttachment
 from cortex_backend.services.llm import SynthesisAgent
 
 
+class _CapturingClient:
+    """Records the options a generate() call actually sends to the model."""
+
+    def __init__(self, message: dict):
+        self.message = message
+        self.last_options: dict | None = None
+
+    def chat(self, *, model, messages, options):
+        self.last_options = options
+        return {"message": self.message}
+
+
 class ChatCorrectnessTests(unittest.TestCase):
     def test_reasoning_metadata_is_scoped_to_assistant_messages(self):
         user_response = ChatMessage(role="user", content="Question", thoughts="must not leak")
@@ -141,6 +153,36 @@ class ChatCorrectnessTests(unittest.TestCase):
         self.assertEqual(fitted[0].filename, "large.md")
         self.assertLess(len(fitted[0].text_content or ""), len(attachment.text_content or ""))
         self.assertIn("truncated to fit the model context", fitted[0].text_content or "")
+
+    def test_generate_does_not_cap_output_length_below_the_configured_context(self):
+        # A reasoning-capable model spends tokens on an invisible "thinking"
+        # block before writing any visible answer. Regression guard for a
+        # bug where generate() silently forced num_predict down to the small
+        # (max 1024) budget meant for trimming attachments/history, so the
+        # thinking block alone would exhaust it and the model was cut off
+        # before ever producing an answer -- persisting a chat with empty
+        # content next to a full reasoning trace.
+        client = _CapturingClient({"content": "the answer", "thinking": "reasoning..."})
+        agent = SynthesisAgent("chat", "title", "translate", client)
+
+        agent.generate("question", "No history available.", [], False, None, options={"num_ctx": 8192})
+
+        self.assertIsNotNone(client.last_options)
+        self.assertNotIn("num_predict", client.last_options)
+
+    def test_generate_surfaces_an_empty_answer_next_to_its_reasoning_rather_than_dropping_it(self):
+        # If a model still returns nothing usable despite the fix above, the
+        # empty answer must reach the caller intact (paired with whatever
+        # reasoning came back) instead of being silently swapped for
+        # something else -- the frontend is responsible for explaining an
+        # empty-content/non-empty-thoughts message to the user.
+        client = _CapturingClient({"content": "", "thinking": "still reducing the problem..."})
+        agent = SynthesisAgent("chat", "title", "translate", client)
+
+        answer, thoughts, _, _ = agent.generate("question", "No history available.", [], False, None)
+
+        self.assertEqual(answer, "")
+        self.assertEqual(thoughts, "still reducing the problem...")
 
     def test_vector_memory_is_not_initialized_until_integrated(self):
         source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")

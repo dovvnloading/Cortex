@@ -108,6 +108,24 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByText("result.md")).toBeInTheDocument();
   });
 
+  it("explains an empty answer next to its reasoning instead of showing a blank bubble", async () => {
+    const transcript: ChatResponse = {
+      id: "thread-a",
+      title: "Workbench",
+      timestamp: "2026-01-01T00:00:00Z",
+      revision: 1,
+      messages: [
+        { id: "m-1", role: "user", content: "Explain the halting problem." },
+        { id: "m-2", role: "assistant", content: "", thoughts: "Still working through the reduction..." },
+      ],
+    };
+    const api = chatApi({ chat: vi.fn(async () => transcript) });
+    renderChat(api);
+
+    expect(await screen.findByText("Reasoning")).toBeInTheDocument();
+    expect(screen.getByText("Cortex ran out of room to finish this answer -- see its reasoning below.")).toBeInTheDocument();
+  });
+
   it("never renders the previous transcript when the current route fails to load", async () => {
     const alpha: ChatResponse = {
       id: "thread-a",

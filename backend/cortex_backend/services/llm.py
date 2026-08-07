@@ -636,8 +636,20 @@ class SynthesisAgent:
         try:
             if api_options.get('seed') == -1:
                 del api_options['seed']
-            if 'num_ctx' in api_options:
-                api_options.setdefault('num_predict', self.output_token_reservation(api_options['num_ctx']))
+
+            # Deliberately no num_predict/max_tokens default here: both Ollama
+            # and llama-server already stop generation on their own once the
+            # configured num_ctx fills up, which is the limit the user
+            # actually controls. output_token_reservation() exists only to
+            # budget prompt-side text (attachments/history/memories) so a
+            # normal answer still fits -- it is far too small (capped at
+            # 1024 tokens) to also serve as the model's total output
+            # ceiling. Reasoning-capable models spend tokens on an invisible
+            # "thinking" block before ever writing visible answer text, and
+            # a 1024-token ceiling routinely gets consumed entirely by that
+            # thinking, cutting generation off before any answer exists --
+            # the model call still "succeeds", but the persisted message has
+            # empty content next to a full reasoning trace.
 
             response = self.chat_client.chat(
                 model=self.gen_model,
