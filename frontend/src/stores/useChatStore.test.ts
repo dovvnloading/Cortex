@@ -8,6 +8,7 @@ const idleGeneration = {
   partialContent: "",
   partialThoughts: "",
   statusText: "",
+  contentReady: false,
 };
 
 describe("useChatStore", () => {
@@ -79,6 +80,17 @@ describe("useChatStore", () => {
 
     useChatStore.getState().revertStopping("job-1");
     expect(useChatStore.getState().generation.phase).toBe("streaming");
+  });
+
+  it("markContentReady flips contentReady only for the matching job, without touching the buffered text", () => {
+    useChatStore.getState().beginGeneration("job-1", "thread-1");
+    useChatStore.getState().appendContentToken("job-1", "The answer");
+    useChatStore.getState().markContentReady("stale-job");
+    expect(useChatStore.getState().generation.contentReady).toBe(false);
+
+    useChatStore.getState().markContentReady("job-1");
+    expect(useChatStore.getState().generation.contentReady).toBe(true);
+    expect(useChatStore.getState().generation.partialContent).toBe("The answer");
   });
 
   it("endGeneration resets the slice to idle only for the matching job", () => {

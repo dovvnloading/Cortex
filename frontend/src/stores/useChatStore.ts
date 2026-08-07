@@ -13,6 +13,17 @@ export interface GenerationState {
   partialContent: string;
   partialThoughts: string;
   statusText: string;
+  /**
+   * True once the backend has sent every content/thinking token and moved
+   * on to bookkeeping (persisting the message, generating a chat title).
+   * The answer text itself never changes after this point, even though the
+   * job is technically still "running" for a bit longer -- title
+   * generation in particular can take as long as the answer itself for a
+   * reasoning model, so the UI must stop looking like it's still typing
+   * once this flips, rather than hanging on a blinking cursor for
+   * unrelated backend bookkeeping the user can't see the effect of yet.
+   */
+  contentReady: boolean;
 }
 
 interface ChatStoreState {
@@ -29,6 +40,7 @@ interface ChatStoreState {
   appendContentToken: (jobId: string, delta: string) => void;
   appendThinkingToken: (jobId: string, delta: string) => void;
   setStatusText: (jobId: string, text: string) => void;
+  markContentReady: (jobId: string) => void;
   markStopping: (jobId: string) => void;
   revertStopping: (jobId: string) => void;
   endGeneration: (jobId: string) => void;
@@ -43,6 +55,7 @@ const idleGeneration: GenerationState = {
   partialContent: "",
   partialThoughts: "",
   statusText: "",
+  contentReady: false,
 };
 
 /**
@@ -86,6 +99,8 @@ export const useChatStore = create<ChatStoreState>((set) => ({
     ),
   setStatusText: (jobId, text) =>
     set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, statusText: text } } : state)),
+  markContentReady: (jobId) =>
+    set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, contentReady: true } } : state)),
   markStopping: (jobId) =>
     set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, phase: "stopping" } } : state)),
   revertStopping: (jobId) =>

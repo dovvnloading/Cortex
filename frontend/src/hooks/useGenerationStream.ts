@@ -113,6 +113,15 @@ export function useGenerationStream(api: CortexApi) {
                 if (event.event === "generation.content_delta" && typeof data.delta === "string") {
                   contentFlusher.push(data.delta);
                 }
+                if (event.event === "generation.persisting") {
+                  // Every token has been sent; only backend bookkeeping
+                  // (saving the message, generating a chat title) remains.
+                  // Flush immediately so the UI can drop the "still typing"
+                  // look right away instead of waiting on that bookkeeping.
+                  contentFlusher.flushNow();
+                  thoughtsFlusher.flushNow();
+                  useChatStore.getState().markContentReady(job.jobId);
+                }
                 if (event.event === "generation.completed") {
                   terminal = true;
                   void onCompleted(job.threadId);

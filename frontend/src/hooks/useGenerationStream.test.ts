@@ -77,6 +77,36 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation.phase).toBe("streaming");
   });
 
+  it("generation.persisting flushes buffered text and marks the answer ready while the job is still running", async () => {
+    let emit: ((event: unknown) => void) | null = null;
+    const api = fakeApi({
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }),
+    });
+    const { result } = renderHook(() => useGenerationStream(api));
+
+    act(() => {
+      result.current.start("job-persist", "thread-persist", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    act(() => {
+      emit!({ event_id: 1, event: "generation.content_delta", job_id: "job-persist", thread_id: "thread-persist", data: { delta: "The answer" } });
+      emit!({ event_id: 2, event: "generation.persisting", job_id: "job-persist", thread_id: "thread-persist", data: { message: "Saving the response." } });
+    });
+
+    // Bookkeeping (title generation) may still be running -- the job must
+    // stay active -- but the answer text is final and known immediately,
+    // without waiting an animation frame for the flush.
+    expect(useChatStore.getState().generation.partialContent).toBe("The answer");
+    expect(useChatStore.getState().generation.contentReady).toBe(true);
+    expect(useChatStore.getState().generation.jobId).toBe("job-persist");
+  });
+
   it("ignores an event whose thread_id does not match the tracked job", async () => {
     let emit: ((event: unknown) => void) | null = null;
     const api = fakeApi({

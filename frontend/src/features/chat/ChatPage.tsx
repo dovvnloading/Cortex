@@ -473,12 +473,12 @@ export function ChatPage({
           <>
             {activeJobForCurrentThread && !generation.partialContent && !generation.partialThoughts && <GenerationStatus status={generation.statusText} />}
             {activeJobForCurrentThread && (generation.partialContent || generation.partialThoughts) && (
-              <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress">
+              <article className="message-card message-assistant message-pending" aria-label={generation.contentReady ? "Cortex response ready, saving..." : "Cortex response in progress"}>
                 <MessageIdentity role="assistant" />
                 <div className="message-bubble">
-                  {generation.partialThoughts && <details className="reasoning" open><summary><span>Reasoning</span><span className="disclosure-hint">Live</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={false} /></div></div></details>}
-                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={false} /></div>}
-                  <span className="streaming-caret" aria-hidden="true" />
+                  {generation.partialThoughts && <details className="reasoning" open><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
+                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={generation.contentReady} /></div>}
+                  {!generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}
                 </div>
               </article>
             )}
