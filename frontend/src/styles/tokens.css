@@ -399,7 +399,13 @@ a { color: inherit; text-decoration: none; }
 .composer-attach-control::after { content: "Attach"; }
 .composer-attach-control:hover, .composer-attach-control:focus-within { border-color: var(--line); background: var(--surface-soft); color: var(--text); }
 .composer-attach-control-busy { cursor: wait; color: var(--accent); }
-.composer-model-control { display: flex; flex: 0 1 auto; min-width: 0; max-width: min(100%, 360px); overflow: visible; }
+.composer-model-control { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: min(100%, 360px); overflow: visible; }
+.runtime-badge { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; font-size: 0.68rem; font-weight: 650; white-space: nowrap; }
+.runtime-badge-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.runtime-badge-ready { color: var(--success); }
+.runtime-badge-idle { color: var(--text-faint); }
+.runtime-badge-starting { color: var(--accent); }
+.runtime-badge-failed { color: var(--danger); }
 
 .params-trigger { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 32px; gap: 6px; border: 1px solid transparent; border-radius: 8px; padding: 0 8px; background: transparent; color: var(--text-muted); font-size: 0.7rem; font-weight: 680; white-space: nowrap; transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
 .params-trigger:hover:not(:disabled), .params-trigger:focus-visible { border-color: var(--line); background: var(--surface-soft); color: var(--text); outline: 0; }

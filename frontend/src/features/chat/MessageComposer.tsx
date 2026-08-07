@@ -12,8 +12,40 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { ChatAttachment, GenerationOptionsOverride, GenerationSettings } from "../../../../contracts/cortex-api";
+import { isGGUFModel } from "../../lib/localModels";
+import { useModelStore } from "../../stores/useModelStore";
 import { GenerationParamsPopover } from "./GenerationParamsPopover";
 import { LocalModelMenu } from "../models/LocalModelMenu";
+
+/** Only rendered for a selected GGUF model -- Ollama has no comparable
+ * "is the runtime actually loaded yet" state worth surfacing here. Keeps
+ * the user from wondering whether sending a message will trigger a local
+ * model load, and shows the currently active state as soon as this
+ * component polls it, not only when a generation is already in flight. */
+function LlamaRuntimeBadge({ selectedModel }: { selectedModel: string }) {
+  const llamacppStatus = useModelStore((state) => state.llamacppStatus);
+  if (!llamacppStatus) return null;
+
+  const isThisModelLoaded = llamacppStatus.state === "ready" && llamacppStatus.loaded_model === selectedModel;
+  const isStarting = llamacppStatus.state === "starting" || llamacppStatus.state === "downloading_binary";
+  const tone = isThisModelLoaded ? "runtime-badge-ready" : llamacppStatus.state === "failed" ? "runtime-badge-failed" : isStarting ? "runtime-badge-starting" : "runtime-badge-idle";
+  const label = isThisModelLoaded
+    ? `Loaded${llamacppStatus.active_backend === "vulkan" ? " · GPU" : llamacppStatus.active_backend === "cpu" ? " · CPU" : ""}`
+    : llamacppStatus.state === "downloading_binary"
+      ? "Downloading runtime…"
+      : llamacppStatus.state === "starting"
+        ? "Starting…"
+        : llamacppStatus.state === "failed"
+          ? "Failed to start"
+          : "Not loaded yet";
+
+  return (
+    <span className={`runtime-badge ${tone}`} title={llamacppStatus.last_error ?? undefined}>
+      <span className="runtime-badge-dot" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
 
@@ -292,6 +324,7 @@ export function MessageComposer({
                   onRescan={onRescanModels}
                   disabled={controlsLocked || modelBusy}
                 />
+                {selectedModel && isGGUFModel(selectedModel) && <LlamaRuntimeBadge selectedModel={selectedModel} />}
               </div>
               {onGenerationOptionsChange && (
                 <GenerationParamsPopover

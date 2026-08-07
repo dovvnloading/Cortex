@@ -97,6 +97,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const setModelBusy = useModelStore((state) => state.setModelBusy);
   const modelProgress = useModelStore((state) => state.modelProgress);
   const setModelProgress = useModelStore((state) => state.setModelProgress);
+  const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
   const chatsRef = useRef(chats);
@@ -116,6 +117,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         api.memories(),
       ]);
       setSystem(systemResponse);
+      setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
@@ -135,7 +137,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     } finally {
       setLoading(false);
     }
-  }, [api, onSessionExpired, setChats, setModels, setSettings]);
+  }, [api, onSessionExpired, setChats, setModels, setSettings, setLlamacppStatus]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
@@ -171,6 +173,31 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       window.clearInterval(timer);
     };
   }, [api, onSessionExpired, system?.execution_preview_available]);
+
+  // Only poll the local llama.cpp runtime state while a GGUF model is
+  // actually selected -- Ollama users never spend cycles on this. A GGUF
+  // model can take a while to download/start on first use, and this is
+  // what lets the composer show live "loaded" / "starting" state instead
+  // of only ever reflecting whatever was true at the last full page load.
+  const selectedModelIsGGUF = isGGUFModel(settings?.models?.chat ?? null);
+  useEffect(() => {
+    if (!selectedModelIsGGUF) return undefined;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const response = await api.system();
+        if (!disposed) setLlamacppStatus(response.llamacpp ?? null);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [api, onSessionExpired, selectedModelIsGGUF, setLlamacppStatus]);
 
   const visibleExecutionTasks = system?.execution_preview_available
     ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
