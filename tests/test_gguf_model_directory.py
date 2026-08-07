@@ -9,18 +9,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+# The gguf availability check must run before any module that reads GGUF
+# files is imported, so these imports are legitimately below it.
 gguf = pytest.importorskip("gguf")
 
-from cortex_backend.core.generation import ConnectionResult
-from cortex_backend.llamacpp.model_directory import (
+from cortex_backend.core.generation import ConnectionResult  # noqa: E402
+from cortex_backend.llamacpp.model_directory import (  # noqa: E402
     GGUFModelDirectory,
     InvalidGGUFModelId,
     resolve_configured_directory,
     resolve_gguf_path,
     to_model_id,
 )
-from cortex_backend.services.model_catalog import CombinedModelCatalog
-from cortex_backend.services.models import InstalledModel
+from cortex_backend.services.model_catalog import CombinedModelCatalog  # noqa: E402
+from cortex_backend.services.models import InstalledModel  # noqa: E402
 
 
 def _write_gguf(path: Path, *, context_length: int = 4096, quant=None) -> None:
