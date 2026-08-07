@@ -48,7 +48,9 @@
     <Folder Include="backend\cortex_backend\" />
     <Folder Include="backend\cortex_backend\api\" />
     <Folder Include="backend\cortex_backend\core\" />
+    <Folder Include="backend\cortex_backend\execution\" />
     <Folder Include="backend\cortex_backend\launcher\" />
+    <Folder Include="backend\cortex_backend\llamacpp\" />
     <Folder Include="backend\cortex_backend\repositories\" />
     <Folder Include="backend\cortex_backend\services\" />
     <Folder Include="backend\cortex_backend\testing\" />
@@ -60,9 +62,25 @@
     <Folder Include="frontend\src\api\" />
     <Folder Include="frontend\src\app\" />
     <Folder Include="frontend\src\components\" />
+    <Folder Include="frontend\src\features\" />
+    <Folder Include="frontend\src\features\chat\" />
+    <Folder Include="frontend\src\features\command-palette\" />
+    <Folder Include="frontend\src\features\markdown\" />
+    <Folder Include="frontend\src\features\models\" />
+    <Folder Include="frontend\src\features\settings\" />
+    <Folder Include="frontend\src\features\shell\" />
+    <Folder Include="frontend\src\hooks\" />
+    <Folder Include="frontend\src\lib\" />
+    <Folder Include="frontend\src\shared\" />
+    <Folder Include="frontend\src\shared\ui\" />
+    <Folder Include="frontend\src\stores\" />
     <Folder Include="frontend\src\styles\" />
     <Folder Include="frontend\src\test\" />
     <Folder Include="packaging\" />
+    <Folder Include="packaging\.runtime\" />
+    <Folder Include="packaging\.runtime\webview2\" />
+    <Folder Include="packaging\recipe_worker\" />
+    <Folder Include="packaging\recipe_worker\__pycache__\" />
     <Folder Include="tests\" />
     <Folder Include="tools\" />
   </ItemGroup>
