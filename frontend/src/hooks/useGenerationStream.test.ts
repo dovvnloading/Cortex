@@ -243,4 +243,39 @@ describe("useGenerationStream", () => {
 
     act(() => result.current.stop());
   });
+
+  it("keeps retrying, and does not orphan the job, when the status-check fallback also fails", async () => {
+    // Regression test: the stream connection drops AND the fallback status
+    // check used to confirm what happened also fails (e.g. the backend is
+    // briefly overloaded). The old code let that second failure escape
+    // uncaught, which skipped past the loop entirely without ever setting
+    // `terminal` -- onFailed() still fired once, but nothing was left
+    // running to ever call endGeneration(), so the composer and pending
+    // message bubble reported "Generating" forever with no way to recover.
+    useChatStore.getState().beginGeneration("job-10", "thread-10");
+    const generationStatus = vi.fn().mockRejectedValue(new Error("status endpoint unreachable"));
+    const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) {
+        return Promise.reject(new Error("connection dropped"));
+      }
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api));
+
+    act(() => {
+      void result.current.consume({ jobId: "job-10", threadId: "thread-10", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(generationStatus).toHaveBeenCalled());
+    // The loop must still be alive and retrying -- not orphaned.
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(useChatStore.getState().generation.jobId).toBe("job-10");
+
+    act(() => result.current.stop());
+  });
 });

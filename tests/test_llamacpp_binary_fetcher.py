@@ -11,6 +11,7 @@ import io
 import tempfile
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -146,6 +147,21 @@ def test_tampered_companion_dll_is_detected_even_though_the_exe_stub_is_untouche
 
     (exe_path.parent / "llama-server-impl.dll").write_bytes(b"tampered impl payload")
     assert fetcher.is_cached(release, "cpu") is False
+
+
+def test_is_cached_reports_false_instead_of_raising_when_hashing_hits_memory_pressure(tmp_path: Path) -> None:
+    # /api/v1/system polls is_cached() every 2s while a GGUF model is
+    # selected, including while a large local model has system memory under
+    # real pressure. MemoryError is not an OSError subclass, so it must be
+    # handled explicitly -- otherwise it escapes this best-effort check
+    # uncaught and 500s the whole system-status endpoint on every poll.
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    fetcher = BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes))
+    fetcher.ensure_binary(release, "cpu")
+
+    with patch("cortex_backend.llamacpp.binary_fetcher.hash_directory", side_effect=MemoryError):
+        assert fetcher.is_cached(release, "cpu") is False
 
 
 def test_zip_slip_entries_are_rejected(tmp_path: Path) -> None:

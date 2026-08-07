@@ -141,15 +141,29 @@ export function useGenerationStream(api: CortexApi) {
           } catch (streamError) {
             if (controller.signal.aborted) return;
             if (streamError instanceof ApiError && streamError.status === 401) return;
-            const snapshot = await api.generationStatus(job.jobId);
-            if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
-              terminal = true;
-              if (snapshot.status !== "succeeded") {
-                onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
+            try {
+              const snapshot = await api.generationStatus(job.jobId);
+              if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
+                terminal = true;
+                if (snapshot.status !== "succeeded") {
+                  onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
+                }
+                await onCompleted(job.threadId);
+              } else {
+                if (snapshot.status === "cancelling") useChatStore.getState().markStopping(job.jobId);
+                useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
+                await delay(RECONNECT_DELAY_MS);
               }
-              await onCompleted(job.threadId);
-            } else {
-              if (snapshot.status === "cancelling") useChatStore.getState().markStopping(job.jobId);
+            } catch (statusError) {
+              // Both the live stream AND the status-check fallback just
+              // failed. Letting this escape uncaught would jump straight to
+              // the outer catch/finally below without ever setting
+              // `terminal` -- onFailed() would still fire, but nothing
+              // would ever call endGeneration(), leaving the composer and
+              // the pending message bubble reporting "Generating" forever
+              // with no live connection left to correct it. Treat it like
+              // any other dropped connection instead: keep retrying.
+              if (statusError instanceof ApiError && statusError.status === 401) return;
               useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
               await delay(RECONNECT_DELAY_MS);
             }

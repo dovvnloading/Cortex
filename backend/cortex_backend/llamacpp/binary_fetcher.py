@@ -75,7 +75,14 @@ def _verify_directory(target_dir: Path, asset: AssetSpec) -> bool:
         return False
     try:
         return hash_directory(target_dir) == asset.directory_sha256
-    except OSError:
+    except (OSError, MemoryError):
+        # This check runs on every /api/v1/system poll (every 2s while a
+        # GGUF model is selected -- see App.tsx), including while a large
+        # local model is loaded and system memory is under real pressure.
+        # MemoryError is not an OSError subclass, so without this it was
+        # escaping uncaught and 500ing the whole system-status endpoint in
+        # a tight, permanent poll loop instead of just reporting "not
+        # verified as cached" the way a disk-read OSError already does.
         return False
 
 
