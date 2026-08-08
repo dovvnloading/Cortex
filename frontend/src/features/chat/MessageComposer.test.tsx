@@ -208,7 +208,10 @@ describe("MessageComposer", () => {
     expect(container.querySelector(".composer-attachments")).toBeInTheDocument();
     expect(container.querySelector(".composer-writing-area")).toBeInTheDocument();
     expect(container.querySelector(".composer-toolbar")).toBeInTheDocument();
-    expect(screen.getByText("Model")).toBeVisible();
+    // The model control shows the model itself; it no longer carries a
+    // separate "Model" kicker that repeated what the value already said.
+    expect(screen.getByText("local-chat:7b")).toBeVisible();
+    expect(screen.queryByText("Model")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   });
 

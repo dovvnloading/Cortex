@@ -315,7 +315,6 @@ export function MessageComposer({
                   disabled={attachmentsBusy || !onAddAttachments}
                 />
               </label>
-              <span className="composer-toolbar-divider" aria-hidden="true" />
               <div className="composer-model-control">
                 <LocalModelMenu
                   models={localModels}

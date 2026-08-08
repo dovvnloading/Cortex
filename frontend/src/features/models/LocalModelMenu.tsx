@@ -190,7 +190,6 @@ export function LocalModelMenu({
       <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${displayModelName(localModels[0])}`}>
         <span className="local-model-menu-single-label" title={displayModelName(localModels[0])}>
           <span>
-            <span className="local-model-menu-kicker">Model</span>
             <span className="local-model-menu-name">{displayModelName(localModels[0])}</span>
           </span>
         </span>
@@ -221,7 +220,6 @@ export function LocalModelMenu({
         onKeyDown={handleTriggerKeyDown}
       >
         <span className="local-model-menu-trigger-label">
-          <span className="local-model-menu-kicker">Model</span>
           <span className="local-model-menu-name">{selected ? displayModelName(selected) : localModels.length ? "Select model" : "No local models"}</span>
         </span>
         <ChevronDown aria-hidden="true" size={15} />
