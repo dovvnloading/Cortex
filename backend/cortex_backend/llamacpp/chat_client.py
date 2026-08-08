@@ -67,8 +67,17 @@ class LlamaCppChatClient:
             response = self._http.post(f"{handle.base_url}/v1/chat/completions", json=body)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            # Carry llama-server's own explanation through instead of replacing
+            # it with a fixed string. Without it every failure -- a context
+            # overflow, an out-of-memory abort, an unsupported quantization --
+            # arrived at _generation_failure_message() as the same opaque text,
+            # so none of its classifiers could match and every one of them was
+            # reported to the user as "rejected this request", which reads as
+            # if their message had been refused. The raw text is used only for
+            # classification there; the message shown to the user is always one
+            # of that function's curated strings, and this text is never logged.
             raise LlamaCppError(
-                "The local model runtime rejected this request.",
+                _server_error_detail(exc.response),
                 status_code=exc.response.status_code,
             ) from exc
         except httpx.TransportError as exc:
@@ -76,6 +85,34 @@ class LlamaCppChatClient:
                 "Cortex lost its connection to the local model runtime."
             ) from exc
         return _adapt_to_ollama_shape(response.json(), elapsed_seconds=time.monotonic() - started)
+
+
+_MAX_SERVER_ERROR_CHARS = 400
+
+
+def _server_error_detail(response: httpx.Response) -> str:
+    """llama-server's reason for refusing, or a neutral fallback.
+
+    Errors come back as ``{"error": {"message": ..., "type": ...}}``; older
+    builds use a bare ``{"error": "..."}``. Bounded because this is an
+    operational string, not a payload to relay verbatim.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    detail: Any = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            detail = error.get("message") or error.get("type")
+        elif isinstance(error, str):
+            detail = error
+        if not detail:
+            detail = payload.get("message")
+    if not isinstance(detail, str) or not detail.strip():
+        return f"The local model runtime failed with HTTP {response.status_code}."
+    return detail.strip()[:_MAX_SERVER_ERROR_CHARS]
 
 
 def _build_request_body(messages: list[dict], options: dict) -> dict[str, Any]:
