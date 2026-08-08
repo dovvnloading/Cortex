@@ -51,6 +51,7 @@ describe("App", () => {
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
       if (url.endsWith("/chats")) return json([]);
       if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
       if (url.endsWith("/memories")) return json({ memos: [] });
@@ -80,6 +81,7 @@ describe("App", () => {
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
       if (url.endsWith("/chats")) return json(chats);
       if (url.endsWith("/chats/thread-a")) {
         return json({ ...chats[0], revision: 1, messages: [{ id: "message-a", role: "assistant", content: "Alpha transcript" }] });
@@ -137,6 +139,7 @@ describe("App", () => {
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
       if (url.endsWith("/chats")) return json([]);
       if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
       if (url.endsWith("/memories")) return json({ memos: [] });
@@ -191,6 +194,7 @@ describe("App", () => {
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
       if (url.endsWith("/chats")) return json([]);
       if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
       if (url.endsWith("/memories")) return json({ memos: [] });

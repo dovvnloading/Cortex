@@ -115,17 +115,25 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setLoading(true);
     setLoadError(null);
     try {
-      const [systemResponse, chatResponse, groupResponse, settingsResponse, memoryResponse] = await Promise.all([
+      const [systemResponse, chatResponse, settingsResponse, memoryResponse] = await Promise.all([
         api.system(),
         api.chats(),
-        api.chatGroups(),
         api.settings(),
         api.memories(),
       ]);
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
-      setGroups(groupResponse);
+      // Groups are organisation on top of the chats, so they load out of band
+      // like the model inventory does: if the endpoint is unavailable the
+      // library still opens with every chat present, just ungrouped. Blocking
+      // the whole workspace on filing metadata would be the wrong trade.
+      void api.chatGroups()
+        .then(setGroups)
+        .catch((error) => {
+          if (error instanceof ApiError && error.status === 401) onSessionExpired();
+          else setGroups([]);
+        });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
