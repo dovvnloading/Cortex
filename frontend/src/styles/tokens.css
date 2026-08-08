@@ -374,10 +374,18 @@ a { color: inherit; text-decoration: none; }
 /* Sits at prose size on the prose baseline, so when the first token replaces
    it the text lands exactly where this line already was. */
 .generation-status { display: inline-flex; align-items: center; gap: 9px; min-height: 30px; color: var(--text-muted); font-size: var(--text-lg); font-weight: var(--weight-normal); line-height: var(--leading-prose); }
+/* A thinking indicator and a text cursor are different affordances and
+   need different pacing -- this used to share the caret's keyframe with a
+   160/320ms stagger against a 1.15s cycle, which bunches all three dots
+   inside the first 42% of the cycle and leaves an 830ms dead gap before
+   they bunch again. That reads as sputtering, not a wave. Evenly-spaced
+   delays (duration / 3) and a keyframe with a long rest phase (dots spend
+   60% of each cycle settled, not mid-swing) is what makes only one dot
+   look "active" at a time. */
 .generation-status-dots { display: inline-flex; align-items: center; gap: 4px; }
-.generation-status-dots i { display: block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.35; animation: caret-pulse 1.15s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-.generation-status-dots i:nth-child(2) { animation-delay: 160ms; }
-.generation-status-dots i:nth-child(3) { animation-delay: 320ms; }
+.generation-status-dots i { display: block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.35; animation: thinking-dot 1.4s ease-in-out infinite; }
+.generation-status-dots i:nth-child(2) { animation-delay: 0.16s; }
+.generation-status-dots i:nth-child(3) { animation-delay: 0.32s; }
 .markdown-body { min-width: 0; overflow-wrap: anywhere; color: inherit; font-size: var(--text-lg); line-height: var(--leading-prose); }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
@@ -703,6 +711,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .loading-spinner { width: 24px; height: 24px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin var(--spinner-duration) linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes caret-pulse { 0%, 100% { opacity: 0.62; } 50% { opacity: 0.12; } }
+@keyframes thinking-dot { 0%, 80%, 100% { opacity: 0.35; transform: scale(0.75); } 40% { opacity: 1; transform: scale(1); } }
 .toast-region { position: fixed; z-index: 100; right: 20px; bottom: 20px; display: grid; gap: 9px; width: min(360px, calc(100vw - 40px)); }
 .toast { display: flex; align-items: center; gap: 9px; padding: 13px 14px; border: 1px solid var(--line-strong); border-left-width: 3px; border-radius: 6px; background: var(--surface-elevated); box-shadow: var(--shadow-md); color: var(--text); font-size: 0.82rem; }
 .toast-success { color: var(--success); }
@@ -817,5 +826,5 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-  .loading-spinner, .composer-control-spinner, .local-model-menu-rescan-icon-pending { animation: none !important; }
+  .loading-spinner, .composer-control-spinner, .local-model-menu-rescan-icon-pending, .generation-status-dots i, .streaming-caret { animation: none !important; }
 }
