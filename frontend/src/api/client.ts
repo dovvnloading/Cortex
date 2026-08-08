@@ -4,13 +4,17 @@ import type {
   AttachmentStageRequest,
   ChatAttachment,
   ChatAttachmentStageRequest,
+  ChatGroup,
   ChatResponse,
   ChatSummary,
   CodeExecutionAccepted,
   CodeExecutionRequest,
   CodeExecutionSourceResponse,
+  CreateChatGroupRequest,
   CreateChatRequest,
   DiagnosticsResponse,
+  MoveChatToGroupRequest,
+  UpdateChatGroupRequest,
   ExecutionSSEEvent,
   ExecutionApprovalDecisionRequest,
   ExecutionStatusResponse,
@@ -119,6 +123,42 @@ export class CortexApi {
     const payload: RenameChatRequest = { title };
     return this.request<ChatResponse>(
       `/chats/${encodeURIComponent(threadId)}`,
+      { method: "PATCH", body: JSON.stringify(payload) },
+    );
+  }
+
+  chatGroups(): Promise<ChatGroup[]> {
+    return this.request<ChatGroup[]>("/chat-groups");
+  }
+
+  createChatGroup(name: string): Promise<ChatGroup> {
+    const payload: CreateChatGroupRequest = { name };
+    return this.request<ChatGroup>("/chat-groups", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** Rename and collapse share one endpoint; pass only what changed. */
+  updateChatGroup(groupId: string, changes: UpdateChatGroupRequest): Promise<ChatGroup> {
+    return this.request<ChatGroup>(
+      `/chat-groups/${encodeURIComponent(groupId)}`,
+      { method: "PATCH", body: JSON.stringify(changes) },
+    );
+  }
+
+  /** Deletes the group only -- its chats return to the ungrouped list. */
+  async deleteChatGroup(groupId: string): Promise<void> {
+    await this.request<void>(`/chat-groups/${encodeURIComponent(groupId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** Pass null to move the chat out of every group. */
+  moveChatToGroup(threadId: string, groupId: string | null): Promise<ChatSummary> {
+    const payload: MoveChatToGroupRequest = { group_id: groupId };
+    return this.request<ChatSummary>(
+      `/chats/${encodeURIComponent(threadId)}/group`,
       { method: "PATCH", body: JSON.stringify(payload) },
     );
   }

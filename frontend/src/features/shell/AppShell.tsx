@@ -1,22 +1,29 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Menu, Pencil, Plus, Search, Settings, Trash2 } from "lucide-react";
-import type { ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
+import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
 import { useChatStore } from "../../stores/useChatStore";
 import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
+import { ChatLibrary } from "./ChatLibrary";
 import { ExportTranscriptMenu } from "../chat/ExportTranscriptMenu";
 import { NavigationLink } from "./NavigationLink";
 
 type Props = {
   chats: ChatSummary[];
+  groups: ChatGroup[];
   activeChatId: string | null;
   modelConnection: ModelResponse["connection"];
   theme: "light" | "dark" | "system";
   onOpenSettings: () => void;
   onRenameChat: (id: string, title: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
+  onCreateGroup: (name: string) => Promise<void>;
+  onRenameGroup: (groupId: string, name: string) => Promise<void>;
+  onDeleteGroup: (groupId: string) => Promise<void>;
+  onToggleGroup: (groupId: string, collapsed: boolean) => void;
+  onMoveChat: (threadId: string, groupId: string | null) => void;
   executionTasks?: ExecutionTaskSummary[];
   onCancelExecution?: (jobId: string) => Promise<void>;
   onDecideExecutionApproval?: (jobId: string, decision: ExecutionApprovalDecisionRequest["decision"]) => Promise<void>;
@@ -26,12 +33,18 @@ type Props = {
 
 export function AppShell({
   chats,
+  groups,
   activeChatId,
   modelConnection,
   theme,
   onOpenSettings,
   onRenameChat,
   onDeleteChat,
+  onCreateGroup,
+  onRenameGroup,
+  onDeleteGroup,
+  onToggleGroup,
+  onMoveChat,
   executionTasks = [],
   onCancelExecution,
   onDecideExecutionApproval,
@@ -47,11 +60,6 @@ export function AppShell({
   const [chatQuery, setChatQuery] = useState("");
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
-  const filteredChats = useMemo(() => {
-    const query = chatQuery.trim().toLowerCase();
-    if (!query) return chats;
-    return chats.filter((chat) => displayChatTitle(chat.title).toLowerCase().includes(query));
-  }, [chats, chatQuery]);
   const activeTitle = isSettings
     ? "Settings"
     : activeChatId
@@ -140,24 +148,21 @@ export function AppShell({
               />
             </div>
           )}
-          <div className="sidebar-section-heading"><span>Threads</span><span>{filteredChats.length}</span></div>
-          <div className="chat-list" aria-label="Saved chats">
-            {filteredChats.length ? filteredChats.map((chat) => (
-              <div className={`chat-list-item ${activeChatId === chat.id && !isSettings ? "chat-list-item-active" : ""}`} key={chat.id}>
-                <button className="chat-list-select" type="button" onClick={() => selectChat(chat.id)} aria-current={activeChatId === chat.id && !isSettings ? "page" : undefined}>
-                  {displayChatTitle(chat.title)}
-                </button>
-                <div className="chat-list-actions">
-                  <button className="history-action" type="button" aria-label={`Rename ${displayChatTitle(chat.title)}`} onClick={() => setRenameTarget(chat)}>
-                    <Pencil aria-hidden="true" size={13} />
-                  </button>
-                  <button className="history-action history-action-danger" type="button" aria-label={`Delete ${displayChatTitle(chat.title)}`} onClick={() => setDeleteTarget(chat)}>
-                    <Trash2 aria-hidden="true" size={13} />
-                  </button>
-                </div>
-              </div>
-            )) : <p className="sidebar-empty">{chats.length ? "No chats match your search." : "No threads yet."}</p>}
-          </div>
+          <ChatLibrary
+            chats={chats}
+            groups={groups}
+            activeChatId={activeChatId}
+            activeRowVisible={!isSettings}
+            query={chatQuery}
+            onSelectChat={selectChat}
+            onRenameChat={setRenameTarget}
+            onDeleteChat={setDeleteTarget}
+            onCreateGroup={onCreateGroup}
+            onRenameGroup={onRenameGroup}
+            onDeleteGroup={onDeleteGroup}
+            onToggleGroup={onToggleGroup}
+            onMoveChat={onMoveChat}
+          />
         </aside>
 
         <main className={`main-content ${isSettings ? "settings-content" : "chat-content"}`}>{children}</main>
