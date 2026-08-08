@@ -31,10 +31,26 @@ def _sanitize_chat_messages(chat: dict[str, Any] | None) -> dict[str, Any] | Non
     return chat
 
 
+class ChatGroupNotFound(ChatRepositoryError):
+    """The referenced group does not exist."""
+
+
 class ChatRepository(Protocol):
     """Durable chat operations required by the versioned API."""
 
     def list_summaries(self) -> list[dict[str, Any]]: ...
+
+    def list_groups(self) -> list[dict[str, Any]]: ...
+
+    def create_group(self, group_id: str, name: str) -> None: ...
+
+    def update_group(
+        self, group_id: str, *, name: str | None = None, collapsed: bool | None = None
+    ) -> bool: ...
+
+    def delete_group(self, group_id: str) -> None: ...
+
+    def set_chat_group(self, thread_id: str, group_id: str | None) -> bool: ...
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None: ...
 
@@ -82,6 +98,28 @@ class LegacyDatabaseChatRepository:
 
     def list_summaries(self) -> list[dict[str, Any]]:
         return self._database.get_all_chats_summary()
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        return self._database.list_groups()
+
+    def create_group(self, group_id: str, name: str) -> None:
+        self._database.create_group(group_id, name)
+
+    def update_group(
+        self, group_id: str, *, name: str | None = None, collapsed: bool | None = None
+    ) -> bool:
+        return self._database.update_group(group_id, name=name, collapsed=collapsed)
+
+    def delete_group(self, group_id: str) -> None:
+        self._database.delete_group(group_id)
+
+    def set_chat_group(self, thread_id: str, group_id: str | None) -> bool:
+        try:
+            return self._database.set_chat_group(thread_id, group_id)
+        except Exception as exc:
+            if "does not exist" in str(exc):
+                raise ChatGroupNotFound("Chat group does not exist.") from exc
+            raise
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
         return _sanitize_chat_messages(self._database.load_chat(thread_id))
@@ -164,6 +202,7 @@ class InMemoryChatRepository:
     def __init__(self, chats: list[dict[str, Any]] | None = None):
         self._lock = RLock()
         self._chats: dict[str, dict[str, Any]] = {}
+        self._groups: dict[str, dict[str, Any]] = {}
         self._next_message_id = 1
         for chat in chats or []:
             copied = deepcopy(chat)
@@ -196,13 +235,66 @@ class InMemoryChatRepository:
     def list_summaries(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
-                {key: chat.get(key) for key in ("id", "title", "timestamp")}
+                {key: chat.get(key) for key in ("id", "title", "timestamp", "group_id")}
                 for chat in sorted(
                     self._chats.values(),
                     key=lambda item: str(item.get("timestamp", "")),
                     reverse=True,
                 )
             ]
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                deepcopy(group)
+                for group in sorted(
+                    self._groups.values(),
+                    key=lambda item: (item.get("position", 0), str(item.get("timestamp", ""))),
+                )
+            ]
+
+    def create_group(self, group_id: str, name: str) -> None:
+        with self._lock:
+            if group_id in self._groups:
+                raise ChatRepositoryError("Chat group already exists.")
+            self._groups[group_id] = {
+                "id": group_id,
+                "name": name,
+                "position": len(self._groups),
+                "collapsed": False,
+                "timestamp": self._timestamp(),
+            }
+
+    def update_group(
+        self, group_id: str, *, name: str | None = None, collapsed: bool | None = None
+    ) -> bool:
+        with self._lock:
+            group = self._groups.get(group_id)
+            if group is None:
+                return False
+            if name is not None:
+                group["name"] = name
+            if collapsed is not None:
+                group["collapsed"] = collapsed
+            return True
+
+    def delete_group(self, group_id: str) -> None:
+        with self._lock:
+            self._groups.pop(group_id, None)
+            # Chats outlive their group; only the filing is removed.
+            for chat in self._chats.values():
+                if chat.get("group_id") == group_id:
+                    chat["group_id"] = None
+
+    def set_chat_group(self, thread_id: str, group_id: str | None) -> bool:
+        with self._lock:
+            if group_id is not None and group_id not in self._groups:
+                raise ChatGroupNotFound("Chat group does not exist.")
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                return False
+            chat["group_id"] = group_id
+            return True
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -217,6 +309,7 @@ class InMemoryChatRepository:
                 "id": thread_id,
                 "title": title,
                 "timestamp": self._timestamp(),
+                "group_id": None,
                 "messages": [],
             }
 

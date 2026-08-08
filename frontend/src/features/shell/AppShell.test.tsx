@@ -1,9 +1,34 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
+import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { useChatStore } from "../../stores/useChatStore";
 import { AppShell } from "./AppShell";
+
+const CONNECTED = { success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>;
+
+/** Defaults for every prop, so adding one to AppShell does not require
+ *  editing each render site here. Override only what the test is about. */
+function renderShell(overrides: Partial<React.ComponentProps<typeof AppShell>> = {}) {
+  const props: React.ComponentProps<typeof AppShell> = {
+    chats: [],
+    groups: [] as ChatGroup[],
+    activeChatId: null,
+    modelConnection: CONNECTED,
+    theme: "dark",
+    onOpenSettings: vi.fn(),
+    onRenameChat: vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue(),
+    onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(),
+    onCreateGroup: vi.fn<(name: string) => Promise<void>>().mockResolvedValue(),
+    onRenameGroup: vi.fn<(id: string, name: string) => Promise<void>>().mockResolvedValue(),
+    onDeleteGroup: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(),
+    onToggleGroup: vi.fn(),
+    onMoveChat: vi.fn(),
+    children: <div>Chat content</div>,
+    ...overrides,
+  };
+  return { ...render(<AppShell {...props} />), props };
+}
 
 describe("AppShell", () => {
   afterEach(() => {
@@ -13,19 +38,7 @@ describe("AppShell", () => {
   it("renders a persisted Markdown-wrapped title as plain application text", () => {
     const chat: ChatSummary = { id: "chat-1", title: "**AI Purpose Explained**", timestamp: "2026-01-01T00:00:00Z" };
 
-    render(
-        <AppShell
-          chats={[chat]}
-          activeChatId={chat.id}
-          modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-          theme="dark"
-          onOpenSettings={vi.fn()}
-          onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-          onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
-        >
-          <div>Chat content</div>
-        </AppShell>,
-    );
+    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: vi.fn() });
 
     expect(screen.getByRole("heading", { name: "AI Purpose Explained" })).toBeVisible();
     expect(screen.getByRole("button", { name: "AI Purpose Explained" })).toBeVisible();
@@ -38,19 +51,7 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
 
-    render(
-        <AppShell
-          chats={[chat]}
-          activeChatId={chat.id}
-          modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-          theme="dark"
-          onOpenSettings={vi.fn()}
-          onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-          onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
-        >
-          <div>Chat content</div>
-        </AppShell>,
-    );
+    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: vi.fn() });
 
     await user.click(screen.getByRole("button", { name: "New thread" }));
 
@@ -62,19 +63,7 @@ describe("AppShell", () => {
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
     const onOpenSettings = vi.fn();
 
-    render(
-      <AppShell
-        chats={[chat]}
-        activeChatId={chat.id}
-        modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-        theme="dark"
-        onOpenSettings={onOpenSettings}
-        onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-        onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
-      >
-        <div>Chat content</div>
-      </AppShell>,
-    );
+    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: onOpenSettings });
 
     await user.click(screen.getByRole("link", { name: "Settings" }));
 
@@ -87,19 +76,7 @@ describe("AppShell", () => {
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
     const onDeleteChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue();
 
-    render(
-        <AppShell
-          chats={[chat]}
-          activeChatId={chat.id}
-          modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-          theme="dark"
-          onOpenSettings={vi.fn()}
-          onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-          onDeleteChat={onDeleteChat}
-        >
-          <div>Chat content</div>
-        </AppShell>,
-    );
+    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: onDeleteChat, onOpenSettings: vi.fn() });
 
     await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
 
@@ -125,19 +102,7 @@ describe("AppShell", () => {
       { id: "chat-2", title: "Recipe ideas", timestamp: "2026-01-01T00:01:00Z" },
     ];
 
-    render(
-      <AppShell
-        chats={chats}
-        activeChatId={null}
-        modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-        theme="dark"
-        onOpenSettings={vi.fn()}
-        onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-        onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
-      >
-        <div>Chat content</div>
-      </AppShell>,
-    );
+    renderShell({ chats: chats, activeChatId: null, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: vi.fn() });
 
     expect(screen.getByRole("button", { name: "Quarterly planning" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recipe ideas" })).toBeInTheDocument();
@@ -163,19 +128,7 @@ describe("AppShell", () => {
     });
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
 
-    render(
-      <AppShell
-        chats={[chat]}
-        activeChatId={chat.id}
-        modelConnection={{ success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>}
-        theme="dark"
-        onOpenSettings={vi.fn()}
-        onRenameChat={vi.fn<(id: string, title: string) => Promise<void>>().mockResolvedValue()}
-        onDeleteChat={vi.fn<(id: string) => Promise<void>>().mockResolvedValue()}
-      >
-        <div>Chat content</div>
-      </AppShell>,
-    );
+    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: vi.fn() });
 
     expect(screen.getByRole("button", { name: "Export as Markdown" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export as JSON" })).toBeInTheDocument();

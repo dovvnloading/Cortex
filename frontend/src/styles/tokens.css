@@ -305,37 +305,70 @@ a { color: inherit; text-decoration: none; }
 .connection-error { background: var(--danger); }
 
 .workspace-body { position: relative; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
-.sidebar { position: relative; z-index: 30; display: flex; flex: 0 0 244px; flex-direction: column; width: 244px; min-width: 244px; min-height: 0; overflow: hidden; padding: 14px 10px 10px; border-right: 1px solid var(--line); background: var(--sidebar); transition: flex-basis 180ms ease, width 180ms ease, min-width 180ms ease, padding 180ms ease, border-color 180ms ease; }
+/* Chat library
+ *
+ * Denser than it was: rows are 28px rather than 39px and sit on the shared
+ * type scale, so roughly a third more of the library is visible without
+ * scrolling. Chrome is subtractive -- no per-row borders, no boxed search, a
+ * single hairline under the header -- which is what keeps a dense list from
+ * reading as cramped. */
+.sidebar { position: relative; z-index: 30; display: flex; flex: 0 0 236px; flex-direction: column; width: 236px; min-width: 236px; min-height: 0; overflow: hidden; padding: 10px 8px 8px; border-right: 1px solid var(--line); background: var(--sidebar); transition: flex-basis 180ms ease, width 180ms ease, min-width 180ms ease, padding 180ms ease, border-color 180ms ease; }
 .sidebar-collapsed .sidebar { flex-basis: 0; width: 0; min-width: 0; padding-inline: 0; border-color: transparent; }
 .sidebar-scrim { display: none; }
-.sidebar-brand { display: flex; align-items: center; min-width: 0; gap: 9px; padding: 0 5px 16px; }
-.sidebar-brand-mark { display: grid; flex: 0 0 27px; place-items: center; width: 27px; height: 27px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-soft); }
+.sidebar-brand { display: flex; align-items: center; min-width: 0; gap: 8px; padding: 2px 4px 10px; }
+.sidebar-brand-mark { display: grid; flex: 0 0 22px; place-items: center; width: 22px; height: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-soft); }
 .sidebar-brand-mark img { width: 100%; height: 100%; object-fit: cover; }
 .sidebar-brand-copy { display: grid; min-width: 0; }
-.sidebar-brand-copy strong { color: var(--text); font-size: 0.8rem; letter-spacing: -0.01em; }
-.sidebar-brand-copy small { overflow: hidden; color: var(--text-faint); font-size: 0.62rem; text-overflow: ellipsis; white-space: nowrap; }
-.new-chat-button { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex: 0 0 38px; width: 100%; border: 1px solid var(--line-strong); border-radius: 6px; padding: 0 10px; background: transparent; color: var(--text); font-size: 0.76rem; font-weight: 650; transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }
-.new-chat-button:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.sidebar-search { display: flex; align-items: center; flex: 0 0 34px; gap: 8px; margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; padding: 0 9px; color: var(--text-faint); }
-.sidebar-search:focus-within { border-color: var(--line-strong); }
-.sidebar-search input { flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: var(--text); font-size: 0.76rem; }
+.sidebar-brand-copy strong { color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-semi); letter-spacing: -0.01em; }
+.new-chat-button { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex: 0 0 32px; width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 9px; background: transparent; color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-medium); transition: border-color 140ms ease, background 140ms ease, color 140ms ease; }
+.new-chat-button:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); color: var(--accent); }
+/* Borderless until focused: one less box in a column that is mostly list. */
+.sidebar-search { display: flex; align-items: center; flex: 0 0 30px; gap: 7px; margin-top: 6px; border: 1px solid transparent; border-radius: var(--radius-sm); padding: 0 8px; background: var(--surface-soft); color: var(--text-faint); transition: border-color 140ms ease; }
+.sidebar-search:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong)); }
+.sidebar-search input { flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: var(--text); font-size: var(--text-sm); }
 .sidebar-search input::placeholder { color: var(--text-faint); }
 .sidebar-search input:focus { outline: 0; }
-.export-transcript-menu { display: flex; align-items: center; gap: 2px; }
-.sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; margin: 23px 5px 7px; color: var(--text-faint); font-size: 0.6rem; font-weight: 760; letter-spacing: 0.13em; text-transform: uppercase; }
-.sidebar-section-heading span:last-child { min-width: 19px; color: var(--text-faint); font-size: 0.64rem; letter-spacing: normal; text-align: right; }
-.chat-list { display: grid; align-content: start; gap: 1px; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 0 1px 8px; scrollbar-gutter: stable; }
-.chat-list-item { display: flex; align-items: center; min-height: 39px; border: 1px solid transparent; border-radius: 4px; transition: background 150ms ease, border-color 150ms ease; }
-.chat-list-item:hover { background: var(--surface-soft); }
-.chat-list-item-active { border-color: var(--line); background: var(--surface-raised); box-shadow: inset 2px 0 0 var(--accent); }
-.chat-list-select { flex: 1; min-width: 0; overflow: hidden; border: 0; padding: 0 9px; background: transparent; color: var(--text-muted); font-size: 0.75rem; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.chat-list-item-active .chat-list-select { color: var(--text); font-weight: 690; }
-.chat-list-actions { display: flex; padding-right: 4px; opacity: 0; transition: opacity 120ms ease; }
-.chat-list-item:hover .chat-list-actions, .chat-list-item:focus-within .chat-list-actions { opacity: 1; }
-.history-action { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 4px; background: transparent; color: var(--text-faint); }
+
+.chat-library { display: flex; flex-direction: column; min-height: 0; margin-top: 10px; }
+.chat-library-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px 5px 6px; border-bottom: 1px solid var(--line); color: var(--text-faint); font-size: var(--text-2xs); font-weight: var(--weight-semi); letter-spacing: 0.1em; text-transform: uppercase; }
+.chat-library-add-group { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-faint); transition: background 140ms ease, color 140ms ease; }
+.chat-library-add-group:hover { background: var(--surface-hover); color: var(--text); }
+.chat-list { display: grid; align-content: start; gap: 1px; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 5px 1px 8px; scrollbar-gutter: stable; }
+
+.chat-group { display: grid; min-width: 0; }
+.chat-group-header { display: flex; align-items: center; min-width: 0; min-height: 26px; border-radius: var(--radius-xs); }
+.chat-group-header:hover { background: var(--surface-soft); }
+.chat-group-toggle { display: flex; align-items: center; flex: 1; min-width: 0; gap: 6px; border: 0; padding: 0 4px 0 6px; background: transparent; color: var(--text-muted); font-size: var(--text-2xs); font-weight: var(--weight-semi); letter-spacing: 0.04em; text-align: left; text-transform: uppercase; }
+.chat-group-chevron { flex: 0 0 auto; color: var(--text-faint); transition: transform 140ms ease; }
+.chat-group-header-open .chat-group-chevron { transform: rotate(90deg); }
+.chat-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-group-count { flex: 0 0 auto; margin-left: auto; padding-left: 6px; color: var(--text-faint); font-variant-numeric: tabular-nums; font-weight: var(--weight-normal); }
+.chat-group-header:hover .chat-group-count, .chat-group-header:focus-within .chat-group-count { opacity: 0; }
+/* The rail marks membership without indenting the title, so grouped and
+   ungrouped rows keep one shared left edge for the eye to scan. */
+.chat-group-body { display: grid; gap: 1px; margin: 1px 0 3px 8px; padding-left: 7px; border-left: 1px solid var(--line); }
+.chat-group-empty { margin: 0; padding: 4px 8px 5px; color: var(--text-faint); font-size: var(--text-2xs); }
+
+.chat-row { position: relative; display: flex; align-items: center; min-width: 0; min-height: 28px; border-radius: var(--radius-xs); transition: background 140ms ease; }
+.chat-row:hover { background: var(--surface-soft); }
+.chat-row-active { background: var(--surface-raised); box-shadow: inset 2px 0 0 var(--accent); }
+.chat-row-select { flex: 1; min-width: 0; overflow: hidden; border: 0; padding: 0 8px; background: transparent; color: var(--text-muted); font-size: var(--text-sm); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.chat-row-active .chat-row-select { color: var(--text); font-weight: var(--weight-medium); }
+/* Actions take no layout space until needed, so a long title uses the full
+   row width instead of being permanently truncated to make room for them. */
+.chat-row-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 1px; padding-right: 3px; opacity: 0; transition: opacity 120ms ease; }
+.chat-row:hover .chat-row-actions, .chat-row:focus-within .chat-row-actions,
+.chat-group-header:hover .chat-row-actions, .chat-group-header:focus-within .chat-row-actions { opacity: 1; }
+.history-action { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-faint); transition: background 140ms ease, color 140ms ease; }
 .history-action:hover { background: var(--surface-hover); color: var(--text); }
 .history-action-danger:hover { color: var(--danger); }
-.sidebar-empty { min-width: 0; margin: 0; padding: 14px 8px; color: var(--text-faint); font-size: 0.78rem; line-height: 1.55; }
+
+.chat-row-menu { position: relative; display: inline-flex; }
+.chat-row-menu-list { position: absolute; z-index: 40; top: calc(100% + 4px); right: 0; display: grid; gap: 1px; width: max-content; min-width: 148px; max-width: 210px; max-height: 240px; overflow-y: auto; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-elevated); box-shadow: var(--elev-3); }
+.chat-row-menu-item { display: block; width: 100%; min-height: 26px; overflow: hidden; border: 0; border-radius: var(--radius-xs); padding: 0 8px; background: transparent; color: var(--text); font-size: var(--text-sm); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.chat-row-menu-item:hover:not(:disabled), .chat-row-menu-item:focus-visible { background: var(--surface-hover); outline: 0; }
+.chat-row-menu-item:disabled { color: var(--text-faint); cursor: default; }
+.sidebar-empty { min-width: 0; margin: 0; padding: 12px 8px; color: var(--text-faint); font-size: var(--text-sm); line-height: 1.5; }
 
 .main-content { flex: 1 1 auto; width: auto; min-width: 0; min-height: 0; margin: 0; }
 .chat-content { overflow: hidden; padding: 0; }

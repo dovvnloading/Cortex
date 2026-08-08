@@ -84,6 +84,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const chats = useChatStore((state) => state.chats);
   const setChats = useChatStore((state) => state.setChats);
   const upsertChatSummary = useChatStore((state) => state.upsertChatSummary);
+  const groups = useChatStore((state) => state.groups);
+  const setGroups = useChatStore((state) => state.setGroups);
+  const upsertGroup = useChatStore((state) => state.upsertGroup);
+  const removeGroup = useChatStore((state) => state.removeGroup);
+  const setChatGroup = useChatStore((state) => state.setChatGroup);
   const [settingsReturnChatId, setSettingsReturnChatId] = useState<string | null>(null);
   const settings = useSettingsStore((state) => state.settings);
   const setSettings = useSettingsStore((state) => state.setSettings);
@@ -119,6 +124,16 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
+      // Groups are organisation on top of the chats, so they load out of band
+      // like the model inventory does: if the endpoint is unavailable the
+      // library still opens with every chat present, just ungrouped. Blocking
+      // the whole workspace on filing metadata would be the wrong trade.
+      void api.chatGroups()
+        .then(setGroups)
+        .catch((error) => {
+          if (error instanceof ApiError && error.status === 401) onSessionExpired();
+          else setGroups([]);
+        });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
@@ -137,7 +152,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     } finally {
       setLoading(false);
     }
-  }, [api, onSessionExpired, setChats, setModels, setSettings, setLlamacppStatus]);
+  }, [api, onSessionExpired, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
@@ -258,6 +273,48 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       notify("Chat deleted.", "success");
     } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); }
+  };
+
+  const createGroup = async (name: string) => {
+    try {
+      upsertGroup(await api.createChatGroup(name));
+      notify("Group created.", "success");
+    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); }
+  };
+
+  const renameGroup = async (groupId: string, name: string) => {
+    try {
+      upsertGroup(await api.updateChatGroup(groupId, { name }));
+    } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); }
+  };
+
+  const deleteGroup = async (groupId: string) => {
+    try {
+      await api.deleteChatGroup(groupId);
+      // Local mirror of the server rule: the group goes, its chats stay and
+      // reappear in the ungrouped list.
+      removeGroup(groupId);
+      notify("Group deleted. Its chats moved back to the main list.", "success");
+    } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); }
+  };
+
+  const toggleGroup = (groupId: string, collapsed: boolean) => {
+    const previous = useChatStore.getState().groups.find((group) => group.id === groupId);
+    if (!previous) return;
+    // Optimistic: collapsing is a high-frequency, zero-risk interaction and
+    // must feel instant. The persisted value is only a preference, so a
+    // failed write rolls the row back and stays quiet.
+    upsertGroup({ ...previous, collapsed });
+    void api.updateChatGroup(groupId, { collapsed }).catch(() => upsertGroup(previous));
+  };
+
+  const moveChat = (threadId: string, groupId: string | null) => {
+    const previous = useChatStore.getState().chats.find((chat) => chat.id === threadId)?.group_id ?? null;
+    setChatGroup(threadId, groupId);
+    void api.moveChatToGroup(threadId, groupId).catch((error) => {
+      setChatGroup(threadId, previous);
+      notify(apiMessage(error, "Could not move chat."), "error");
+    });
   };
 
   const saveSettings = async (next: CortexSettings) => {
@@ -422,7 +479,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <>
-      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat}>
+      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         {route.kind === "settings"
           ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
           : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} />}

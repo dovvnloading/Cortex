@@ -28,17 +28,20 @@ describe("useChatStore", () => {
   });
 
   it("upsertChatSummary prepends a new chat and dedupes an existing id", () => {
-    useChatStore.getState().setChats([{ id: "a", title: "Alpha", timestamp: "t1" }]);
+    useChatStore.getState().setChats([{ id: "a", title: "Alpha", timestamp: "t1", group_id: "g1" }]);
     useChatStore.getState().upsertChatSummary({ id: "b", title: "Beta", timestamp: "t2", messages: [] });
     expect(useChatStore.getState().chats).toEqual([
-      { id: "b", title: "Beta", timestamp: "t2" },
-      { id: "a", title: "Alpha", timestamp: "t1" },
+      { id: "b", title: "Beta", timestamp: "t2", group_id: null },
+      { id: "a", title: "Alpha", timestamp: "t1", group_id: "g1" },
     ]);
 
+    // Re-upserting an existing chat must not evict it from its group: the
+    // response that triggers this carries group_id only once the server has
+    // it, so the known filing has to win over an absent field.
     useChatStore.getState().upsertChatSummary({ id: "a", title: "Alpha renamed", timestamp: "t3", messages: [] });
     expect(useChatStore.getState().chats).toEqual([
-      { id: "a", title: "Alpha renamed", timestamp: "t3" },
-      { id: "b", title: "Beta", timestamp: "t2" },
+      { id: "a", title: "Alpha renamed", timestamp: "t3", group_id: "g1" },
+      { id: "b", title: "Beta", timestamp: "t2", group_id: null },
     ]);
   });
 

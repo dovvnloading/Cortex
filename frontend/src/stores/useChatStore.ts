@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ChatResponse, ChatSummary, GenerationOptionsOverride } from "../../../contracts/cortex-api";
+import type { ChatGroup, ChatResponse, ChatSummary, GenerationOptionsOverride } from "../../../contracts/cortex-api";
 
 /** A brand-new, not-yet-created chat has no thread id yet; scope its draft options under this key. */
 export const NEW_THREAD_OPTIONS_KEY = "new";
@@ -28,6 +28,8 @@ export interface GenerationState {
 
 interface ChatStoreState {
   chats: ChatSummary[];
+  /** User-created folders/projects, in their persisted display order. */
+  groups: ChatGroup[];
   activeChat: ChatResponse | null;
   generation: GenerationState;
   generationOptionsByThread: Record<string, GenerationOptionsOverride>;
@@ -35,6 +37,13 @@ interface ChatStoreState {
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
   upsertChatSummary: (chat: ChatResponse) => void;
   setActiveChat: (chat: ChatResponse | null) => void;
+
+  setGroups: (next: ChatGroup[] | ((current: ChatGroup[]) => ChatGroup[])) => void;
+  /** Replace one group in place, keeping its position in the list. */
+  upsertGroup: (group: ChatGroup) => void;
+  /** Drop the group and return every chat filed under it to ungrouped. */
+  removeGroup: (groupId: string) => void;
+  setChatGroup: (threadId: string, groupId: string | null) => void;
 
   beginGeneration: (jobId: string, threadId: string) => void;
   appendContentToken: (jobId: string, delta: string) => void;
@@ -68,6 +77,7 @@ const idleGeneration: GenerationState = {
  */
 export const useChatStore = create<ChatStoreState>((set) => ({
   chats: [],
+  groups: [],
   activeChat: null,
   generation: idleGeneration,
   generationOptionsByThread: {},
@@ -77,11 +87,38 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   upsertChatSummary: (chat) =>
     set((state) => ({
       chats: [
-        { id: chat.id, title: chat.title, timestamp: chat.timestamp },
+        // Preserve the filing: a chat that gains a message must not jump out
+        // of its group just because the summary was rebuilt from the
+        // response, which carries group_id only once the server has it.
+        {
+          id: chat.id,
+          title: chat.title,
+          timestamp: chat.timestamp,
+          group_id: chat.group_id ?? state.chats.find((item) => item.id === chat.id)?.group_id ?? null,
+        },
         ...state.chats.filter((item) => item.id !== chat.id),
       ],
     })),
   setActiveChat: (chat) => set({ activeChat: chat }),
+
+  setGroups: (next) =>
+    set((state) => ({ groups: typeof next === "function" ? (next as (current: ChatGroup[]) => ChatGroup[])(state.groups) : next })),
+  upsertGroup: (group) =>
+    set((state) => (
+      state.groups.some((item) => item.id === group.id)
+        ? { groups: state.groups.map((item) => (item.id === group.id ? group : item)) }
+        : { groups: [...state.groups, group] }
+    )),
+  removeGroup: (groupId) =>
+    set((state) => ({
+      groups: state.groups.filter((group) => group.id !== groupId),
+      // Mirrors the server: deleting a group never deletes its chats.
+      chats: state.chats.map((chat) => (chat.group_id === groupId ? { ...chat, group_id: null } : chat)),
+    })),
+  setChatGroup: (threadId, groupId) =>
+    set((state) => ({
+      chats: state.chats.map((chat) => (chat.id === threadId ? { ...chat, group_id: groupId } : chat)),
+    })),
 
   beginGeneration: (jobId, threadId) =>
     set({ generation: { ...idleGeneration, jobId, threadId, phase: "starting" } }),
