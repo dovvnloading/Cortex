@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from cortex_backend.llamacpp.errors import LlamaCppError, ServerStartTimeoutError
@@ -19,12 +22,17 @@ from cortex_backend.llamacpp.server_manager import LlamaServerManager
 class _FakePopen:
     def __init__(self, *, exit_immediately: bool = False) -> None:
         self._exit_immediately = exit_immediately
+        # Tests set this after the server is "running" to simulate a crash
+        # between messages (the poll() != None path in _reuse_verdict).
+        self.exit_code: int | None = None
         self.terminated = False
         self.killed = False
         self.stdout = io.BytesIO(b"")
 
     def poll(self):
-        return 1 if self._exit_immediately else None
+        if self._exit_immediately:
+            return 1
+        return self.exit_code
 
     def terminate(self) -> None:
         self.terminated = True
@@ -60,6 +68,22 @@ class _AlwaysUnhealthyClient:
     def get(self, url: str, timeout=None):
         del url, timeout
         return _FakeResponse(503)
+
+
+class _FlakyHealthClient:
+    """Healthy, except for the next ``fail_count`` calls (set by the test)."""
+
+    def __init__(self) -> None:
+        self.fail_count = 0
+        self.calls = 0
+
+    def get(self, url: str, timeout=None):
+        del url, timeout
+        self.calls += 1
+        if self.fail_count > 0:
+            self.fail_count -= 1
+            raise httpx.ConnectTimeout("simulated slow health probe")
+        return _FakeResponse(200)
 
 
 class _FakeResponse:
@@ -301,3 +325,169 @@ def test_stop_terminates_the_process_and_resets_state(tmp_path: Path) -> None:
 
     # Idempotent: a second stop() with nothing running must not raise.
     manager.stop()
+
+
+def test_a_smaller_num_ctx_reuses_the_running_server(tmp_path: Path) -> None:
+    """llama-server can serve any request that fits its allocation, so a
+    smaller context window must never force a multi-minute reload -- only a
+    LARGER one does."""
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=6144)
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 1
+    assert manager.status.state == "ready"
+
+
+def test_restart_reasons_are_recorded_never_anonymous(tmp_path: Path) -> None:
+    """A model reload costs minutes of disk and GPU work. Every teardown
+    must record why it happened, surfaced through status for the UI."""
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen(), _FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    manager.ensure_ready(tmp_path / "a.gguf", num_ctx=4096)
+    assert manager.status.last_restart_reason is None  # first start, not a restart
+
+    manager.ensure_ready(tmp_path / "a.gguf", num_ctx=8192)
+    assert "context window increased from 4096 to 8192" in (manager.status.last_restart_reason or "")
+
+    manager.ensure_ready(tmp_path / "b.gguf", num_ctx=8192)
+    assert "model changed from a.gguf to b.gguf" in (manager.status.last_restart_reason or "")
+
+
+def test_a_dead_process_is_restarted_with_the_exit_code_recorded(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    first = _FakePopen()
+    launcher = _QueueLauncher([first, _FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    first.exit_code = -1073741819  # simulated access-violation crash between messages
+
+    handle = manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert handle is not None
+    assert len(launcher.launch_args) == 2
+    assert "exit code -1073741819" in (manager.status.last_restart_reason or "")
+
+
+def test_one_slow_health_probe_does_not_kill_a_live_server(tmp_path: Path) -> None:
+    """The old behavior condemned a healthy process on a single 1-second
+    health timeout -- under memory pressure (paged-out model) that meant a
+    full reload on every message. A retry must rescue it."""
+    fetcher = _FakeFetcher()
+    process = _FakePopen()
+    launcher = _QueueLauncher([process])
+    client = _FlakyHealthClient()
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=client)
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager._last_health_check = -1e9  # defeat the health-result cache
+    client.fail_count = 1  # first probe times out; the retry answers
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 1
+    assert process.terminated is False
+    assert manager.status.state == "ready"
+
+
+def test_an_unresponsive_server_is_replaced_only_after_retries_are_exhausted(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    first = _FakePopen()
+    launcher = _QueueLauncher([first, _FakePopen()])
+    client = _FlakyHealthClient()
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=client)
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager._last_health_check = -1e9
+    client.fail_count = 3  # all retries fail; the replacement's startup probes then succeed
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert first.terminated is True
+    assert "stopped responding" in (manager.status.last_restart_reason or "")
+
+
+def test_a_crash_loop_stops_with_an_honest_error_instead_of_thrashing(tmp_path: Path) -> None:
+    """Reloading a multi-gigabyte model once per message because it keeps
+    dying is the worst possible behavior on constrained hardware. After
+    repeated failures of the same configuration the manager must refuse,
+    with advice, rather than silently pay another reload."""
+    fetcher = _FakeFetcher()
+    processes = [_FakePopen(), _FakePopen(), _FakePopen(), _FakePopen()]
+    launcher = _QueueLauncher(list(processes))
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    for crash_round in range(3):
+        manager.ensure_ready(model_path, num_ctx=6144)
+        processes[crash_round].exit_code = 1  # dies after "generating"
+
+    with pytest.raises(LlamaCppError) as raised:
+        manager.ensure_ready(model_path, num_ctx=6144)
+
+    assert len(launcher.launch_args) == 3  # the guard fired BEFORE a fourth reload
+    assert "does not fit in available memory" in str(raised.value)
+    assert manager.status.state == "failed"
+
+    # And it keeps refusing fast -- no half-thrash of reload-every-other-message.
+    with pytest.raises(LlamaCppError):
+        manager.ensure_ready(model_path, num_ctx=6144)
+    assert len(launcher.launch_args) == 3
+
+    # A deliberate configuration change (smaller context might fix an OOM
+    # crash) clears the guard and gets a fresh attempt.
+    handle = manager.ensure_ready(model_path, num_ctx=2048)
+    assert handle is not None
+    assert len(launcher.launch_args) == 4
+    assert manager.status.state == "ready"
+
+
+def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
+    """The UI polls status every couple of seconds. It must never queue
+    behind a model load, which can legitimately take minutes."""
+    fetcher = _FakeFetcher()
+    release_launch = threading.Event()
+
+    class _BlockingLauncher:
+        def __init__(self) -> None:
+            self.launch_args: list[list[str]] = []
+
+        def __call__(self, argv: list[str], *, cwd: Path):
+            self.launch_args.append(argv)
+            assert release_launch.wait(timeout=5.0), "test deadlock: launch never released"
+            return _FakePopen()
+
+    launcher = _BlockingLauncher()
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    worker = threading.Thread(
+        target=lambda: manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096),
+        daemon=True,
+    )
+    worker.start()
+
+    observed_starting = False
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        state = manager.status.state  # must return promptly mid-load, not block
+        if state in ("downloading_binary", "starting"):
+            observed_starting = True
+            break
+        time.sleep(0.01)
+
+    release_launch.set()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert observed_starting is True
+    assert manager.status.state == "ready"

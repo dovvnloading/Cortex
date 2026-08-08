@@ -362,6 +362,7 @@ export interface LlamaCppRuntimeStatus {
   models_directory?: string;
   models_directory_exists?: boolean;
   active_backend?: "vulkan" | "cpu" | null;
+  last_restart_reason?: string | null;
 }
 
 export interface LlamaCppSettings {

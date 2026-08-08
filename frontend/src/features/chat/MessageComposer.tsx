@@ -40,7 +40,10 @@ function LlamaRuntimeBadge({ selectedModel }: { selectedModel: string }) {
           : "Not loaded yet";
 
   return (
-    <span className={`runtime-badge ${tone}`} title={llamacppStatus.last_error ?? undefined}>
+    // Tooltip prefers the hard error; otherwise it explains the most recent
+    // runtime restart (model change, context increase, crash) -- a model
+    // reload costs minutes, so the reason should never be a mystery.
+    <span className={`runtime-badge ${tone}`} title={llamacppStatus.last_error ?? llamacppStatus.last_restart_reason ?? undefined}>
       <span className="runtime-badge-dot" aria-hidden="true" />
       {label}
     </span>

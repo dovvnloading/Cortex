@@ -4,6 +4,13 @@ State machine: ``idle -> downloading_binary -> starting -> ready`` on
 success, or ``-> failed`` on any error; ``stopping`` is reachable from any
 non-idle state and always returns to ``idle``.
 
+Lifecycle policy, stated explicitly because it is the whole point of this
+class: a loaded model stays resident until (a) a different model is
+requested, (b) a larger context window is requested, (c) the app shuts
+down, or (d) the process itself dies.  Nothing here ever unloads a model
+"between messages" -- if that appears to happen, one of those four causes
+fired, and this class records which one (see ``last_restart_reason``).
+
 This is a small, dedicated subprocess manager built directly on
 ``subprocess.Popen`` -- the existing ``execution/native_*``/``worker_*``
 machinery is a purpose-built AppContainer sandbox + signing pipeline for
@@ -38,9 +45,23 @@ GpuBackendSetting = Literal["auto", "vulkan", "cpu"]
 
 _HEALTH_POLL_INTERVAL_SECONDS = 0.3
 _HEALTH_STATUS_CACHE_SECONDS = 5.0
+# Re-verifying a warm server: a single slow /health response must never be a
+# death sentence. Loading a multi-gigabyte model back into memory costs
+# minutes; waiting a few extra seconds to be sure costs nothing. Between
+# attempts the process itself is re-checked, so an actual crash is still
+# detected immediately.
+_HEALTH_RETRY_ATTEMPTS = 3
+_HEALTH_RETRY_TIMEOUT_SECONDS = 2.0
+_HEALTH_RETRY_DELAY_SECONDS = 0.6
 _SHUTDOWN_GRACE_SECONDS = 5.0
 _STATUS_REPEAT_SECONDS = 5.0
 _STDERR_TAIL_LINES = 200
+# Crash-loop guard: if the same (model, num_ctx) keeps dying, stop paying a
+# full model reload per message and surface an honest error instead. The
+# guard clears when the user changes model or context size (either may fix
+# an out-of-memory crash), or after the window expires.
+_FAILURE_LIMIT = 3
+_FAILURE_WINDOW_SECONDS = 300.0
 # Used only when a call with no num_ctx preference (title/translation) is
 # the very first thing to ever request this model -- i.e. there is no
 # already-loaded context size to inherit. In normal use the main chat call
@@ -85,6 +106,22 @@ class LlamaCppRuntimeStatus:
     # GPU can confirm it's actually being used rather than guessing from
     # generation speed alone.
     active_backend: Literal["vulkan", "cpu"] | None = None
+    # Why the most recent server teardown happened ("the selected model
+    # changed...", "the runtime process exited unexpectedly (exit code
+    # N)..."). A model reload costs minutes of disk and GPU work; it must
+    # never be anonymous.
+    last_restart_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReuseVerdict:
+    reusable: bool
+    # Human-readable teardown reason when not reusable. None means "nothing
+    # was running" -- a first start, not a restart.
+    reason: str | None = None
+    # True when the running server was lost rather than deliberately
+    # replaced (process died, stopped responding). Feeds the crash-loop guard.
+    failure: bool = False
 
 
 class ProcessLauncher(Protocol):
@@ -124,7 +161,16 @@ def _drain_output(stream, sink: list[str]) -> None:
 
 
 class LlamaServerManager:
-    """Ensures exactly one llama-server process is running for the requested model."""
+    """Ensures exactly one llama-server process is running for the requested model.
+
+    Locking: ``_ensure_lock`` serializes the slow paths (health re-verification,
+    teardown, launch -- a launch can legitimately take minutes for a large
+    model). ``_state_lock`` guards field access and is only ever held for
+    microseconds, so :attr:`status` -- polled every couple of seconds by the
+    UI -- stays responsive throughout a load instead of queueing behind it.
+    ``_ensure_lock`` is always acquired before ``_state_lock``, never the
+    reverse, so the pair cannot deadlock.
+    """
 
     def __init__(
         self,
@@ -150,16 +196,20 @@ class LlamaServerManager:
         )
         self._owns_http_client = http_client is None
 
-        self._lock = threading.RLock()
+        self._ensure_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._state: ServerState = "idle"
         self._process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
         self._loaded_num_ctx: int | None = None
         self._base_url: str | None = None
         self._last_error: str | None = None
+        self._last_restart_reason: str | None = None
         self._active_backend: GpuBackend | None = None
         self._last_health_check: float = 0.0
         self._stderr_tail: list[str] = []
+        self._failure_times: list[float] = []
+        self._failure_key: tuple[Path, int] | None = None
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
 
     # -- public API -------------------------------------------------------
@@ -168,96 +218,263 @@ class LlamaServerManager:
         self, model_path: Path, *, num_ctx: int | None, on_status: StatusCallback | None = None
     ) -> ServerHandle:
         """Block the caller's thread until a server serving ``model_path`` is
-        ready, reusing the current process if it already matches.
+        ready, reusing the current process whenever it can.
 
-        ``num_ctx=None`` means "no preference" (used by title/translation
-        calls, which don't carry the user's context-window setting): it
-        reuses whatever context size is already loaded for this model
-        rather than forcing a specific one. Only an explicit, *different*
-        num_ctx triggers a restart -- num_ctx is a launch-time flag for
-        llama-server (unlike Ollama, where it's a per-request option), so
-        treating "unspecified" as "must be exactly 4096" would restart the
-        server on every title-generation call.
+        Reuse policy: the running server is kept when the model matches and
+        the requested context window fits inside the loaded one.
+        ``num_ctx=None`` means "no preference" (title/translation calls);
+        a *smaller* num_ctx also reuses, because llama-server can serve any
+        request that fits its allocation -- only a larger context window
+        forces a relaunch, since ``-c`` is a launch-time flag (unlike
+        Ollama, where it's a per-request option).
 
         ``on_status`` is called with short, user-facing progress strings only
         while real work is happening (binary download, process start) -- an
         already-warm reused server never fires it, so no message flashes for
         the common fast path.
         """
-        with self._lock:
-            if self._is_reusable(model_path, num_ctx):
-                assert self._base_url is not None
-                return ServerHandle(base_url=self._base_url, model_path=model_path)
-            effective_num_ctx = (
-                num_ctx
-                if num_ctx is not None
-                else (self._loaded_num_ctx if self._loaded_model_path == model_path else _DEFAULT_NUM_CTX)
-            )
-            if self._process is not None:
-                self._stop_locked()
-            return self._start_locked(model_path, effective_num_ctx, on_status)
+        with self._ensure_lock:
+            verdict = self._reuse_verdict(model_path, num_ctx)
+            if verdict.reusable:
+                with self._state_lock:
+                    assert self._base_url is not None
+                    return ServerHandle(base_url=self._base_url, model_path=model_path)
+
+            with self._state_lock:
+                effective_num_ctx = (
+                    num_ctx
+                    if num_ctx is not None
+                    else (
+                        self._loaded_num_ctx
+                        if self._loaded_model_path == model_path and self._loaded_num_ctx is not None
+                        else _DEFAULT_NUM_CTX
+                    )
+                )
+
+            if verdict.reason is not None:
+                self._record_restart(verdict, model_path, effective_num_ctx)
+
+            self._guard_against_crash_loop(model_path, effective_num_ctx)
+
+            self._terminate_and_reset()
+            return self._start(model_path, effective_num_ctx, on_status)
 
     @property
     def status(self) -> LlamaCppRuntimeStatus:
-        with self._lock:
+        with self._state_lock:
+            state = self._state
             loaded_model = (
                 f"gguf:{self._loaded_model_path.name}"
-                if self._state == "ready" and self._loaded_model_path is not None
+                if state == "ready" and self._loaded_model_path is not None
                 else None
             )
-            models_directory = self._models_directory()
-            return LlamaCppRuntimeStatus(
-                state=self._state,
-                binary_present=self._release is not None and self._any_backend_cached(),
-                loaded_model=loaded_model,
-                last_error=self._last_error,
-                models_directory=str(models_directory),
-                models_directory_exists=models_directory.is_dir(),
-                active_backend=self._active_backend,
-            )
+            last_error = self._last_error
+            last_restart_reason = self._last_restart_reason
+            active_backend = self._active_backend
+        # The expensive parts -- hashing the cached binary directory and a
+        # settings read for the models folder -- run outside every lock, so
+        # a status poll never stalls behind (or holds up) a model load.
+        models_directory = self._models_directory()
+        return LlamaCppRuntimeStatus(
+            state=state,
+            binary_present=self._release is not None and self._any_backend_cached(),
+            loaded_model=loaded_model,
+            last_error=last_error,
+            models_directory=str(models_directory),
+            models_directory_exists=models_directory.is_dir(),
+            active_backend=active_backend,
+            last_restart_reason=last_restart_reason,
+        )
 
     def stop(self) -> None:
         """Terminate any running process. Idempotent; safe to call from app shutdown."""
-        with self._lock:
-            self._stop_locked()
+        with self._ensure_lock:
+            self._terminate_and_reset()
+            with self._state_lock:
+                self._failure_times.clear()
+                self._failure_key = None
 
-    # -- internals ----------------------------------------------------------
+    # -- reuse & teardown ---------------------------------------------------
 
-    def _is_reusable(self, model_path: Path, num_ctx: int | None) -> bool:
-        if self._state != "ready" or self._process is None:
-            return False
-        if self._loaded_model_path != model_path:
-            return False
-        if num_ctx is not None and self._loaded_num_ctx != num_ctx:
-            return False
-        if self._process.poll() is not None:
-            self._state = "failed"
-            self._last_error = "The local model runtime stopped unexpectedly."
-            return False
-        now = time.monotonic()
-        if now - self._last_health_check < _HEALTH_STATUS_CACHE_SECONDS:
-            return True
-        if self._poll_health_once():
-            self._last_health_check = now
-            return True
-        self._state = "failed"
-        self._last_error = "The local model runtime stopped responding."
-        return False
+    def _reuse_verdict(self, model_path: Path, num_ctx: int | None) -> _ReuseVerdict:
+        with self._state_lock:
+            if self._state != "ready" or self._process is None:
+                return _ReuseVerdict(reusable=False)
+            if self._loaded_model_path != model_path:
+                return _ReuseVerdict(
+                    reusable=False,
+                    reason=(
+                        f"the selected model changed from {self._loaded_model_path.name} "
+                        f"to {model_path.name}"
+                    ),
+                )
+            if (
+                num_ctx is not None
+                and self._loaded_num_ctx is not None
+                and num_ctx > self._loaded_num_ctx
+            ):
+                return _ReuseVerdict(
+                    reusable=False,
+                    reason=(
+                        f"the context window increased from {self._loaded_num_ctx} "
+                        f"to {num_ctx} tokens"
+                    ),
+                )
+            exit_code = self._process.poll()
+            if exit_code is not None:
+                return _ReuseVerdict(
+                    reusable=False,
+                    reason=f"the runtime process exited unexpectedly (exit code {exit_code})",
+                    failure=True,
+                )
+            if time.monotonic() - self._last_health_check < _HEALTH_STATUS_CACHE_SECONDS:
+                return _ReuseVerdict(reusable=True)
+            base_url = self._base_url
+            process = self._process
 
-    def _poll_health_once(self) -> bool:
+        # Probes run without the state lock; status polls stay responsive.
+        healthy, exit_code = self._probe_health_with_retries(base_url, process)
+        with self._state_lock:
+            if healthy:
+                self._last_health_check = time.monotonic()
+                return _ReuseVerdict(reusable=True)
+            if exit_code is not None:
+                return _ReuseVerdict(
+                    reusable=False,
+                    reason=f"the runtime process exited unexpectedly (exit code {exit_code})",
+                    failure=True,
+                )
+            return _ReuseVerdict(
+                reusable=False,
+                reason=(
+                    f"the runtime stopped responding to health checks "
+                    f"({_HEALTH_RETRY_ATTEMPTS} attempts)"
+                ),
+                failure=True,
+            )
+
+    def _probe_health_with_retries(
+        self, base_url: str | None, process: subprocess.Popen
+    ) -> tuple[bool, int | None]:
+        """Distinguish busy from dead. Returns (healthy, exit_code_if_dead).
+
+        A process that is still running but momentarily slow (paged out
+        under memory pressure, mid-page-fault-storm) answers on a retry; a
+        crashed one is caught by the ``poll()`` between attempts.
+        """
+        for attempt in range(_HEALTH_RETRY_ATTEMPTS):
+            exit_code = process.poll()
+            if exit_code is not None:
+                return False, exit_code
+            try:
+                response = self._http.get(
+                    f"{base_url}/health", timeout=_HEALTH_RETRY_TIMEOUT_SECONDS
+                )
+                if response.status_code == 200:
+                    return True, None
+            except httpx.TransportError:
+                pass
+            if attempt < _HEALTH_RETRY_ATTEMPTS - 1:
+                time.sleep(_HEALTH_RETRY_DELAY_SECONDS)
+        return False, process.poll()
+
+    def _record_restart(
+        self, verdict: _ReuseVerdict, model_path: Path, effective_num_ctx: int
+    ) -> None:
+        assert verdict.reason is not None
+        with self._state_lock:
+            self._last_restart_reason = verdict.reason
+            tail = list(self._stderr_tail[-20:])
+            if verdict.failure:
+                crashed_key = (
+                    (self._loaded_model_path, self._loaded_num_ctx)
+                    if self._loaded_model_path is not None and self._loaded_num_ctx is not None
+                    else (model_path, effective_num_ctx)
+                )
+                if self._failure_key != crashed_key:
+                    self._failure_key = crashed_key
+                    self._failure_times.clear()
+                self._failure_times.append(time.monotonic())
+            else:
+                # A deliberate configuration change (model or context size)
+                # is exactly what fixes an out-of-memory crash loop -- give
+                # the new configuration a clean slate.
+                self._failure_times.clear()
+                self._failure_key = None
+        log = logger.warning if verdict.failure else logger.info
+        log("Restarting the local model runtime: %s.", verdict.reason)
+        if verdict.failure and tail:
+            logger.warning("llama-server output before it was lost:\n%s", "\n".join(tail))
+
+    def _guard_against_crash_loop(self, model_path: Path, effective_num_ctx: int) -> None:
+        with self._state_lock:
+            now = time.monotonic()
+            self._failure_times = [
+                at for at in self._failure_times if now - at < _FAILURE_WINDOW_SECONDS
+            ]
+            if (
+                self._failure_key == (model_path, effective_num_ctx)
+                and len(self._failure_times) >= _FAILURE_LIMIT
+            ):
+                reason = self._last_restart_reason or "the runtime kept failing"
+                message = (
+                    f"The local model runtime for {model_path.name} failed "
+                    f"{len(self._failure_times)} times in the last few minutes "
+                    f"(most recently: {reason}). It likely does not fit in available "
+                    "memory. Choose a smaller model or quantization, or lower the "
+                    "context window in Settings, and Cortex will try again."
+                )
+                self._terminate_and_reset_locked()
+                self._state = "failed"
+                self._last_error = message
+                raise LlamaCppError(message)
+
+    def _terminate_and_reset(self) -> None:
+        with self._state_lock:
+            process = self._process
+            if process is not None:
+                self._state = "stopping"
+        if process is not None:
+            # Terminate outside the state lock: the grace wait can take
+            # seconds and status polls must not hang behind it.
+            self._terminate_process(process)
+        with self._state_lock:
+            self._reset_fields_locked()
+
+    def _terminate_and_reset_locked(self) -> None:
+        if self._process is not None:
+            self._terminate_process(self._process)
+        self._reset_fields_locked()
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> None:
+        process.terminate()
         try:
-            response = self._http.get(f"{self._base_url}/health", timeout=1.0)
-        except httpx.TransportError:
-            return False
-        return response.status_code == 200
+            process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.error("The local model runtime process did not exit after being killed.")
 
-    def _start_locked(
+    def _reset_fields_locked(self) -> None:
+        self._process = None
+        self._loaded_model_path = None
+        self._loaded_num_ctx = None
+        self._base_url = None
+        self._state = "idle"
+
+    # -- launch -------------------------------------------------------------
+
+    def _start(
         self, model_path: Path, num_ctx: int, on_status: StatusCallback | None
     ) -> ServerHandle:
         if self._release is None:
-            self._state = "failed"
-            self._last_error = "The local GGUF runtime is not yet configured."
-            raise LlamaCppError(self._last_error)
+            with self._state_lock:
+                self._state = "failed"
+                self._last_error = "The local GGUF runtime is not yet configured."
+            raise LlamaCppError("The local GGUF runtime is not yet configured.")
 
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
@@ -272,9 +489,11 @@ class LlamaServerManager:
                     type(exc).__name__,
                 )
                 continue
-        self._state = "failed"
-        self._last_error = str(last_exc) if last_exc else "The local model runtime could not start."
-        raise last_exc or LlamaCppError(self._last_error)
+        message = str(last_exc) if last_exc else "The local model runtime could not start."
+        with self._state_lock:
+            self._state = "failed"
+            self._last_error = message
+        raise last_exc or LlamaCppError(message)
 
     def _backend_order(self, requested: GpuBackendSetting) -> list[GpuBackend]:
         if requested == "cpu":
@@ -304,13 +523,15 @@ class LlamaServerManager:
     def _start_with_backend(
         self, model_path: Path, num_ctx: int, backend: GpuBackend, on_status: StatusCallback | None
     ) -> ServerHandle:
-        self._state = "downloading_binary"
+        with self._state_lock:
+            self._state = "downloading_binary"
         assert self._release is not None
         if not self._fetcher.is_cached(self._release, backend) and on_status is not None:
             on_status("Downloading the local model runtime (one-time setup)...")
         executable = self._fetcher.ensure_binary(self._release, backend)
 
-        self._state = "starting"
+        with self._state_lock:
+            self._state = "starting"
         if on_status is not None:
             on_status(f"Starting the local model ({model_path.name})...")
         port = _free_loopback_port()
@@ -341,15 +562,16 @@ class LlamaServerManager:
                     + "\n".join(stderr_tail[-20:])
                 )
             if self._probe_health(base_url):
-                self._process = process
-                self._loaded_model_path = model_path
-                self._loaded_num_ctx = num_ctx
-                self._base_url = base_url
-                self._state = "ready"
-                self._last_error = None
-                self._active_backend = backend
-                self._last_health_check = time.monotonic()
-                self._stderr_tail = stderr_tail
+                with self._state_lock:
+                    self._process = process
+                    self._loaded_model_path = model_path
+                    self._loaded_num_ctx = num_ctx
+                    self._base_url = base_url
+                    self._state = "ready"
+                    self._last_error = None
+                    self._active_backend = backend
+                    self._last_health_check = time.monotonic()
+                    self._stderr_tail = stderr_tail
                 return ServerHandle(base_url=base_url, model_path=model_path)
             now = time.monotonic()
             if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
@@ -366,24 +588,6 @@ class LlamaServerManager:
         except httpx.TransportError:
             return False
         return response.status_code == 200
-
-    def _stop_locked(self) -> None:
-        if self._process is not None:
-            self._state = "stopping"
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                try:
-                    self._process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    logger.error("The local model runtime process did not exit after being killed.")
-        self._process = None
-        self._loaded_model_path = None
-        self._loaded_num_ctx = None
-        self._base_url = None
-        self._state = "idle"
 
     def _any_backend_cached(self) -> bool:
         if self._release is None:

@@ -75,6 +75,10 @@ class LlamaCppRuntimeStatus(APIModel):
     models_directory: str = ""
     models_directory_exists: bool = True
     active_backend: Literal["vulkan", "cpu"] | None = None
+    # Why the most recent runtime teardown happened (model change, context
+    # increase, crash with exit code, unresponsive). A model reload costs
+    # minutes; it is never anonymous.
+    last_restart_reason: str | None = None
 
 
 class SystemResponse(APIModel):
