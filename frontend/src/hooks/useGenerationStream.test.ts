@@ -154,6 +154,42 @@ describe("useGenerationStream", () => {
     expect(readActiveJob()).toBeNull();
   });
 
+  it("waits for onCompleted's reload to finish before clearing the store's jobId", async () => {
+    // Regression test: the store's jobId gates whether ChatPage's pending
+    // bubble is mounted. onCompleted (reconcileChat) reloads the chat so the
+    // real, persisted message can take that bubble's place. If the store
+    // cleared jobId before that reload resolved, the pending bubble would
+    // unmount with nothing yet loaded to replace it -- the response visibly
+    // vanishes for the length of that request, then "pops" back in once it
+    // resolves.
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api));
+
+    let resolveReload: (() => void) | null = null;
+    const onCompleted = vi.fn(() => new Promise<void>((resolve) => { resolveReload = resolve; }));
+
+    act(() => {
+      result.current.start("job-11", "thread-11", onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-11", thread_id: "thread-11", data: { delta: "done" } });
+      emitEvent({ event_id: 2, event: "generation.completed", job_id: "job-11", thread_id: "thread-11", data: {} });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-11"));
+
+    // The reload is deliberately left pending -- the job must still read as
+    // active so the pending bubble stays mounted.
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(useChatStore.getState().generation.jobId).toBe("job-11");
+
+    act(() => resolveReload?.());
+
+    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }));
+  });
+
   it("on generation.failed calls onFailed with the event message and resets the store", async () => {
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });

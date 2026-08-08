@@ -91,6 +91,13 @@ export function useGenerationStream(api: CortexApi) {
       abortRef.current = controller;
       let cursor = job.lastEventId;
       let terminal = false;
+      // Set alongside `terminal`, never awaited until the finally block below
+      // -- endGeneration() must not clear the store's jobId (and unmount the
+      // pending bubble) before the reload it triggers has actually put the
+      // real, persisted message in its place. Awaiting inline here isn't an
+      // option: the SSE event handler that sets this is a synchronous
+      // callback.
+      let completion: Promise<void> | null = null;
       useChatStore.getState().setStatusText(job.jobId, "Connecting to generation...");
       const contentFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendContentToken(job.jobId, buffered));
       const thoughtsFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendThinkingToken(job.jobId, buffered));
@@ -124,12 +131,12 @@ export function useGenerationStream(api: CortexApi) {
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
-                  void onCompleted(job.threadId);
+                  completion = onCompleted(job.threadId);
                 }
                 if (event.event === "generation.failed" || event.event === "generation.cancelled") {
                   terminal = true;
                   onFailed(job.threadId, typeof data.message === "string" ? data.message : "Generation did not complete.");
-                  void onCompleted(job.threadId);
+                  completion = onCompleted(job.threadId);
                 }
               },
               { signal: controller.signal, afterEventId: cursor },
@@ -148,7 +155,7 @@ export function useGenerationStream(api: CortexApi) {
                 if (snapshot.status !== "succeeded") {
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 }
-                await onCompleted(job.threadId);
+                completion = onCompleted(job.threadId);
               } else {
                 if (snapshot.status === "cancelling") useChatStore.getState().markStopping(job.jobId);
                 useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
@@ -179,6 +186,18 @@ export function useGenerationStream(api: CortexApi) {
         contentFlusher.flushNow();
         thoughtsFlusher.flushNow();
         if (terminal) {
+          if (completion) {
+            // Wait for the reload that puts the real, persisted message in
+            // the transcript before dropping the store's jobId below --
+            // otherwise the pending bubble unmounts (jobId cleared) a beat
+            // before the real one is ready to take its place, and the
+            // response visibly vanishes for the length of that request
+            // before "popping" back in once it resolves. onCompleted
+            // implementations (reconcileChat) already catch and report
+            // their own failures, so this is just a wait, not error
+            // handling.
+            await completion.catch(() => undefined);
+          }
           const stored = readActiveJob();
           if (stored?.jobId === job.jobId) clearActiveJob();
           useChatStore.getState().endGeneration(job.jobId);

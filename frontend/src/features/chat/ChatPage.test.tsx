@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
@@ -277,6 +277,40 @@ describe("ChatPage composer integration", () => {
 
     expect(streamCalls[0].afterEventId).toBe(0);
     expect(streamCalls[1].afterEventId).toBe(0);
+  });
+
+  it("collapses the pending reasoning panel in step with contentReady, ahead of the swap to the real message", async () => {
+    // The final MessageCard's reasoning panel defaults collapsed. If the
+    // pending bubble's stayed forced-open the whole time, it would visibly
+    // snap shut the moment the real message swaps in. Closing it here, at
+    // the same instant the "Live" badge goes away, means both states
+    // already agree by the time that swap happens.
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-reason", threadId: "thread-a", lastEventId: 0 }));
+    let emit: ((event: unknown) => void) | null = null;
+    const api = chatApi({
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }),
+    });
+    renderChat(api, "thread-a");
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    act(() => {
+      emit!({ event_id: 1, event: "generation.thinking_delta", job_id: "job-reason", thread_id: "thread-a", data: { delta: "reasoning..." } });
+    });
+    const details = (await screen.findByText("Reasoning")).closest("details");
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText("Live")).toBeInTheDocument();
+
+    act(() => {
+      emit!({ event_id: 2, event: "generation.persisting", job_id: "job-reason", thread_id: "thread-a", data: {} });
+    });
+
+    await waitFor(() => expect(details).not.toHaveAttribute("open"));
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
   });
 
   it("retains the exact draft if generation acceptance fails", async () => {

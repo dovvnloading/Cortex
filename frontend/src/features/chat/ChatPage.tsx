@@ -476,7 +476,8 @@ export function ChatPage({
               <article className="message-card message-assistant message-pending" aria-label={generation.contentReady ? "Cortex response ready, saving..." : "Cortex response in progress"}>
                 <MessageIdentity role="assistant" />
                 <div className="message-bubble">
-                  {generation.partialThoughts && <details className="reasoning" open><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
+                  {/* Open while actively thinking, then auto-collapses in step with the "Live" badge going away -- matches the final MessageCard's default-collapsed state, so the reload swap below doesn't cause the reasoning panel to visibly snap shut. */}
+                  {generation.partialThoughts && <details className="reasoning" open={!generation.contentReady}><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
                   {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={generation.contentReady} /></div>}
                   {!generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}
                 </div>
