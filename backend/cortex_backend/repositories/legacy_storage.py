@@ -51,7 +51,7 @@ class MigrationResult:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(
         self,
@@ -132,6 +132,19 @@ class DatabaseManager:
                     FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
                 );
             """)
+            # Groups (folders/projects). `position` gives the user an explicit
+            # order independent of recency, and `collapsed` lives here rather
+            # than in browser storage so the sidebar looks the same on every
+            # launch and on any window.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    collapsed INTEGER NOT NULL DEFAULT 0,
+                    timestamp TEXT NOT NULL
+                );
+            """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_thread_timestamp "
                 "ON messages(thread_id, timestamp, id)"
@@ -154,6 +167,34 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
             if "generation_stats_json" not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN generation_stats_json TEXT")
+            thread_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(threads)").fetchall()
+            }
+            if "group_id" not in thread_columns:
+                # Deliberately no FOREIGN KEY: SQLite cannot add a constrained
+                # column via ALTER TABLE, and existing databases must upgrade
+                # in place rather than be rebuilt. delete_group() clears the
+                # column explicitly (the same effect as ON DELETE SET NULL),
+                # and the orphan sweep below repairs any row that somehow
+                # outlives its group.
+                conn.execute("ALTER TABLE threads ADD COLUMN group_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(group_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_groups_position "
+                "ON chat_groups(position, timestamp)"
+            )
+            # Self-heal: without a real FK, a chat could in principle point at
+            # a group that no longer exists (an interrupted delete, an
+            # externally edited file). Such a chat would be filed under a
+            # group the sidebar never renders, making it look deleted. Return
+            # any orphan to the ungrouped list on startup.
+            conn.execute(
+                "UPDATE threads SET group_id = NULL WHERE group_id IS NOT NULL "
+                "AND group_id NOT IN (SELECT id FROM chat_groups)"
+            )
             if version < self.SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
             logging.info("Database tables and indexes verified/created successfully.")
@@ -413,7 +454,10 @@ class DatabaseManager:
         try:
             with self.connect() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, title, timestamp FROM threads WHERE id = ?", (thread_id,))
+                cursor.execute(
+                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    (thread_id,),
+                )
                 thread_row = cursor.fetchone()
                 if not thread_row:
                     return None
@@ -551,16 +595,136 @@ class DatabaseManager:
             ) from exc
 
     def get_all_chats_summary(self) -> list[dict]:
-        """Retrieves a summary (id, title, timestamp) of all chats, sorted by recency."""
+        """Retrieves a summary (id, title, timestamp, group_id) of all chats, sorted by recency."""
         try:
             with self.connect() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, title, timestamp FROM threads ORDER BY timestamp DESC")
+                cursor.execute(
+                    "SELECT id, title, timestamp, group_id FROM threads ORDER BY timestamp DESC"
+                )
                 return [dict(row) for row in cursor.fetchall()]
         except PersistenceError as exc:
             raise PersistenceError(
                 "Failed to get chat summaries.",
                 operation="get_all_chats_summary",
+                cause=exc,
+            ) from exc
+
+    # -- chat groups (folders/projects) -----------------------------------
+
+    def list_groups(self) -> list[dict]:
+        """All groups in user-defined order, oldest-created first within a position."""
+        try:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    "SELECT id, name, position, collapsed, timestamp FROM chat_groups "
+                    "ORDER BY position ASC, timestamp ASC"
+                )
+                return [
+                    {**dict(row), "collapsed": bool(row["collapsed"])}
+                    for row in cursor.fetchall()
+                ]
+        except PersistenceError as exc:
+            raise PersistenceError(
+                "Failed to list chat groups.", operation="list_groups", cause=exc
+            ) from exc
+
+    def create_group(self, group_id: str, name: str) -> None:
+        """Append a group after every existing one."""
+        try:
+            with self.connect() as conn:
+                next_position = conn.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_groups"
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO chat_groups (id, name, position, collapsed, timestamp) "
+                    "VALUES (?, ?, ?, 0, ?)",
+                    (group_id, name, next_position, _utc_now().isoformat()),
+                )
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to create chat group {group_id}.",
+                operation="create_group",
+                cause=exc,
+            ) from exc
+
+    def update_group(
+        self, group_id: str, *, name: str | None = None, collapsed: bool | None = None
+    ) -> bool:
+        """Rename and/or collapse a group. Returns False when it does not exist."""
+        assignments: list[str] = []
+        values: list[object] = []
+        if name is not None:
+            assignments.append("name = ?")
+            values.append(name)
+        if collapsed is not None:
+            assignments.append("collapsed = ?")
+            values.append(1 if collapsed else 0)
+        if not assignments:
+            return self.group_exists(group_id)
+        values.append(group_id)
+        try:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    f"UPDATE chat_groups SET {', '.join(assignments)} WHERE id = ?",
+                    tuple(values),
+                )
+                return cursor.rowcount > 0
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to update chat group {group_id}.",
+                operation="update_group",
+                cause=exc,
+            ) from exc
+
+    def delete_group(self, group_id: str) -> None:
+        """Delete a group and return its chats to the ungrouped list.
+
+        Chats are never deleted with their group -- losing conversations as a
+        side effect of tidying the sidebar would be indefensible.
+        """
+        try:
+            with self.connect() as conn:
+                conn.execute(
+                    "UPDATE threads SET group_id = NULL WHERE group_id = ?", (group_id,)
+                )
+                conn.execute("DELETE FROM chat_groups WHERE id = ?", (group_id,))
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to delete chat group {group_id}.",
+                operation="delete_group",
+                cause=exc,
+            ) from exc
+
+    def group_exists(self, group_id: str) -> bool:
+        with self.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM chat_groups WHERE id = ?", (group_id,)
+                ).fetchone()
+                is not None
+            )
+
+    def set_chat_group(self, thread_id: str, group_id: str | None) -> bool:
+        """Move a chat into a group, or out of every group when ``group_id`` is None."""
+        try:
+            with self.connect() as conn:
+                if group_id is not None and conn.execute(
+                    "SELECT 1 FROM chat_groups WHERE id = ?", (group_id,)
+                ).fetchone() is None:
+                    raise PersistenceError(
+                        "Chat group does not exist.", operation="set_chat_group"
+                    )
+                cursor = conn.execute(
+                    "UPDATE threads SET group_id = ? WHERE id = ?", (group_id, thread_id)
+                )
+                return cursor.rowcount > 0
+        except PersistenceError as exc:
+            if exc.operation == "set_chat_group":
+                raise
+            raise PersistenceError(
+                f"Failed to move chat {thread_id}.",
+                operation="set_chat_group",
                 cause=exc,
             ) from exc
 

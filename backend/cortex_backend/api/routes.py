@@ -33,7 +33,11 @@ from cortex_backend.core.settings import (
     GENERATION_OVERRIDE_FIELDS,
     GenerationOptionsOverride,
 )
-from cortex_backend.repositories.chats import ChatRepositoryError, ChatRevisionConflict
+from cortex_backend.repositories.chats import (
+    ChatGroupNotFound,
+    ChatRepositoryError,
+    ChatRevisionConflict,
+)
 from cortex_backend.repositories.settings import SettingsMigrationReport
 from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.services.attachments import (
@@ -91,9 +95,11 @@ from .jobs import (
 from .schemas import (
     AddMemoryRequest,
     AddMessageRequest,
+    ChatGroup,
     ChatResponse,
     ChatSummary,
     ClearMemoryRequest,
+    CreateChatGroupRequest,
     CreateChatRequest,
     DiagnosticsResponse,
     AttachmentStageAccepted,
@@ -130,10 +136,12 @@ from .schemas import (
     ModelPullRequest,
     ModelResponse,
     InstalledModel,
+    MoveChatToGroupRequest,
     RenameChatRequest,
     ReplaceMemoryRequest,
     SessionExchangeRequest,
     SessionExchangeResponse,
+    UpdateChatGroupRequest,
     ShutdownResponse,
     SettingsResponse,
     SettingsMigrationReport as SettingsMigrationReportResponse,
@@ -355,6 +363,104 @@ def build_router() -> APIRouter:
             deps.chats.delete_chat(thread_id)
         except Exception as exc:
             _raise_repository_error("delete chat", exc)
+
+    @router.get("/chat-groups", response_model=list[ChatGroup])
+    def list_chat_groups(
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> list[ChatGroup]:
+        try:
+            return [ChatGroup.model_validate(item) for item in deps.chats.list_groups()]
+        except Exception as exc:
+            _raise_repository_error("list chat groups", exc)
+
+    @router.post(
+        "/chat-groups", response_model=ChatGroup, status_code=status.HTTP_201_CREATED
+    )
+    def create_chat_group(
+        payload: CreateChatGroupRequest,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> ChatGroup:
+        group_id = uuid4().hex
+        try:
+            deps.chats.create_group(group_id, payload.name.strip())
+            created = next(
+                (item for item in deps.chats.list_groups() if item["id"] == group_id),
+                None,
+            )
+        except Exception as exc:
+            _raise_repository_error("create chat group", exc)
+        if created is None:
+            raise HTTPException(
+                status_code=500, detail="Chat group creation did not persist."
+            )
+        return ChatGroup.model_validate(created)
+
+    @router.patch("/chat-groups/{group_id}", response_model=ChatGroup)
+    def update_chat_group(
+        group_id: str,
+        payload: UpdateChatGroupRequest,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> ChatGroup:
+        try:
+            updated = deps.chats.update_group(
+                group_id,
+                name=payload.name.strip() if payload.name is not None else None,
+                collapsed=payload.collapsed,
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail="Chat group not found.")
+            group = next(
+                (item for item in deps.chats.list_groups() if item["id"] == group_id),
+                None,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_repository_error("update chat group", exc)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Chat group not found.")
+        return ChatGroup.model_validate(group)
+
+    @router.delete("/chat-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_chat_group(
+        group_id: str,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> None:
+        """Delete the group only. Its chats return to the ungrouped list --
+        tidying the sidebar must never destroy conversations."""
+        try:
+            deps.chats.delete_group(group_id)
+        except Exception as exc:
+            _raise_repository_error("delete chat group", exc)
+
+    @router.patch("/chats/{thread_id}/group", response_model=ChatSummary)
+    def move_chat_to_group(
+        thread_id: str,
+        payload: MoveChatToGroupRequest,
+        deps: BackendDependenciesProtocol = Depends(dependencies),
+        _: SessionPrincipal = Depends(require_session),
+    ) -> ChatSummary:
+        try:
+            moved = deps.chats.set_chat_group(thread_id, payload.group_id)
+            if not moved:
+                raise HTTPException(status_code=404, detail="Chat not found.")
+            summary = next(
+                (item for item in deps.chats.list_summaries() if item["id"] == thread_id),
+                None,
+            )
+        except HTTPException:
+            raise
+        except ChatGroupNotFound as exc:
+            raise HTTPException(status_code=404, detail="Chat group not found.") from exc
+        except Exception as exc:
+            _raise_repository_error("move chat", exc)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Chat not found.")
+        return ChatSummary.model_validate(summary)
 
     @router.post("/chats/{thread_id}/messages", response_model=ChatResponse)
     def add_message(

@@ -58,6 +58,14 @@ export interface ChatAttachmentStageRequest {
   content_base64: string;
 }
 
+export interface ChatGroup {
+  id: string;
+  name: string;
+  position?: number;
+  collapsed?: boolean;
+  timestamp: string;
+}
+
 export interface ChatMessage {
   id?: string | null;
   role: "user" | "assistant" | "system";
@@ -74,6 +82,7 @@ export interface ChatResponse {
   title: string;
   timestamp: string;
   revision?: number;
+  group_id?: string | null;
   messages?: Array<ChatMessage>;
 }
 
@@ -81,6 +90,7 @@ export interface ChatSummary {
   id: string;
   title: string;
   timestamp: string;
+  group_id?: string | null;
 }
 
 export interface ClearMemoryRequest {
@@ -148,6 +158,10 @@ export interface CortexSettings {
   memory?: MemorySettings;
   translation?: TranslationSettings;
   suggestions?: SuggestionSettings;
+}
+
+export interface CreateChatGroupRequest {
+  name: string;
 }
 
 export interface CreateChatRequest {
@@ -405,6 +419,10 @@ export interface ModelSettings {
   gguf_directory?: string | null;
 }
 
+export interface MoveChatToGroupRequest {
+  group_id?: string | null;
+}
+
 export interface OnboardingSettings {
   agreement_accepted?: boolean;
 }
@@ -533,6 +551,11 @@ export interface SystemResponse {
 export interface TranslationSettings {
   enabled?: boolean;
   target_language?: string;
+}
+
+export interface UpdateChatGroupRequest {
+  name?: string | null;
+  collapsed?: boolean | null;
 }
 
 export interface ValidationError {

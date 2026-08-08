@@ -326,6 +326,41 @@
         "title": "ChatAttachmentStageRequest",
         "type": "object"
       },
+      "ChatGroup": {
+        "additionalProperties": false,
+        "description": "A user-created folder/project in the chat library.",
+        "properties": {
+          "collapsed": {
+            "default": false,
+            "title": "Collapsed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "position": {
+            "default": 0,
+            "title": "Position",
+            "type": "integer"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "timestamp"
+        ],
+        "title": "ChatGroup",
+        "type": "object"
+      },
       "ChatMessage": {
         "additionalProperties": false,
         "properties": {
@@ -423,6 +458,17 @@
       "ChatResponse": {
         "additionalProperties": false,
         "properties": {
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -459,6 +505,17 @@
       "ChatSummary": {
         "additionalProperties": false,
         "properties": {
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -797,6 +854,22 @@
           }
         },
         "title": "CortexSettings",
+        "type": "object"
+      },
+      "CreateChatGroupRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateChatGroupRequest",
         "type": "object"
       },
       "CreateChatRequest": {
@@ -2562,6 +2635,24 @@
         "title": "ModelSettings",
         "type": "object"
       },
+      "MoveChatToGroupRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
+          }
+        },
+        "title": "MoveChatToGroupRequest",
+        "type": "object"
+      },
       "OnboardingSettings": {
         "additionalProperties": false,
         "properties": {
@@ -3242,6 +3333,38 @@
         "title": "TranslationSettings",
         "type": "object"
       },
+      "UpdateChatGroupRequest": {
+        "additionalProperties": false,
+        "description": "Both fields optional: renaming and collapsing use the same endpoint.",
+        "properties": {
+          "collapsed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collapsed"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "UpdateChatGroupRequest",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -3328,6 +3451,144 @@
           }
         },
         "summary": "Stage Chat Attachment"
+      }
+    },
+    "/api/v1/chat-groups": {
+      "get": {
+        "operationId": "list_chat_groups_api_v1_chat_groups_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChatGroup"
+                  },
+                  "title": "Response List Chat Groups Api V1 Chat Groups Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Chat Groups"
+      },
+      "post": {
+        "operationId": "create_chat_group_api_v1_chat_groups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChatGroupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatGroup"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Chat Group"
+      }
+    },
+    "/api/v1/chat-groups/{group_id}": {
+      "delete": {
+        "description": "Delete the group only. Its chats return to the ungrouped list --\ntidying the sidebar must never destroy conversations.",
+        "operationId": "delete_chat_group_api_v1_chat_groups__group_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Chat Group"
+      },
+      "patch": {
+        "operationId": "update_chat_group_api_v1_chat_groups__group_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChatGroupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatGroup"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Chat Group"
       }
     },
     "/api/v1/chats": {
@@ -3551,6 +3812,55 @@
           }
         },
         "summary": "Fork Chat"
+      }
+    },
+    "/api/v1/chats/{thread_id}/group": {
+      "patch": {
+        "operationId": "move_chat_to_group_api_v1_chats__thread_id__group_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveChatToGroupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Move Chat To Group"
       }
     },
     "/api/v1/chats/{thread_id}/messages": {

@@ -157,6 +157,36 @@ class ChatSummary(APIModel):
     id: str
     title: str
     timestamp: str
+    # None means the chat sits in the ungrouped list.
+    group_id: str | None = None
+
+
+class ChatGroup(APIModel):
+    """A user-created folder/project in the chat library."""
+
+    id: str
+    name: str
+    position: int = 0
+    # Persisted server-side rather than in browser storage, so the library
+    # looks the same on every launch and in every window.
+    collapsed: bool = False
+    timestamp: str
+
+
+class CreateChatGroupRequest(APIModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class UpdateChatGroupRequest(APIModel):
+    """Both fields optional: renaming and collapsing use the same endpoint."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    collapsed: bool | None = None
+
+
+class MoveChatToGroupRequest(APIModel):
+    # Explicit null moves the chat back to the ungrouped list.
+    group_id: str | None = None
 
 
 class ChatResponse(APIModel):
@@ -164,6 +194,7 @@ class ChatResponse(APIModel):
     title: str
     timestamp: str
     revision: int = 0
+    group_id: str | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
