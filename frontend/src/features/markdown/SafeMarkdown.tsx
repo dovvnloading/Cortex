@@ -34,20 +34,26 @@ function languageLabel(className: string | undefined): string {
   return languageClass?.replace(/^language-/, "") || "code";
 }
 
-function Code({ className, children, ...props }: ComponentProps<"code">) {
-  const value = childrenToText(children).replace(/\n$/, "");
-  const fenced = Boolean(className) || value.includes("\n");
-  if (!fenced) return <code className={className} {...props}>{children}</code>;
-
-  const language = languageLabel(className);
+/**
+ * Wraps the whole fenced block so the toolbar is a *sibling* of the scrolling
+ * <pre>, not a child of it. Nested inside, the toolbar inherits the code's
+ * max-content width, which pushes the right-aligned Copy button off-screen on
+ * any block wider than the column -- reachable only by scrolling the code all
+ * the way right. As a sibling it stays pinned while only the code scrolls.
+ */
+function Pre({ children }: ComponentProps<"pre">) {
+  const code = isValidElement<{ className?: string; children?: ReactNode }>(children) ? children : null;
+  if (!code) return <pre>{children}</pre>;
+  const language = languageLabel(code.props.className);
+  const value = childrenToText(code.props.children).replace(/\n$/, "");
   return (
-    <span className="code-block-content">
-      <span className="code-block-toolbar">
+    <div className="code-block">
+      <div className="code-block-toolbar">
         <span className="code-language">{language}</span>
         <CodeCopyButton value={value} language={language} />
-      </span>
-      <code className={className} {...props}>{children}</code>
-    </span>
+      </div>
+      <pre>{children}</pre>
+    </div>
   );
 }
 
@@ -76,7 +82,7 @@ function Table({ children, ...props }: ComponentProps<"table">) {
 
 const components = {
   a: Link,
-  code: Code,
+  pre: Pre,
   img: () => null,
   table: Table,
 };

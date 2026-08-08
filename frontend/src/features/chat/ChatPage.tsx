@@ -8,7 +8,6 @@ import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hoo
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
-import { MessageIdentity } from "./MessageCard";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
 
@@ -473,14 +472,16 @@ export function ChatPage({
           <>
             {activeJobForCurrentThread && !generation.partialContent && !generation.partialThoughts && <GenerationStatus status={generation.statusText} />}
             {activeJobForCurrentThread && (generation.partialContent || generation.partialThoughts) && (
+              /* Same markup and the same unframed treatment as a persisted
+                 assistant message, so when this is replaced by the real one
+                 nothing about the message changes shape or position. */
               <article className="message-card message-assistant message-pending" aria-label={generation.contentReady ? "Cortex response ready, saving..." : "Cortex response in progress"}>
-                <MessageIdentity role="assistant" />
                 <div className="message-bubble">
-                  {/* Open while actively thinking, then auto-collapses in step with the "Live" badge going away -- matches the final MessageCard's default-collapsed state, so the reload swap below doesn't cause the reasoning panel to visibly snap shut. */}
-                  {generation.partialThoughts && <details className="reasoning" open={!generation.contentReady}><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
-                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={generation.contentReady} /></div>}
-                  {!generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}
+                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={generation.contentReady} />{!generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}</div>}
+                  {!generation.partialContent && !generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}
                 </div>
+                {/* Collapses in step with the "Live" badge, matching the persisted card's default state so the swap is invisible. */}
+                {generation.partialThoughts && <details className="reasoning" open={!generation.contentReady}><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
               </article>
             )}
           </>
@@ -520,7 +521,16 @@ export function ChatPage({
 }
 
 function GenerationStatus({ status }: { status: string }) {
-  return <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress"><MessageIdentity role="assistant" /><div className="message-bubble"><div className="generation-status" role="status"><span className="loading-spinner" aria-hidden="true" />{humanizeGenerationStatus(status)}</div></div></article>;
+  return (
+    <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress">
+      <div className="message-bubble">
+        <div className="generation-status" role="status">
+          {humanizeGenerationStatus(status)}
+          <span className="generation-status-dots" aria-hidden="true"><i /><i /><i /></span>
+        </div>
+      </div>
+    </article>
+  );
 }
 
 function createRequestId(): string {

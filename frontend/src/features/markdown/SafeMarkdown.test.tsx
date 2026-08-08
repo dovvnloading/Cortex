@@ -25,6 +25,22 @@ describe("SafeMarkdown", () => {
     expect(document.querySelector("code")?.textContent).toBe("const answer = 42;\n");
   });
 
+  it("keeps the code toolbar outside the scrolling <pre>", () => {
+    // Regression guard: the toolbar used to render inside <pre>, where it
+    // inherited the code's max-content width. On a block wider than the
+    // column that pushed the right-aligned Copy button off-screen, reachable
+    // only by scrolling the code all the way right. <pre> must scroll alone.
+    render(<SafeMarkdown content={"```ts\nconst answer = 42;\n```"} />);
+
+    const toolbar = document.querySelector(".code-block-toolbar");
+    const pre = document.querySelector("pre");
+    expect(toolbar).not.toBeNull();
+    expect(pre).not.toBeNull();
+    expect(pre?.contains(toolbar as Node)).toBe(false);
+    expect(toolbar?.parentElement).toBe(pre?.parentElement);
+    expect(toolbar?.parentElement).toHaveClass("code-block");
+  });
+
   it("syntax-highlights a finalized (default) code block", () => {
     render(<SafeMarkdown content={"```ts\nconst answer = 42;\n```"} />);
 

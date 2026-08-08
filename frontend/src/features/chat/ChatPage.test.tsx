@@ -97,8 +97,11 @@ describe("ChatPage composer integration", () => {
     });
     renderChat(api);
 
-    expect(await screen.findByText("Cortex")).toBeInTheDocument();
-    expect(screen.getByText("You")).toBeInTheDocument();
+    // The speaker is carried by form and by each article's accessible name,
+    // not by a repeated visible nameplate above every turn.
+    expect(await screen.findByLabelText("Cortex message")).toBeInTheDocument();
+    expect(screen.getByLabelText("Your message")).toBeInTheDocument();
+    expect(screen.queryByText("Cortex")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Result", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
     expect(screen.getByText("Reasoning")).toBeInTheDocument();
