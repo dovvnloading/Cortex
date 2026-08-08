@@ -243,23 +243,34 @@ test("renders a structured workbench transcript with markdown and code blocks", 
 
   await page.goto("/chat/rich-thread?bootstrap=launcher-token");
   await expect(page.getByText("The local calculation is complete.")).toBeVisible();
-  await expect(page.getByRole("article", { name: "Cortex message" }).getByText("Cortex")).toBeVisible();
-  await expect(page.getByRole("article", { name: "Your message" }).getByText("You")).toBeVisible();
+  // The speaker is carried by form and by each article's accessible name, not
+  // by a repeated visible nameplate above every turn.
+  await expect(page.getByRole("article", { name: "Cortex message" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Your message" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Result", level: 1 })).toBeVisible();
   await expect(page.getByRole("cell", { name: "Aspect" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "Shape" })).toBeVisible();
   const tableLayout = await page.locator(".markdown-table-wrap table").evaluate((node) => {
     const firstRow = node.querySelector("tr");
-    const firstCell = firstRow?.firstElementChild;
+    const headerCells = firstRow ? Array.from(firstRow.children) : [];
     return {
-      firstColumnWidth: firstCell?.getBoundingClientRect().width ?? 0,
+      columnWidths: headerCells.map((cell) => Math.round(cell.getBoundingClientRect().width)),
       tableWidth: node.getBoundingClientRect().width,
-      wrapperWidth: node.parentElement?.getBoundingClientRect().width ?? 0,
+      wrapperClientWidth: node.parentElement?.clientWidth ?? 0,
       wrapperScrollWidth: node.parentElement?.scrollWidth ?? 0,
     };
   });
-  expect(tableLayout.firstColumnWidth).toBeGreaterThan(120);
-  expect(tableLayout.wrapperScrollWidth).toBeGreaterThanOrEqual(tableLayout.wrapperWidth);
+  // Columns size to their content now that the blanket 18%/10rem first-column
+  // rule is gone: the short "Aspect" column is narrower than the long-prose
+  // column beside it instead of being pinned to a fixed width on every table.
+  expect(tableLayout.columnWidths).toHaveLength(3);
+  expect(Math.min(...tableLayout.columnWidths)).toBeGreaterThan(40);
+  expect(tableLayout.columnWidths[0]).toBeLessThan(tableLayout.columnWidths[1]);
+  // A table this size now fits its column instead of being forced into a
+  // horizontal scroll by a blanket min-width. The wrapper stays the scroll
+  // container for genuinely wider tables; the page itself never scrolls
+  // sideways, which the document-width check below still guards.
+  expect(tableLayout.wrapperScrollWidth).toBeLessThanOrEqual(tableLayout.wrapperClientWidth);
   await expect(page.getByRole("button", { name: "Copy python code" })).toBeVisible();
   await expect(page.getByText("Reasoning")).toBeVisible();
   await expect(page.getByText("Sources")).toBeVisible();
