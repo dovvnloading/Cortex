@@ -109,9 +109,21 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
             "The selected local model cannot use this image. Choose a vision-capable model or remove the image.",
             "image_unsupported",
         )
-    if "context length" in text or "context window" in text or "num_ctx" in text:
+    # llama.cpp phrases this as "the request exceeds the available context
+    # size. try increasing the context size or enable context shift", which
+    # shares no wording with Ollama's "context length" -- matching only the
+    # Ollama phrasing left the single most common local-runtime failure
+    # unclassified and reported as a generic rejection.
+    if (
+        "context length" in text
+        or "context window" in text
+        or "num_ctx" in text
+        or "context size" in text
+        or "context shift" in text
+        or "exceeds the available context" in text
+    ):
         return (
-            "This conversation is too large for the model's current context setting. Start a new chat or increase the context limit.",
+            "This conversation is too large for the model's current context setting. Start a new chat, or raise the context limit in Settings.",
             "context_limit",
         )
     if any(
@@ -139,8 +151,16 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
             "runtime_unavailable",
         )
     if isinstance(status, int):
+        # 5xx is the runtime failing, not the message being refused. Saying
+        # "rejected this request" for a server fault sends people looking for
+        # something wrong with what they wrote.
+        if status >= 500:
+            return (
+                f"{runtime_name_title} failed while answering. This is a problem with the runtime, not your message. Retry it; if it keeps happening the model may be too large for this machine, or the file may be corrupt -- try a smaller quantization.",
+                f"{error_prefix}_http_{status}",
+            )
         return (
-            f"{runtime_name_title} rejected this request. Retry the message; if it repeats, restart {runtime_name} or choose another model.",
+            f"{runtime_name_title} could not accept this request. Retry the message; if it repeats, restart {runtime_name} or choose another model.",
             f"{error_prefix}_http_{status}",
         )
     return (

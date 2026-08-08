@@ -177,6 +177,71 @@ def test_llamacpp_chat_client_raises_llamacpp_error_on_failure(tmp_path: Path) -
     assert excinfo.value.backend == "llamacpp"
 
 
+def test_llamacpp_chat_client_carries_the_servers_reason_through(tmp_path: Path) -> None:
+    """The runtime's own explanation must survive into the exception.
+
+    Regression test: this used to be replaced with a fixed "rejected this
+    request" string, so every distinct failure -- context overflow, an
+    out-of-memory abort, a bad quantization -- reached
+    _generation_failure_message() as the same opaque text. None of its
+    classifiers could match, and all of them were reported to the user as a
+    rejection of their message.
+    """
+    import httpx
+
+    from cortex_backend.llamacpp.chat_client import _server_error_detail
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+
+    overflow = "the request exceeds the available context size. try increasing the context size or enable context shift"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(500, json={"error": {"message": overflow, "type": "server_error"}})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://fakellama")
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    with pytest.raises(LlamaCppError) as excinfo:
+        client.chat(model=f"gguf:{model_path.name}", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert excinfo.value.status_code == 500
+    assert "exceeds the available context" in excinfo.value.error
+
+    # And the classifier must now recognise llama.cpp's wording, which shares
+    # no vocabulary with Ollama's "context length".
+    from cortex_backend.services.llm import _generation_failure_message
+
+    message, details = _generation_failure_message(excinfo.value)
+    assert details == "context_limit"
+    assert "too large for the model's current context" in message
+    assert "rejected" not in message.lower()
+
+    # A body Cortex cannot parse still yields something usable, never a crash.
+    assert "HTTP 503" in _server_error_detail(httpx.Response(503, text="<html>gateway</html>"))
+
+
+def test_a_runtime_fault_is_not_reported_as_a_refused_message() -> None:
+    """A 5xx is the runtime failing, not the user's message being refused."""
+    from cortex_backend.services.llm import _generation_failure_message
+
+    message, details = _generation_failure_message(
+        LlamaCppError("internal server error", status_code=500)
+    )
+    assert details == "llamacpp_http_500"
+    assert "not your message" in message
+    assert "rejected" not in message.lower()
+
+    # A genuine 4xx may still say the request could not be accepted.
+    client_message, client_details = _generation_failure_message(
+        LlamaCppError("invalid request", status_code=400)
+    )
+    assert client_details == "llamacpp_http_400"
+    assert "could not accept" in client_message
+
+
 def test_adapt_falls_back_to_wall_clock_when_timings_absent() -> None:
     payload = {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
     adapted = _adapt_to_ollama_shape(payload, elapsed_seconds=1.5)
