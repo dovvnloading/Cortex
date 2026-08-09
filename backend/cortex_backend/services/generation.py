@@ -192,10 +192,17 @@ class GenerationService:
                 "translation",
                 f"Translating to {snapshot.target_language}...",
             )
-            translation_result = engine.translate_text(
-                response,
-                snapshot.target_language,
-            )
+            try:
+                translation_result = engine.translate_text(
+                    response,
+                    snapshot.target_language,
+                    options=dict(snapshot.model_options),
+                )
+            except TypeError:
+                translation_result = engine.translate_text(
+                    response,
+                    snapshot.target_language,
+                )
             if not isinstance(translation_result, TranslationResult):
                 raise ModelOperationError(
                     "Translation returned an invalid result.",
@@ -235,6 +242,17 @@ class GenerationService:
         if not callable(title_generator):
             return None
         try:
+            return title_generator(
+                self._title_history(snapshot.user_input, response),
+                # The title reuses the chat model, so it must also reuse the
+                # chat's context sizing -- otherwise the runtime is asked for
+                # a differently-configured copy of a model it already has
+                # loaded, and reloads it.
+                options=dict(snapshot.model_options),
+            )
+        except TypeError:
+            # An engine predating the options parameter (older adapters, and
+            # the narrower fakes in the test suite) still titles correctly.
             return title_generator(self._title_history(snapshot.user_input, response))
         except Exception as exc:  # defensive boundary for optional work
             logging.warning(

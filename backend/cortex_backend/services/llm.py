@@ -699,7 +699,36 @@ class SynthesisAgent:
                 error_details=error_details,
             ) from e
 
-    def translate_text(self, text: str, target_language: str) -> TranslationResult:
+    @staticmethod
+    def _auxiliary_options(
+        carried: dict | None, *, temperature: float
+    ) -> dict:
+        """Options for a follow-up call that reuses the turn's loaded model.
+
+        Title and translation calls run straight after the main answer, and
+        the title deliberately reuses the *same* model. ``num_ctx`` is a
+        per-request option for Ollama and a launch flag for llama-server, so a
+        follow-up that omits it does not merely fall back to a default -- it
+        asks the runtime for a differently-configured model and forces a full
+        unload/reload of one already in memory, moments after generation left
+        memory at its peak. That reload is what turns a successful answer into
+        an out-of-memory crash on a machine near its limit.
+
+        Carrying the turn's own sizing forward keeps the loaded model
+        eligible for reuse. Temperature stays fixed: these calls want
+        determinism regardless of what the chat was set to.
+        """
+        options = {
+            key: value
+            for key, value in (carried or {}).items()
+            if key == "num_ctx" and value is not None
+        }
+        options["temperature"] = temperature
+        return options
+
+    def translate_text(
+        self, text: str, target_language: str, *, options: dict | None = None
+    ) -> TranslationResult:
         """
         Translates the given text into the target language using the configured translation model.
 
@@ -721,7 +750,7 @@ class SynthesisAgent:
             response = self.chat_client.chat(
                 model=self.translation_model,
                 messages=[{'role': 'user', 'content': prompt}],
-                options={'temperature': 0.1}
+                options=self._auxiliary_options(options, temperature=0.1),
             )
             translated_text = response.get('message', {}).get('content', '')
             if translated_text:
@@ -868,12 +897,17 @@ class SynthesisAgent:
 
         return MemoryCommand(tuple(validated), clear_requested)
 
-    def generate_chat_title(self, chat_history: str) -> str | None:
+    def generate_chat_title(
+        self, chat_history: str, *, options: dict | None = None
+    ) -> str | None:
         """
         Generates a concise title for a chat conversation.
 
         Args:
             chat_history (str): The conversation history to be titled.
+            options (dict | None): Runtime options to carry over from the turn
+                that produced the chat -- above all ``num_ctx``. See
+                :meth:`_auxiliary_options` for why omitting it is harmful.
 
         Returns:
             A string containing the generated title, or None if an error occurs
@@ -888,7 +922,7 @@ class SynthesisAgent:
             response = self.chat_client.chat(
                 model=self.title_model,
                 messages=prompt_messages,
-                options={'temperature': 0.2}
+                options=self._auxiliary_options(options, temperature=0.2),
             )
             title = self.normalize_title(response['message']['content'])
             logging.info("Generated chat title with %s characters.", len(title))

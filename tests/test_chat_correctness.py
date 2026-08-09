@@ -184,6 +184,40 @@ class ChatCorrectnessTests(unittest.TestCase):
         self.assertEqual(answer, "")
         self.assertEqual(thoughts, "still reducing the problem...")
 
+    def test_followup_calls_reuse_the_turns_context_size(self):
+        """Regression test for an out-of-memory crash *after* a good answer.
+
+        The title deliberately reuses the chat model. num_ctx is a per-request
+        option for Ollama and a launch flag for llama-server, so a title call
+        that omits it does not quietly fall back to a default -- it asks the
+        runtime for a differently-sized copy of a model already in memory and
+        forces a full unload/reload, moments after generation left memory at
+        its peak. On a machine near its limit that reload is the crash.
+        """
+        client = _CapturingClient({"content": "Some answer"})
+        agent = SynthesisAgent("chat", "chat", "translate", client)
+
+        agent.generate_chat_title("User: hi\nAssistant: hello", options={"num_ctx": 16384})
+        self.assertEqual(client.last_options.get("num_ctx"), 16384)
+        # Determinism is the call's own concern, never inherited from the chat.
+        self.assertEqual(client.last_options.get("temperature"), 0.2)
+
+        agent.translate_text("hello", "Spanish", options={"num_ctx": 16384})
+        self.assertEqual(client.last_options.get("num_ctx"), 16384)
+        self.assertEqual(client.last_options.get("temperature"), 0.1)
+
+        # Only sizing is carried over; sampling from the chat turn must not
+        # leak into a call that needs to be deterministic.
+        agent.generate_chat_title(
+            "User: hi\nAssistant: hello",
+            options={"num_ctx": 8192, "temperature": 1.4, "top_p": 0.2, "seed": 7},
+        )
+        self.assertEqual(client.last_options, {"num_ctx": 8192, "temperature": 0.2})
+
+        # And omitting options entirely must not invent a num_ctx.
+        agent.generate_chat_title("User: hi\nAssistant: hello")
+        self.assertNotIn("num_ctx", client.last_options)
+
     def test_vector_memory_is_not_initialized_until_integrated(self):
         source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
         self.assertNotIn("VectorDatabaseManager()", source)
