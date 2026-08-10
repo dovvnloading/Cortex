@@ -21,12 +21,12 @@ below.](docs/images/workspace.png)
 Every response carries its own footer -- timestamp, token count, and tokens per
 second -- with copy, regenerate, and fork controls that appear on hover.
 
-Settings keep model selection and generation parameters in one place, and the
-chat model doubles as the title model so there is only one choice to make:
+Settings keep model selection and generation defaults in one place, and the chat
+model doubles as the title model so there is only one choice to make:
 
-![Cortex settings, AI Model section: local model picker showing qwen3:8b, with
-temperature, top-p, top-k, and repeat penalty
-controls.](docs/images/settings.png)
+![Cortex settings, AI Model section: top-p, top-k, and repeat penalty sliders,
+context window and seed fields, a system instructions box, and a toggle to
+bypass Cortex's default system prompt.](docs/images/settings.png)
 
 `Ctrl`/`Cmd`+`K` opens a command palette that reaches new chat, settings, theme,
 model switching, and recent conversations without leaving the keyboard:
@@ -63,6 +63,10 @@ chats.](docs/images/command-palette.png)
   for a single conversation from the composer, without changing the standing
   default. Each response shows its token count and tokens/sec once generation
   finishes.
+- **Prompt control.** Standing system instructions apply to every turn, with no
+  length cap. A local model can also be run raw: **Bypass Cortex's default
+  system prompt** leaves the built-in identity and safety instructions out of
+  the request entirely. It is off by default and takes a deliberate opt-in.
 - **Model details.** The Models panel shows each installed model's parameter
   size, quantization, and context length alongside its name, read from Ollama's
   existing model-detail response.
@@ -183,17 +187,17 @@ endpoint can be intentionally changed for a trusted local network setup with
 
 ## Development checks
 
-From the repository root:
+One script runs the same gates CI runs, from the repository root:
 
 ```powershell
-python -m pytest -q
-python -m compileall -q main.py backend
+./scripts/check.ps1              # lint, tests, contracts, frontend -- about two minutes
+./scripts/check.ps1 -Tier full   # adds compileall, Playwright, and the bundle build
+```
 
-npm.cmd ci --prefix frontend
-npm.cmd run lint --prefix frontend
-npm.cmd run typecheck --prefix frontend
-npm.cmd test --prefix frontend -- --run
-npm.cmd run build --prefix frontend
+To run them automatically before every push:
+
+```powershell
+git config core.hooksPath .githooks
 ```
 
 Use `npm.cmd` on Windows when PowerShell execution policy blocks the `npm.ps1`

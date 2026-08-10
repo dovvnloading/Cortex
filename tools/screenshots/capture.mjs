@@ -102,7 +102,15 @@ await page.goto(`${base}/settings`);
 await page.getByRole("heading", { name: "Settings", exact: true }).first().waitFor();
 await page.getByRole("button", { name: "AI Model" }).click();
 await page.getByLabel("System instructions").waitFor({ state: "visible" });
-await page.waitForTimeout(300);
+
+// The panel is taller than the viewport. Model selection is already visible in
+// the composer of the workspace shot, so frame this one on the lower half --
+// the generation parameters, system instructions, and the system-prompt bypass.
+await page.evaluate(() => {
+  const pane = document.querySelector(".settings-pane");
+  if (pane) pane.scrollTop = pane.scrollHeight;
+});
+await page.waitForTimeout(400);
 await shot("settings");
 
 // --- 3. Command palette over the workspace -----------------------------------
