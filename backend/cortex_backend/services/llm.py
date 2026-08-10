@@ -261,6 +261,7 @@ class PromptTemplate:
         user_system_instructions: str | None,
         attachments: Sequence[GenerationAttachment] = (),
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> list[dict]:
         """
         Builds a structured prompt for a general-purpose AI assistant with memory capabilities.
@@ -271,21 +272,26 @@ class PromptTemplate:
             permanent_memories (list[str]): A list of facts the AI has permanently stored.
             memories_enabled (bool): A flag to determine if memory features should be included in the prompt.
             user_system_instructions (str | None): Custom instructions provided by the user.
+            bypass_system_prompt (bool): When true, Cortex's own built-in
+                system_prompt.txt is left out of the request. Per-turn JIT
+                fragments (code execution, memory) still apply on their own
+                settings. If nothing ends up in the system role, no system
+                message is sent at all.
 
         Returns:
             list[dict]: A list of dictionaries formatted for the Ollama chat API,
                         containing system and user roles with their respective content.
         """
-        system_content = PromptTemplate._load_system_prompt()
+        system_content = "" if bypass_system_prompt else PromptTemplate._load_system_prompt()
 
         if code_execution_eligible is None:
             code_execution_eligible = should_offer_code_execution(query)
         if code_execution_eligible:
-            system_content += "\n\n" + PromptTemplate._load_code_execution_prompt()
+            system_content += ("\n\n" if system_content else "") + PromptTemplate._load_code_execution_prompt()
 
         if memories_enabled:
-            system_content += "\n" + PromptTemplate._load_memory_prompt()
-        
+            system_content += ("\n" if system_content else "") + PromptTemplate._load_memory_prompt()
+
         user_content_parts = []
 
         if user_system_instructions:
@@ -362,10 +368,10 @@ Here are the available facts:
         ]
         if images:
             user_message["images"] = images
-        messages = [
-            {'role': 'system', 'content': system_content},
-            user_message,
-        ]
+        messages: list[dict] = []
+        if system_content:
+            messages.append({'role': 'system', 'content': system_content})
+        messages.append(user_message)
         return messages
 
     @staticmethod
@@ -417,6 +423,7 @@ class SynthesisAgent:
         chat_client,
         *,
         code_execution_eligible: bool = False,
+        bypass_system_prompt: bool = False,
     ):
         """
         Initializes the SynthesisAgent.
@@ -428,12 +435,15 @@ class SynthesisAgent:
             chat_client: A ChatClient implementation (see services/chat_client.py).
             code_execution_eligible (bool): Immutable per-turn admission for
                 the optional local code contract.
+            bypass_system_prompt (bool): Skip Cortex's own built-in system
+                prompt for every call this agent makes.
         """
         self.gen_model = gen_model
         self.title_model = title_model
         self.translation_model = translation_model
         self.chat_client = chat_client
         self.code_execution_eligible = code_execution_eligible
+        self.bypass_system_prompt = bypass_system_prompt
         self.last_code_proposal: CodeExecutionProposal | None = None
         logging.info(f"SynthesisAgent initialized with Generator: '{gen_model}', Titler: '{title_model}', Translator: '{translation_model}'")
 
@@ -471,6 +481,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> tuple[GenerationAttachment, ...]:
         """Bound reference text so documents cannot consume the answer budget.
 
@@ -488,6 +499,7 @@ class SynthesisAgent:
             memories_enabled,
             user_system_instructions,
             code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
         )
         base_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in base_prompt)
         available_tokens = max(
@@ -527,6 +539,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> str:
         """Keep the newest history that fits beside prompts, memories, and output."""
         output_reservation = cls.output_token_reservation(num_ctx)
@@ -542,6 +555,7 @@ class SynthesisAgent:
                 memories_enabled,
                 user_system_instructions,
                 code_execution_eligible=code_execution_eligible,
+                bypass_system_prompt=bypass_system_prompt,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
@@ -560,6 +574,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> list[str]:
         """Keep the newest permanent memories that fit before chat history."""
         output_reservation = cls.output_token_reservation(num_ctx)
@@ -573,6 +588,7 @@ class SynthesisAgent:
                 True,
                 user_system_instructions,
                 code_execution_eligible=code_execution_eligible,
+                bypass_system_prompt=bypass_system_prompt,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
@@ -640,6 +656,7 @@ class SynthesisAgent:
             user_system_instructions=user_system_instructions,
             num_ctx=int(api_options.get("num_ctx", 4096)),
             code_execution_eligible=self.code_execution_eligible,
+            bypass_system_prompt=self.bypass_system_prompt,
         )
         prompt_messages = PromptTemplate.build_synthesis_prompt(
             query,
@@ -649,6 +666,7 @@ class SynthesisAgent:
             user_system_instructions,
             fitted_attachments,
             code_execution_eligible=self.code_execution_eligible,
+            bypass_system_prompt=self.bypass_system_prompt,
         )
         
         logging.info(f"Generating response using Generator: '{self.gen_model}'. Options: {options}")

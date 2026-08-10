@@ -47,8 +47,14 @@ class TypedSettingsTests(unittest.TestCase):
             GenerationSettings(num_ctx=1024)
         with self.assertRaises(ValidationError):
             GenerationSettings(seed=2147483648)
-        with self.assertRaises(ValidationError):
-            GenerationSettings(system_instructions="x" * 1801)
+
+    def test_system_instructions_has_no_arbitrary_length_cap(self):
+        # A hard character ceiling here only produced silent, confusing
+        # truncation of pasted text -- oversized instructions are already
+        # handled gracefully by the context-budget fitting in SynthesisAgent.
+        long_instructions = "x" * 50_000
+        settings = GenerationSettings(system_instructions=long_instructions)
+        self.assertEqual(settings.system_instructions, long_instructions)
 
 
 class LegacySettingsReaderTests(unittest.TestCase):

@@ -2304,6 +2304,7 @@ def _generation_snapshot(
             settings.execution.code_execution_enabled
             and should_offer_code_execution(payload.user_input)
         ),
+        bypass_system_prompt=settings.generation.bypass_system_prompt,
     )
 
 

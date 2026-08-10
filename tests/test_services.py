@@ -46,8 +46,9 @@ class _FakeEngine:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> list[str]:
-        del code_execution_eligible
+        del code_execution_eligible, bypass_system_prompt
         self.memory_inputs = list(memories)
         return list(memories)
 
@@ -61,8 +62,9 @@ class _FakeEngine:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> str:
-        del code_execution_eligible
+        del code_execution_eligible, bypass_system_prompt
         self.history_messages = messages
         return "formatted history"
 

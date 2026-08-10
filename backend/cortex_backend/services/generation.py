@@ -32,6 +32,7 @@ class GenerationEngine(Protocol):
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> list[str]:
         """Fit permanent memories into the configured context budget."""
 
@@ -45,6 +46,7 @@ class GenerationEngine(Protocol):
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> str:
         """Format the retained history for the model prompt."""
 
@@ -120,6 +122,7 @@ class GenerationService:
                 user_system_instructions=snapshot.user_system_instructions,
                 num_ctx=num_ctx,
                 code_execution_eligible=snapshot.code_execution_eligible,
+                bypass_system_prompt=snapshot.bypass_system_prompt,
             )
         else:
             self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
@@ -152,6 +155,7 @@ class GenerationService:
             user_system_instructions=snapshot.user_system_instructions,
             num_ctx=num_ctx,
             code_execution_eligible=snapshot.code_execution_eligible,
+            bypass_system_prompt=snapshot.bypass_system_prompt,
         )
 
         self._check_cancelled(cancellation_event)
