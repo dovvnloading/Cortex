@@ -8,6 +8,7 @@ from cortex_backend.api.schemas import AddMessageRequest, ChatMessage
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.legacy_storage import DatabaseManager
 from cortex_backend.core.generation import GenerationAttachment
+from cortex_backend.core.settings import CortexSettings
 from cortex_backend.services.llm import SynthesisAgent
 
 
@@ -116,6 +117,56 @@ class ChatCorrectnessTests(unittest.TestCase):
         self.assertIn("old-7", history)
         self.assertNotIn("old-0", history)
         self.assertEqual(SynthesisAgent.output_token_reservation(4096), 1024)
+
+    def test_default_context_window_survives_a_realistic_long_conversation(self):
+        """Regression guard for a bug where the shipped num_ctx default was
+        small enough that ordinary conversations lost most of their history
+        to the context-budget trim -- not because any model "forgot", but
+        because the built-in system/memory/code-execution prompts (up to
+        ~2000 tokens) ate most of an already-small budget before a single
+        word of the conversation was counted. At the old 4096 default, a
+        30-exchange conversation like this one kept as few as 4 of 30
+        exchanges. Reads the default from CortexSettings rather than
+        hardcoding it, so this stays meaningful if the default changes again.
+        """
+        turn = "Can you walk me through why the connection pool keeps timing out under load?"
+        reply = (
+            "The timeout usually means every connection is checked out and none are "
+            "returned before the next request needs one. Check whether connections "
+            "are closed in a finally block even on exceptions, and whether the pool "
+            "size actually matches your real concurrency."
+        )
+        messages = []
+        for index in range(30):
+            messages.append({"role": "user", "content": f"{turn} (turn {index})"})
+            messages.append({"role": "assistant", "content": f"{reply} (turn {index})"})
+
+        default_num_ctx = CortexSettings().generation.num_ctx
+        history = SynthesisAgent.fit_history_to_context(
+            messages,
+            query="Given all that, what should I change first?",
+            permanent_memories=[
+                "Prefers Python for backend work.",
+                "Works on a small internal tools team of four engineers.",
+                "Wants direct answers with caveats stated plainly.",
+                "Currently debugging a connection-pool timeout issue in production.",
+                "Uses PostgreSQL with SQLAlchemy's pooled engine.",
+            ],
+            memories_enabled=True,
+            user_system_instructions="Always include a code example when relevant, and be concise.",
+            num_ctx=default_num_ctx,
+            code_execution_eligible=True,
+        )
+
+        kept_exchanges = history.count("User: ")
+        self.assertGreaterEqual(
+            kept_exchanges,
+            25,
+            f"Only {kept_exchanges}/30 exchanges survived at the shipped default "
+            f"num_ctx={default_num_ctx} with memory and code-execution eligibility "
+            "both on -- the default is too small relative to the built-in prompt "
+            "overhead and conversations will appear to lose their memory.",
+        )
 
     def test_context_budget_trims_oversized_permanent_memory(self):
         memories = [f"memory-{index} " + ("detail " * 120) for index in range(20)]

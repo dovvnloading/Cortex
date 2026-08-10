@@ -112,7 +112,11 @@ class GenerationService:
         permanent_memories = (
             list(self._memory_loader()) if snapshot.memories_enabled else []
         )
-        num_ctx = int(snapshot.model_options.get("num_ctx", 4096))
+        # A real snapshot always carries num_ctx (GENERATION_OVERRIDE_FIELDS
+        # guarantees it); this fallback only matters for callers that build
+        # model_options by hand, so it stays in step with GenerationSettings'
+        # own default rather than reintroducing the old, too-small one.
+        num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
         if snapshot.memories_enabled:
             self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
             engine = self._engine_factory(snapshot)

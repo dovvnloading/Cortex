@@ -1792,7 +1792,7 @@
             "type": "boolean"
           },
           "num_ctx": {
-            "default": 4096,
+            "default": 8192,
             "maximum": 16384.0,
             "minimum": 2048.0,
             "title": "Num Ctx",

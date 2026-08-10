@@ -204,7 +204,7 @@ export function SettingsPanel({
                 </div>
                 <div className="settings-field-row">
                   <label className="field-label" htmlFor="num-ctx">Context window
-                    <input id="num-ctx" type="number" min="2048" max="16384" step="1024" value={generation.num_ctx ?? 4096} onChange={(event) => update({ generation: { ...generation, num_ctx: Number(event.target.value) } })} />
+                    <input id="num-ctx" type="number" min="2048" max="16384" step="1024" value={generation.num_ctx ?? 8192} onChange={(event) => update({ generation: { ...generation, num_ctx: Number(event.target.value) } })} />
                   </label>
                   <label className="field-label" htmlFor="seed">Seed
                     <input id="seed" type="number" min="-1" max="2147483647" value={generation.seed ?? -1} onChange={(event) => update({ generation: { ...generation, seed: Number(event.target.value) } })} />
