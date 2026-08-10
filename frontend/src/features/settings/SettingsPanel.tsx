@@ -7,6 +7,7 @@ import type {
   ModelResponse,
 } from "../../../../contracts/cortex-api";
 import { displayModelName, isGGUFModel, localModelNames } from "../../lib/localModels";
+import { RangeField } from "../../shared/ui/RangeField";
 import { Select } from "../../shared/ui/Select";
 import { MemoryPanel } from "./MemoryPanel";
 import { ModelsPanel } from "../models/ModelsPanel";
@@ -184,18 +185,23 @@ export function SettingsPanel({
                     <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
                   </div>
                 )}
-                <label className="field-label" htmlFor="temperature">Temperature <span className="field-value">{generation.temperature ?? 0.7}</span>
-                  <input id="temperature" type="range" min="0" max="2" step="0.1" value={generation.temperature ?? 0.7} onChange={(event) => update({ generation: { ...generation, temperature: Number(event.target.value) } })} />
-                </label>
-                <label className="field-label" htmlFor="top-p">Top P <span className="field-value">{generation.top_p ?? 0.9}</span>
-                  <input id="top-p" type="range" min="0" max="1" step="0.05" value={generation.top_p ?? 0.9} onChange={(event) => update({ generation: { ...generation, top_p: Number(event.target.value) } })} />
-                </label>
-                <label className="field-label" htmlFor="top-k">Top K <span className="field-value">{generation.top_k ?? 40}</span>
-                  <input id="top-k" type="range" min="0" max="200" step="1" value={generation.top_k ?? 40} onChange={(event) => update({ generation: { ...generation, top_k: Number(event.target.value) } })} />
-                </label>
-                <label className="field-label" htmlFor="repeat-penalty">Repeat penalty <span className="field-value">{generation.repeat_penalty ?? 1.1}</span>
-                  <input id="repeat-penalty" type="range" min="0.5" max="2" step="0.05" value={generation.repeat_penalty ?? 1.1} onChange={(event) => update({ generation: { ...generation, repeat_penalty: Number(event.target.value) } })} />
-                </label>
+                <hr className="settings-divider" />
+                <div className="settings-subhead">
+                  <strong>Sampling</strong>
+                  <small>How the model picks its next token. Defaults suit most local models.</small>
+                </div>
+                <div className="settings-range-grid">
+                  <RangeField id="temperature" label="Temperature" min={0} max={2} step={0.1} value={generation.temperature ?? 0.7} format={(value) => value.toFixed(1)} onChange={(temperature) => update({ generation: { ...generation, temperature } })} />
+                  <RangeField id="top-p" label="Top P" min={0} max={1} step={0.05} value={generation.top_p ?? 0.9} format={(value) => value.toFixed(2)} onChange={(top_p) => update({ generation: { ...generation, top_p } })} />
+                  <RangeField id="top-k" label="Top K" min={0} max={200} step={1} value={generation.top_k ?? 40} onChange={(top_k) => update({ generation: { ...generation, top_k } })} />
+                  <RangeField id="repeat-penalty" label="Repeat penalty" min={0.5} max={2} step={0.05} value={generation.repeat_penalty ?? 1.1} format={(value) => value.toFixed(2)} onChange={(repeat_penalty) => update({ generation: { ...generation, repeat_penalty } })} />
+                </div>
+
+                <hr className="settings-divider" />
+                <div className="settings-subhead">
+                  <strong>Context</strong>
+                  <small>A larger window holds more conversation but uses more memory. Seed -1 keeps replies varied.</small>
+                </div>
                 <div className="settings-field-row">
                   <label className="field-label" htmlFor="num-ctx">Context window
                     <input id="num-ctx" type="number" min="2048" max="16384" step="1024" value={generation.num_ctx ?? 4096} onChange={(event) => update({ generation: { ...generation, num_ctx: Number(event.target.value) } })} />
@@ -203,6 +209,12 @@ export function SettingsPanel({
                   <label className="field-label" htmlFor="seed">Seed
                     <input id="seed" type="number" min="-1" max="2147483647" value={generation.seed ?? -1} onChange={(event) => update({ generation: { ...generation, seed: Number(event.target.value) } })} />
                   </label>
+                </div>
+
+                <hr className="settings-divider" />
+                <div className="settings-subhead">
+                  <strong>System prompt</strong>
+                  <small>Standing instructions sent with every message in every chat.</small>
                 </div>
                 <label className="field-label" htmlFor="system-instructions">System instructions
                   <textarea id="system-instructions" value={generation.system_instructions ?? ""} onChange={(event) => update({ generation: { ...generation, system_instructions: event.target.value } })} rows={4} />
