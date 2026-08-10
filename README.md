@@ -73,8 +73,6 @@ chats.](docs/images/command-palette.png)
 - **Keyboard-first navigation.** A command palette (Ctrl/Cmd+K) reaches new
   chat, settings, theme, model switching, and recent chats; `?` opens a
   shortcuts reference. The sidebar also supports searching chats by title.
-- **Transcript export.** Any conversation can be exported as Markdown or JSON
-  from the workspace header.
 - **Durable context.** Threads live in SQLite; permanent memories use atomic
   local JSON storage. Existing JSON chat history and Windows settings are read
   additively during migration without rewriting the legacy source.

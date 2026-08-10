@@ -13,7 +13,7 @@ const idleGeneration = {
 
 describe("useChatStore", () => {
   beforeEach(() => {
-    useChatStore.setState({ chats: [], activeChat: null, generation: idleGeneration, generationOptionsByThread: {} });
+    useChatStore.setState({ chats: [], generation: idleGeneration, generationOptionsByThread: {} });
   });
 
   it("setChats accepts a plain array, mirroring useState", () => {

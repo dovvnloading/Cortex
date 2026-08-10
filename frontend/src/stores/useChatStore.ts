@@ -30,13 +30,11 @@ interface ChatStoreState {
   chats: ChatSummary[];
   /** User-created folders/projects, in their persisted display order. */
   groups: ChatGroup[];
-  activeChat: ChatResponse | null;
   generation: GenerationState;
   generationOptionsByThread: Record<string, GenerationOptionsOverride>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
   upsertChatSummary: (chat: ChatResponse) => void;
-  setActiveChat: (chat: ChatResponse | null) => void;
 
   setGroups: (next: ChatGroup[] | ((current: ChatGroup[]) => ChatGroup[])) => void;
   /** Replace one group in place, keeping its position in the list. */
@@ -78,7 +76,6 @@ const idleGeneration: GenerationState = {
 export const useChatStore = create<ChatStoreState>((set) => ({
   chats: [],
   groups: [],
-  activeChat: null,
   generation: idleGeneration,
   generationOptionsByThread: {},
 
@@ -99,7 +96,6 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ...state.chats.filter((item) => item.id !== chat.id),
       ],
     })),
-  setActiveChat: (chat) => set({ activeChat: chat }),
 
   setGroups: (next) =>
     set((state) => ({ groups: typeof next === "function" ? (next as (current: ChatGroup[]) => ChatGroup[])(state.groups) : next })),

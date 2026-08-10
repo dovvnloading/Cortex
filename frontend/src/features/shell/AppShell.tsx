@@ -3,11 +3,9 @@ import { Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
-import { useChatStore } from "../../stores/useChatStore";
 import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
 import { ChatLibrary } from "./ChatLibrary";
-import { ExportTranscriptMenu } from "../chat/ExportTranscriptMenu";
 import { NavigationLink } from "./NavigationLink";
 
 type Props = {
@@ -53,7 +51,6 @@ export function AppShell({
 }: Props) {
   const navigate = useNavigate();
   const pathname = usePathname();
-  const activeChat = useChatStore((state) => state.activeChat);
   const [sidebarVisible, setSidebarVisible] = useState(() => !isCompactWindow());
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
@@ -110,7 +107,6 @@ export function AppShell({
           </div>
         </div>
         <div className="window-actions">
-          {!isSettings && activeChat && <ExportTranscriptMenu chat={activeChat} />}
           <NavigationLink
             to="/settings"
             className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}

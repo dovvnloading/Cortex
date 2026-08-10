@@ -143,15 +143,6 @@ export function ChatPage({
 
   const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
 
-  // Mirror the fully-loaded, currently-viewed chat into the global store so
-  // chrome outside ChatPage (the AppShell header's export control) can read
-  // it without prop-drilling. Cleared on unmount so a Settings round-trip
-  // doesn't leave a stale chat exported from the header.
-  useEffect(() => {
-    useChatStore.getState().setActiveChat(currentChat);
-    return () => useChatStore.getState().setActiveChat(null);
-  }, [currentChat]);
-
   useEffect(() => {
     if (isNearTranscriptEnd.current) {
       messageListRef.current?.scrollToBottom();
