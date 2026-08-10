@@ -663,11 +663,122 @@ a { color: inherit; text-decoration: none; }
 .translation-install-status > strong { margin-left: auto; font-variant-numeric: tabular-nums; }
 .field-value { float: right; color: var(--accent); }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+/* Sliders -------------------------------------------------------------------
+   The default range control is styled per browser and reads as an unfinished
+   form rather than part of this interface, so the track and thumb are drawn
+   here instead. The filled portion comes from --range-fill, published by
+   RangeField, because WebKit has no ::-moz-range-progress equivalent. */
+.range-field { display: grid; min-width: 0; gap: 9px; }
+.range-field-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }
+.range-field-head label { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); font-weight: var(--weight-semi); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.range-field-value {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semi);
+}
+.range-field-hint { color: var(--text-faint); font-size: var(--text-2xs); line-height: 1.45; }
+
+.range-input {
+  --range-fill: 50%;
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.range-input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--range-fill),
+    var(--line-strong) var(--range-fill) 100%
+  );
+}
+.range-input::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform 130ms ease, box-shadow 130ms ease;
+}
+.range-input::-moz-range-track { height: 4px; border-radius: 999px; background: var(--line-strong); }
+.range-input::-moz-range-progress { height: 4px; border-radius: 999px; background: var(--accent); }
+.range-input::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform 130ms ease, box-shadow 130ms ease;
+}
+.range-input:hover::-webkit-slider-thumb { transform: scale(1.14); }
+.range-input:hover::-moz-range-thumb { transform: scale(1.14); }
+.range-input:focus-visible { outline: 0; }
+.range-input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-soft); }
+.range-input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--accent-soft); }
+
+/* Two columns keeps a 0-2 range from being stretched across the whole pane,
+   where a pixel of travel stops meaning anything. */
+.settings-range-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 26px; }
+.settings-subhead { display: grid; gap: 2px; margin: 4px 0 -4px; }
+.settings-subhead strong { color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-semi); }
+.settings-subhead small { color: var(--text-faint); font-size: var(--text-2xs); line-height: 1.45; }
+.settings-divider { height: 1px; margin: 4px 0 0; border: 0; background: var(--line); }
+
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .toggle-row span { display: grid; gap: 3px; }
 .toggle-row strong { color: var(--text); font-size: 0.85rem; }
 .toggle-row small { color: var(--text-muted); font-size: 0.75rem; line-height: 1.45; }
-.toggle-row input { width: 42px; height: 23px; accent-color: var(--accent); }
+
+/* A real switch. This stays an <input type="checkbox"> -- the look is painted
+   on, so the control keeps its native role, keyboard behaviour, and label
+   association rather than being rebuilt out of divs. */
+.toggle-row input[type="checkbox"] {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 22px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.toggle-row input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transform: translateY(-50%);
+  transition: transform 180ms cubic-bezier(0.3, 0.7, 0.4, 1), background 160ms ease;
+}
+.toggle-row input[type="checkbox"]:checked { border-color: var(--accent); background: var(--accent); }
+.toggle-row input[type="checkbox"]:checked::after { background: var(--surface); transform: translateY(-50%) translateX(18px); }
+.toggle-row input[type="checkbox"]:focus-visible { outline: 0; box-shadow: 0 0 0 4px var(--accent-soft); }
+.toggle-row input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
 .inline-form { display: flex; gap: 8px; margin-bottom: 17px; }
 .inline-form input { flex: 1; }
 .memory-list { display: grid; gap: 8px; padding: 0; margin: 0 0 20px; list-style: none; }
@@ -821,6 +932,7 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
   .settings-tab small { display: none; }
   .settings-pane { flex: 1 1 auto; padding: 24px 16px; }
   .settings-field-row { grid-template-columns: 1fr; }
+  .settings-range-grid { grid-template-columns: 1fr; gap: 18px; }
   .settings-dialog-footer { padding: 0 12px; }
   .panel { padding: 0; }
   .panel-heading { flex-direction: column; }

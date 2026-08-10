@@ -24,9 +24,9 @@ second -- with copy, regenerate, and fork controls that appear on hover.
 Settings keep model selection and generation defaults in one place, and the chat
 model doubles as the title model so there is only one choice to make:
 
-![Cortex settings, AI Model section: top-p, top-k, and repeat penalty sliders,
-context window and seed fields, a system instructions box, and a toggle to
-bypass Cortex's default system prompt.](docs/images/settings.png)
+![Cortex settings, AI Model section: the local model picker above grouped
+Sampling and Context controls, with filled-track sliders and their current
+values shown beside each label.](docs/images/settings.png)
 
 `Ctrl`/`Cmd`+`K` opens a command palette that reaches new chat, settings, theme,
 model switching, and recent conversations without leaving the keyboard:
