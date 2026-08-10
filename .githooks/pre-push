@@ -1,0 +1,46 @@
+#!/bin/sh
+#
+# Run Cortex's quick quality gates before anything leaves the machine.
+#
+# Bypass for a genuine emergency:
+#   git push --no-verify
+#   CORTEX_SKIP_HOOK=1 git push
+#
+# Enable (once per clone):
+#   git config core.hooksPath .githooks
+
+if [ "$CORTEX_SKIP_HOOK" = "1" ]; then
+    echo "pre-push: skipped (CORTEX_SKIP_HOOK=1)"
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+script="$repo_root/scripts/check.ps1"
+
+if [ ! -f "$script" ]; then
+    echo "pre-push: scripts/check.ps1 not found -- skipping."
+    exit 0
+fi
+
+if command -v pwsh >/dev/null 2>&1; then
+    shell_bin="pwsh"
+elif command -v powershell >/dev/null 2>&1; then
+    shell_bin="powershell"
+else
+    echo "pre-push: no PowerShell found -- skipping local checks."
+    exit 0
+fi
+
+echo "pre-push: running quick quality checks (bypass with --no-verify)..."
+
+"$shell_bin" -NoProfile -ExecutionPolicy Bypass -File "$script" -Tier quick
+status=$?
+
+if [ $status -ne 0 ]; then
+    echo ""
+    echo "pre-push: checks failed -- push aborted."
+    echo "          Fix the failures above, or push anyway with: git push --no-verify"
+    exit 1
+fi
+
+exit 0

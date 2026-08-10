@@ -23,7 +23,39 @@ data in tests or logs.
 
 ## Quality checks
 
-Run the relevant checks before opening a pull request:
+One script runs the same gates CI does, on your machine:
+
+```powershell
+./scripts/check.ps1
+```
+
+That is the `quick` tier -- lint, backend tests, contract drift, and frontend
+types/lint/unit tests -- and takes roughly two minutes. Before opening a pull
+request, run the `full` tier, which adds `compileall`, the Playwright browser
+tests, and the bundle build:
+
+```powershell
+./scripts/check.ps1 -Tier full
+```
+
+Use `-SkipFrontend` or `-SkipBackend` to narrow the run while iterating.
+
+Packaging (PyInstaller), the recipe-worker and coordinator qualification
+spikes, and WebView2 signature verification are deliberately left out of both
+tiers: they take 35+ minutes and need signing tooling. CI covers them.
+
+### Run the checks automatically before a push
+
+Point Git at the tracked hooks directory once per clone:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+The `pre-push` hook then runs the `quick` tier and aborts the push if anything
+fails. Bypass it in an emergency with `git push --no-verify`.
+
+The individual commands, if you prefer to run them by hand:
 
 ```powershell
 python -m pytest
