@@ -128,8 +128,9 @@ class FakeGenerationEngine:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> list[str]:
-        del query, user_system_instructions, code_execution_eligible
+        del query, user_system_instructions, code_execution_eligible, bypass_system_prompt
         budget = max(1, num_ctx // 4)
         retained: list[str] = []
         used = 0
@@ -151,6 +152,7 @@ class FakeGenerationEngine:
         user_system_instructions: str | None,
         num_ctx: int,
         code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
     ) -> str:
         del (
             query,
@@ -159,6 +161,7 @@ class FakeGenerationEngine:
             user_system_instructions,
             num_ctx,
             code_execution_eligible,
+            bypass_system_prompt,
         )
         return "\n".join(
             f"{message.get('role', 'unknown')}: {message.get('content', '')}"

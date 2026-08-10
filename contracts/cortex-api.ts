@@ -296,6 +296,7 @@ export interface GenerationSettings {
   num_ctx?: number;
   seed?: number;
   system_instructions?: string;
+  bypass_system_prompt?: boolean;
 }
 
 export interface GenerationStats {

@@ -123,6 +123,7 @@ def build_preview_app(
             snapshot.translation_model,
             routing_chat_client,
             code_execution_eligible=snapshot.code_execution_eligible,
+            bypass_system_prompt=snapshot.bypass_system_prompt,
         ),
     )
     dependencies = BackendDependencies(

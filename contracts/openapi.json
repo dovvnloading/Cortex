@@ -1786,6 +1786,11 @@
       "GenerationSettings": {
         "additionalProperties": false,
         "properties": {
+          "bypass_system_prompt": {
+            "default": false,
+            "title": "Bypass System Prompt",
+            "type": "boolean"
+          },
           "num_ctx": {
             "default": 4096,
             "maximum": 16384.0,
@@ -1809,7 +1814,6 @@
           },
           "system_instructions": {
             "default": "",
-            "maxLength": 1800,
             "title": "System Instructions",
             "type": "string"
           },

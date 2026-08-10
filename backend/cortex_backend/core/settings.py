@@ -56,7 +56,17 @@ class GenerationSettings(_SettingsModel):
     repeat_penalty: float = Field(default=1.1, ge=0.5, le=2.0)
     num_ctx: int = Field(default=4096, ge=2048, le=16384)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
-    system_instructions: str = Field(default="", max_length=1800)
+    # No length cap: whatever doesn't fit in the configured context window is
+    # already handled gracefully by the history/memory/attachment budget
+    # fitting in SynthesisAgent (they yield ground first), so an arbitrary
+    # character ceiling here only produced silent, confusing truncation.
+    system_instructions: str = ""
+    # When true, Cortex's own built-in system_prompt.txt (identity, tone,
+    # safety directives) is left out of the prompt entirely -- a "raw"
+    # escape hatch for a locally-run model. Per-feature JIT prompt fragments
+    # (code execution contract, memory instructions) are unaffected: they
+    # stay conditional on their own settings, not on this one.
+    bypass_system_prompt: bool = False
 
 
 # The subset of GenerationSettings that a single request may override for

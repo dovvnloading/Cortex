@@ -205,7 +205,11 @@ export function SettingsPanel({
                   </label>
                 </div>
                 <label className="field-label" htmlFor="system-instructions">System instructions
-                  <textarea id="system-instructions" value={generation.system_instructions ?? ""} onChange={(event) => update({ generation: { ...generation, system_instructions: event.target.value } })} maxLength={1800} rows={4} />
+                  <textarea id="system-instructions" value={generation.system_instructions ?? ""} onChange={(event) => update({ generation: { ...generation, system_instructions: event.target.value } })} rows={4} />
+                </label>
+                <label className="toggle-row" htmlFor="bypass-system-prompt">
+                  <span><strong id="bypass-system-prompt-label">Bypass Cortex's default system prompt</strong><small id="bypass-system-prompt-description">Skip Cortex's built-in identity and safety instructions. Only your system instructions above (if any) and the conversation are sent to the model.</small></span>
+                  <input id="bypass-system-prompt" type="checkbox" aria-labelledby="bypass-system-prompt-label" aria-describedby="bypass-system-prompt-description" checked={generation.bypass_system_prompt ?? false} onChange={(event) => update({ generation: { ...generation, bypass_system_prompt: event.target.checked } })} />
                 </label>
               </div>
             </section>
