@@ -654,7 +654,10 @@ class SynthesisAgent:
             permanent_memories=permanent_memories,
             memories_enabled=memories_enabled,
             user_system_instructions=user_system_instructions,
-            num_ctx=int(api_options.get("num_ctx", 4096)),
+            # Kept in step with GenerationSettings.num_ctx's own default --
+            # a real call always carries num_ctx, so this only matters for
+            # options built by hand without one.
+            num_ctx=int(api_options.get("num_ctx", 8192)),
             code_execution_eligible=self.code_execution_eligible,
             bypass_system_prompt=self.bypass_system_prompt,
         )

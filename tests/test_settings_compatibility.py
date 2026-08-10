@@ -31,7 +31,7 @@ class TypedSettingsTests(unittest.TestCase):
         self.assertIsNone(settings.models.title)
         self.assertEqual(settings.models.translation, "translategemma:4b")
         self.assertEqual(settings.generation.temperature, 0.7)
-        self.assertEqual(settings.generation.num_ctx, 4096)
+        self.assertEqual(settings.generation.num_ctx, 8192)
         self.assertEqual(settings.generation.seed, -1)
         self.assertTrue(settings.execution.automatic_compute)
         self.assertTrue(settings.memory.enabled)

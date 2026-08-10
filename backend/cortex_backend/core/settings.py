@@ -54,7 +54,14 @@ class GenerationSettings(_SettingsModel):
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     top_k: int = Field(default=40, ge=0, le=200)
     repeat_penalty: float = Field(default=1.1, ge=0.5, le=2.0)
-    num_ctx: int = Field(default=4096, ge=2048, le=16384)
+    # 4096 measured out at only 4-10 of 30 realistic exchanges surviving the
+    # context-budget trim once the built-in system/memory/code-execution
+    # prompts (up to ~2000 tokens) were accounted for -- history was being
+    # silently discarded well within what every locally installed model
+    # actually supports (the smallest here is 40960). 8192 keeps the full
+    # 30-exchange conversation even with memories and code-execution eligibility
+    # both active; see the discussion around PR raising this default.
+    num_ctx: int = Field(default=8192, ge=2048, le=16384)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
     # No length cap: whatever doesn't fit in the configured context window is
     # already handled gracefully by the history/memory/attachment budget

@@ -88,7 +88,7 @@ const FALLBACK_GENERATION_DEFAULTS: GenerationSettings = {
   top_p: 0.9,
   top_k: 40,
   repeat_penalty: 1.1,
-  num_ctx: 4096,
+  num_ctx: 8192,
   seed: -1,
 };
 
