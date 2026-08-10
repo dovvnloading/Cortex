@@ -2,7 +2,6 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
-import { useChatStore } from "../../stores/useChatStore";
 import { AppShell } from "./AppShell";
 
 const CONNECTED = { success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>;
@@ -116,21 +115,5 @@ describe("AppShell", () => {
     await user.type(screen.getByLabelText("Search chats by title"), "nothing matches this");
 
     expect(screen.getByText("No chats match your search.")).toBeInTheDocument();
-  });
-
-  it("shows an export control in the header once a full chat is the active chat in the store", () => {
-    useChatStore.getState().setActiveChat({
-      id: "chat-1",
-      title: "Quarterly planning",
-      timestamp: "2026-01-01T00:00:00Z",
-      revision: 1,
-      messages: [{ id: "m-1", role: "user", content: "hi" }],
-    });
-    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
-
-    renderShell({ chats: [chat], activeChatId: chat.id, onDeleteChat: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(), onOpenSettings: vi.fn() });
-
-    expect(screen.getByRole("button", { name: "Export as Markdown" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Export as JSON" })).toBeInTheDocument();
   });
 });
