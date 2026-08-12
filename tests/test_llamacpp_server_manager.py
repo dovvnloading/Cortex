@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -41,6 +42,20 @@ class _FakePopen:
         self.killed = True
 
     def wait(self, timeout=None):
+        return 0
+
+
+class _UncooperativePopen(_FakePopen):
+    """Stay alive after terminate() until the manager escalates to kill()."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_calls = 0
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if not self.killed:
+            raise subprocess.TimeoutExpired("llama-server", timeout)
         return 0
 
 
@@ -279,6 +294,25 @@ def test_slow_but_alive_process_times_out_without_gpu_fallback(tmp_path: Path) -
     # A timeout (process alive, just slow) must NOT be recorded as a known-bad
     # backend -- only an early process exit means "this backend can't launch here".
     assert not (tmp_path / "preferred_gpu_backend.json").exists()
+
+
+def test_start_timeout_kills_and_reaps_process_that_ignores_terminate(tmp_path: Path) -> None:
+    process = _UncooperativePopen()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysUnhealthyClient(),
+        gpu_backend="vulkan",
+        health_timeout_seconds=0.05,
+    )
+
+    with pytest.raises(ServerStartTimeoutError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.wait_calls == 2
 
 
 def test_unconfigured_release_fails_cleanly(tmp_path: Path) -> None:

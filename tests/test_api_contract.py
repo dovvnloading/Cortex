@@ -53,6 +53,20 @@ def _events(body: str) -> list[dict]:
     ]
 
 
+def test_generation_stream_openapi_declares_sse_media_type():
+    app = create_app(allowed_hosts=ALLOWED_HOSTS)
+    response = app.openapi()["paths"]["/api/v1/generations/{job_id}/events"][
+        "get"
+    ]["responses"]["200"]
+
+    assert response["description"] == "Server-sent generation events."
+    assert response["content"] == {
+        "text/event-stream": {
+            "schema": {"$ref": "#/components/schemas/GenerationEvent"}
+        }
+    }
+
+
 def test_api_factory_is_headless_and_session_exchange_is_one_time():
     app, client = _client()
     with client:

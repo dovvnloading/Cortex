@@ -262,6 +262,140 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("button", { name: "Stop generating" })).toBeInTheDocument();
   });
 
+  it("moves drafts created during new-chat acceptance into the accepted thread", async () => {
+    const user = userEvent.setup();
+    const lateAttachment: ChatAttachment = {
+      attachment_id: "late-doc",
+      filename: "next-turn.md",
+      mime_type: "text/markdown",
+      size: 9,
+      sha256: "1".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    let accept!: (value: { job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }) => void;
+    const accepted = new Promise<{ job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }>((resolve) => { accept = resolve; });
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      generate: vi.fn(() => accepted),
+      stageChatAttachment: vi.fn().mockResolvedValue(lateAttachment),
+    });
+    function RoutedChat() {
+      const [threadId, setThreadId] = useState<string | null>(null);
+      return (
+        <ChatPage
+          api={api}
+          threadId={threadId}
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={setThreadId}
+          onChatChanged={vi.fn()}
+          onForked={vi.fn()}
+        />
+      );
+    }
+    render(<RoutedChat />);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    const attachmentInput = screen.getByLabelText("Attach images or documents");
+    await user.type(composer, "First turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledTimes(1));
+
+    await user.clear(composer);
+    await user.type(composer, "Draft for the next turn");
+    await user.upload(attachmentInput, new File(["next turn"], "next-turn.md", { type: "text/markdown" }));
+    expect(await screen.findByRole("button", { name: "Remove next-turn.md" })).toBeInTheDocument();
+
+    accept({
+      job_id: "job-new",
+      kind: "generation",
+      status: "queued",
+      thread_id: "thread-new",
+      user_message_id: "message-new",
+    });
+
+    await waitFor(() => expect(screen.getByLabelText("Message Cortex")).toHaveValue("Draft for the next turn"));
+    expect(screen.getByRole("button", { name: "Remove next-turn.md" })).toBeInTheDocument();
+    expect(window.sessionStorage.getItem("cortex.composer.draft.new")).toBeNull();
+    expect(window.sessionStorage.getItem("cortex.composer.draft.thread-new")).toBe("Draft for the next turn");
+    expect(window.sessionStorage.getItem("cortex.composer.attachments.new")).toBeNull();
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-new") ?? "[]")).toEqual([lateAttachment]);
+  });
+
+  it("retargets an in-flight new-chat attachment when acceptance wins the race", async () => {
+    const user = userEvent.setup();
+    const stagedAttachment: ChatAttachment = {
+      attachment_id: "inverse-order-doc",
+      filename: "after-acceptance.md",
+      mime_type: "text/markdown",
+      size: 16,
+      sha256: "2".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    let accept!: (value: { job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }) => void;
+    let finishStaging!: (value: ChatAttachment) => void;
+    const accepted = new Promise<{ job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }>((resolve) => { accept = resolve; });
+    const staging = new Promise<ChatAttachment>((resolve) => { finishStaging = resolve; });
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      generate: vi.fn(() => accepted),
+      stageChatAttachment: vi.fn(() => staging),
+    });
+    function RoutedChat() {
+      const [threadId, setThreadId] = useState<string | null>(null);
+      return (
+        <ChatPage
+          api={api}
+          threadId={threadId}
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={setThreadId}
+          onChatChanged={vi.fn()}
+          onForked={vi.fn()}
+        />
+      );
+    }
+    render(<RoutedChat />);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "First turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledTimes(1));
+    await user.upload(
+      screen.getByLabelText("Attach images or documents"),
+      new File(["after acceptance"], "after-acceptance.md", { type: "text/markdown" }),
+    );
+    await waitFor(() => expect(api.stageChatAttachment).toHaveBeenCalledTimes(1));
+
+    accept({
+      job_id: "job-inverse",
+      kind: "generation",
+      status: "queued",
+      thread_id: "thread-inverse",
+      user_message_id: "message-inverse",
+    });
+    await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-inverse"));
+    expect(window.sessionStorage.getItem("cortex.composer.attachments.new")).toBeNull();
+
+    act(() => finishStaging(stagedAttachment));
+
+    expect(await screen.findByRole("button", { name: "Remove after-acceptance.md" })).toBeInTheDocument();
+    expect(window.sessionStorage.getItem("cortex.composer.attachments.new")).toBeNull();
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-inverse") ?? "[]")).toEqual([stagedAttachment]);
+  });
+
   it("replays an active generation from the beginning after a remount", async () => {
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-replay", threadId: "thread-a", lastEventId: 7 }));
     const streamCalls: Array<{ afterEventId?: number }> = [];
@@ -429,6 +563,94 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByLabelText("Message Cortex")).toBeEnabled();
   });
 
+  it("regenerates from the selected user turn instead of stale cross-chat or composer state", async () => {
+    const user = userEvent.setup();
+    const originalAttachment: ChatAttachment = {
+      attachment_id: "original-doc",
+      filename: "original.md",
+      mime_type: "text/markdown",
+      size: 12,
+      sha256: "d".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const draftAttachment: ChatAttachment = {
+      attachment_id: "next-draft-doc",
+      filename: "next-draft.md",
+      mime_type: "text/markdown",
+      size: 14,
+      sha256: "e".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const threadA = emptyChat("thread-a");
+    const threadB: ChatResponse = {
+      ...emptyChat("thread-b"),
+      revision: 2,
+      messages: [
+        { id: "user-b", role: "user", content: "Prompt from B", attachments: [originalAttachment] },
+        { id: "assistant-b", role: "assistant", content: "Answer from B" },
+      ],
+    };
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => id === "thread-b" ? threadB : threadA),
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-a",
+      }),
+      regenerate: vi.fn().mockResolvedValue({
+        job_id: "job-b", kind: "generation", status: "queued", thread_id: "thread-b",
+      }),
+      stageChatAttachment: vi.fn().mockResolvedValue(draftAttachment),
+      streamGeneration: vi.fn(async (jobId, onEvent) => {
+        const completedThreadId = jobId === "job-a" ? "thread-a" : "thread-b";
+        onEvent({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: jobId,
+          thread_id: completedThreadId,
+          data: {},
+        });
+      }),
+    });
+    const view = renderChat(api, "thread-a");
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Prompt from A");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull());
+
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-b"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText("Answer from B")).toBeInTheDocument();
+    await user.upload(
+      screen.getByLabelText("Attach images or documents"),
+      new File(["next"], "next-draft.md", { type: "text/markdown" }),
+    );
+    expect(await screen.findByRole("button", { name: "Remove next-draft.md" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Regenerate response" }));
+
+    await waitFor(() => expect(api.regenerate).toHaveBeenCalledWith("thread-b", expect.objectContaining({
+      message_id: "assistant-b",
+      user_input: "Prompt from B",
+      attachments: [originalAttachment],
+    })));
+    expect(screen.getByRole("button", { name: "Remove next-draft.md" })).toBeInTheDocument();
+  });
+
   it("stages a document without putting its contents into the composer and sends its opaque metadata", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {
@@ -456,6 +678,51 @@ describe("ChatPage composer integration", () => {
       user_input: "Please review the attached file(s).",
       attachments: [attachment],
     })));
+  });
+
+  it("keeps attachments staged while generation acceptance is pending", async () => {
+    const user = userEvent.setup();
+    const firstAttachment: ChatAttachment = {
+      attachment_id: "doc-first",
+      filename: "first.md",
+      mime_type: "text/markdown",
+      size: 5,
+      sha256: "f".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const nextAttachment: ChatAttachment = {
+      attachment_id: "doc-next",
+      filename: "next.md",
+      mime_type: "text/markdown",
+      size: 4,
+      sha256: "0".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    let accept!: (value: { job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }) => void;
+    const accepted = new Promise<{ job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }>((resolve) => { accept = resolve; });
+    const api = chatApi({
+      stageChatAttachment: vi.fn()
+        .mockResolvedValueOnce(firstAttachment)
+        .mockResolvedValueOnce(nextAttachment),
+      generate: vi.fn(() => accepted),
+    });
+    renderChat(api);
+
+    const attachmentInput = await screen.findByLabelText("Attach images or documents");
+    await user.upload(attachmentInput, new File(["first"], "first.md", { type: "text/markdown" }));
+    await screen.findByRole("button", { name: "Remove first.md" });
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledTimes(1));
+
+    await user.upload(attachmentInput, new File(["next"], "next.md", { type: "text/markdown" }));
+    expect(await screen.findByRole("button", { name: "Remove next.md" })).toBeInTheDocument();
+
+    accept({ job_id: "job-1", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "message-1" });
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove first.md" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Remove next.md" })).toBeInTheDocument();
   });
 
   it("explains the image capability mismatch before a generation request is made", async () => {

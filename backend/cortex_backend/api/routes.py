@@ -1313,7 +1313,21 @@ def build_router() -> APIRouter:
             _raise_job_error(exc)
         return _job_response(snapshot)
 
-    @router.get("/generations/{job_id}/events", response_model=GenerationEvent)
+    @router.get(
+        "/generations/{job_id}/events",
+        response_model=GenerationEvent,
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Server-sent generation events.",
+                "content": {
+                    "text/event-stream": {
+                        "schema": {"$ref": "#/components/schemas/GenerationEvent"}
+                    }
+                },
+            }
+        },
+    )
     async def generation_events(
         job_id: str,
         request: Request,
