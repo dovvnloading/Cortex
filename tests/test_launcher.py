@@ -414,6 +414,16 @@ def test_frontend_manifest_detects_source_changes(tmp_path: Path):
     assert frontend_module.needs_build(root) is True
 
 
+def test_frontend_public_icon_matches_canonical_asset():
+    repository_root = Path(__file__).resolve().parents[1]
+    canonical = repository_root / "assets" / "cortex.svg"
+    frontend_icon = repository_root / "frontend" / "public" / "cortex.svg"
+
+    assert frontend_icon.read_bytes() == canonical.read_bytes(), (
+        "The checked-in web icon is stale; run `npm run icons` from frontend/."
+    )
+
+
 def test_frontend_build_replaces_bundle_atomically_and_records_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -463,6 +473,38 @@ def test_frontend_build_stages_sources_outside_live_node_modules(
 
     assert dist == root / "dist"
     assert (dist / "index.html").read_text(encoding="utf-8") == "isolated"
+    assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_frontend_build_manifest_describes_staged_snapshot_during_live_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    staged_lock_digest = frontend_module.lock_digest(root)
+    staged_source_digest = frontend_module.source_digest(root)
+    monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
+    monkeypatch.setattr(frontend_module, "_install_if_needed", lambda *_args: None)
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        assert frontend_module.lock_digest(cwd) == staged_lock_digest
+        assert frontend_module.source_digest(cwd) == staged_source_digest
+        (root / "src" / "App.tsx").write_text(
+            "export default { changedDuringBuild: true };",
+            encoding="utf-8",
+        )
+        output = Path(command[-1])
+        output.mkdir(parents=True)
+        (output / "index.html").write_text("staged snapshot", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    dist = frontend_module.build_frontend(root)
+    manifest = frontend_module.read_manifest(dist)
+
+    assert manifest is not None
+    assert manifest.lock_digest == staged_lock_digest
+    assert manifest.source_digest == staged_source_digest
+    assert frontend_module.needs_build(root) is True
     assert not list(tmp_path.glob(".cortex-frontend-build-*"))
 
 

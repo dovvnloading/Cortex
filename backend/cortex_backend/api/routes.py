@@ -1869,23 +1869,10 @@ async def _start_generation_job(
                 history_messages=prepared_history,
             )
             # The generation service checks cancellation around its model work,
-            # but the API owns the following persistence and optional title work.
-            # Keep those side effects behind explicit checkpoints as well.
+            # while the API owns streaming and persistence. Keep everything
+            # cancellable until begin_commit atomically seals the durable result.
             if cancel_event.is_set():
                 return {"cancelled": True}
-            code_execution_job_id = _queue_code_proposal(
-                request,
-                principal,
-                settings,
-                generation_snapshot.job_id,
-                result,
-            )
-            if code_execution_job_id:
-                sink.publish_progress(
-                    "code_approval",
-                    "A local code task is waiting for your approval.",
-                    data={"execution_job_id": code_execution_job_id},
-                )
             if result.thoughts:
                 for delta in _chunks(result.thoughts):
                     if cancel_event.is_set():
@@ -1904,14 +1891,7 @@ async def _start_generation_job(
                     data={"delta": delta},
                 )
 
-            for memo in result.memory_command.additions:
-                if cancel_event.is_set():
-                    return {"cancelled": True}
-                deps.memories.add_memo(memo)
-            if cancel_event.is_set():
-                return {"cancelled": True}
-            sink.publish_progress("persisting", "Saving the response.")
-            if cancel_event.is_set():
+            if not sink.begin_commit("persisting", "Saving the response."):
                 return {"cancelled": True}
             stats_payload = asdict(result.stats) if result.stats else None
             if target_message_id is None:
@@ -1934,13 +1914,40 @@ async def _start_generation_job(
                 )
                 assistant_message_id = target_message_id
 
-            if cancel_event.is_set():
-                return {"cancelled": True}
+            # The assistant turn is the canonical generation result. Code and
+            # memory actions are optional derivatives: queue them only after the
+            # answer exists, and never invalidate that answer if they fail.
+            code_execution_job_id = None
+            try:
+                code_execution_job_id = _queue_code_proposal(
+                    request,
+                    principal,
+                    settings,
+                    generation_snapshot.job_id,
+                    result,
+                )
+            except Exception as exc:
+                logging.warning(
+                    "Cortex code proposal queueing failed (%s).", type(exc).__name__
+                )
+            if code_execution_job_id:
+                sink.publish_progress(
+                    "code_approval",
+                    "A local code task is waiting for your approval.",
+                    data={"execution_job_id": code_execution_job_id},
+                )
+
+            for memo in result.memory_command.additions:
+                try:
+                    deps.memories.add_memo(memo)
+                except Exception as exc:
+                    logging.warning(
+                        "Cortex memory update failed (%s).", type(exc).__name__
+                    )
+
             updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
             title = str(updated_chat.get("title") or "New Chat")
             if target_message_id is None and title == "New Chat":
-                if cancel_event.is_set():
-                    return {"cancelled": True}
                 raw_title = None
                 title_generator = getattr(
                     deps.generation, "generate_chat_title", None
@@ -1955,8 +1962,6 @@ async def _start_generation_job(
                             "Cortex chat title generation failed (%s).",
                             type(exc).__name__,
                         )
-                if cancel_event.is_set():
-                    return {"cancelled": True}
                 generated_title = normalize_title(raw_title, fallback="")
                 if (
                     not generated_title
@@ -1964,8 +1969,6 @@ async def _start_generation_job(
                 ):
                     generated_title = title_from_first_message(payload.user_input)
                 if generated_title != title:
-                    if cancel_event.is_set():
-                        return {"cancelled": True}
                     try:
                         deps.chats.rename_chat(thread_id, generated_title)
                         title = generated_title
@@ -1973,8 +1976,6 @@ async def _start_generation_job(
                         logging.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
                         )
-            if cancel_event.is_set():
-                return {"cancelled": True}
             updated_chat = deps.chats.get_chat(thread_id) or updated_chat
             return {
                 "thread_id": thread_id,

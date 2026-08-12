@@ -141,6 +141,19 @@ describe("MessageComposer", () => {
     stop.resolve();
   });
 
+  it("shows non-cancellable finishing work without offering another stop", async () => {
+    const user = userEvent.setup();
+    const onStop = vi.fn();
+    render(<ComposerHarness phase="finishing" onStop={onStop} />);
+
+    expect(screen.getByText("Finishing response…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Finishing response" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Message Cortex"));
+    await user.keyboard("{Escape}");
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
   it("keeps drafting available while the local runtime is unavailable", async () => {
     const user = userEvent.setup();
     render(<ComposerHarness phase="unavailable" />);

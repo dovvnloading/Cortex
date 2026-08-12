@@ -57,6 +57,7 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onThreadCreated={vi.fn()}
       onChatChanged={vi.fn()}
       onForked={vi.fn()}
+      onSessionExpired={vi.fn()}
     />,
   );
 }
@@ -163,6 +164,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
 
@@ -198,6 +200,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
@@ -215,6 +218,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledTimes(3));
@@ -250,6 +254,7 @@ describe("ChatPage composer integration", () => {
           onThreadCreated={setThreadId}
           onChatChanged={vi.fn()}
           onForked={vi.fn()}
+          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -296,6 +301,7 @@ describe("ChatPage composer integration", () => {
           onThreadCreated={setThreadId}
           onChatChanged={vi.fn()}
           onForked={vi.fn()}
+          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -364,6 +370,7 @@ describe("ChatPage composer integration", () => {
           onThreadCreated={setThreadId}
           onChatChanged={vi.fn()}
           onForked={vi.fn()}
+          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -448,6 +455,8 @@ describe("ChatPage composer integration", () => {
 
     await waitFor(() => expect(details).not.toHaveAttribute("open"));
     expect(screen.queryByText("Live")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Finishing response" })).toBeDisabled();
   });
 
   it("retains the exact draft if generation acceptance fails", async () => {
@@ -501,6 +510,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
     const composerB = await screen.findByLabelText("Message Cortex");
@@ -521,6 +531,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => {
@@ -555,12 +566,53 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
 
     await waitFor(() => expect(screen.getByText("Generating in another thread")).toBeVisible());
     expect(screen.getByRole("button", { name: "Stop generating" })).toBeVisible();
     expect(screen.getByLabelText("Message Cortex")).toBeEnabled();
+  });
+
+  it("does not stay stuck in stopping when cancellation loses to persistence", async () => {
+    const user = userEvent.setup();
+    const cancelGeneration = vi.fn(async () => ({
+      job_id: "job-committing",
+      kind: "generation" as const,
+      status: "running" as const,
+      sequence: 3,
+    }));
+    const api = chatApi({
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-committing",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-1",
+      }),
+      cancelGeneration,
+      streamGeneration: vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) =>
+        new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+      ),
+    });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Persist this answer");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await user.click(await screen.findByRole("button", { name: "Stop generating" }));
+
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledWith("job-committing"));
+    expect(screen.queryByRole("button", { name: "Stopping response" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Finishing response" })).toBeDisabled();
+    expect(screen.getByText("Finishing response...")).toBeVisible();
   });
 
   it("regenerates from the selected user turn instead of stale cross-chat or composer state", async () => {
@@ -632,6 +684,7 @@ describe("ChatPage composer integration", () => {
         onThreadCreated={vi.fn()}
         onChatChanged={vi.fn()}
         onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
       />,
     );
     expect(await screen.findByText("Answer from B")).toBeInTheDocument();

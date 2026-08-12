@@ -32,12 +32,14 @@ function fakeApi(overrides: Partial<CortexApi> = {}): CortexApi {
   } as unknown as CortexApi;
 }
 
+const ignoreSessionExpiry = () => undefined;
+
 describe("useGenerationStream", () => {
   afterEach(() => window.sessionStorage.clear());
 
   it("start() persists the job to sessionStorage and moves the store to starting", () => {
     const api = fakeApi();
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const onCompleted = vi.fn().mockResolvedValue(undefined);
     const onFailed = vi.fn();
 
@@ -59,7 +61,7 @@ describe("useGenerationStream", () => {
         });
       }),
     });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const onCompleted = vi.fn().mockResolvedValue(undefined);
     const onFailed = vi.fn();
 
@@ -87,7 +89,7 @@ describe("useGenerationStream", () => {
         });
       }),
     });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     act(() => {
       result.current.start("job-persist", "thread-persist", vi.fn().mockResolvedValue(undefined), vi.fn());
@@ -117,7 +119,7 @@ describe("useGenerationStream", () => {
         });
       }),
     });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     act(() => {
       result.current.start("job-3", "thread-3", vi.fn().mockResolvedValue(undefined), vi.fn());
@@ -135,7 +137,7 @@ describe("useGenerationStream", () => {
   it("on generation.completed calls onCompleted, clears sessionStorage, and resets the store to idle", async () => {
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const onCompleted = vi.fn().mockResolvedValue(undefined);
 
     act(() => {
@@ -164,7 +166,7 @@ describe("useGenerationStream", () => {
     // resolves.
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     let resolveReload: (() => void) | null = null;
     const onCompleted = vi.fn(() => new Promise<void>((resolve) => { resolveReload = resolve; }));
@@ -193,7 +195,7 @@ describe("useGenerationStream", () => {
   it("on generation.failed calls onFailed with the event message and resets the store", async () => {
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const onFailed = vi.fn();
 
     act(() => {
@@ -214,7 +216,7 @@ describe("useGenerationStream", () => {
       options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
     }));
     const api = fakeApi({ streamGeneration });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const job = { jobId: "job-6", threadId: "thread-6", lastEventId: 0 };
 
     await act(async () => {
@@ -228,7 +230,7 @@ describe("useGenerationStream", () => {
 
   it("stop() aborts the in-flight stream without treating it as a terminal failure", async () => {
     const api = fakeApi();
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
     const onFailed = vi.fn();
 
     act(() => {
@@ -244,16 +246,43 @@ describe("useGenerationStream", () => {
     expect(onFailed).not.toHaveBeenCalled();
   });
 
-  it("stops without reconnecting when the stream rejects with a 401", async () => {
+  it("clears the tracked generation and expires the session without reconnecting when the stream rejects with a 401", async () => {
     const streamGeneration = vi.fn().mockRejectedValue(new ApiError(401, "Local session expired."));
     const api = fakeApi({ streamGeneration });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const onSessionExpired = vi.fn();
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
 
-    await act(async () => {
-      await result.current.consume({ jobId: "job-8", threadId: "thread-8", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+    act(() => {
+      result.current.start("job-8", "thread-8", vi.fn().mockResolvedValue(undefined), onFailed);
     });
 
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
     expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(api.generationStatus).not.toHaveBeenCalled();
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(readActiveJob()).toBeNull();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+  });
+
+  it("clears the tracked generation and expires the session when the status fallback rejects with a 401", async () => {
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const generationStatus = vi.fn().mockRejectedValue(new ApiError(401, "Local session expired."));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onSessionExpired = vi.fn();
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
+
+    act(() => {
+      result.current.start("job-status-401", "thread-status-401", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(generationStatus).toHaveBeenCalledTimes(1);
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(readActiveJob()).toBeNull();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
   it("reconnects with the accumulated cursor after a transient (non-401) stream error", async () => {
@@ -268,7 +297,7 @@ describe("useGenerationStream", () => {
       });
     });
     const api = fakeApi({ streamGeneration, generationStatus });
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     act(() => {
       void result.current.consume({ jobId: "job-9", threadId: "thread-9", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
@@ -300,7 +329,7 @@ describe("useGenerationStream", () => {
     });
     const api = fakeApi({ streamGeneration, generationStatus });
     const onFailed = vi.fn();
-    const { result } = renderHook(() => useGenerationStream(api));
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     act(() => {
       void result.current.consume({ jobId: "job-10", threadId: "thread-10", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), onFailed);

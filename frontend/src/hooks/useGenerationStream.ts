@@ -32,6 +32,7 @@ function delay(milliseconds: number): Promise<void> {
 
 type OnCompleted = (threadId: string) => Promise<void>;
 type OnFailed = (threadId: string, message: string) => void;
+type OnSessionExpired = () => void;
 
 /**
  * Coalesces many rapid push() calls into at most one flush per animation
@@ -77,7 +78,7 @@ function createRafBatchedFlusher(flush: (buffered: string) => void) {
  * Error handling stays with the caller (ChatPage) via onFailed, since it's
  * displayed scoped to whichever thread is currently being viewed.
  */
-export function useGenerationStream(api: CortexApi) {
+export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionExpired) {
   const consumingRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -91,6 +92,7 @@ export function useGenerationStream(api: CortexApi) {
       abortRef.current = controller;
       let cursor = job.lastEventId;
       let terminal = false;
+      let sessionExpired = false;
       // Set alongside `terminal`, never awaited until the finally block below
       // -- endGeneration() must not clear the store's jobId (and unmount the
       // pending bubble) before the reload it triggers has actually put the
@@ -147,7 +149,10 @@ export function useGenerationStream(api: CortexApi) {
             }
           } catch (streamError) {
             if (controller.signal.aborted) return;
-            if (streamError instanceof ApiError && streamError.status === 401) return;
+            if (streamError instanceof ApiError && streamError.status === 401) {
+              sessionExpired = true;
+              break;
+            }
             try {
               const snapshot = await api.generationStatus(job.jobId);
               if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
@@ -170,7 +175,10 @@ export function useGenerationStream(api: CortexApi) {
               // the pending message bubble reporting "Generating" forever
               // with no live connection left to correct it. Treat it like
               // any other dropped connection instead: keep retrying.
-              if (statusError instanceof ApiError && statusError.status === 401) return;
+              if (statusError instanceof ApiError && statusError.status === 401) {
+                sessionExpired = true;
+                break;
+              }
               useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
               await delay(RECONNECT_DELAY_MS);
             }
@@ -185,27 +193,28 @@ export function useGenerationStream(api: CortexApi) {
         // completion/abort is never silently dropped.
         contentFlusher.flushNow();
         thoughtsFlusher.flushNow();
-        if (terminal) {
-          if (completion) {
-            // Wait for the reload that puts the real, persisted message in
-            // the transcript before dropping the store's jobId below --
-            // otherwise the pending bubble unmounts (jobId cleared) a beat
-            // before the real one is ready to take its place, and the
-            // response visibly vanishes for the length of that request
-            // before "popping" back in once it resolves. onCompleted
-            // implementations (reconcileChat) already catch and report
-            // their own failures, so this is just a wait, not error
-            // handling.
-            await completion.catch(() => undefined);
-          }
+        if (terminal && completion) {
+          // Wait for the reload that puts the real, persisted message in
+          // the transcript before dropping the store's jobId below --
+          // otherwise the pending bubble unmounts (jobId cleared) a beat
+          // before the real one is ready to take its place, and the
+          // response visibly vanishes for the length of that request
+          // before "popping" back in once it resolves. onCompleted
+          // implementations (reconcileChat) already catch and report
+          // their own failures, so this is just a wait, not error
+          // handling.
+          await completion.catch(() => undefined);
+        }
+        if (terminal || sessionExpired) {
           const stored = readActiveJob();
           if (stored?.jobId === job.jobId) clearActiveJob();
           useChatStore.getState().endGeneration(job.jobId);
         }
         consumingRef.current = null;
+        if (sessionExpired) onSessionExpired();
       }
     },
-    [api],
+    [api, onSessionExpired],
   );
 
   const start = useCallback(

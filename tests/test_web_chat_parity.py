@@ -8,6 +8,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+import cortex_backend.api.routes as api_routes
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 
@@ -180,7 +181,60 @@ def test_failed_generation_keeps_user_turn_without_successful_assistant():
         assert [message["role"] for message in chat["messages"]] == ["user"]
 
 
-def test_cancelled_generation_waits_for_worker_and_skips_response_persistence():
+def test_derived_effect_failures_do_not_invalidate_the_persisted_assistant(
+    monkeypatch,
+):
+    dependencies = build_demo_dependencies()
+    code_observations: list[bool] = []
+    memory_observations: list[bool] = []
+
+    def assistant_exists() -> bool:
+        summaries = dependencies.chats.list_summaries()
+        if not summaries:
+            return False
+        chat = dependencies.chats.get_chat(summaries[0]["id"])
+        return bool(chat and chat["messages"][-1]["role"] == "assistant")
+
+    def fail_code_proposal(*_args, **_kwargs):
+        code_observations.append(assistant_exists())
+        raise RuntimeError("derived code failure")
+
+    def fail_memory(_memo):
+        memory_observations.append(assistant_exists())
+        raise RuntimeError("derived memory failure")
+
+    monkeypatch.setattr(api_routes, "_queue_code_proposal", fail_code_proposal)
+    monkeypatch.setattr(dependencies.memories, "add_memo", fail_memory)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "derived-failure-1", "user_input": "!remember tea"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        assert events[-1]["event"] == "generation.completed"
+        assert code_observations == [True]
+        assert memory_observations == [True]
+        assert dependencies.memories.get_memos() == []
+        chat = client.get(
+            f"/api/v1/chats/{accepted['thread_id']}", headers=headers
+        ).json()
+        assert [message["role"] for message in chat["messages"]] == [
+            "user",
+            "assistant",
+        ]
+
+
+def test_precommit_cancellation_waits_for_worker_and_skips_response_persistence():
     state = FakeOllamaState(
         generation_delay_seconds=0.2,
         title_response="This title must not be persisted",
@@ -233,7 +287,7 @@ def test_cancelled_generation_waits_for_worker_and_skips_response_persistence():
         assert [message["role"] for message in chat["messages"]] == ["user"]
 
 
-def test_cancelling_during_title_generation_does_not_apply_a_late_title():
+def test_cancellation_after_commit_does_not_downgrade_the_persisted_response():
     dependencies = build_demo_dependencies()
     title_started = Event()
     release_title = Event()
@@ -261,7 +315,7 @@ def test_cancelling_during_title_generation_does_not_apply_a_late_title():
                 headers=headers,
             )
             assert cancelled.status_code == 200
-            assert cancelled.json()["status"] == "cancelling"
+            assert cancelled.json()["status"] == "running"
             blocked = client.post(
                 "/api/v1/generations",
                 json={"thread_id": accepted["thread_id"], "user_input": "must wait"},
@@ -277,12 +331,13 @@ def test_cancelling_during_title_generation_does_not_apply_a_late_title():
             headers=headers,
         ) as response:
             events = _events("".join(response.iter_text()))
-        assert events[-1]["event"] == "generation.cancelled"
-        assert "generation.completed" not in [event["event"] for event in events]
+        assert events[-1]["event"] == "generation.completed"
+        assert "generation.cancelling" not in [event["event"] for event in events]
+        assert "generation.cancelled" not in [event["event"] for event in events]
         chat = client.get(
             f"/api/v1/chats/{accepted['thread_id']}", headers=headers
         ).json()
-        assert chat["title"] == "New Chat"
+        assert chat["title"] == "Late title"
         assert [message["role"] for message in chat["messages"]] == [
             "user",
             "assistant",
