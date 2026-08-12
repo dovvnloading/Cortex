@@ -4599,13 +4599,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/GenerationEvent"
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Server-sent generation events."
           },
           "422": {
             "content": {

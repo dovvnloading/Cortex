@@ -48,6 +48,15 @@ type ChatLoadState = {
   error: string | null;
 };
 
+type StartedGeneration = {
+  threadId: string;
+};
+
+type AttachmentDraftTarget = {
+  scope: string;
+  threadId: string | null;
+};
+
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENTS = 8;
@@ -102,6 +111,7 @@ export function ChatPage({
   const initialMountRef = useRef(true);
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
+  const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
 
   const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
     setGenerationError({ threadId: failedThreadId, message });
@@ -243,15 +253,15 @@ export function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, loadChat]);
 
-  const startGeneration = async (prompt: string, regenerateMessageId?: string, suppliedAttachments: readonly ChatAttachment[] = attachments): Promise<boolean> => {
+  const startGeneration = async (prompt: string, regenerateMessageId?: string, suppliedAttachments: readonly ChatAttachment[] = attachments): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
-    if (!input || generation.jobId || startingRef.current) return false;
+    if (!input || generation.jobId || startingRef.current) return null;
     if (!runtimeReady) {
       setGenerationError({
         threadId,
         message: runtimeMessage ?? "The local runtime is unavailable. Rescan local models after it is running.",
       });
-      return false;
+      return null;
     }
 
     startingRef.current = true;
@@ -298,14 +308,13 @@ export function ChatPage({
           error: null,
         });
       }
-      if (!threadId) onThreadCreated(jobThreadId);
-      return true;
+      return { threadId: jobThreadId };
     } catch (requestError) {
       setGenerationError({
         threadId,
         message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
       });
-      return false;
+      return null;
     } finally {
       startingRef.current = false;
       setStarting(false);
@@ -316,20 +325,66 @@ export function ChatPage({
     const submittedDraft = draft;
     const submittedAttachments = attachments;
     const submittedScope = draftScope;
+    const submittedAttachmentScope = attachmentScope;
     const submittedThreadId = threadId;
-    const accepted = await startGeneration(submittedDraft, undefined, submittedAttachments);
+    const started = await startGeneration(submittedDraft, undefined, submittedAttachments);
+    if (!started) return false;
+
+    const destinationThreadId = submittedThreadId ?? started.threadId;
+    const destinationDraftScope = composerDraftKey(destinationThreadId);
+    const destinationAttachmentScope = composerAttachmentKey(destinationThreadId);
+    if (submittedAttachmentScope !== destinationAttachmentScope) {
+      // Retarget only batches that were already staging into this submitted
+      // draft. Each batch owns its mutable target, so a later /chat/new never
+      // inherits a stale redirect to this accepted thread.
+      for (const target of attachmentDraftTargetsRef.current) {
+        if (target.scope === submittedAttachmentScope) {
+          target.scope = destinationAttachmentScope;
+          target.threadId = destinationThreadId;
+        }
+      }
+    }
     const currentDraft = draftsRef.current[submittedScope] ?? readComposerDraft(submittedThreadId);
-    if (accepted && currentDraft === submittedDraft) {
-      const nextDrafts = { ...draftsRef.current, [submittedScope]: "" };
+    const retainedDraft = currentDraft === submittedDraft ? "" : currentDraft;
+    if (submittedScope === destinationDraftScope) {
+      const nextDrafts = { ...draftsRef.current, [submittedScope]: retainedDraft };
+      draftsRef.current = nextDrafts;
+      setDrafts(nextDrafts);
+      writeComposerDraft(submittedThreadId, retainedDraft);
+    } else {
+      const nextDrafts = {
+        ...draftsRef.current,
+        [submittedScope]: "",
+        [destinationDraftScope]: retainedDraft,
+      };
       draftsRef.current = nextDrafts;
       setDrafts(nextDrafts);
       writeComposerDraft(submittedThreadId, "");
-      const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: [] };
+      writeComposerDraft(destinationThreadId, retainedDraft);
+    }
+    if (submittedAttachments.length || submittedAttachmentScope !== destinationAttachmentScope) {
+      const submittedAttachmentIds = new Set(submittedAttachments.map((attachment) => attachment.attachment_id));
+      const currentAttachments = attachmentDraftsRef.current[submittedAttachmentScope]
+        ?? readComposerAttachments(submittedThreadId);
+      const retainedAttachments = currentAttachments.filter(
+        (attachment) => !submittedAttachmentIds.has(attachment.attachment_id),
+      );
+      const nextAttachments = submittedAttachmentScope === destinationAttachmentScope
+        ? { ...attachmentDraftsRef.current, [submittedAttachmentScope]: retainedAttachments }
+        : {
+            ...attachmentDraftsRef.current,
+            [submittedAttachmentScope]: [],
+            [destinationAttachmentScope]: retainedAttachments,
+          };
       attachmentDraftsRef.current = nextAttachments;
       setAttachmentDrafts(nextAttachments);
-      writeComposerAttachments(submittedThreadId, []);
+      if (submittedAttachmentScope !== destinationAttachmentScope) {
+        writeComposerAttachments(submittedThreadId, []);
+      }
+      writeComposerAttachments(destinationThreadId, retainedAttachments);
     }
-    return accepted;
+    if (!submittedThreadId) onThreadCreated(started.threadId);
+    return true;
   };
 
   const cancel = async (): Promise<void> => {
@@ -355,7 +410,9 @@ export function ChatPage({
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
-    return startGeneration(lastPrompt, undefined, lastAttachments);
+    const started = await startGeneration(lastPrompt, undefined, lastAttachments);
+    if (started && !threadId) onThreadCreated(started.threadId);
+    return Boolean(started);
   };
 
   const fork = async (message: ChatMessage) => {
@@ -383,6 +440,8 @@ export function ChatPage({
 
   const addAttachments = async (files: File[]): Promise<void> => {
     if (attachmentsBusy || !files.length) return;
+    const target: AttachmentDraftTarget = { scope: attachmentScope, threadId };
+    attachmentDraftTargetsRef.current.add(target);
     setAttachmentsBusy(true);
     setAttachmentError(null);
     try {
@@ -406,14 +465,25 @@ export function ChatPage({
         staged.push(attachment);
         totalBytes += attachment.size;
       }
-      const next = [...attachments, ...staged];
-      const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: next };
+      // The generation request and attachment staging can finish in either
+      // order. Merge into the latest scoped draft instead of the render-time
+      // `attachments` snapshot, which may contain files that were submitted
+      // and cleared while these new files were still uploading.
+      const currentAttachments = attachmentDraftsRef.current[target.scope]
+        ?? readComposerAttachments(target.threadId);
+      const currentAttachmentIds = new Set(currentAttachments.map((attachment) => attachment.attachment_id));
+      const next = [
+        ...currentAttachments,
+        ...staged.filter((attachment) => !currentAttachmentIds.has(attachment.attachment_id)),
+      ];
+      const nextAttachments = { ...attachmentDraftsRef.current, [target.scope]: next };
       attachmentDraftsRef.current = nextAttachments;
       setAttachmentDrafts(nextAttachments);
-      writeComposerAttachments(threadId, next);
+      writeComposerAttachments(target.threadId, next);
     } catch (error) {
       setAttachmentError(error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "The attachment could not be uploaded.");
     } finally {
+      attachmentDraftTargetsRef.current.delete(target);
       setAttachmentsBusy(false);
     }
   };
@@ -456,7 +526,14 @@ export function ChatPage({
         finalAssistantId={finalAssistantId}
         busy={Boolean(generation.jobId) || starting}
         forkingMessageId={forkingMessage}
-        onRegenerate={(message, index) => void startGeneration(lastPrompt || messages[index - 1]?.content || "", message.id ?? undefined)}
+        onRegenerate={(message, index) => {
+          const userTurn = messages[index - 1];
+          void startGeneration(
+            userTurn?.role === "user" ? userTurn.content : "",
+            message.id ?? undefined,
+            userTurn?.role === "user" ? userTurn.attachments ?? [] : [],
+          );
+        }}
         onFork={(message) => void fork(message)}
         onNearEndChange={handleNearEndChange}
         trailingContent={

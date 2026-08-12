@@ -552,35 +552,43 @@ class LlamaServerManager:
         base_url = f"http://127.0.0.1:{port}"
         deadline = time.monotonic() + self._health_timeout_seconds
         last_status_at = time.monotonic()
-        while time.monotonic() < deadline:
-            exit_code = process.poll()
-            if exit_code is not None:
-                if backend == "vulkan":
-                    self._mark_backend_bad("vulkan")
-                raise ServerLaunchError(
-                    "The local model runtime exited before it became ready.\n"
-                    + "\n".join(stderr_tail[-20:])
-                )
-            if self._probe_health(base_url):
-                with self._state_lock:
-                    self._process = process
-                    self._loaded_model_path = model_path
-                    self._loaded_num_ctx = num_ctx
-                    self._base_url = base_url
-                    self._state = "ready"
-                    self._last_error = None
-                    self._active_backend = backend
-                    self._last_health_check = time.monotonic()
-                    self._stderr_tail = stderr_tail
-                return ServerHandle(base_url=base_url, model_path=model_path)
-            now = time.monotonic()
-            if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
-                on_status(f"Still loading the model ({model_path.name})... this can take a while for large files.")
-                last_status_at = now
-            time.sleep(_HEALTH_POLL_INTERVAL_SECONDS)
+        ready = False
+        try:
+            while time.monotonic() < deadline:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    if backend == "vulkan":
+                        self._mark_backend_bad("vulkan")
+                    raise ServerLaunchError(
+                        "The local model runtime exited before it became ready.\n"
+                        + "\n".join(stderr_tail[-20:])
+                    )
+                if self._probe_health(base_url):
+                    with self._state_lock:
+                        self._process = process
+                        self._loaded_model_path = model_path
+                        self._loaded_num_ctx = num_ctx
+                        self._base_url = base_url
+                        self._state = "ready"
+                        self._last_error = None
+                        self._active_backend = backend
+                        self._last_health_check = time.monotonic()
+                        self._stderr_tail = stderr_tail
+                    ready = True
+                    return ServerHandle(base_url=base_url, model_path=model_path)
+                now = time.monotonic()
+                if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
+                    on_status(f"Still loading the model ({model_path.name})... this can take a while for large files.")
+                    last_status_at = now
+                time.sleep(_HEALTH_POLL_INTERVAL_SECONDS)
 
-        process.terminate()
-        raise ServerStartTimeoutError("The local model runtime did not become ready in time.")
+            raise ServerStartTimeoutError("The local model runtime did not become ready in time.")
+        finally:
+            # The manager does not publish the process into ``self._process``
+            # until health succeeds. Reap every failed startup here so a
+            # timeout or callback error cannot leave an unowned model process.
+            if not ready and process.poll() is None:
+                self._terminate_process(process)
 
     def _probe_health(self, base_url: str) -> bool:
         try:
