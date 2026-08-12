@@ -50,7 +50,7 @@ function LlamaRuntimeBadge({ selectedModel }: { selectedModel: string }) {
   );
 }
 
-export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "unavailable";
+export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "finishing" | "unavailable";
 
 export type MessageComposerProps = {
   value: string;
@@ -134,7 +134,8 @@ export function MessageComposer({
     && !attachmentsBusy
     && !imageInputBlocked;
   const isStopping = phase === "stopping";
-  const isGenerating = phase === "generating" || isStopping;
+  const isFinishing = phase === "finishing";
+  const isGenerating = phase === "generating" || isStopping || isFinishing;
   // Runtime availability gates sending, not workspace configuration. Users
   // must still be able to choose a discovered model while the current model
   // is missing or the local service is reconnecting.
@@ -183,7 +184,7 @@ export function MessageComposer({
   };
 
   const stop = async () => {
-    if (!isGenerating || isStopping || stopPendingRef.current) return;
+    if (!isGenerating || isStopping || isFinishing || stopPendingRef.current) return;
     stopPendingRef.current = true;
     try {
       await onStop();
@@ -229,6 +230,8 @@ export function MessageComposer({
     ? "Starting response…"
     : phase === "stopping"
       ? "Stopping response…"
+      : phase === "finishing"
+        ? "Finishing response…"
       : phase === "generating"
         ? generationElsewhere ? "Generating in another thread" : "Generating…"
         : phase === "unavailable"
@@ -347,12 +350,12 @@ export function MessageComposer({
                 <button
                   className="composer-primary-control composer-stop-control"
                   type="button"
-                  aria-label={isStopping ? "Stopping response" : "Stop generating"}
-                  title={isStopping ? "Stopping response" : "Stop generating"}
-                  disabled={isStopping}
+                  aria-label={isStopping ? "Stopping response" : isFinishing ? "Finishing response" : "Stop generating"}
+                  title={isStopping ? "Stopping response" : isFinishing ? "Finishing response" : "Stop generating"}
+                  disabled={isStopping || isFinishing}
                   onClick={() => void stop()}
                 >
-                  {isStopping ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : <Square aria-hidden="true" size={15} fill="currentColor" />}
+                  {isStopping || isFinishing ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : <Square aria-hidden="true" size={15} fill="currentColor" />}
                 </button>
               ) : (
                 <button

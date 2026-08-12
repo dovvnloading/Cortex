@@ -98,6 +98,7 @@ class _JobRecord:
     prepared: bool = False
     preparation_error: str | None = None
     cancel_event: Event = field(default_factory=Event)
+    commit_started: bool = False
     status: JobStatus = "queued"
     sequence: int = 0
     error: str | None = None
@@ -126,6 +127,39 @@ class JobProgressSink:
         """Publish a safe progress message for generation or model work."""
         payload = {"message": message, **dict(data or {})}
         self.publish_event("progress", phase=phase, data=payload)
+
+    def begin_commit(
+        self,
+        phase: str,
+        message: str,
+        *,
+        data: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Atomically cross the point after which cancellation is too late.
+
+        The worker must call this immediately before its first durable result
+        mutation.  Sharing the registry lock with :meth:`JobRegistry.cancel`
+        gives the two operations one unambiguous order: cancellation wins and
+        this returns ``False``, or commit wins and later cancellation is inert.
+        """
+        payload = {"message": message, **dict(data or {})}
+        with self._registry._lock:
+            if (
+                self._record.status != "running"
+                or self._record.cancel_event.is_set()
+            ):
+                return False
+            if self._record.commit_started:
+                return True
+            self._record.commit_started = True
+            self._registry._append_event(
+                self._record,
+                kind="progress",
+                status="running",
+                phase=phase,
+                data=payload,
+            )
+            return True
 
     def publish_event(
         self,
@@ -392,7 +426,11 @@ class JobRegistry:
     def cancel(self, job_id: str, *, owner: str) -> JobSnapshot:
         record = self._owned_record(job_id, owner)
         with self._lock:
-            if record.status not in TERMINAL_STATUSES and record.status != "cancelling":
+            if (
+                not record.commit_started
+                and record.status not in TERMINAL_STATUSES
+                and record.status != "cancelling"
+            ):
                 record.cancel_event.set()
                 self._append_event(
                     record,
@@ -443,6 +481,8 @@ class JobRegistry:
                 if record.status not in TERMINAL_STATUSES
             ]
             for record in records:
+                if record.commit_started:
+                    continue
                 if record.status != "cancelling":
                     record.cancel_event.set()
                     self._append_event(
@@ -493,7 +533,9 @@ class JobRegistry:
             with self._lock:
                 if record.status in TERMINAL_STATUSES:
                     return
-                if record.status == "cancelling" or record.cancel_event.is_set():
+                if not record.commit_started and (
+                    record.status == "cancelling" or record.cancel_event.is_set()
+                ):
                     self._finalize_cancellation(record)
                     return
                 data = dict(
@@ -510,6 +552,7 @@ class JobRegistry:
             with self._lock:
                 if (
                     record.status not in TERMINAL_STATUSES
+                    and not record.commit_started
                     and (record.status == "cancelling" or record.cancel_event.is_set())
                 ):
                     self._finalize_cancellation(record)
@@ -518,7 +561,9 @@ class JobRegistry:
             with self._lock:
                 if record.status in TERMINAL_STATUSES:
                     return
-                if record.status == "cancelling" or record.cancel_event.is_set():
+                if not record.commit_started and (
+                    record.status == "cancelling" or record.cancel_event.is_set()
+                ):
                     self._finalize_cancellation(record)
                     return
                 logging.error(

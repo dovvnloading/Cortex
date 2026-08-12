@@ -478,3 +478,149 @@ def test_job_registry_enforces_ownership_and_one_active_job():
             await registry.shutdown()
 
     asyncio.run(exercise())
+
+
+def test_job_registry_commit_barrier_linearizes_cancellation():
+    async def wait_for_event(event: Event):
+        for _ in range(200):
+            if event.is_set():
+                return
+            await asyncio.sleep(0.001)
+        raise AssertionError("worker did not reach its synchronization point")
+
+    async def wait_for_status(
+        registry: JobRegistry, job_id: str, expected: str
+    ):
+        for _ in range(200):
+            snapshot = registry.status(job_id, owner="owner")
+            if snapshot.status == expected:
+                return snapshot
+            await asyncio.sleep(0.001)
+        raise AssertionError(f"job did not reach {expected}")
+
+    async def exercise():
+        registry = JobRegistry(poll_seconds=0.001)
+        before_barrier = Event()
+        release_before_barrier = Event()
+        after_barrier = Event()
+        release_after_barrier = Event()
+        barrier_results: list[bool] = []
+
+        def cancellable_runner(sink, _cancel_event):
+            before_barrier.set()
+            release_before_barrier.wait(timeout=1)
+            barrier_results.append(
+                sink.begin_commit("persisting", "Saving the response.")
+            )
+            return {"persisted": barrier_results[-1]}
+
+        def committed_runner(sink, _cancel_event):
+            barrier_results.append(
+                sink.begin_commit("persisting", "Saving the response.")
+            )
+            after_barrier.set()
+            release_after_barrier.wait(timeout=1)
+            return {"persisted": True}
+
+        try:
+            cancellable = await registry.start(
+                kind="generation",
+                owner="owner",
+                thread_id="thread-before",
+                runner=cancellable_runner,
+            )
+            await wait_for_event(before_barrier)
+            assert registry.cancel(cancellable.job_id, owner="owner").status == "cancelling"
+            release_before_barrier.set()
+            cancelled = await wait_for_status(
+                registry, cancellable.job_id, "cancelled"
+            )
+            assert cancelled.result is None
+            assert barrier_results == [False]
+            cancelled_events = [
+                event
+                async for event in registry.events(cancellable.job_id, owner="owner")
+            ]
+            assert not any(event.phase == "persisting" for event in cancelled_events)
+
+            committed = await registry.start(
+                kind="generation",
+                owner="owner",
+                thread_id="thread-after",
+                runner=committed_runner,
+            )
+            await wait_for_event(after_barrier)
+            too_late = registry.cancel(committed.job_id, owner="owner")
+            assert too_late.status == "running"
+            release_after_barrier.set()
+            succeeded = await wait_for_status(registry, committed.job_id, "succeeded")
+            assert succeeded.result == {"persisted": True}
+            assert barrier_results == [False, True]
+            committed_events = [
+                event
+                async for event in registry.events(committed.job_id, owner="owner")
+            ]
+            assert any(event.phase == "persisting" for event in committed_events)
+            assert not any(event.status == "cancelling" for event in committed_events)
+            assert not any(event.status == "cancelled" for event in committed_events)
+        finally:
+            release_before_barrier.set()
+            release_after_barrier.set()
+            await registry.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_job_registry_shutdown_cancels_only_before_commit():
+    async def exercise():
+        async def wait_for_event(event: Event):
+            for _ in range(200):
+                if event.is_set():
+                    return
+                await asyncio.sleep(0.001)
+            raise AssertionError("worker did not reach its synchronization point")
+
+        before_registry = JobRegistry(poll_seconds=0.001)
+        before_started = Event()
+
+        def before_runner(_sink, cancel_event):
+            before_started.set()
+            cancel_event.wait(timeout=1)
+            return {"persisted": False}
+
+        before = await before_registry.start(
+            kind="generation",
+            owner="owner",
+            thread_id="thread-before-shutdown",
+            runner=before_runner,
+        )
+        await wait_for_event(before_started)
+        await before_registry.shutdown()
+        assert before_registry.status(before.job_id, owner="owner").status == "cancelled"
+
+        after_registry = JobRegistry(poll_seconds=0.001)
+        after_barrier = Event()
+        release_after_barrier = Event()
+
+        def after_runner(sink, _cancel_event):
+            assert sink.begin_commit("persisting", "Saving the response.")
+            after_barrier.set()
+            release_after_barrier.wait(timeout=1)
+            return {"persisted": True}
+
+        after = await after_registry.start(
+            kind="generation",
+            owner="owner",
+            thread_id="thread-after-shutdown",
+            runner=after_runner,
+        )
+        await wait_for_event(after_barrier)
+        shutdown = asyncio.create_task(after_registry.shutdown())
+        await asyncio.sleep(0.01)
+        assert not shutdown.done()
+        assert after_registry.status(after.job_id, owner="owner").status == "running"
+        release_after_barrier.set()
+        await shutdown
+        assert after_registry.status(after.job_id, owner="owner").status == "succeeded"
+
+    asyncio.run(exercise())

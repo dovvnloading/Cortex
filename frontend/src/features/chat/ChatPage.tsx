@@ -35,6 +35,7 @@ type Props = {
   onThreadCreated: (threadId: string) => void;
   onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
+  onSessionExpired: () => void;
 };
 
 type ScopedError = {
@@ -75,12 +76,13 @@ export function ChatPage({
   onThreadCreated,
   onChatChanged,
   onForked,
+  onSessionExpired,
 }: Props) {
   const generation = useChatStore((state) => state.generation);
   const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
   const setThreadOptions = useChatStore((state) => state.setThreadOptions);
   const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
-  const { start, consume, stop } = useGenerationStream(api);
+  const { start, consume, stop } = useGenerationStream(api, onSessionExpired);
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
   const [drafts, setDrafts] = useState<Record<string, string>>(() => ({
@@ -192,7 +194,7 @@ export function ChatPage({
     : generation.phase === "stopping"
       ? "stopping"
       : generation.jobId
-        ? "generating"
+        ? generation.contentReady ? "finishing" : "generating"
         : starting
           ? "starting"
           : "ready";
@@ -396,7 +398,16 @@ export function ChatPage({
     useChatStore.getState().markStopping(jobId);
     useChatStore.getState().setStatusText(jobId, "Stopping response...");
     try {
-      await api.cancelGeneration(jobId);
+      const snapshot = await api.cancelGeneration(jobId);
+      if (snapshot.status !== "cancelling" && snapshot.status !== "cancelled") {
+        // Persistence has already crossed the backend's commit barrier, so a
+        // late stop is intentionally inert. Reflect that response instead of
+        // leaving the composer disabled in a false "Stopping" state while the
+        // durable answer finishes its optional bookkeeping.
+        useChatStore.getState().markContentReady(jobId);
+        useChatStore.getState().revertStopping(jobId);
+        useChatStore.getState().setStatusText(jobId, "Finishing response...");
+      }
     } catch (requestError) {
       useChatStore.getState().revertStopping(jobId);
       setGenerationError({

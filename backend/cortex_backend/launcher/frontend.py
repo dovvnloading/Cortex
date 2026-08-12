@@ -200,14 +200,15 @@ def build_frontend(
     frontend_root = frontend_root.resolve()
     if not (frontend_root / "package.json").is_file():
         raise FrontendBuildError("frontend/package.json is missing from the source checkout.")
-    lock = lock_digest(frontend_root)
-    node_major = _major_version("node")
-    npm_major = _major_version("npm")
     build_root = _stage_frontend_source(frontend_root)
     staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
     dist = frontend_root / "dist"
     backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
     try:
+        lock = lock_digest(build_root)
+        source = source_digest(build_root)
+        node_major = _major_version("node")
+        npm_major = _major_version("npm")
         _install_if_needed(build_root, lock)
         _run(
             [_tool_name("npm"), "run", "build", "--", "--outDir", str(staging)],
@@ -217,7 +218,7 @@ def build_frontend(
             raise FrontendBuildError("Frontend build completed without index.html.")
         manifest = FrontendManifest(
             lock_digest=lock,
-            source_digest=source_digest(frontend_root),
+            source_digest=source,
             node_major=node_major,
             npm_major=npm_major,
             built_at=datetime.now(timezone.utc).isoformat(),

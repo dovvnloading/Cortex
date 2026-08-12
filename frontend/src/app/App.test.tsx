@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import { CortexApi } from "../api/client";
+import { useChatStore } from "../stores/useChatStore";
 import { ToastProvider } from "./ToastProvider";
 
 describe("App", () => {
@@ -40,6 +41,40 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Opening local workspace" })).toBeVisible());
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/session/exchange"))).toHaveLength(1);
     expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
+  });
+
+  it("returns to onboarding and clears a persisted generation when its stream session expires", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({
+      jobId: "job-expired",
+      threadId: "thread-expired",
+      lastEventId: 3,
+    }));
+    window.history.replaceState({}, "", "/chat/thread-expired");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([{ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z" }]);
+      if (url.endsWith("/chats/thread-expired")) return json({ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z", revision: 1, messages: [] });
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.endsWith("/generations/job-expired/events")) return json({ detail: "Local session expired." }, 401);
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "Start local workspace" })).toBeVisible();
+    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/generations/job-expired/events"))).toHaveLength(1);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
+    expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
   it("opens the workspace when the model service is unavailable", async () => {
