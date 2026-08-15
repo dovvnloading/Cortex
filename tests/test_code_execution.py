@@ -112,6 +112,69 @@ def test_network_broker_rejects_private_targets() -> None:
         )
 
 
+def test_network_validation_returns_the_address_it_vetted(monkeypatch) -> None:
+    """The vetted address must come back so the caller can dial it directly.
+
+    Discarding it and handing the hostname to the HTTP stack is what allowed
+    DNS rebinding: the stack resolved a second time, and a nameserver
+    answering differently on that second lookup reached targets the check
+    had just rejected.
+    """
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        del host, port, args, kwargs
+        return [(0, 0, 0, "", ("93.184.216.34", 80))]
+
+    monkeypatch.setattr(code_execution.socket, "getaddrinfo", fake_getaddrinfo)
+
+    url, pinned_ip = code_execution._validate_network_url("http://example.test/status")
+
+    assert url == "http://example.test/status"
+    assert pinned_ip == "93.184.216.34"
+
+
+def test_network_broker_pins_the_vetted_address_against_dns_rebinding(monkeypatch) -> None:
+    """A nameserver that answers public-then-private must not win.
+
+    The first resolution passes validation; a second resolution (the one the
+    HTTP stack would otherwise perform when it opens the socket) returns
+    loopback. The connection must still be made to the first, vetted address
+    -- never to the rebound one.
+    """
+    answers = [
+        [(0, 0, 0, "", ("93.184.216.34", 80))],  # vetted: public
+        [(0, 0, 0, "", ("127.0.0.1", 80))],      # rebound: loopback
+    ]
+
+    def rebinding_getaddrinfo(host, port, *args, **kwargs):
+        del host, port, args, kwargs
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    monkeypatch.setattr(code_execution.socket, "getaddrinfo", rebinding_getaddrinfo)
+
+    _, pinned_ip = code_execution._validate_network_url("http://rebind.test/status")
+    assert pinned_ip == "93.184.216.34"
+
+    dialed: list[tuple[str, int]] = []
+
+    def fake_create_connection(address, timeout=None, source_address=None):
+        del timeout, source_address
+        dialed.append(address)
+        raise OSError("connection not actually made in this test")
+
+    plain, _tls = code_execution._pinned_connection_classes(pinned_ip)
+    connection = plain("rebind.test", 80)
+    monkeypatch.setattr(connection, "_create_connection", fake_create_connection)
+    with pytest.raises(OSError):
+        connection.connect()
+
+    assert dialed == [("93.184.216.34", 80)], (
+        "the connection re-resolved instead of using the vetted address"
+    )
+    # The hostname is still what travels in Host / SNI, so servers and
+    # certificate validation are unaffected by the pinning.
+    assert connection.host == "rebind.test"
+
+
 def test_code_execution_waits_for_one_time_approval_and_returns_structured_output(tmp_path) -> None:
     repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
     coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
