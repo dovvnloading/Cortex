@@ -11,6 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+import httpx  # noqa: E402
 import ollama  # noqa: E402
 import uvicorn  # noqa: E402
 
@@ -88,7 +89,10 @@ def build_preview_app(
         legacy=LegacySettingsReader(),
     )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
-    client = ollama.Client(host=ollama_host)
+    client = ollama.Client(
+        host=ollama_host,
+        timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
+    )
 
     def gguf_directory() -> Path:
         # Re-read settings each call (cheap SQLite read, same pattern the API

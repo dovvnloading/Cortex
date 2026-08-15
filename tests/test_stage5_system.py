@@ -8,8 +8,11 @@ from pathlib import Path
 import shutil
 from threading import Barrier
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
+import Cortex_Preview
 from Cortex_Preview import build_preview_app
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
@@ -203,6 +206,25 @@ def test_packaged_runtime_builder_opens_existing_chat_fixture_without_qt(tmp_pat
     assert response.json()[0]["id"] == "fixture-chat"
     assert not (legacy_dir / CHAT_FIXTURE.name).exists()
     assert list(tmp_path.glob("chat_history_migrated_*/*.json"))
+
+
+def test_preview_app_builds_ollama_client_with_a_bounded_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured_kwargs: dict[str, object] = {}
+    real_client_cls = Cortex_Preview.ollama.Client
+
+    class RecordingClient(real_client_cls):
+        def __init__(self, *, host=None, **kwargs):
+            captured_kwargs.update(kwargs)
+            super().__init__(host=host, **kwargs)
+
+    monkeypatch.setattr(Cortex_Preview.ollama, "Client", RecordingClient)
+
+    build_preview_app(data_dir=tmp_path, serve_frontend=False)
+
+    assert captured_kwargs.get("timeout") is not None
+    assert isinstance(captured_kwargs["timeout"], httpx.Timeout)
 
 
 def test_model_inventory_pull_progress_and_failure_are_safe():
