@@ -156,6 +156,62 @@ def test_expired_session_is_rejected_without_exposing_token_details():
         raise AssertionError("expired session was accepted")
 
 
+def test_authenticate_slides_the_session_expiry_forward():
+    """Regression guard: a session's expiry used to be fixed at issuance, so
+    the desktop app hard-locked after exactly one hour of continuous use --
+    the frontend has no way to reach a fresh bootstrap token once its only
+    credential is destroyed after the initial handoff. Every successful
+    authenticate() must extend expires_at, so a session that is actually
+    being used never expires mid-session.
+    """
+    manager = SessionManager(bootstrap_token="bootstrap", ttl_seconds=3600, allowed_hosts=("testserver",))
+    exchanged = manager.exchange("bootstrap")
+    digest = manager._digest(exchanged.token)
+    # 50 minutes into a 60-minute TTL -- still valid, but would expire in
+    # 10 more minutes without a renewal.
+    stale_issued_at = datetime.now(timezone.utc) - timedelta(minutes=50)
+    manager._sessions[digest] = replace(
+        exchanged.principal,
+        issued_at=stale_issued_at,
+        expires_at=stale_issued_at + timedelta(seconds=3600),
+    )
+    old_expiry = manager._sessions[digest].expires_at
+
+    principal = manager.authenticate(exchanged.token)
+
+    assert principal.expires_at > old_expiry
+    assert manager._sessions[digest].expires_at == principal.expires_at
+    # And the renewed session is genuinely usable well past the original
+    # one-hour mark, not just nominally not-yet-expired.
+    assert principal.expires_at > datetime.now(timezone.utc) + timedelta(minutes=55)
+
+
+def test_authenticate_caps_the_sliding_expiry_at_the_absolute_max_lifetime():
+    """A session cannot renew itself forever -- continuous use still hits
+    an absolute lifetime cap rather than sliding indefinitely."""
+    manager = SessionManager(
+        bootstrap_token="bootstrap",
+        ttl_seconds=3600,
+        max_lifetime_seconds=7200,
+        allowed_hosts=("testserver",),
+    )
+    exchanged = manager.exchange("bootstrap")
+    digest = manager._digest(exchanged.token)
+    issued_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=55)  # close to the 2h cap
+    manager._sessions[digest] = replace(
+        exchanged.principal,
+        issued_at=issued_at,
+        # Not yet expired, but well below the eventual ~5-minute-away cap --
+        # a realistic pre-renewal state, unlike setting it past the cap.
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    principal = manager.authenticate(exchanged.token)
+
+    assert principal.expires_at <= issued_at + timedelta(hours=2)
+    assert principal.expires_at > datetime.now(timezone.utc) + timedelta(minutes=1)
+
+
 def test_generation_selects_a_live_local_model_and_translation_is_opt_in():
     settings = CortexSettings()
     snapshot = _generation_snapshot(

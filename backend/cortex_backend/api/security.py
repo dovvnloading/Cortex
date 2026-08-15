@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -34,6 +34,10 @@ class SessionPrincipal:
     session_id: str
     installation_principal_id: str
     expires_at: datetime
+    # When this session was first issued -- fixed for its whole life, unlike
+    # expires_at, so a sliding renewal has an absolute lifetime to cap
+    # against instead of extending forever under continuous use.
+    issued_at: datetime
 
 
 class SessionManager:
@@ -44,15 +48,19 @@ class SessionManager:
         *,
         bootstrap_token: str | None = None,
         ttl_seconds: int = 3600,
+        max_lifetime_seconds: int = 24 * 3600,
         allowed_hosts: Iterable[str] = ("127.0.0.1", "localhost", "::1"),
         installation_principal_id: str | None = None,
     ):
         if ttl_seconds < 60:
             raise ValueError("session TTL must be at least 60 seconds")
+        if max_lifetime_seconds < ttl_seconds:
+            raise ValueError("max_lifetime_seconds must be at least ttl_seconds")
         self._bootstrap_token = bootstrap_token or secrets.token_urlsafe(32)
         self._bootstrap_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
         self._bootstrap_used = False
         self._ttl = timedelta(seconds=ttl_seconds)
+        self._max_lifetime = timedelta(seconds=max_lifetime_seconds)
         self._allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
         self._installation_principal_id = validate_installation_principal_id(
             installation_principal_id or secrets.token_hex(32)
@@ -95,24 +103,37 @@ class SessionManager:
                 raise SessionSecurityError("invalid bootstrap token")
             self._bootstrap_used = True
             raw_token = secrets.token_urlsafe(32)
-            expires_at = datetime.now(timezone.utc) + self._ttl
+            issued_at = datetime.now(timezone.utc)
             session_id = secrets.token_urlsafe(16)
-            self._sessions[self._digest(raw_token)] = SessionPrincipal(
+            principal = SessionPrincipal(
                 session_id=session_id,
                 installation_principal_id=self._installation_principal_id,
-                expires_at=expires_at,
+                expires_at=issued_at + self._ttl,
+                issued_at=issued_at,
             )
-            return SessionExchange(
-                token=raw_token,
-                principal=self._sessions[self._digest(raw_token)],
-            )
+            self._sessions[self._digest(raw_token)] = principal
+            return SessionExchange(token=raw_token, principal=principal)
 
     def authenticate(self, token: str) -> SessionPrincipal:
+        """Validate a bearer token and slide its expiry forward.
+
+        A session in continuous use must never expire mid-session -- every
+        successful authenticate() extends expires_at by the full TTL again,
+        capped at issued_at + max_lifetime so a session cannot renew itself
+        forever. A session that goes genuinely idle for longer than the TTL
+        still expires normally, since nothing calls authenticate() to renew
+        it while idle.
+        """
         now = datetime.now(timezone.utc)
+        digest = self._digest(token)
         with self._lock:
-            principal = self._sessions.get(self._digest(token))
+            principal = self._sessions.get(digest)
             if principal is None or principal.expires_at <= now:
                 raise SessionSecurityError("invalid or expired session")
+            renewed_expiry = min(now + self._ttl, principal.issued_at + self._max_lifetime)
+            if renewed_expiry > principal.expires_at:
+                principal = replace(principal, expires_at=renewed_expiry)
+                self._sessions[digest] = principal
             return principal
 
     def validate_request_context(self, request: Request) -> None:
