@@ -197,13 +197,22 @@ class JobRegistry:
     registry itself remains the single authority for lifecycle transitions.
     """
 
-    def __init__(self, *, poll_seconds: float = 0.025, max_terminal_jobs: int = 100):
+    def __init__(
+        self,
+        *,
+        poll_seconds: float = 0.025,
+        max_terminal_jobs: int = 100,
+        shutdown_grace_seconds: float = 10.0,
+    ):
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         if max_terminal_jobs <= 0:
             raise ValueError("max_terminal_jobs must be positive")
+        if shutdown_grace_seconds <= 0:
+            raise ValueError("shutdown_grace_seconds must be positive")
         self._poll_seconds = poll_seconds
         self._max_terminal_jobs = max_terminal_jobs
+        self._shutdown_grace_seconds = shutdown_grace_seconds
         self._records: dict[str, _JobRecord] = {}
         self._active: dict[JobKind, str] = {}
         self._request_index: dict[tuple[JobKind, str, str], str] = {}
@@ -472,7 +481,23 @@ class JobRegistry:
             await asyncio.sleep(self._poll_seconds)
 
     async def shutdown(self) -> None:
-        """Request cancellation and wait for owned workers to finish safely."""
+        """Request cancellation and wait for owned workers to finish safely.
+
+        A worker that has already begun committing its result (see
+        :meth:`JobProgressSink.begin_commit`) is awaited without a bound --
+        that commit must finish so persisted state and the retained event
+        stream stay consistent. A worker that has not committed is only
+        cooperative on a best-effort basis: it may be blocked inside a
+        synchronous call (a model HTTP request with no read deadline, for
+        example) that never polls ``cancel_event``. Waiting on it
+        indefinitely would hang app shutdown -- and the llama-server child
+        process it is talking to -- for as long as that call takes, so the
+        first wait below is capped at ``shutdown_grace_seconds``. Anything
+        still pending after that grace period is re-checked: a worker that
+        committed *during* the grace period still gets the unbounded wait
+        it is owed; a worker that never committed is abandoned so shutdown
+        can proceed with the rest of teardown.
+        """
         with self._lock:
             self._accepting = False
             records = [
@@ -498,12 +523,31 @@ class JobRegistry:
                     if self._active.get(record.kind) == record.job_id:
                         self._active.pop(record.kind, None)
             tasks = [record.task for record in self._records.values() if record.task]
-        pending = [task for task in tasks if task is not asyncio.current_task()]
-        if pending:
+        pending = {task for task in tasks if task is not asyncio.current_task()}
+        if not pending:
+            return
+        _, still_pending = await asyncio.wait(pending, timeout=self._shutdown_grace_seconds)
+        if not still_pending:
+            return
+        with self._lock:
+            committed_still_pending = [
+                record.task
+                for record in self._records.values()
+                if record.task in still_pending and record.commit_started
+            ]
+        abandoned = len(still_pending) - len(committed_still_pending)
+        if abandoned:
+            logging.warning(
+                "Cortex shutdown: %d job worker(s) did not observe cancellation within "
+                "%.0fs and were abandoned so shutdown could proceed.",
+                abandoned,
+                self._shutdown_grace_seconds,
+            )
+        if committed_still_pending:
             # Cancelling an asyncio task does not stop its ``to_thread``
             # worker. Waiting for the task lets the worker observe the event,
             # complete its cleanup, and finalize the cancellation itself.
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*committed_still_pending, return_exceptions=True)
 
     async def _run(
         self,
