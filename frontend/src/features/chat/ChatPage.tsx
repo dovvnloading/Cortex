@@ -335,6 +335,17 @@ export function ChatPage({
     const destinationThreadId = submittedThreadId ?? started.threadId;
     const destinationDraftScope = composerDraftKey(destinationThreadId);
     const destinationAttachmentScope = composerAttachmentKey(destinationThreadId);
+    if (!submittedThreadId) {
+      // Overrides staged before the first message live under the "new chat"
+      // placeholder key. Migrate them to the real thread id now that one
+      // exists, so they keep applying to this conversation instead of
+      // reverting after one message and leaking into the next new chat.
+      const draftOptions = useChatStore.getState().generationOptionsByThread[NEW_THREAD_OPTIONS_KEY];
+      if (draftOptions) {
+        setThreadOptions(destinationThreadId, draftOptions);
+        setThreadOptions(NEW_THREAD_OPTIONS_KEY, null);
+      }
+    }
     if (submittedAttachmentScope !== destinationAttachmentScope) {
       // Retarget only batches that were already staging into this submitted
       // draft. Each batch owns its mutable target, so a later /chat/new never
