@@ -311,6 +311,7 @@ def test_default_runtime_starts_backend_then_native_window(
             self.running = False
 
     calls: list[tuple[str, object]] = []
+    probed_urls: list[str] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
     monkeypatch.setattr(launcher_main, "_requested_port", lambda _port: 43125)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
@@ -318,7 +319,12 @@ def test_default_runtime_starts_backend_then_native_window(
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
     monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
-    monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_args, **_kwargs: True)
+
+    def fake_wait_for_http(url, *_args, **_kwargs):
+        probed_urls.append(url)
+        return True
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
     monkeypatch.setattr(
         launcher_main,
         "ensure_webview2_runtime",
@@ -327,19 +333,75 @@ def test_default_runtime_starts_backend_then_native_window(
     monkeypatch.setattr(
         launcher_main,
         "run_desktop_window",
-        lambda config, monitor: calls.append(("window", config)),
+        lambda config, monitor: calls.append(("window", (config, monitor))),
     )
 
     args = launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path)])
     assert launcher_main._run_web(args) == 0
 
     assert [name for name, _value in calls] == ["runtime", "window"]
-    window_config = calls[1][1]
+    window_config, monitor = calls[1][1]
     assert isinstance(window_config, DesktopWindowConfig)
     assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token"
     assert window_config.storage_path == tmp_path / "webview"
     assert server.should_exit is True
     assert backend_instances[0].running is False
+
+    # Startup gate used the heavier readiness probe.
+    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/ready"]
+
+    # The ongoing native-window monitor should poll the cheap liveness route
+    # rather than the readiness route, since it runs for the app's lifetime.
+    closed_checks = {"count": 0}
+
+    def closed_is_set() -> bool:
+        closed_checks["count"] += 1
+        return closed_checks["count"] > 1
+
+    fake_window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=closed_is_set)),
+        destroy=lambda: None,
+    )
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
+    monitor(fake_window)
+    assert probed_urls[-1] == "http://127.0.0.1:43125/api/v1/health/live"
+
+
+def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleeps: list[float] = []
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    probed_urls: list[str] = []
+
+    def fake_wait_for_http(url, *, timeout, is_alive):
+        probed_urls.append(url)
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
+
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        destroy=lambda: destroyed.append(True),
+    )
+    destroyed: list[bool] = []
+    backend = SimpleNamespace(error=None)
+    frontend = SimpleNamespace(running=True)
+    server = SimpleNamespace(should_exit=False)
+
+    with pytest.raises(RuntimeError, match="8 consecutive liveness probes"):
+        launcher_main._monitor_native_window(
+            window,
+            backend=backend,
+            frontend=frontend,
+            server=server,
+            readiness_url="http://127.0.0.1:43125/api/v1/health/live",
+        )
+
+    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/live"] * 8
+    assert sleeps == [1.5] * 7
+    assert destroyed == [True]
 
 
 def _frontend_fixture(tmp_path: Path) -> Path:
