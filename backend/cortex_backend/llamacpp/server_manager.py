@@ -21,6 +21,7 @@ downloaded and pinned." See the design plan for the full comparison.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import socket
@@ -28,9 +29,10 @@ import subprocess
 import sys
 import threading
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 import httpx
 
@@ -67,6 +69,12 @@ _FAILURE_WINDOW_SECONDS = 300.0
 # already-loaded context size to inherit. In normal use the main chat call
 # establishes the real context size first, so this rarely matters.
 _DEFAULT_NUM_CTX = 4096
+# How long a vulkan launch failure for one (model, num_ctx, release) keeps
+# steering that exact configuration to cpu before being retried on vulkan
+# again -- long enough that a genuinely-too-large model doesn't thrash on
+# every message, short enough that a driver update or freed VRAM gets a
+# chance to matter within the same day rather than needing a manual reset.
+_KNOWN_BAD_BACKEND_TTL_SECONDS = 24.0 * 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +139,7 @@ class ProcessLauncher(Protocol):
         ...
 
 
-def default_launcher(argv: list[str], *, cwd: Path) -> subprocess.Popen:
+def _spawn_process(argv: list[str], *, cwd: Path) -> subprocess.Popen:
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     return subprocess.Popen(
         argv,
@@ -140,6 +148,147 @@ def default_launcher(argv: list[str], *, cwd: Path) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         creationflags=creationflags,
     )
+
+
+# Windows Job Object plumbing so llama-server cannot outlive this process.
+# Sandboxed execution workers already get this exact policy (see
+# execution/native_win32.py's Win32SuspendedWorker); it was simply missing
+# here. Kept self-contained rather than importing that module's structs --
+# this manager deliberately does not depend on the AppContainer sandbox
+# machinery (see the module docstring), and the struct layout below is
+# stable, documented Win32 API surface, not something specific to either
+# module.
+_JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time", ctypes.c_int64),
+        ("per_job_user_time", ctypes.c_int64),
+        ("limit_flags", wintypes.DWORD),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", wintypes.DWORD),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", wintypes.DWORD),
+        ("scheduling_class", wintypes.DWORD),
+    ]
+
+
+class _JobObjectIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _JobObjectBasicLimitInformation),
+        ("io_info", _JobObjectIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _JobWin32(Protocol):
+    """The handful of kernel32 entry points needed to assign a kill-on-close
+    Job Object -- small and injectable so tests can verify the exact call
+    sequence without touching real Windows APIs or spawning a real process."""
+
+    def CreateJobObjectW(self, security_attributes: Any, name: Any) -> int: ...
+    def SetInformationJobObject(self, job: int, info_class: int, info: Any, info_size: int) -> int: ...
+    def OpenProcess(self, access: int, inherit_handle: int, pid: int) -> int: ...
+    def AssignProcessToJobObject(self, job: int, process: int) -> int: ...
+    def CloseHandle(self, handle: int) -> int: ...
+
+
+def _real_job_win32() -> _JobWin32:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+class _JobObjectLauncher:
+    """Spawns llama-server and assigns it to a kill-on-close Job Object.
+
+    The job is created once and held for the launcher's lifetime (one
+    instance per LlamaServerManager, held as a module-level default so a
+    normal Cortex process shares a single job across every model
+    restart) rather than recreated per launch, so restarting the server
+    many times in one session cannot leak a Windows handle per restart.
+    A hard exit of this Cortex process -- Task Manager, a crash, the
+    launcher supervisor's own shutdown timeout -- closes every handle this
+    process owns, including the job's; that is what tears llama-server
+    down with it even when nothing here ran a graceful stop() first.
+    """
+
+    def __init__(self, *, win32_factory: Callable[[], _JobWin32] = _real_job_win32) -> None:
+        self._win32_factory = win32_factory
+        self._win32: _JobWin32 | None = None
+        self._job: int | None = None
+
+    def __call__(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
+        process = _spawn_process(argv, cwd=cwd)
+        if sys.platform == "win32":
+            self._apply_job_policy(process)
+        return process
+
+    def _apply_job_policy(self, process: subprocess.Popen) -> None:
+        try:
+            win32 = self._win32 or self._win32_factory()
+            job = self._job
+            if job is None:
+                job = win32.CreateJobObjectW(None, None)
+                if not job:
+                    return
+                limits = _JobObjectExtendedLimitInformation()
+                limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if not win32.SetInformationJobObject(
+                    job,
+                    _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                    ctypes.byref(limits),
+                    ctypes.sizeof(limits),
+                ):
+                    win32.CloseHandle(job)
+                    return
+                self._win32 = win32
+                self._job = job
+            process_handle = win32.OpenProcess(
+                _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
+            )
+            if not process_handle:
+                return
+            try:
+                win32.AssignProcessToJobObject(job, process_handle)
+            finally:
+                win32.CloseHandle(process_handle)
+        except OSError:
+            logger.warning(
+                "Could not attach the local model runtime to a Job Object; "
+                "it may keep running if Cortex exits abnormally."
+            )
+
+
+default_launcher: ProcessLauncher = _JobObjectLauncher()
 
 
 def _free_loopback_port() -> int:
@@ -412,22 +561,34 @@ class LlamaServerManager:
             self._failure_times = [
                 at for at in self._failure_times if now - at < _FAILURE_WINDOW_SECONDS
             ]
-            if (
+            tripped = (
                 self._failure_key == (model_path, effective_num_ctx)
                 and len(self._failure_times) >= _FAILURE_LIMIT
-            ):
-                reason = self._last_restart_reason or "the runtime kept failing"
-                message = (
-                    f"The local model runtime for {model_path.name} failed "
-                    f"{len(self._failure_times)} times in the last few minutes "
-                    f"(most recently: {reason}). It likely does not fit in available "
-                    "memory. Choose a smaller model or quantization, or lower the "
-                    "context window in Settings, and Cortex will try again."
-                )
-                self._terminate_and_reset_locked()
-                self._state = "failed"
-                self._last_error = message
-                raise LlamaCppError(message)
+            )
+            if not tripped:
+                return
+            reason = self._last_restart_reason or "the runtime kept failing"
+            message = (
+                f"The local model runtime for {model_path.name} failed "
+                f"{len(self._failure_times)} times in the last few minutes "
+                f"(most recently: {reason}). It likely does not fit in available "
+                "memory. Choose a smaller model or quantization, or lower the "
+                "context window in Settings, and Cortex will try again."
+            )
+            process = self._process
+            self._state = "stopping"
+        # Terminate outside the state lock, same as _terminate_and_reset: the
+        # grace wait can take seconds, and status -- polled every couple of
+        # seconds by the UI -- must stay responsive throughout, not queue
+        # behind a shutdown the class documents this lock as never holding
+        # for more than microseconds.
+        if process is not None:
+            self._terminate_process(process)
+        with self._state_lock:
+            self._reset_fields_locked()
+            self._state = "failed"
+            self._last_error = message
+        raise LlamaCppError(message)
 
     def _terminate_and_reset(self) -> None:
         with self._state_lock:
@@ -440,11 +601,6 @@ class LlamaServerManager:
             self._terminate_process(process)
         with self._state_lock:
             self._reset_fields_locked()
-
-    def _terminate_and_reset_locked(self) -> None:
-        if self._process is not None:
-            self._terminate_process(self._process)
-        self._reset_fields_locked()
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen) -> None:
@@ -478,7 +634,7 @@ class LlamaServerManager:
 
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
-        for backend in self._backend_order(requested_backend):
+        for backend in self._backend_order(requested_backend, model_path, num_ctx):
             try:
                 return self._start_with_backend(model_path, num_ctx, backend, on_status)
             except ServerLaunchError as exc:
@@ -495,27 +651,54 @@ class LlamaServerManager:
             self._last_error = message
         raise last_exc or LlamaCppError(message)
 
-    def _backend_order(self, requested: GpuBackendSetting) -> list[GpuBackend]:
+    def _backend_order(
+        self, requested: GpuBackendSetting, model_path: Path, num_ctx: int
+    ) -> list[GpuBackend]:
         if requested == "cpu":
             return ["cpu"]
         if requested == "vulkan":
             return ["vulkan"]
-        if self._known_bad_backend() == "vulkan":
+        if self._known_bad_backend(model_path, num_ctx) == "vulkan":
             return ["cpu"]
         return ["vulkan", "cpu"]
 
-    def _known_bad_backend(self) -> str | None:
+    def _known_bad_backend(self, model_path: Path, num_ctx: int) -> str | None:
+        """Only skip vulkan when THIS (model, context size, runtime build)
+        is the one that failed, and only for a bounded window -- a launch
+        failure for one oversized model must not permanently disable GPU
+        inference for every other model, and a driver update or freed VRAM
+        deserves a retry rather than an indefinite ban."""
         try:
             data = json.loads(self._preferred_backend_file.read_text("utf-8"))
         except (OSError, ValueError):
             return None
-        return data.get("known_bad") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        if data.get("model") != str(model_path) or data.get("num_ctx") != num_ctx:
+            return None
+        if self._release is not None and data.get("release") != getattr(self._release, "tag", None):
+            return None
+        marked_at = data.get("at")
+        if (
+            not isinstance(marked_at, (int, float))
+            or isinstance(marked_at, bool)
+            or time.time() - marked_at > _KNOWN_BAD_BACKEND_TTL_SECONDS
+        ):
+            return None
+        return data.get("known_bad")
 
-    def _mark_backend_bad(self, backend: GpuBackend) -> None:
+    def _mark_backend_bad(self, backend: GpuBackend, model_path: Path, num_ctx: int) -> None:
         try:
             self._runtime_dir.mkdir(parents=True, exist_ok=True)
             self._preferred_backend_file.write_text(
-                json.dumps({"known_bad": backend}), encoding="utf-8"
+                json.dumps({
+                    "known_bad": backend,
+                    "model": str(model_path),
+                    "num_ctx": num_ctx,
+                    "release": getattr(self._release, "tag", None) if self._release is not None else None,
+                    "at": time.time(),
+                }),
+                encoding="utf-8",
             )
         except OSError:
             logger.warning("Could not persist the known-bad GPU backend marker.")
@@ -558,7 +741,7 @@ class LlamaServerManager:
                 exit_code = process.poll()
                 if exit_code is not None:
                     if backend == "vulkan":
-                        self._mark_backend_bad("vulkan")
+                        self._mark_backend_bad("vulkan", model_path, num_ctx)
                     raise ServerLaunchError(
                         "The local model runtime exited before it became ready.\n"
                         + "\n".join(stderr_tail[-20:])
