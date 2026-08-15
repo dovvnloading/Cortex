@@ -787,3 +787,17 @@ def test_handoff_rotates_bootstrap_token_and_shutdown_is_authenticated():
         assert shutdown.json() == {"status": "accepted"}
         assert shutdown_calls == [True]
         assert client.get("/api/v1/health/ready").status_code == 503
+
+
+def test_handoff_rejects_non_ascii_header_with_a_clean_unauthorized():
+    app = create_app(
+        build_demo_dependencies(),
+        allowed_hosts=("testserver", "127.0.0.1", "localhost", "::1"),
+        handoff_secret="handoff-secret",
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/session/handoff",
+            headers={b"X-Cortex-Handoff": "café-token".encode("latin-1")},
+        )
+        assert response.status_code == 401

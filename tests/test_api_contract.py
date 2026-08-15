@@ -97,6 +97,16 @@ def test_api_factory_is_headless_and_session_exchange_is_one_time():
         assert second.status_code == 401
 
 
+def test_session_exchange_rejects_non_ascii_bootstrap_token_cleanly():
+    app, client = _client()
+    with client:
+        response = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": "café-token"},
+        )
+        assert response.status_code == 401
+
+
 def test_security_rejects_non_loopback_host_and_origin():
     app, client = _client()
     default_app = create_app()
