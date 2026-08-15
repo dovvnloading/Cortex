@@ -634,3 +634,79 @@ def test_job_registry_shutdown_cancels_only_before_commit():
         assert after_registry.status(after.job_id, owner="owner").status == "succeeded"
 
     asyncio.run(exercise())
+
+
+def test_job_registry_shutdown_is_bounded_for_a_worker_that_never_observes_cancellation():
+    """Regression guard: shutdown() used to await every pending worker with
+    no bound at all, including one stuck inside a synchronous call that
+    never polls cancel_event (a model HTTP request with no read deadline,
+    for example). That hung app shutdown -- and the llama-server child
+    process behind it -- for as long as that call took, sometimes forever.
+    A worker that has not begun committing its result must now be
+    abandoned once the grace period elapses so shutdown always completes
+    in bounded time.
+    """
+    async def exercise():
+        registry = JobRegistry(poll_seconds=0.001, shutdown_grace_seconds=0.05)
+        started = Event()
+        never_released = Event()
+
+        def stuck_runner(_sink, _cancel_event):
+            # Never checks _cancel_event -- simulates a blocking call (e.g.
+            # a socket read with no deadline) that ignores cancellation.
+            started.set()
+            never_released.wait(timeout=5)
+            return {"persisted": False}
+
+        job = await registry.start(
+            kind="generation",
+            owner="owner",
+            thread_id="thread-stuck",
+            runner=stuck_runner,
+        )
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("worker did not start")
+
+        loop = asyncio.get_event_loop()
+        started_at = loop.time()
+        await asyncio.wait_for(registry.shutdown(), timeout=1.0)
+        elapsed = loop.time() - started_at
+
+        assert elapsed < 0.5, f"shutdown() took {elapsed:.2f}s, expected it bounded near the 0.05s grace period"
+        assert registry.status(job.job_id, owner="owner").status == "cancelling"
+        never_released.set()
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_runtime_teardown_runs_even_if_job_shutdown_raises():
+    """Regression guard: the lifespan finally block used to await job
+    shutdown unconditionally before tearing down the runtime, so an
+    exception there (or, before the bounded-shutdown fix, an indefinite
+    hang) would skip llamacpp_manager.stop() entirely and leave the
+    llama-server child process orphaned. Runtime teardown must run
+    regardless of whether job shutdown succeeds.
+    """
+    class _RaisingJobs:
+        async def shutdown(self):
+            raise RuntimeError("boom")
+
+    class _FakeLlamaManager:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    fake_manager = _FakeLlamaManager()
+    app = create_app(allowed_hosts=ALLOWED_HOSTS, llamacpp_manager=fake_manager)
+    app.state.jobs = _RaisingJobs()
+
+    with TestClient(app):
+        pass
+
+    assert fake_manager.stopped is True
