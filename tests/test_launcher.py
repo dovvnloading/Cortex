@@ -517,7 +517,9 @@ def test_frontend_build_stages_sources_outside_live_node_modules(
     installed_roots: list[Path] = []
     monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
 
-    def fake_install(frontend_root: Path, _expected_lock_digest: str) -> None:
+    def fake_install(
+        frontend_root: Path, _expected_lock_digest: str, _cache_root: Path
+    ) -> None:
         installed_roots.append(frontend_root)
 
     def fake_run(command: list[str], *, cwd: Path) -> None:
@@ -568,6 +570,129 @@ def test_frontend_build_manifest_describes_staged_snapshot_during_live_edits(
     assert manifest.source_digest == staged_source_digest
     assert frontend_module.needs_build(root) is True
     assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_stale_staging_directories_are_swept_before_a_new_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    stale = tmp_path / ".cortex-frontend-build-orphaned"
+    stale.mkdir()
+    (stale / "leftover.txt").write_text("orphaned", encoding="utf-8")
+    monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
+    monkeypatch.setattr(frontend_module, "_install_if_needed", lambda *_args: None)
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        staging = Path(command[-1])
+        staging.mkdir(parents=True)
+        (staging / "index.html").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    frontend_module.build_frontend(root)
+
+    assert not stale.exists()
+    assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_reclaim_stale_staging_directories_removes_orphaned_builds(tmp_path: Path):
+    stale_a = tmp_path / ".cortex-frontend-build-aaa"
+    stale_b = tmp_path / ".cortex-frontend-build-bbb"
+    keep = tmp_path / ".cortex-frontend-build-new"
+    stale_a.mkdir()
+    (stale_a / "leftover.txt").write_text("orphaned", encoding="utf-8")
+    stale_b.mkdir()
+
+    frontend_module._reclaim_stale_staging_directories(tmp_path, keep)
+
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+
+
+def test_stale_staging_directory_removal_failure_is_logged_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    locked = tmp_path / ".cortex-frontend-build-locked"
+    locked.mkdir()
+
+    def flaky_rmtree(_path, *_args, **_kwargs):
+        raise OSError("file is locked by another process")
+
+    monkeypatch.setattr(frontend_module.shutil, "rmtree", flaky_rmtree)
+
+    with caplog.at_level("WARNING"):
+        frontend_module._reclaim_stale_staging_directories(
+            tmp_path, tmp_path / ".cortex-frontend-build-new"
+        )
+
+    assert locked.exists()
+    assert "Could not remove stale frontend build directory" in caplog.text
+
+
+def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    cache_root = tmp_path / "cache"
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text("{}", encoding="utf-8")
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "abc123"}), encoding="utf-8"
+    )
+
+    def fail_run(*_args, **_kwargs):
+        pytest.fail("npm ci should not run on a cache hit")
+
+    monkeypatch.setattr(frontend_module, "_run", fail_run)
+
+    frontend_module._install_if_needed(build_root, "abc123", cache_root)
+
+    assert (build_root / "node_modules" / "package.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_install_cache_miss_runs_npm_ci_when_lockfile_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    cache_root = tmp_path / "cache"
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text('{"old": true}', encoding="utf-8")
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "old-digest"}), encoding="utf-8"
+    )
+
+    calls: list[Path] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        calls.append(cwd)
+        node_modules = cwd / "node_modules"
+        node_modules.mkdir(parents=True)
+        (node_modules / "package.json").write_text('{"new": true}', encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    frontend_module._install_if_needed(build_root, "new-digest", cache_root)
+
+    assert calls == [build_root]
+    marker_path = cache_root / frontend_module.INSTALL_MANIFEST_NAME
+    stored = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert stored["lock_digest"] == "new-digest"
+    assert (cached_modules / "package.json").read_text(encoding="utf-8") == '{"new": true}'
+
+    # A later build with the same lockfile digest hits the refreshed cache.
+    calls.clear()
+    build_root_2 = tmp_path / "build2"
+    build_root_2.mkdir()
+    frontend_module._install_if_needed(build_root_2, "new-digest", cache_root)
+
+    assert calls == []
+    assert (
+        build_root_2 / "node_modules" / "package.json"
+    ).read_text(encoding="utf-8") == '{"new": true}'
 
 
 def test_frontend_install_failure_leaves_live_node_modules_untouched(
