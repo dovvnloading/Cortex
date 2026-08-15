@@ -1,6 +1,7 @@
 import { createRef, forwardRef, useEffect, useImperativeHandle } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { VirtuosoHandle, VirtuosoProps } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { MessageList, type MessageListHandle } from "./MessageList";
 
@@ -109,10 +110,17 @@ describe("MessageList", () => {
     // function's own identity stays stable (so React doesn't remount it).
     vi.resetModules();
     vi.doMock("react-virtuoso", () => ({
-      Virtuoso: forwardRef(function MockVirtuoso(props: any, ref: any) {
-        useImperativeHandle(ref, () => ({ scrollToIndex: () => {} }));
+      Virtuoso: forwardRef<VirtuosoHandle, VirtuosoProps<ChatMessage, unknown>>(function MockVirtuoso(props, ref) {
+        useImperativeHandle(ref, () => ({
+          scrollToIndex: () => {},
+          scrollTo: () => {},
+          scrollBy: () => {},
+          autoscrollToBottom: () => {},
+          scrollIntoView: () => {},
+          getState: () => { throw new Error("not implemented in this test double"); },
+        }));
         const Footer = props.components?.Footer;
-        return <div data-testid="virtuoso-scroller">{Footer ? <Footer /> : null}</div>;
+        return <div data-testid="virtuoso-scroller">{Footer ? <Footer context={undefined} /> : null}</div>;
       }),
     }));
     const { MessageList: MockedMessageList } = await import("./MessageList");
