@@ -66,6 +66,53 @@ describe("SettingsPanel", () => {
     }));
   });
 
+  it("preserves the configured chat model when saving with an empty model inventory", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    const settings: CortexSettings = {
+      appearance: { theme: "dark" },
+      models: { chat: "gguf:mistral-7b.gguf", title: null, translation: "translategemma:4b" },
+      generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: [],
+      models: [],
+      connection: { success: false, status: "unreachable", message: "Ollama is not running." },
+    };
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={onSave}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // An unrelated edit, e.g. toggling the theme, must not wipe the still-valid
+    // configured chat model just because the inventory came back empty.
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      models: expect.objectContaining({ chat: "gguf:mistral-7b.gguf", title: null }),
+    }));
+  });
+
   it("shows an active spinner and progress message while pulling the default translation model", async () => {
     const user = userEvent.setup();
     const settings: CortexSettings = {

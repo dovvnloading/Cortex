@@ -101,7 +101,14 @@ export function SettingsPanel({
   }));
   const saveDraft = () => onSave({
     ...draft,
-    models: { ...modelSettings, chat: selectedChatModel || null, title: null },
+    models: {
+      ...modelSettings,
+      // An empty inventory (Ollama down, a failed refresh) is a routine,
+      // recoverable state -- it must not overwrite a still-valid configured
+      // model with null just because the picker has nothing to offer right now.
+      chat: installedModels.length ? (selectedChatModel || null) : (modelSettings.chat ?? null),
+      title: null,
+    },
   });
 
   return (
