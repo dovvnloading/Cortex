@@ -85,8 +85,11 @@ def build_preview_app(
     database.migrate_from_json_if_needed()
     permanent_memory = PermanentMemoryManager(app_paths=paths)
     settings_repository = SQLiteSettingsRepository(
-        paths.database,
+        paths.settings_database,
         legacy=LegacySettingsReader(),
+        # Settings used to live inside the chat database; adopt them once so
+        # an upgrade does not silently revert to defaults.
+        adopt_from=paths.database,
     )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
     client = ollama.Client(
