@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, type ReactNode } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useRef, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { MessageCard } from "./MessageCard";
@@ -37,6 +37,18 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const plainRef = useRef<HTMLDivElement>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const virtualized = messages.length >= VIRTUALIZE_THRESHOLD;
+
+  // Virtuoso remounts its Footer subtree whenever the `components.Footer`
+  // *function* identity changes -- a fresh arrow function here every render
+  // (streaming pushes a render per token) tore down and rebuilt the
+  // streaming bubble every frame. `components` itself must still get a new
+  // object each render (Virtuoso only redraws the slot when that reference
+  // changes), but Footer's own identity stays stable via the ref, so React
+  // reconciles the redraw as an update to the existing instance rather than
+  // an unmount/remount.
+  const trailingRef = useRef(trailingContent);
+  trailingRef.current = trailingContent;
+  const Footer = useCallback(() => <>{trailingRef.current}</>, []);
 
   useImperativeHandle(ref, () => ({
     scrollToBottom: () => {
@@ -88,7 +100,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       alignToBottom
       atBottomStateChange={onNearEndChange}
       itemContent={(index, message) => renderCard(message, index)}
-      components={{ Footer: () => <>{trailingContent}</> }}
+      components={{ Footer }}
     />
   );
 });
