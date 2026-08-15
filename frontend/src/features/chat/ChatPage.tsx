@@ -237,9 +237,17 @@ export function ChatPage({
       void loadChat({ preserveCurrent });
       const stored = readActiveJob();
       if (stored) {
-        const job: PersistedJob = initialMountRef.current ? { ...stored, lastEventId: 0 } : stored;
+        // Only rewind the event cursor when the store is actually cold for
+        // this job. initialMountRef is per-instance, so it is true on EVERY
+        // mount -- including a return from /settings, which unmounts this
+        // page but leaves the module-level generation store populated.
+        // Replaying from 0 onto already-accumulated text printed the answer
+        // twice; keeping the stored cursor resumes where the buffer left off.
+        const warmForThisJob = useChatStore.getState().generation.jobId === stored.jobId;
+        const replayFromStart = initialMountRef.current && !warmForThisJob;
+        const job: PersistedJob = replayFromStart ? { ...stored, lastEventId: 0 } : stored;
         initialMountRef.current = false;
-        if (useChatStore.getState().generation.jobId !== job.jobId) {
+        if (replayFromStart || !warmForThisJob) {
           useChatStore.getState().beginGeneration(job.jobId, job.threadId);
         }
         void consume(job, reconcileChat, reportGenerationFailure);

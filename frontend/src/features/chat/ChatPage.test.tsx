@@ -454,7 +454,16 @@ describe("ChatPage composer integration", () => {
     expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-inverse") ?? "[]")).toEqual([stagedAttachment]);
   });
 
-  it("replays an active generation from the beginning after a remount", async () => {
+  it("replays from the beginning on a cold start, then resumes without duplicating after a route remount", async () => {
+    // Two different situations that both reach this mount effect:
+    //
+    //   Cold start (page reload): sessionStorage remembers the job but the
+    //   module-level store was wiped, so the transcript must be rebuilt by
+    //   replaying every event from 0.
+    //
+    //   Route remount (Settings and back): the page unmounts but the store
+    //   survives with its accumulated text intact. Replaying from 0 here
+    //   appends the whole answer onto itself -- the regression this pins.
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-replay", threadId: "thread-a", lastEventId: 7 }));
     const streamCalls: Array<{ afterEventId?: number }> = [];
     const api = chatApi({
@@ -466,12 +475,19 @@ describe("ChatPage composer integration", () => {
     });
     const first = renderChat(api, "thread-a");
     await waitFor(() => expect(streamCalls).toHaveLength(1));
+    await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
+
     first.unmount();
     renderChat(api, "thread-a");
     await waitFor(() => expect(streamCalls).toHaveLength(2));
 
+    // Cold start replayed from 0; the remount resumed from the persisted
+    // cursor instead of rewinding.
     expect(streamCalls[0].afterEventId).toBe(0);
-    expect(streamCalls[1].afterEventId).toBe(0);
+    expect(streamCalls[1].afterEventId).toBe(8);
+
+    // And the answer is not printed twice.
+    await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
   });
 
   it("collapses the pending reasoning panel in step with contentReady, ahead of the swap to the real message", async () => {
