@@ -177,7 +177,7 @@ def _monitor_native_window(
     server,
     readiness_url: str,
 ) -> None:
-    """Close the shell only after sustained backend-readiness failure."""
+    """Close the shell only after sustained backend-liveness failure."""
     failed_probes = 0
     while not window.events.closed.is_set():
         ready = wait_for_http(
@@ -195,7 +195,7 @@ def _monitor_native_window(
             except Exception:
                 pass
             raise RuntimeError("Cortex backend stopped unexpectedly.") from backend.error
-        if failed_probes >= 12:
+        if failed_probes >= 8:
             try:
                 window.destroy()
             except Exception:
@@ -203,7 +203,7 @@ def _monitor_native_window(
             if server.should_exit:
                 return
             raise RuntimeError(
-                "Cortex backend became unavailable after 12 consecutive readiness probes."
+                "Cortex backend became unavailable after 8 consecutive liveness probes."
             )
         if frontend is not None and not frontend.running:
             try:
@@ -213,7 +213,7 @@ def _monitor_native_window(
             raise RuntimeError(
                 f"Vite stopped unexpectedly with exit code {frontend.returncode}."
             )
-        time.sleep(0.1)
+        time.sleep(1.5)
 
 
 def _run_headless(*, backend, frontend, server) -> int:
@@ -352,7 +352,7 @@ def _run_web(args: argparse.Namespace) -> int:
                     frontend=frontend,
                     server=server,
                     readiness_url=(
-                        f"http://127.0.0.1:{backend_port}/api/v1/health/ready"
+                        f"http://127.0.0.1:{backend_port}/api/v1/health/live"
                     ),
                 ),
             )

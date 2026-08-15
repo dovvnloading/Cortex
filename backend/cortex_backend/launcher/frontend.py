@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -14,8 +15,11 @@ import uuid
 from typing import Any
 
 
+logger = logging.getLogger(__name__)
+
 MANIFEST_NAME = ".cortex-build.json"
 INSTALL_MANIFEST_NAME = ".cortex-install.json"
+INSTALL_CACHE_DIRNAME = ".cortex-install-cache"
 TRACKED_CONFIG = (
     "index.html",
     "package.json",
@@ -149,9 +153,29 @@ def _run(command: list[str], *, cwd: Path) -> None:
         ) from exc
 
 
+def _reclaim_stale_staging_directories(parent: Path, keep: Path) -> None:
+    """Remove staging directories orphaned by a crashed or killed build."""
+    try:
+        candidates = list(parent.glob(".cortex-frontend-build-*"))
+    except OSError as exc:
+        logger.warning("Could not scan %s for stale frontend build directories: %s", parent, exc)
+        return
+    for candidate in candidates:
+        if candidate == keep:
+            continue
+        try:
+            shutil.rmtree(candidate)
+            logger.info("Reclaimed stale frontend build staging directory: %s", candidate)
+        except OSError as exc:
+            logger.warning(
+                "Could not remove stale frontend build directory %s: %s", candidate, exc
+            )
+
+
 def _stage_frontend_source(frontend_root: Path) -> Path:
     """Copy build inputs beside the source tree so live installs stay untouched."""
     staging = frontend_root.parent / f".cortex-frontend-build-{uuid.uuid4().hex}"
+    _reclaim_stale_staging_directories(frontend_root.parent, staging)
     try:
         shutil.copytree(
             frontend_root,
@@ -173,19 +197,30 @@ def _stage_frontend_source(frontend_root: Path) -> Path:
     return staging
 
 
-def _install_if_needed(frontend_root: Path, expected_lock_digest: str) -> None:
-    node_modules = frontend_root / "node_modules"
-    marker = node_modules / INSTALL_MANIFEST_NAME
-    installed_digest = None
+def _install_cache_root(frontend_root: Path) -> Path:
+    """Stable cache directory that survives per-build staging churn."""
+    return frontend_root / INSTALL_CACHE_DIRNAME
+
+
+def _install_if_needed(build_root: Path, expected_lock_digest: str, cache_root: Path) -> None:
+    """Install dependencies into ``build_root``, reusing a stable cache when possible."""
+    node_modules = build_root / "node_modules"
+    cached_node_modules = cache_root / "node_modules"
+    marker = cache_root / INSTALL_MANIFEST_NAME
+    cached_digest = None
     if marker.is_file():
         try:
-            installed_digest = json.loads(marker.read_text(encoding="utf-8"))["lock_digest"]
+            cached_digest = json.loads(marker.read_text(encoding="utf-8"))["lock_digest"]
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            installed_digest = None
-    if node_modules.is_dir() and installed_digest == expected_lock_digest:
+            cached_digest = None
+    if cached_digest == expected_lock_digest and cached_node_modules.is_dir():
+        shutil.copytree(cached_node_modules, node_modules)
         return
-    _run([_tool_name("npm"), "ci"], cwd=frontend_root)
-    node_modules.mkdir(parents=True, exist_ok=True)
+    _run([_tool_name("npm"), "ci"], cwd=build_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    if cached_node_modules.exists():
+        shutil.rmtree(cached_node_modules)
+    shutil.copytree(node_modules, cached_node_modules)
     marker.write_text(
         json.dumps({"lock_digest": expected_lock_digest}, indent=2),
         encoding="utf-8",
@@ -209,7 +244,7 @@ def build_frontend(
         source = source_digest(build_root)
         node_major = _major_version("node")
         npm_major = _major_version("npm")
-        _install_if_needed(build_root, lock)
+        _install_if_needed(build_root, lock, _install_cache_root(frontend_root))
         _run(
             [_tool_name("npm"), "run", "build", "--", "--outDir", str(staging)],
             cwd=build_root,

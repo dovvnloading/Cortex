@@ -200,7 +200,9 @@ def build_router() -> APIRouter:
         manager.validate_request_context(request)
         supplied = request.headers.get("X-Cortex-Handoff", "")
         expected = request.app.state.handoff_secret
-        if not expected or not hmac.compare_digest(supplied, expected):
+        if not expected or not hmac.compare_digest(
+            supplied.encode("latin-1"), expected.encode("utf-8")
+        ):
             raise HTTPException(status_code=401, detail="Cortex handoff unavailable.")
         token, expires_at = manager.issue_bootstrap_token()
         return HandoffResponse(bootstrap_token=token, expires_at=expires_at)

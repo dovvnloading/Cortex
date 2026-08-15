@@ -112,6 +112,31 @@ class PersistenceTests(unittest.TestCase):
             self.assertTrue((legacy / "quarantine" / "malformed.json").exists())
             self.assertTrue(list(root.glob("legacy_migrated_*/*.json")))
 
+    def test_permanent_memory_add_memo_is_safe_across_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "memory_bank.json"
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            errors = []
+
+            def add_memo(index):
+                try:
+                    manager.add_memo(f"memo {index}")
+                except Exception as exc:  # pragma: no cover - assertion below reports it
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=add_memo, args=(index,)) for index in range(20)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            expected = {f"memo {index}" for index in range(20)}
+            self.assertEqual(set(manager.get_memos()), expected)
+
+            reloaded = PermanentMemoryManager(memory_file_path=str(memory_path))
+            self.assertEqual(set(reloaded.get_memos()), expected)
+
     def test_permanent_memory_recovers_from_backup_after_interrupted_write(self):
         with tempfile.TemporaryDirectory() as directory:
             memory_path = Path(directory) / "memory_bank.json"

@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { ChatPage } from "./ChatPage";
 
 describe("humanizeGenerationStatus", () => {
@@ -63,7 +64,10 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
 }
 
 describe("ChatPage composer integration", () => {
-  afterEach(() => window.sessionStorage.clear());
+  afterEach(() => {
+    window.sessionStorage.clear();
+    useChatStore.setState({ generationOptionsByThread: {} });
+  });
 
   it("keeps a blank conversation focused on the composer", async () => {
     renderChat(chatApi());
@@ -332,6 +336,53 @@ describe("ChatPage composer integration", () => {
     expect(window.sessionStorage.getItem("cortex.composer.draft.thread-new")).toBe("Draft for the next turn");
     expect(window.sessionStorage.getItem("cortex.composer.attachments.new")).toBeNull();
     expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-new") ?? "[]")).toEqual([lateAttachment]);
+  });
+
+  it("migrates generation overrides set before the first message to the new chat's thread id", async () => {
+    const user = userEvent.setup();
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      generate: vi.fn(async () => ({
+        job_id: "job-new",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-new",
+        user_message_id: "message-new",
+      })),
+    });
+    function RoutedChat() {
+      const [threadId, setThreadId] = useState<string | null>(null);
+      return (
+        <ChatPage
+          api={api}
+          threadId={threadId}
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={setThreadId}
+          onChatChanged={vi.fn()}
+          onForked={vi.fn()}
+          onSessionExpired={vi.fn()}
+        />
+      );
+    }
+    render(<RoutedChat />);
+
+    // Tune sampling before the thread exists -- it is stored under the
+    // "new chat" placeholder key until a real thread id is assigned.
+    useChatStore.getState().setThreadOptions(NEW_THREAD_OPTIONS_KEY, { temperature: 0.2 });
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "First turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledTimes(1));
+
+    await waitFor(() => expect(useChatStore.getState().generationOptionsByThread["thread-new"]).toEqual({ temperature: 0.2 }));
+    expect(useChatStore.getState().generationOptionsByThread[NEW_THREAD_OPTIONS_KEY]).toBeUndefined();
   });
 
   it("retargets an in-flight new-chat attachment when acceptance wins the race", async () => {
