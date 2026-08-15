@@ -62,28 +62,24 @@ def hash_directory(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _verify_directory(target_dir: Path, asset: AssetSpec) -> bool:
-    """Re-verify the whole extracted directory against the pinned manifest hash.
+_TreeIdentity = tuple[tuple[str, int, int], ...]
 
-    Run before every launch (not just once after download) so a corrupted or
-    tampered-with cached install is caught rather than trusted forever. This
-    isn't a single-file TOCTOU-resistant stat-hash-stat check (a multi-file
-    tree walk can't be made atomic that cheaply); it is still a large
-    improvement over trusting an unverified cache indefinitely.
+
+def _tree_identity(root: Path) -> _TreeIdentity:
+    """Cheap per-file ``(relative_path, size, mtime_ns)`` fingerprint of a tree.
+
+    Stat-ing every file is orders of magnitude cheaper than hashing their
+    content, so ``_verify_directory`` uses this to detect "nothing changed"
+    and skip the expensive ``hash_directory`` walk -- mirroring the
+    stat-based memoization ``GGUFModelDirectory`` uses for the same reason.
     """
-    if not (target_dir / asset.executable_relpath).is_file():
-        return False
-    try:
-        return hash_directory(target_dir) == asset.directory_sha256
-    except (OSError, MemoryError):
-        # This check runs on every /api/v1/system poll (every 2s while a
-        # GGUF model is selected -- see App.tsx), including while a large
-        # local model is loaded and system memory is under real pressure.
-        # MemoryError is not an OSError subclass, so without this it was
-        # escaping uncaught and 500ing the whole system-status endpoint in
-        # a tight, permanent poll loop instead of just reporting "not
-        # verified as cached" the way a disk-read OSError already does.
-        return False
+    return tuple(
+        sorted(
+            (path.relative_to(root).as_posix(), (stat := path.stat()).st_size, stat.st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        )
+    )
 
 
 class BinaryFetcher:
@@ -92,17 +88,54 @@ class BinaryFetcher:
     def __init__(self, runtime_dir: Path, *, http_client: httpx.Client | None = None) -> None:
         self._runtime_dir = runtime_dir
         self._http = http_client
+        self._verification_cache: dict[Path, tuple[_TreeIdentity, bool]] = {}
+
+    def _verify_directory(self, target_dir: Path, asset: AssetSpec) -> bool:
+        """Re-verify the whole extracted directory against the pinned manifest hash.
+
+        Run before every launch (not just once after download) so a corrupted or
+        tampered-with cached install is caught rather than trusted forever. This
+        isn't a single-file TOCTOU-resistant stat-hash-stat check (a multi-file
+        tree walk can't be made atomic that cheaply); it is still a large
+        improvement over trusting an unverified cache indefinitely.
+
+        The full SHA-256 walk (``hash_directory``) only actually runs when the
+        tree's cheap ``_tree_identity`` fingerprint has changed since the last
+        call -- this check runs on every /api/v1/system poll (every 2s while a
+        GGUF model is selected -- see App.tsx), and re-hashing a ~100MB,
+        unchanged runtime directory on every idle poll was pure wasted CPU
+        and disk I/O.
+        """
+        if not (target_dir / asset.executable_relpath).is_file():
+            return False
+        try:
+            identity = _tree_identity(target_dir)
+            cached = self._verification_cache.get(target_dir)
+            if cached is not None and cached[0] == identity:
+                return cached[1]
+            result = hash_directory(target_dir) == asset.directory_sha256
+            self._verification_cache[target_dir] = (identity, result)
+            return result
+        except (OSError, MemoryError):
+            # This check runs on every /api/v1/system poll (every 2s while a
+            # GGUF model is selected -- see App.tsx), including while a large
+            # local model is loaded and system memory is under real pressure.
+            # MemoryError is not an OSError subclass, so without this it was
+            # escaping uncaught and 500ing the whole system-status endpoint in
+            # a tight, permanent poll loop instead of just reporting "not
+            # verified as cached" the way a disk-read OSError already does.
+            return False
 
     def is_cached(self, release: PinnedRelease, backend: GpuBackend) -> bool:
         asset = release.assets[backend]
-        return _verify_directory(self._target_dir(release, backend), asset)
+        return self._verify_directory(self._target_dir(release, backend), asset)
 
     def ensure_binary(self, release: PinnedRelease, backend: GpuBackend) -> Path:
         """Return a verified llama-server.exe path, downloading on first use."""
         asset = release.assets[backend]
         target_dir = self._target_dir(release, backend)
         exe_path = target_dir / asset.executable_relpath
-        if _verify_directory(target_dir, asset):
+        if self._verify_directory(target_dir, asset):
             return exe_path
 
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +153,7 @@ class BinaryFetcher:
             if extract_tmp.exists():
                 shutil.rmtree(extract_tmp, ignore_errors=True)
 
-        if not _verify_directory(target_dir, asset):
+        if not self._verify_directory(target_dir, asset):
             raise BinaryVerificationError(
                 f"Downloaded llama.cpp binary for '{backend}' failed verification."
             )
