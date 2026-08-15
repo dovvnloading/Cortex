@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import sys
 from collections.abc import Sequence
+from threading import Event
+from typing import Any
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
@@ -641,6 +643,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         options: dict | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        cancellation_event: Event | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """
         Generates a synthesized response and extracts thoughts and commands.
@@ -652,6 +655,11 @@ class SynthesisAgent:
             memories_enabled (bool): Flag indicating if memory features are active.
             user_system_instructions (str | None): Custom instructions from the user.
             options (dict | None): A dictionary of Ollama options (e.g., temperature, num_ctx).
+            cancellation_event (Event | None): When given, lets the underlying
+                chat client stop consuming an in-flight response early instead
+                of only noticing cancellation after the call returns on its
+                own. Only the real chat turn passes one; title and
+                translation calls do not need it.
 
         Returns:
             A tuple containing:
@@ -706,11 +714,14 @@ class SynthesisAgent:
             # the model call still "succeeds", but the persisted message has
             # empty content next to a full reasoning trace.
 
-            response = self.chat_client.chat(
-                model=self.gen_model,
-                messages=prompt_messages,
-                options=api_options
-            )
+            chat_kwargs: dict[str, Any] = {
+                "model": self.gen_model,
+                "messages": prompt_messages,
+                "options": api_options,
+            }
+            if cancellation_event is not None:
+                chat_kwargs["cancellation_event"] = cancellation_event
+            response = self.chat_client.chat(**chat_kwargs)
             message_obj = response.get('message', {})
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')

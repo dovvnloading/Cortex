@@ -178,6 +178,7 @@ class FakeGenerationEngine:
         user_system_instructions: str | None,
         options: dict[str, Any],
         attachments: tuple[Any, ...] = (),
+        cancellation_event: Any = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del (
             chat_history,
@@ -186,6 +187,7 @@ class FakeGenerationEngine:
             user_system_instructions,
             options,
             attachments,
+            cancellation_event,
         )
         if self.state.status_updates and self._status_callback is not None:
             for message in self.state.status_updates:

@@ -10,9 +10,11 @@ sufficient and keeps this adapter simple.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import httpx
@@ -48,7 +50,14 @@ class LlamaCppChatClient:
         """
         self._status_callback = callback
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> dict:
         model_path = resolve_gguf_path(self._models_directory(), model)
         # None means "no preference" -- title/translation calls pass a
         # minimal options dict with no num_ctx at all. Since num_ctx is a
@@ -61,21 +70,21 @@ class LlamaCppChatClient:
         raw_num_ctx = options.get("num_ctx")
         num_ctx = int(raw_num_ctx) if raw_num_ctx is not None else None
         handle = self._provider.ensure_ready(model_path, num_ctx=num_ctx, on_status=self._status_callback)
-        body = _build_request_body(messages, options)
         started = time.monotonic()
+        if cancellation_event is None:
+            return self._chat_blocking(handle.base_url, messages, options, started)
+        return self._chat_abortable(handle.base_url, messages, options, started, cancellation_event)
+
+    def _chat_blocking(self, base_url: str, messages: list[dict], options: dict, started: float) -> dict:
+        """Single request/response call, unchanged from before cancellation
+        support existed. Used whenever the caller has no cancellation_event
+        to honor (title and translation calls, and anything else that isn't
+        the main chat turn)."""
+        body = _build_request_body(messages, options, stream=False)
         try:
-            response = self._http.post(f"{handle.base_url}/v1/chat/completions", json=body)
+            response = self._http.post(f"{base_url}/v1/chat/completions", json=body)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            # Carry llama-server's own explanation through instead of replacing
-            # it with a fixed string. Without it every failure -- a context
-            # overflow, an out-of-memory abort, an unsupported quantization --
-            # arrived at _generation_failure_message() as the same opaque text,
-            # so none of its classifiers could match and every one of them was
-            # reported to the user as "rejected this request", which reads as
-            # if their message had been refused. The raw text is used only for
-            # classification there; the message shown to the user is always one
-            # of that function's curated strings, and this text is never logged.
             raise LlamaCppError(
                 _server_error_detail(exc.response),
                 status_code=exc.response.status_code,
@@ -85,6 +94,77 @@ class LlamaCppChatClient:
                 "Cortex lost its connection to the local model runtime."
             ) from exc
         return _adapt_to_ollama_shape(response.json(), elapsed_seconds=time.monotonic() - started)
+
+    def _chat_abortable(
+        self,
+        base_url: str,
+        messages: list[dict],
+        options: dict,
+        started: float,
+        cancellation_event: Event,
+    ) -> dict:
+        """Streamed request whose consumption is checked against
+        cancellation_event between chunks, so closing the response (which
+        releases llama-server's slot) happens promptly on Stop instead of
+        only after the model finishes on its own."""
+        body = _build_request_body(messages, options, stream=True)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        usage: dict | None = None
+        timings: dict | None = None
+        try:
+            with self._http.stream("POST", f"{base_url}/v1/chat/completions", json=body) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    exc.response.read()
+                    raise LlamaCppError(
+                        _server_error_detail(exc.response),
+                        status_code=exc.response.status_code,
+                    ) from exc
+                for line in response.iter_lines():
+                    if cancellation_event.is_set():
+                        break
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except ValueError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        content_piece = delta.get("content")
+                        if content_piece:
+                            content_parts.append(content_piece)
+                        reasoning_piece = delta.get("reasoning_content")
+                        if reasoning_piece:
+                            reasoning_parts.append(reasoning_piece)
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    if chunk.get("timings"):
+                        timings = chunk["timings"]
+        except httpx.TransportError as exc:
+            raise LlamaCppError(
+                "Cortex lost its connection to the local model runtime."
+            ) from exc
+        # Reuse the existing non-streamed adapter by handing it a payload
+        # shaped the same way -- accumulated deltas standing in for the
+        # single message a non-streamed response would have carried.
+        synthetic_payload = {
+            "choices": [{
+                "message": {
+                    "content": "".join(content_parts),
+                    "reasoning_content": "".join(reasoning_parts) or None,
+                },
+            }],
+            "usage": usage,
+            "timings": timings,
+        }
+        return _adapt_to_ollama_shape(synthetic_payload, elapsed_seconds=time.monotonic() - started)
 
 
 _MAX_SERVER_ERROR_CHARS = 400
@@ -115,11 +195,19 @@ def _server_error_detail(response: httpx.Response) -> str:
     return detail.strip()[:_MAX_SERVER_ERROR_CHARS]
 
 
-def _build_request_body(messages: list[dict], options: dict) -> dict[str, Any]:
+def _build_request_body(messages: list[dict], options: dict, *, stream: bool) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": _strip_unsupported_fields(messages),
-        "stream": False,
+        "stream": stream,
     }
+    if stream:
+        # OpenAI-compatible streaming convention llama-server also follows:
+        # without this, per-chunk usage/timings are commonly omitted
+        # entirely rather than attached to the final chunk. Parsing already
+        # treats both as optional and falls back to a wall-clock estimate
+        # (see _adapt_to_ollama_shape), so an older server that ignores this
+        # field degrades to that same fallback rather than failing.
+        body["stream_options"] = {"include_usage": True}
     for option_key, body_key in (
         ("temperature", "temperature"),
         ("top_p", "top_p"),

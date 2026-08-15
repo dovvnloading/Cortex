@@ -9,6 +9,7 @@ to know which backend served a call.
 
 from __future__ import annotations
 
+from threading import Event
 from typing import Any, Protocol
 
 # Ollama tags are ``name:tag`` and never contain this prefix, so it
@@ -25,9 +26,22 @@ class ChatClient(Protocol):
          "prompt_eval_duration": int | None,   # nanoseconds
          "eval_duration": int | None,          # nanoseconds
          "total_duration": int | None}         # nanoseconds
+
+    ``cancellation_event``, when given, lets a caller ask the client to stop
+    consuming an in-flight response early (see ``LlamaCppChatClient`` and
+    ``OllamaChatClient``). It is optional and only meaningful to real
+    implementations -- callers that never set it keep today's simple
+    single-shot request.
     """
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> dict:
         ...
 
 
@@ -37,8 +51,49 @@ class OllamaChatClient:
     def __init__(self, client: Any) -> None:
         self._client = client
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
-        return self._client.chat(model=model, messages=messages, options=options)
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> dict:
+        if cancellation_event is None:
+            return self._client.chat(model=model, messages=messages, options=options)
+        # ollama.Client(stream=True) returns a generator that owns an httpx
+        # streaming response internally (see the installed ``ollama`` package's
+        # Client._request: ``with self._client.stream(...) as r: ... yield``).
+        # Breaking out of the loop early and closing the generator sends it a
+        # GeneratorExit at its suspended yield point, which unwinds that
+        # ``with`` block and releases the connection -- the same mechanism
+        # LlamaCppChatClient uses for the local runtime.
+        chunks = self._client.chat(model=model, messages=messages, options=options, stream=True)
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        final: dict = {}
+        try:
+            for chunk in chunks:
+                if cancellation_event.is_set():
+                    break
+                message = chunk.get("message") or {}
+                content_piece = message.get("content")
+                if content_piece:
+                    content_parts.append(content_piece)
+                thinking_piece = message.get("thinking")
+                if thinking_piece:
+                    thinking_parts.append(thinking_piece)
+                if chunk.get("done"):
+                    final = dict(chunk)
+        finally:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
+        final["message"] = {
+            "content": "".join(content_parts),
+            "thinking": "".join(thinking_parts) or None,
+        }
+        return final
 
 
 class RoutingChatClient:
@@ -55,8 +110,20 @@ class RoutingChatClient:
         self._ollama = ollama_client
         self._llamacpp = llamacpp_client
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> dict:
         target = self._llamacpp if model.startswith(GGUF_PREFIX) else self._ollama
+        # Only forward cancellation_event when it is actually set, so test
+        # doubles and any future ChatClient implementation that predates this
+        # parameter keep working against their original 3-argument call.
+        if cancellation_event is not None:
+            return target.chat(model=model, messages=messages, options=options, cancellation_event=cancellation_event)
         return target.chat(model=model, messages=messages, options=options)
 
     def set_status_callback(self, callback: Any) -> None:
