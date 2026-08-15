@@ -22,6 +22,7 @@ import shutil
 import math
 import struct
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 
 from cortex_backend.core.paths import AppPaths
@@ -898,6 +899,7 @@ class PermanentMemoryManager:
             memory_file_path = str(resolved_paths.permanent_memory)
         self.memory_file_path = memory_file_path
         self.backup_file_path = f"{self.memory_file_path}.bak"
+        self._lock = threading.RLock()
         self.memos = self._load_memos()
 
     @staticmethod
@@ -991,7 +993,8 @@ class PermanentMemoryManager:
         Returns:
             A list of memo strings.
         """
-        return list(self.memos)
+        with self._lock:
+            return list(self.memos)
 
     def add_memo(self, memo_text: str):
         """
@@ -1000,16 +1003,17 @@ class PermanentMemoryManager:
         Args:
             memo_text (str): The fact to be remembered.
         """
-        normalized = self.normalize_memos(self.memos + [memo_text])
-        if normalized == self.memos:
-            return
-        previous_memos = list(self.memos)
-        self.memos = normalized
-        try:
-            self._save_memos()
-        except PersistenceError:
-            self.memos = previous_memos
-            raise
+        with self._lock:
+            normalized = self.normalize_memos(self.memos + [memo_text])
+            if normalized == self.memos:
+                return
+            previous_memos = list(self.memos)
+            self.memos = normalized
+            try:
+                self._save_memos()
+            except PersistenceError:
+                self.memos = previous_memos
+                raise
 
     def update_memos(self, memos: list[str]):
         """
@@ -1019,24 +1023,26 @@ class PermanentMemoryManager:
             memos (list[str]): The new, complete list of memos.
         """
         # Filter out any empty strings that might have come from the UI.
-        previous_memos = list(self.memos)
-        self.memos = self.normalize_memos(memos)
-        try:
-            self._save_memos()
-        except PersistenceError:
-            self.memos = previous_memos
-            raise
-        logging.info(f"Permanent memory updated with {len(self.memos)} memos.")
+        with self._lock:
+            previous_memos = list(self.memos)
+            self.memos = self.normalize_memos(memos)
+            try:
+                self._save_memos()
+            except PersistenceError:
+                self.memos = previous_memos
+                raise
+            logging.info(f"Permanent memory updated with {len(self.memos)} memos.")
 
     def clear_memos(self):
         """Clears all memos from the list and saves the empty list to disk."""
-        previous_memos = list(self.memos)
-        self.memos.clear()
-        try:
-            self._save_memos()
-        except PersistenceError:
-            self.memos = previous_memos
-            raise
+        with self._lock:
+            previous_memos = list(self.memos)
+            self.memos.clear()
+            try:
+                self._save_memos()
+            except PersistenceError:
+                self.memos = previous_memos
+                raise
 
 
 class ShortTermMemory:
