@@ -79,7 +79,7 @@ describe("SettingsPanel", () => {
       optional_models: [],
       installed_models: [],
       models: [],
-      connection: { success: false, status: "unreachable", message: "Ollama is not running." },
+      connection: { success: false, status: "error", message: "Ollama is not running." },
     };
 
     render(
