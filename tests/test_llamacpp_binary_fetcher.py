@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -158,10 +160,42 @@ def test_is_cached_reports_false_instead_of_raising_when_hashing_hits_memory_pre
     archive_bytes = _build_archive()
     release = _release_for(archive_bytes)
     fetcher = BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes))
-    fetcher.ensure_binary(release, "cpu")
+    exe_path = fetcher.ensure_binary(release, "cpu")
+
+    # Touch a file so the cheap tree-identity cache misses and this call
+    # actually reaches hash_directory -- otherwise the unchanged-directory
+    # fast path would return the cached result without calling it at all.
+    future = time.time() + 10
+    os.utime(exe_path, (future, future))
 
     with patch("cortex_backend.llamacpp.binary_fetcher.hash_directory", side_effect=MemoryError):
         assert fetcher.is_cached(release, "cpu") is False
+
+
+def test_is_cached_only_hashes_once_for_an_unchanged_directory(tmp_path: Path) -> None:
+    """/api/v1/system polls is_cached() every ~2s while idle -- the full
+    SHA-256 directory walk must be skipped when nothing on disk changed, and
+    only re-run once a file actually changes."""
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    fetcher = BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes))
+    exe_path = fetcher.ensure_binary(release, "cpu")
+
+    with patch(
+        "cortex_backend.llamacpp.binary_fetcher.hash_directory", wraps=hash_directory
+    ) as spy:
+        # ensure_binary() already verified (and cached) this directory, so
+        # a repeated is_cached() call for the same unchanged tree must not
+        # re-hash it.
+        assert fetcher.is_cached(release, "cpu") is True
+        assert fetcher.is_cached(release, "cpu") is True
+        assert spy.call_count == 0
+
+        future = time.time() + 10
+        os.utime(exe_path, (future, future))
+
+        assert fetcher.is_cached(release, "cpu") is True
+        assert spy.call_count == 1
 
 
 def test_zip_slip_entries_are_rejected(tmp_path: Path) -> None:

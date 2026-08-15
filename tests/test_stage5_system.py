@@ -8,8 +8,11 @@ from pathlib import Path
 import shutil
 from threading import Barrier
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
+import Cortex_Preview
 from Cortex_Preview import build_preview_app
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
@@ -205,6 +208,25 @@ def test_packaged_runtime_builder_opens_existing_chat_fixture_without_qt(tmp_pat
     assert list(tmp_path.glob("chat_history_migrated_*/*.json"))
 
 
+def test_preview_app_builds_ollama_client_with_a_bounded_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured_kwargs: dict[str, object] = {}
+    real_client_cls = Cortex_Preview.ollama.Client
+
+    class RecordingClient(real_client_cls):
+        def __init__(self, *, host=None, **kwargs):
+            captured_kwargs.update(kwargs)
+            super().__init__(host=host, **kwargs)
+
+    monkeypatch.setattr(Cortex_Preview.ollama, "Client", RecordingClient)
+
+    build_preview_app(data_dir=tmp_path, serve_frontend=False)
+
+    assert captured_kwargs.get("timeout") is not None
+    assert isinstance(captured_kwargs["timeout"], httpx.Timeout)
+
+
 def test_model_inventory_pull_progress_and_failure_are_safe():
     state = FakeOllamaState(installed_models={"qwen3:8b"})
     app = create_app(
@@ -301,3 +323,77 @@ def test_diagnostics_exposes_migration_and_setup_capabilities():
         payload = diagnostics.json()
         assert payload["settings_source"] == "memory"
         assert payload["ollama_setup_url"] == "https://ollama.com/download"
+
+
+def test_settings_live_in_their_own_database_not_the_chat_database(tmp_path: Path):
+    """Settings writes take a full-file backup copy first, so colocating them
+    with chat history meant every settings save byte-copied the whole
+    transcript store. The settings database must be a separate file, and its
+    backup must never touch the chat database."""
+    chat_db = tmp_path / "cortex_db.sqlite"
+    settings_db = tmp_path / "cortex_settings.sqlite"
+    chat_db.write_bytes(b"pretend this is a large chat history" * 1000)
+    chat_before = chat_db.read_bytes()
+
+    repository = SQLiteSettingsRepository(settings_db, adopt_from=chat_db)
+    saved = repository.load().settings
+    repository.save(saved)
+
+    assert settings_db.exists()
+    # The backup that save() takes is of the settings file, not the chat one.
+    assert repository.backup_path == Path(f"{settings_db}.bak")
+    assert not Path(f"{chat_db}.bak").exists()
+    assert chat_db.read_bytes() == chat_before
+
+
+def test_settings_colocated_in_the_chat_database_are_adopted_once(tmp_path: Path):
+    """Regression guard for the upgrade path: without adoption, every existing
+    install would silently revert to default settings the first time it ran a
+    build that moved settings into their own file."""
+    chat_db = tmp_path / "cortex_db.sqlite"
+    settings_db = tmp_path / "cortex_settings.sqlite"
+
+    # An install from before the split: settings living inside the chat database.
+    old = SQLiteSettingsRepository(chat_db)
+    configured = old.load().settings
+    configured = configured.model_copy(
+        update={"models": configured.models.model_copy(update={"chat": "gguf:kept.gguf"})}
+    )
+    old.save(configured)
+
+    adopted = SQLiteSettingsRepository(settings_db, adopt_from=chat_db)
+
+    assert adopted.load().settings.models.chat == "gguf:kept.gguf"
+    with adopted.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM settings_migration_ledger WHERE migration_key = ?",
+            ("chatdb-colocated-settings-to-own-file-v1",),
+        ).fetchone()[0] == 1
+
+    # Adoption is one-time: a later edit is not clobbered by re-adopting the
+    # stale row on the next startup.
+    current = adopted.load().settings
+    adopted.save(
+        current.model_copy(
+            update={"models": current.models.model_copy(update={"chat": "gguf:newer.gguf"})}
+        )
+    )
+    reopened = SQLiteSettingsRepository(settings_db, adopt_from=chat_db)
+    assert reopened.load().settings.models.chat == "gguf:newer.gguf"
+
+
+def test_adoption_is_skipped_cleanly_when_there_is_nothing_to_adopt(tmp_path: Path):
+    """A fresh install, and an unreadable or settings-free old database, must
+    both start normally rather than failing closed."""
+    settings_db = tmp_path / "cortex_settings.sqlite"
+
+    # Nothing at the old path at all.
+    fresh = SQLiteSettingsRepository(settings_db, adopt_from=tmp_path / "absent.sqlite")
+    assert fresh.load().settings is not None
+
+    # An old database that exists but holds no settings table.
+    other_db = tmp_path / "unrelated.sqlite"
+    other_db.write_bytes(b"not a sqlite file at all")
+    second = tmp_path / "second_settings.sqlite"
+    repository = SQLiteSettingsRepository(second, adopt_from=other_db)
+    assert repository.load().settings is not None

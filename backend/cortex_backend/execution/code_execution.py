@@ -32,6 +32,7 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import (
+    AbstractHTTPHandler,
     HTTPRedirectHandler,
     Request as UrlRequest,
     build_opener,
@@ -999,7 +1000,16 @@ def _terminate_brokered_process(process: subprocess.Popen[bytes], job: _WindowsP
         pass
 
 
-def _validate_network_url(url: str) -> str:
+def _validate_network_url(url: str) -> tuple[str, str]:
+    """Validate a URL and return it with the single vetted IP to dial.
+
+    Returning the resolved address is the point: the caller must connect to
+    *this* address rather than let the stack re-resolve the hostname, or a
+    time-varying DNS answer can pass the public-address check below and then
+    steer the actual connection to loopback/LAN (DNS rebinding). The
+    filesystem capability already closes the equivalent race by re-stat'ing
+    and comparing an identity tuple after validating.
+    """
     if not isinstance(url, str) or len(url) > MAX_CODE_NETWORK_URL_CHARS:
         raise ValueError("network URL is invalid")
     try:
@@ -1050,12 +1060,88 @@ def _validate_network_url(url: str) -> str:
             or resolved.is_unspecified
         ):
             raise PermissionError("network host is not public")
-    return url
+    # Every address in this answer passed, so any of them is safe to use.
+    # Pin the first so the connection cannot resolve a different one.
+    return url, addresses[0][4][0]
+
+
+def _pinned_connection_classes(pinned_ip: str) -> tuple[type, type]:
+    """HTTP/HTTPS connection classes that dial ``pinned_ip`` directly.
+
+    The hostname still travels in the ``Host`` header and in TLS SNI and
+    certificate validation, so servers and certificate checks behave exactly
+    as they normally would -- only the address the socket connects to is
+    forced, which is what closes the rebinding window.
+    """
+    import http.client
+
+    class _PinnedHTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            self.sock = self._create_connection(
+                (pinned_ip, self.port), self.timeout, self.source_address
+            )
+            try:
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+
+    class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            self.sock = self._create_connection(
+                (pinned_ip, self.port), self.timeout, self.source_address
+            )
+            try:
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            # server_hostname stays the real hostname: certificate validation
+            # must not be weakened just because we dialed an address.
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+    return _PinnedHTTPConnection, _PinnedHTTPSConnection
+
+
+class _PinnedHTTPHandler(AbstractHTTPHandler):
+    """Opens http:// requests through a caller-supplied connection factory."""
+
+    def __init__(self, connection_factory: Callable[..., Any]) -> None:
+        super().__init__()
+        self._connection_factory = connection_factory
+
+    def http_open(self, req: Any) -> Any:
+        return self.do_open(self._connection_factory, req)
+
+    http_request = AbstractHTTPHandler.do_request_
+
+
+class _PinnedHTTPSHandler(AbstractHTTPHandler):
+    """Opens https:// requests through a caller-supplied connection factory."""
+
+    def __init__(self, connection_factory: Callable[..., Any]) -> None:
+        super().__init__()
+        self._connection_factory = connection_factory
+
+    def https_open(self, req: Any) -> Any:
+        return self.do_open(self._connection_factory, req)
+
+    https_request = AbstractHTTPHandler.do_request_
 
 
 class _SafeRedirectHandler(HTTPRedirectHandler):
+    """Re-validates every redirect target and re-pins the opener to it.
+
+    Validating without re-pinning would leave the same hole one hop later:
+    the redirect's own connection would re-resolve the new hostname and could
+    land on an address this check just rejected.
+    """
+
+    def __init__(self, rebind: Callable[[str], None]) -> None:
+        super().__init__()
+        self._rebind = rebind
+
     def redirect_request(self, request: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
-        _validate_network_url(urljoin(request.full_url, newurl))
+        _, pinned_ip = _validate_network_url(urljoin(request.full_url, newurl))
+        self._rebind(pinned_ip)
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
@@ -1075,10 +1161,32 @@ class _NetworkCapability:
             raise ValueError("network timeout is invalid") from None
         if not math.isfinite(timeout):
             raise ValueError("network timeout is invalid")
-        safe_url = _validate_network_url(url)
+        safe_url, pinned_ip = _validate_network_url(url)
         self._budget.take_network()
         timeout = max(0.1, min(timeout, 5.0))
-        opener = build_opener(_SafeRedirectHandler, ProxyHandler({}))
+
+        # A mutable holder so a redirect can re-pin the opener to whatever its
+        # own (re-validated) target resolved to. The connection classes are
+        # rebuilt per connection rather than once up front -- otherwise every
+        # hop would keep dialing the first hop's address.
+        current_ip = {"value": pinned_ip}
+
+        def rebind(next_ip: str) -> None:
+            current_ip["value"] = next_ip
+
+        def connection_factory(secure: bool) -> Callable[..., Any]:
+            def factory(*args: Any, **kwargs: Any) -> Any:
+                plain, tls = _pinned_connection_classes(current_ip["value"])
+                return (tls if secure else plain)(*args, **kwargs)
+
+            return factory
+
+        opener = build_opener(
+            _PinnedHTTPHandler(connection_factory(secure=False)),
+            _PinnedHTTPSHandler(connection_factory(secure=True)),
+            _SafeRedirectHandler(rebind),
+            ProxyHandler({}),
+        )
         request = UrlRequest(safe_url, headers={"User-Agent": "Cortex-local-code/1"})
         try:
             with opener.open(request, timeout=timeout) as response:

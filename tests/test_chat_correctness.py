@@ -168,6 +168,34 @@ class ChatCorrectnessTests(unittest.TestCase):
             "overhead and conversations will appear to lose their memory.",
         )
 
+    def test_oversized_newest_exchange_does_not_wipe_the_rest_of_history(self):
+        """Regression guard: fit_history_to_context used to stop walking the
+        moment the single newest exchange alone exceeded the budget, discarding
+        every older exchange too and returning "No history available." even
+        though ten small exchanges right before it would easily have fit. The
+        newest exchange being oversized should just be dropped on its own.
+        """
+        messages = []
+        for index in range(10):
+            messages.append({"role": "user", "content": f"Question number {index} about the project"})
+            messages.append({"role": "assistant", "content": f"Short answer number {index}."})
+        messages.append({"role": "user", "content": "Please write the full module"})
+        messages.append({"role": "assistant", "content": "X" * 35_000})
+
+        history = SynthesisAgent.fit_history_to_context(
+            messages,
+            query="now explain what you just did",
+            permanent_memories=[],
+            memories_enabled=True,
+            user_system_instructions=None,
+            num_ctx=8192,
+        )
+
+        self.assertNotEqual(history, "No history available.")
+        self.assertEqual(history.count("User: "), 10)
+        self.assertIn("Question number 9", history)
+        self.assertNotIn("X" * 100, history)
+
     def test_context_budget_trims_oversized_permanent_memory(self):
         memories = [f"memory-{index} " + ("detail " * 120) for index in range(20)]
 

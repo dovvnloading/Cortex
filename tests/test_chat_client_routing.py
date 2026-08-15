@@ -114,6 +114,61 @@ def test_ollama_chat_client_passes_through() -> None:
     assert result["options"] == {"temperature": 0.5}
 
 
+def test_ollama_chat_client_stops_consuming_the_stream_once_cancelled() -> None:
+    """A cancellation_event switches OllamaChatClient to a streamed call it
+    can abort between chunks, closing the generator (which owns the
+    underlying httpx streaming response in the real ollama package -- see
+    Client._request) rather than reading it to completion."""
+    from threading import Event
+
+    closed = {"value": False}
+
+    def chunk_generator():
+        try:
+            yield {"message": {"content": "Hel"}, "done": False}
+            yield {"message": {"content": "lo"}, "done": False}
+            yield {"message": {}, "done": True, "prompt_eval_count": 5, "eval_count": 3}
+        except GeneratorExit:
+            closed["value"] = True
+            raise
+
+    class _StubStreamingOllama:
+        def chat(self, *, model, messages, options, stream=False):
+            assert stream is True
+            return chunk_generator()
+
+    already_cancelled = Event()
+    already_cancelled.set()
+    client = OllamaChatClient(_StubStreamingOllama())
+
+    result = client.chat(model="m", messages=[], options={}, cancellation_event=already_cancelled)
+
+    assert result["message"]["content"] == ""
+    assert closed["value"] is True
+
+
+def test_ollama_chat_client_streams_the_full_response_when_not_cancelled() -> None:
+    from threading import Event
+
+    def chunk_generator():
+        yield {"message": {"content": "Hel"}, "done": False}
+        yield {"message": {"content": "lo"}, "done": False}
+        yield {"message": {}, "done": True, "prompt_eval_count": 5, "eval_count": 3}
+
+    class _StubStreamingOllama:
+        def chat(self, *, model, messages, options, stream=False):
+            assert stream is True
+            return chunk_generator()
+
+    client = OllamaChatClient(_StubStreamingOllama())
+
+    result = client.chat(model="m", messages=[], options={}, cancellation_event=Event())
+
+    assert result["message"]["content"] == "Hello"
+    assert result["prompt_eval_count"] == 5
+    assert result["eval_count"] == 3
+
+
 class _StaticProvider:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url
@@ -240,6 +295,66 @@ def test_a_runtime_fault_is_not_reported_as_a_refused_message() -> None:
     )
     assert client_details == "llamacpp_http_400"
     assert "could not accept" in client_message
+
+
+def test_llamacpp_chat_client_stops_consuming_the_stream_once_cancelled(tmp_path: Path) -> None:
+    """Regression guard: chat() used to make one blocking, non-cancellable
+    request (stream: false), so Stop could not interrupt an in-flight call
+    until the model finished on its own -- up to the client's 600s read
+    timeout. Passing cancellation_event switches to the streamed request and
+    checks the event between chunks; an already-set event must stop the
+    client from consuming (and returning) any of the response.
+    """
+    from threading import Event
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    state = FakeLlamaCppState(generation_response="a long response that streams as several chunks")
+    app = create_fake_llamacpp_app(state)
+    http_client = TestClient(app, base_url="http://fakellama")
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    already_cancelled = Event()
+    already_cancelled.set()
+
+    response = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=already_cancelled,
+    )
+
+    assert response["message"]["content"] == ""
+
+
+def test_llamacpp_chat_client_streams_the_full_response_when_not_cancelled(tmp_path: Path) -> None:
+    """The streamed (cancellation_event given) and blocking (not given)
+    paths must produce the same adapted result when nothing is cancelled --
+    passing an event that never fires should behave exactly like today's
+    ordinary call."""
+    from threading import Event
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    state = FakeLlamaCppState(generation_response="Hello from llama.cpp", generation_thoughts="pondering")
+    app = create_fake_llamacpp_app(state)
+    http_client = TestClient(app, base_url="http://fakellama")
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    response = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={"num_ctx": 4096, "temperature": 0.7},
+        cancellation_event=Event(),
+    )
+
+    assert response["message"]["content"] == "Hello from llama.cpp"
+    assert response["message"]["thinking"] == "pondering"
+    assert response["prompt_eval_duration"] == 120_000_000
+    assert response["eval_duration"] == 480_000_000
+    assert response["eval_count"] == 48
 
 
 def test_adapt_falls_back_to_wall_clock_when_timings_absent() -> None:

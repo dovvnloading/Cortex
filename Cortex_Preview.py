@@ -11,6 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+import httpx  # noqa: E402
 import ollama  # noqa: E402
 import uvicorn  # noqa: E402
 
@@ -84,11 +85,17 @@ def build_preview_app(
     database.migrate_from_json_if_needed()
     permanent_memory = PermanentMemoryManager(app_paths=paths)
     settings_repository = SQLiteSettingsRepository(
-        paths.database,
+        paths.settings_database,
         legacy=LegacySettingsReader(),
+        # Settings used to live inside the chat database; adopt them once so
+        # an upgrade does not silently revert to defaults.
+        adopt_from=paths.database,
     )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
-    client = ollama.Client(host=ollama_host)
+    client = ollama.Client(
+        host=ollama_host,
+        timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
+    )
 
     def gguf_directory() -> Path:
         # Re-read settings each call (cheap SQLite read, same pattern the API

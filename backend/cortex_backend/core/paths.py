@@ -80,6 +80,17 @@ class AppPaths:
         return self.data_dir / "memory_bank.json.bak"
 
     @property
+    def settings_database(self) -> Path:
+        """Settings kept out of the chat database.
+
+        Settings writes take a full-file backup copy first. Colocating them
+        with chat history meant every settings save byte-copied the entire
+        transcript store -- slow, disk-doubling, and able to fail a theme
+        toggle outright once the chat database grew large.
+        """
+        return self.data_dir / "cortex_settings.sqlite"
+
+    @property
     def vector_database(self) -> Path:
         """Retain the dormant legacy path without enabling vector memory."""
         return self.data_dir / "cortex_vectors.sqlite"

@@ -97,6 +97,16 @@ def test_api_factory_is_headless_and_session_exchange_is_one_time():
         assert second.status_code == 401
 
 
+def test_session_exchange_rejects_non_ascii_bootstrap_token_cleanly():
+    app, client = _client()
+    with client:
+        response = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": "café-token"},
+        )
+        assert response.status_code == 401
+
+
 def test_security_rejects_non_loopback_host_and_origin():
     app, client = _client()
     default_app = create_app()
@@ -144,6 +154,62 @@ def test_expired_session_is_rejected_without_exposing_token_details():
         pass
     else:
         raise AssertionError("expired session was accepted")
+
+
+def test_authenticate_slides_the_session_expiry_forward():
+    """Regression guard: a session's expiry used to be fixed at issuance, so
+    the desktop app hard-locked after exactly one hour of continuous use --
+    the frontend has no way to reach a fresh bootstrap token once its only
+    credential is destroyed after the initial handoff. Every successful
+    authenticate() must extend expires_at, so a session that is actually
+    being used never expires mid-session.
+    """
+    manager = SessionManager(bootstrap_token="bootstrap", ttl_seconds=3600, allowed_hosts=("testserver",))
+    exchanged = manager.exchange("bootstrap")
+    digest = manager._digest(exchanged.token)
+    # 50 minutes into a 60-minute TTL -- still valid, but would expire in
+    # 10 more minutes without a renewal.
+    stale_issued_at = datetime.now(timezone.utc) - timedelta(minutes=50)
+    manager._sessions[digest] = replace(
+        exchanged.principal,
+        issued_at=stale_issued_at,
+        expires_at=stale_issued_at + timedelta(seconds=3600),
+    )
+    old_expiry = manager._sessions[digest].expires_at
+
+    principal = manager.authenticate(exchanged.token)
+
+    assert principal.expires_at > old_expiry
+    assert manager._sessions[digest].expires_at == principal.expires_at
+    # And the renewed session is genuinely usable well past the original
+    # one-hour mark, not just nominally not-yet-expired.
+    assert principal.expires_at > datetime.now(timezone.utc) + timedelta(minutes=55)
+
+
+def test_authenticate_caps_the_sliding_expiry_at_the_absolute_max_lifetime():
+    """A session cannot renew itself forever -- continuous use still hits
+    an absolute lifetime cap rather than sliding indefinitely."""
+    manager = SessionManager(
+        bootstrap_token="bootstrap",
+        ttl_seconds=3600,
+        max_lifetime_seconds=7200,
+        allowed_hosts=("testserver",),
+    )
+    exchanged = manager.exchange("bootstrap")
+    digest = manager._digest(exchanged.token)
+    issued_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=55)  # close to the 2h cap
+    manager._sessions[digest] = replace(
+        exchanged.principal,
+        issued_at=issued_at,
+        # Not yet expired, but well below the eventual ~5-minute-away cap --
+        # a realistic pre-renewal state, unlike setting it past the cap.
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    principal = manager.authenticate(exchanged.token)
+
+    assert principal.expires_at <= issued_at + timedelta(hours=2)
+    assert principal.expires_at > datetime.now(timezone.utc) + timedelta(minutes=1)
 
 
 def test_generation_selects_a_live_local_model_and_translation_is_opt_in():
@@ -624,3 +690,79 @@ def test_job_registry_shutdown_cancels_only_before_commit():
         assert after_registry.status(after.job_id, owner="owner").status == "succeeded"
 
     asyncio.run(exercise())
+
+
+def test_job_registry_shutdown_is_bounded_for_a_worker_that_never_observes_cancellation():
+    """Regression guard: shutdown() used to await every pending worker with
+    no bound at all, including one stuck inside a synchronous call that
+    never polls cancel_event (a model HTTP request with no read deadline,
+    for example). That hung app shutdown -- and the llama-server child
+    process behind it -- for as long as that call took, sometimes forever.
+    A worker that has not begun committing its result must now be
+    abandoned once the grace period elapses so shutdown always completes
+    in bounded time.
+    """
+    async def exercise():
+        registry = JobRegistry(poll_seconds=0.001, shutdown_grace_seconds=0.05)
+        started = Event()
+        never_released = Event()
+
+        def stuck_runner(_sink, _cancel_event):
+            # Never checks _cancel_event -- simulates a blocking call (e.g.
+            # a socket read with no deadline) that ignores cancellation.
+            started.set()
+            never_released.wait(timeout=5)
+            return {"persisted": False}
+
+        job = await registry.start(
+            kind="generation",
+            owner="owner",
+            thread_id="thread-stuck",
+            runner=stuck_runner,
+        )
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("worker did not start")
+
+        loop = asyncio.get_event_loop()
+        started_at = loop.time()
+        await asyncio.wait_for(registry.shutdown(), timeout=1.0)
+        elapsed = loop.time() - started_at
+
+        assert elapsed < 0.5, f"shutdown() took {elapsed:.2f}s, expected it bounded near the 0.05s grace period"
+        assert registry.status(job.job_id, owner="owner").status == "cancelling"
+        never_released.set()
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_runtime_teardown_runs_even_if_job_shutdown_raises():
+    """Regression guard: the lifespan finally block used to await job
+    shutdown unconditionally before tearing down the runtime, so an
+    exception there (or, before the bounded-shutdown fix, an indefinite
+    hang) would skip llamacpp_manager.stop() entirely and leave the
+    llama-server child process orphaned. Runtime teardown must run
+    regardless of whether job shutdown succeeds.
+    """
+    class _RaisingJobs:
+        async def shutdown(self):
+            raise RuntimeError("boom")
+
+    class _FakeLlamaManager:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    fake_manager = _FakeLlamaManager()
+    app = create_app(allowed_hosts=ALLOWED_HOSTS, llamacpp_manager=fake_manager)
+    app.state.jobs = _RaisingJobs()
+
+    with TestClient(app):
+        pass
+
+    assert fake_manager.stopped is True

@@ -24,6 +24,7 @@ from .settings import (
 
 SETTINGS_SCHEMA_VERSION = 1
 MIGRATION_KEY = "qsettings-to-sqlite-v1"
+COLOCATED_MIGRATION_KEY = "chatdb-colocated-settings-to-own-file-v1"
 
 
 def _utc_now() -> str:
@@ -31,10 +32,15 @@ def _utc_now() -> str:
 
 
 class SQLiteSettingsRepository:
-    """Store validated settings beside the existing chat database.
+    """Store validated settings in their own database file.
 
     The repository creates only additive settings tables. It never writes back
     to QSettings, so the legacy Qt reader remains a safe rollback path.
+
+    Settings used to live inside the chat database. Every save takes a
+    full-file backup copy first, so colocation meant each settings write
+    byte-copied the whole transcript store. ``adopt_from`` performs the
+    one-time move; see :meth:`_adopt_colocated_settings`.
     """
 
     def __init__(
@@ -42,6 +48,7 @@ class SQLiteSettingsRepository:
         db_path: str | Path,
         *,
         legacy: SettingsRepository | None = None,
+        adopt_from: str | Path | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.backup_path = Path(f"{self.db_path}.bak")
@@ -52,6 +59,90 @@ class SQLiteSettingsRepository:
         self._load_lock = RLock()
         self._pre_schema_backup = self._create_backup()
         self._ensure_schema()
+        if adopt_from is not None:
+            self._adopt_colocated_settings(Path(adopt_from))
+
+    def _adopt_colocated_settings(self, source_db: Path) -> None:
+        """Move settings out of a database they used to share with chat data.
+
+        Runs once per install: if this settings database has no row yet but
+        the old colocated database does, copy that row across. Without this,
+        every existing install would silently revert to defaults on upgrade,
+        which is a worse failure than the one being fixed.
+
+        The source row is left in place. It is small, it costs nothing to
+        keep, and leaving it makes downgrading to a previous Cortex build a
+        non-event rather than a data-loss bug.
+        """
+        if source_db == self.db_path or not source_db.exists():
+            return
+        with self._load_lock:
+            try:
+                with self.connect() as connection:
+                    already = connection.execute(
+                        "SELECT 1 FROM cortex_settings WHERE id = 1"
+                    ).fetchone()
+                if already is not None:
+                    return
+            except SettingsRepositoryError:
+                return
+
+            source: sqlite3.Connection | None = None
+            try:
+                source = sqlite3.connect(source_db, timeout=10.0)
+                source.row_factory = sqlite3.Row
+                source.execute("PRAGMA busy_timeout = 10000")
+                table = source.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cortex_settings'"
+                ).fetchone()
+                if table is None:
+                    return
+                row = source.execute(
+                    "SELECT schema_version, revision, payload, updated_at "
+                    "FROM cortex_settings WHERE id = 1"
+                ).fetchone()
+            except sqlite3.Error:
+                # The old database being unreadable must not stop Cortex from
+                # starting -- it just means there is nothing to adopt, and the
+                # normal legacy/default path takes over.
+                return
+            finally:
+                if source is not None:
+                    source.close()
+
+            if row is None:
+                return
+            try:
+                with self.connect() as connection:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO cortex_settings "
+                        "(id, schema_version, revision, payload, updated_at) "
+                        "VALUES (1, ?, ?, ?, ?)",
+                        (
+                            int(row["schema_version"]),
+                            int(row["revision"]),
+                            str(row["payload"]),
+                            str(row["updated_at"]),
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT OR REPLACE INTO settings_migration_ledger "
+                        "(migration_key, source, status, imported_keys, invalid_keys, "
+                        "backup_path, message, applied_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            COLOCATED_MIGRATION_KEY,
+                            str(source_db),
+                            "applied",
+                            "[]",
+                            "[]",
+                            None,
+                            "Adopted settings from the chat database.",
+                            _utc_now(),
+                        ),
+                    )
+            except SettingsRepositoryError:
+                return
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

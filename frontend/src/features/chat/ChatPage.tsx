@@ -237,9 +237,17 @@ export function ChatPage({
       void loadChat({ preserveCurrent });
       const stored = readActiveJob();
       if (stored) {
-        const job: PersistedJob = initialMountRef.current ? { ...stored, lastEventId: 0 } : stored;
+        // Only rewind the event cursor when the store is actually cold for
+        // this job. initialMountRef is per-instance, so it is true on EVERY
+        // mount -- including a return from /settings, which unmounts this
+        // page but leaves the module-level generation store populated.
+        // Replaying from 0 onto already-accumulated text printed the answer
+        // twice; keeping the stored cursor resumes where the buffer left off.
+        const warmForThisJob = useChatStore.getState().generation.jobId === stored.jobId;
+        const replayFromStart = initialMountRef.current && !warmForThisJob;
+        const job: PersistedJob = replayFromStart ? { ...stored, lastEventId: 0 } : stored;
         initialMountRef.current = false;
-        if (useChatStore.getState().generation.jobId !== job.jobId) {
+        if (replayFromStart || !warmForThisJob) {
           useChatStore.getState().beginGeneration(job.jobId, job.threadId);
         }
         void consume(job, reconcileChat, reportGenerationFailure);
@@ -335,6 +343,17 @@ export function ChatPage({
     const destinationThreadId = submittedThreadId ?? started.threadId;
     const destinationDraftScope = composerDraftKey(destinationThreadId);
     const destinationAttachmentScope = composerAttachmentKey(destinationThreadId);
+    if (!submittedThreadId) {
+      // Overrides staged before the first message live under the "new chat"
+      // placeholder key. Migrate them to the real thread id now that one
+      // exists, so they keep applying to this conversation instead of
+      // reverting after one message and leaking into the next new chat.
+      const draftOptions = useChatStore.getState().generationOptionsByThread[NEW_THREAD_OPTIONS_KEY];
+      if (draftOptions) {
+        setThreadOptions(destinationThreadId, draftOptions);
+        setThreadOptions(NEW_THREAD_OPTIONS_KEY, null);
+      }
+    }
     if (submittedAttachmentScope !== destinationAttachmentScope) {
       // Retarget only batches that were already staging into this submitted
       // draft. Each batch owns its mutable target, so a later /chat/new never

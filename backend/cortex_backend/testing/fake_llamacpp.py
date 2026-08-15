@@ -6,11 +6,13 @@ network call, binary download, or subprocess spawn happens anywhere here.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from cortex_backend.llamacpp.server_manager import LlamaCppRuntimeStatus, ServerHandle
 
@@ -71,7 +73,7 @@ def create_fake_llamacpp_app(state: FakeLlamaCppState | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/v1/chat/completions", response_model=None)
-    def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
+    def chat_completions(payload: dict[str, Any]) -> dict[str, Any] | StreamingResponse:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise HTTPException(status_code=422, detail="messages required")
@@ -82,20 +84,47 @@ def create_fake_llamacpp_app(state: FakeLlamaCppState | None = None) -> FastAPI:
             "",
         )
         content = fake_state.generation_response or f"Echo: {last_user}"
+        usage = {"prompt_tokens": 24, "completion_tokens": 48, "total_tokens": 72}
+        timings = {
+            "prompt_n": 24,
+            "prompt_ms": 120.0,
+            "prompt_per_second": 200.0,
+            "predicted_n": 48,
+            "predicted_ms": 480.0,
+            "predicted_per_second": 100.0,
+        }
+        if payload.get("stream"):
+            def sse_chunks():
+                if fake_state.generation_thoughts:
+                    yield _sse({"choices": [{"delta": {"reasoning_content": fake_state.generation_thoughts}}]})
+                for piece in _fake_llamacpp_chunks(content):
+                    yield _sse({"choices": [{"delta": {"content": piece}}]})
+                yield _sse({
+                    "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    "usage": usage,
+                    "timings": timings,
+                })
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(sse_chunks(), media_type="text/event-stream")
+
         message: dict[str, Any] = {"role": "assistant", "content": content}
         if fake_state.generation_thoughts:
             message["reasoning_content"] = fake_state.generation_thoughts
         return {
             "choices": [{"message": message, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 24, "completion_tokens": 48, "total_tokens": 72},
-            "timings": {
-                "prompt_n": 24,
-                "prompt_ms": 120.0,
-                "prompt_per_second": 200.0,
-                "predicted_n": 48,
-                "predicted_ms": 480.0,
-                "predicted_per_second": 100.0,
-            },
+            "usage": usage,
+            "timings": timings,
         }
 
     return app
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _fake_llamacpp_chunks(value: str, size: int = 4):
+    """Split into several pieces so a streaming test observes more than one
+    chunk, mirroring the real server's token-at-a-time delivery."""
+    for start in range(0, len(value), size):
+        yield value[start:start + size]

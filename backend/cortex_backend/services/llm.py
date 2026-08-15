@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import sys
 from collections.abc import Sequence
+from threading import Event
+from typing import Any
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
@@ -540,8 +542,16 @@ class SynthesisAgent:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
-        """Keep the newest history that fits beside prompts, memories, and output."""
+        """Keep the newest history that fits beside prompts, memories, and output.
+
+        ``attachments`` are already-fitted reference text (see
+        ``fit_attachments_to_context``); they are threaded into the same
+        per-candidate prompt sizing used here purely so history leaves them
+        room, mirroring the fixed overhead memories and the system prompt
+        already contribute.
+        """
         output_reservation = cls.output_token_reservation(num_ctx)
         selected: list[dict] = []
 
@@ -554,14 +564,20 @@ class SynthesisAgent:
                 permanent_memories,
                 memories_enabled,
                 user_system_instructions,
+                attachments,
                 code_execution_eligible=code_execution_eligible,
                 bypass_system_prompt=bypass_system_prompt,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
                 selected = candidate
-            elif selected:
-                break
+            # Candidate sizes are not monotonic: dropping a newly-unpaired
+            # trailing assistant message (see _format_history_messages)
+            # shrinks the *next* candidate, so an oversized exchange must not
+            # stop the walk -- older, smaller exchanges further back can
+            # still fit. Stopping here previously discarded the entire
+            # history whenever the single newest exchange alone was too
+            # large for the budget.
 
         return cls._format_history_messages(selected)
 
@@ -627,6 +643,7 @@ class SynthesisAgent:
         user_system_instructions: str | None,
         options: dict | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        cancellation_event: Event | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """
         Generates a synthesized response and extracts thoughts and commands.
@@ -638,6 +655,11 @@ class SynthesisAgent:
             memories_enabled (bool): Flag indicating if memory features are active.
             user_system_instructions (str | None): Custom instructions from the user.
             options (dict | None): A dictionary of Ollama options (e.g., temperature, num_ctx).
+            cancellation_event (Event | None): When given, lets the underlying
+                chat client stop consuming an in-flight response early instead
+                of only noticing cancellation after the call returns on its
+                own. Only the real chat turn passes one; title and
+                translation calls do not need it.
 
         Returns:
             A tuple containing:
@@ -692,11 +714,14 @@ class SynthesisAgent:
             # the model call still "succeeds", but the persisted message has
             # empty content next to a full reasoning trace.
 
-            response = self.chat_client.chat(
-                model=self.gen_model,
-                messages=prompt_messages,
-                options=api_options
-            )
+            chat_kwargs: dict[str, Any] = {
+                "model": self.gen_model,
+                "messages": prompt_messages,
+                "options": api_options,
+            }
+            if cancellation_event is not None:
+                chat_kwargs["cancellation_event"] = cancellation_event
+            response = self.chat_client.chat(**chat_kwargs)
             message_obj = response.get('message', {})
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')

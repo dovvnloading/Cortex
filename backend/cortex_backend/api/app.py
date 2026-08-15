@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -41,6 +42,8 @@ from cortex_backend.testing.fake_ollama import (
 from .jobs import JobRegistry
 from .routes import build_router
 from .security import SessionManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -159,7 +162,16 @@ def create_app(
             yield
         finally:
             app.state.ready = False
-            await app.state.jobs.shutdown()
+            # Runtime teardown below must run even if job shutdown raises --
+            # it is what actually terminates the llama-server child process,
+            # and a worker that refuses to unwind must not leave that
+            # process (and the GPU/RAM it holds) orphaned.
+            try:
+                await app.state.jobs.shutdown()
+            except Exception:
+                logger.exception(
+                    "Cortex job registry shutdown raised; continuing with runtime teardown."
+                )
             if app.state.execution_lifecycle is not None:
                 app.state.execution_lifecycle.stop()
             elif app.state.execution_coordinator is not None:

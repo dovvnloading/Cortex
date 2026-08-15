@@ -10,6 +10,7 @@ import unittest
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
+    GenerationAttachment,
     GenerationSnapshot,
     GenerationStats,
     MemoryCommand,
@@ -17,6 +18,7 @@ from cortex_backend.core.generation import (
     TranslationResult,
 )
 from cortex_backend.services.generation import GenerationService
+from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.services.models import ModelService
 from cortex_backend.services.progress import ProgressEvent
 
@@ -164,6 +166,71 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(engine.history_messages, [{"role": "assistant", "content": "old"}])
         self.assertEqual(engine.memory_inputs, ["remember tea"])
         self.assertEqual(engine.options["num_ctx"], 4096)
+
+    def test_attachment_reference_text_is_not_crushed_by_a_full_history_fit(self):
+        """Regression guard: history used to be fit to the context budget
+        first, greedily claiming nearly all of it before attachments were
+        ever considered, so a document attached mid-conversation could be
+        cut to a tiny fragment even though it would easily have fit had it
+        been given any priority over old chat turns. Attachments must now be
+        reserved room before history is sized around them.
+        """
+        class _CapturingChatClient:
+            def __init__(self):
+                self.last_messages: list[dict] | None = None
+
+            def chat(self, *, model, messages, options):
+                del model, options
+                self.last_messages = messages
+                return {"message": {"content": "ok", "thinking": None}}
+
+        history_messages = []
+        for index in range(20):
+            history_messages.append({"role": "user", "content": f"old-{index} " + ("details " * 80)})
+            history_messages.append({"role": "assistant", "content": f"reply-{index} " + ("context " * 80)})
+
+        attachment = GenerationAttachment(
+            attachment_id="doc-1",
+            filename="report.md",
+            mime_type="text/markdown",
+            kind="document",
+            text_content="report line " * 400,
+        )
+
+        client = _CapturingChatClient()
+        service = GenerationService(
+            history_loader=lambda thread_id: history_messages,
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: SynthesisAgent(
+                "chat-model", "title-model", "translate-model", client,
+            ),
+        )
+        snapshot = GenerationSnapshot(
+            job_id="job-1",
+            thread_id="thread-1",
+            user_input="Summarize the attached report.",
+            model="chat-model",
+            title_model="title-model",
+            translation_model="translate-model",
+            model_options={"temperature": 0.7, "num_ctx": 4096, "seed": -1},
+            memories_enabled=False,
+            translation_enabled=False,
+            target_language="French",
+            user_system_instructions=None,
+            attachments=(attachment,),
+        )
+
+        service.generate(snapshot)
+
+        self.assertIsNotNone(client.last_messages)
+        sent_content = "\n".join(str(message.get("content", "")) for message in client.last_messages or [])
+        retained_repeats = sent_content.count("report line")
+        self.assertGreater(
+            retained_repeats,
+            300,
+            f"Only {retained_repeats}/400 repetitions of the attachment text survived context "
+            "fitting -- the attachment was crushed by history claiming the whole budget first.",
+        )
 
     def test_engine_status_callback_reports_as_loading_model_progress(self):
         """An engine backed by a locally-managed runtime (llama.cpp) can

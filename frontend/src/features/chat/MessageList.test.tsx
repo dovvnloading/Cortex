@@ -1,6 +1,7 @@
-import { createRef } from "react";
+import { createRef, forwardRef, useEffect, useImperativeHandle } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { VirtuosoHandle, VirtuosoProps } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { MessageList, type MessageListHandle } from "./MessageList";
 
@@ -95,6 +96,78 @@ describe("MessageList", () => {
     );
 
     await waitFor(() => expect(screen.getByTestId("pending-bubble")).toBeInTheDocument());
+  });
+
+  it("updates the virtualized Footer content in place instead of remounting it on every change", async () => {
+    // The real react-virtuoso only redraws its Footer slot in response to
+    // its own internal layout/scroll signals, which jsdom's zero-height
+    // environment never fires after mount -- so a plain rerender() can't
+    // observe an update through the real library here. Swap in a minimal
+    // stand-in that always re-invokes components.Footer on every render,
+    // the way the real library does in a browser, so this test can isolate
+    // and verify the actual contract MessageList relies on: components.Footer
+    // must be read fresh each render (so content updates) while the
+    // function's own identity stays stable (so React doesn't remount it).
+    vi.resetModules();
+    vi.doMock("react-virtuoso", () => ({
+      Virtuoso: forwardRef<VirtuosoHandle, VirtuosoProps<ChatMessage, unknown>>(function MockVirtuoso(props, ref) {
+        useImperativeHandle(ref, () => ({
+          scrollToIndex: () => {},
+          scrollTo: () => {},
+          scrollBy: () => {},
+          autoscrollToBottom: () => {},
+          scrollIntoView: () => {},
+          getState: () => { throw new Error("not implemented in this test double"); },
+        }));
+        const Footer = props.components?.Footer;
+        return <div data-testid="virtuoso-scroller">{Footer ? <Footer context={undefined} /> : null}</div>;
+      }),
+    }));
+    const { MessageList: MockedMessageList } = await import("./MessageList");
+
+    const mountSpy = vi.fn();
+    function Probe({ label }: { label: string }) {
+      // Fires only on true mount (empty deps) -- a remount would call this
+      // again; an in-place update of the same instance would not.
+      useEffect(() => { mountSpy(); }, []);
+      return <div data-testid="pending-bubble">{label}</div>;
+    }
+
+    const { rerender } = render(
+      <MockedMessageList
+        messages={makeMessages(45)}
+        isStreaming
+        finalAssistantId={null}
+        busy={false}
+        forkingMessageId={null}
+        onRegenerate={vi.fn()}
+        onFork={vi.fn()}
+        onNearEndChange={vi.fn()}
+        trailingContent={<Probe label="Streaming…" />}
+      />,
+    );
+    expect(screen.getByTestId("pending-bubble")).toHaveTextContent("Streaming…");
+    expect(mountSpy).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <MockedMessageList
+        messages={makeMessages(45)}
+        isStreaming
+        finalAssistantId={null}
+        busy={false}
+        forkingMessageId={null}
+        onRegenerate={vi.fn()}
+        onFork={vi.fn()}
+        onNearEndChange={vi.fn()}
+        trailingContent={<Probe label="Streaming… more text" />}
+      />,
+    );
+
+    expect(screen.getByTestId("pending-bubble")).toHaveTextContent("Streaming… more text");
+    expect(mountSpy).toHaveBeenCalledTimes(1);
+
+    vi.doUnmock("react-virtuoso");
+    vi.resetModules();
   });
 
   it("reports near-end scroll state via onNearEndChange on the plain path", () => {

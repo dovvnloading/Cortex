@@ -311,6 +311,7 @@ def test_default_runtime_starts_backend_then_native_window(
             self.running = False
 
     calls: list[tuple[str, object]] = []
+    probed_urls: list[str] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
     monkeypatch.setattr(launcher_main, "_requested_port", lambda _port: 43125)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
@@ -318,7 +319,12 @@ def test_default_runtime_starts_backend_then_native_window(
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
     monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
-    monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_args, **_kwargs: True)
+
+    def fake_wait_for_http(url, *_args, **_kwargs):
+        probed_urls.append(url)
+        return True
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
     monkeypatch.setattr(
         launcher_main,
         "ensure_webview2_runtime",
@@ -327,19 +333,75 @@ def test_default_runtime_starts_backend_then_native_window(
     monkeypatch.setattr(
         launcher_main,
         "run_desktop_window",
-        lambda config, monitor: calls.append(("window", config)),
+        lambda config, monitor: calls.append(("window", (config, monitor))),
     )
 
     args = launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path)])
     assert launcher_main._run_web(args) == 0
 
     assert [name for name, _value in calls] == ["runtime", "window"]
-    window_config = calls[1][1]
+    window_config, monitor = calls[1][1]
     assert isinstance(window_config, DesktopWindowConfig)
     assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token"
     assert window_config.storage_path == tmp_path / "webview"
     assert server.should_exit is True
     assert backend_instances[0].running is False
+
+    # Startup gate used the heavier readiness probe.
+    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/ready"]
+
+    # The ongoing native-window monitor should poll the cheap liveness route
+    # rather than the readiness route, since it runs for the app's lifetime.
+    closed_checks = {"count": 0}
+
+    def closed_is_set() -> bool:
+        closed_checks["count"] += 1
+        return closed_checks["count"] > 1
+
+    fake_window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=closed_is_set)),
+        destroy=lambda: None,
+    )
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
+    monitor(fake_window)
+    assert probed_urls[-1] == "http://127.0.0.1:43125/api/v1/health/live"
+
+
+def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleeps: list[float] = []
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    probed_urls: list[str] = []
+
+    def fake_wait_for_http(url, *, timeout, is_alive):
+        probed_urls.append(url)
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
+
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        destroy=lambda: destroyed.append(True),
+    )
+    destroyed: list[bool] = []
+    backend = SimpleNamespace(error=None)
+    frontend = SimpleNamespace(running=True)
+    server = SimpleNamespace(should_exit=False)
+
+    with pytest.raises(RuntimeError, match="8 consecutive liveness probes"):
+        launcher_main._monitor_native_window(
+            window,
+            backend=backend,
+            frontend=frontend,
+            server=server,
+            readiness_url="http://127.0.0.1:43125/api/v1/health/live",
+        )
+
+    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/live"] * 8
+    assert sleeps == [1.5] * 7
+    assert destroyed == [True]
 
 
 def _frontend_fixture(tmp_path: Path) -> Path:
@@ -455,7 +517,9 @@ def test_frontend_build_stages_sources_outside_live_node_modules(
     installed_roots: list[Path] = []
     monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
 
-    def fake_install(frontend_root: Path, _expected_lock_digest: str) -> None:
+    def fake_install(
+        frontend_root: Path, _expected_lock_digest: str, _cache_root: Path
+    ) -> None:
         installed_roots.append(frontend_root)
 
     def fake_run(command: list[str], *, cwd: Path) -> None:
@@ -506,6 +570,129 @@ def test_frontend_build_manifest_describes_staged_snapshot_during_live_edits(
     assert manifest.source_digest == staged_source_digest
     assert frontend_module.needs_build(root) is True
     assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_stale_staging_directories_are_swept_before_a_new_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    stale = tmp_path / ".cortex-frontend-build-orphaned"
+    stale.mkdir()
+    (stale / "leftover.txt").write_text("orphaned", encoding="utf-8")
+    monkeypatch.setattr(frontend_module, "_major_version", lambda _: 24)
+    monkeypatch.setattr(frontend_module, "_install_if_needed", lambda *_args: None)
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        staging = Path(command[-1])
+        staging.mkdir(parents=True)
+        (staging / "index.html").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    frontend_module.build_frontend(root)
+
+    assert not stale.exists()
+    assert not list(tmp_path.glob(".cortex-frontend-build-*"))
+
+
+def test_reclaim_stale_staging_directories_removes_orphaned_builds(tmp_path: Path):
+    stale_a = tmp_path / ".cortex-frontend-build-aaa"
+    stale_b = tmp_path / ".cortex-frontend-build-bbb"
+    keep = tmp_path / ".cortex-frontend-build-new"
+    stale_a.mkdir()
+    (stale_a / "leftover.txt").write_text("orphaned", encoding="utf-8")
+    stale_b.mkdir()
+
+    frontend_module._reclaim_stale_staging_directories(tmp_path, keep)
+
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+
+
+def test_stale_staging_directory_removal_failure_is_logged_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    locked = tmp_path / ".cortex-frontend-build-locked"
+    locked.mkdir()
+
+    def flaky_rmtree(_path, *_args, **_kwargs):
+        raise OSError("file is locked by another process")
+
+    monkeypatch.setattr(frontend_module.shutil, "rmtree", flaky_rmtree)
+
+    with caplog.at_level("WARNING"):
+        frontend_module._reclaim_stale_staging_directories(
+            tmp_path, tmp_path / ".cortex-frontend-build-new"
+        )
+
+    assert locked.exists()
+    assert "Could not remove stale frontend build directory" in caplog.text
+
+
+def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    cache_root = tmp_path / "cache"
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text("{}", encoding="utf-8")
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "abc123"}), encoding="utf-8"
+    )
+
+    def fail_run(*_args, **_kwargs):
+        pytest.fail("npm ci should not run on a cache hit")
+
+    monkeypatch.setattr(frontend_module, "_run", fail_run)
+
+    frontend_module._install_if_needed(build_root, "abc123", cache_root)
+
+    assert (build_root / "node_modules" / "package.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_install_cache_miss_runs_npm_ci_when_lockfile_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    cache_root = tmp_path / "cache"
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text('{"old": true}', encoding="utf-8")
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "old-digest"}), encoding="utf-8"
+    )
+
+    calls: list[Path] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        calls.append(cwd)
+        node_modules = cwd / "node_modules"
+        node_modules.mkdir(parents=True)
+        (node_modules / "package.json").write_text('{"new": true}', encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+
+    frontend_module._install_if_needed(build_root, "new-digest", cache_root)
+
+    assert calls == [build_root]
+    marker_path = cache_root / frontend_module.INSTALL_MANIFEST_NAME
+    stored = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert stored["lock_digest"] == "new-digest"
+    assert (cached_modules / "package.json").read_text(encoding="utf-8") == '{"new": true}'
+
+    # A later build with the same lockfile digest hits the refreshed cache.
+    calls.clear()
+    build_root_2 = tmp_path / "build2"
+    build_root_2.mkdir()
+    frontend_module._install_if_needed(build_root_2, "new-digest", cache_root)
+
+    assert calls == []
+    assert (
+        build_root_2 / "node_modules" / "package.json"
+    ).read_text(encoding="utf-8") == '{"new": true}'
 
 
 def test_frontend_install_failure_leaves_live_node_modules_untouched(
@@ -600,3 +787,17 @@ def test_handoff_rotates_bootstrap_token_and_shutdown_is_authenticated():
         assert shutdown.json() == {"status": "accepted"}
         assert shutdown_calls == [True]
         assert client.get("/api/v1/health/ready").status_code == 503
+
+
+def test_handoff_rejects_non_ascii_header_with_a_clean_unauthorized():
+    app = create_app(
+        build_demo_dependencies(),
+        allowed_hosts=("testserver", "127.0.0.1", "localhost", "::1"),
+        handoff_secret="handoff-secret",
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/session/handoff",
+            headers={b"X-Cortex-Handoff": "café-token".encode("latin-1")},
+        )
+        assert response.status_code == 401
