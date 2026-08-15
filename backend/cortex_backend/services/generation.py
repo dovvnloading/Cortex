@@ -47,8 +47,24 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         """Format the retained history for the model prompt."""
+
+    def fit_attachments_to_context(
+        self,
+        attachments: Sequence[GenerationAttachment],
+        *,
+        query: str,
+        chat_history: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
+    ) -> tuple[GenerationAttachment, ...]:
+        """Bound attachment reference text to fit the configured context."""
 
     def generate(
         self,
@@ -151,16 +167,41 @@ class GenerationService:
         working_history = [dict(message) for message in loaded_history]
         if working_history and working_history[-1].get("role") == "user":
             working_history.pop()
-        chat_history = engine.fit_history_to_context(
-            working_history,
-            query=snapshot.user_input,
-            permanent_memories=permanent_memories,
-            memories_enabled=snapshot.memories_enabled,
-            user_system_instructions=snapshot.user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=snapshot.code_execution_eligible,
-            bypass_system_prompt=snapshot.bypass_system_prompt,
-        )
+
+        # Reserve room for attachments *before* history claims the whole
+        # budget: fit them first against a placeholder (history is not known
+        # yet), giving an attached document priority over old chat turns,
+        # then let history size itself around that reservation below. The
+        # attachments passed to engine.generate() further down are re-fit
+        # against the real, now-correctly-sized chat_history -- this pass
+        # only determines how much room history should leave.
+        reserved_attachments: Sequence[GenerationAttachment] = ()
+        fit_attachments = getattr(engine, "fit_attachments_to_context", None)
+        if snapshot.attachments and callable(fit_attachments):
+            reserved_attachments = fit_attachments(
+                snapshot.attachments,
+                query=snapshot.user_input,
+                chat_history="No history available.",
+                permanent_memories=permanent_memories,
+                memories_enabled=snapshot.memories_enabled,
+                user_system_instructions=snapshot.user_system_instructions,
+                num_ctx=num_ctx,
+                code_execution_eligible=snapshot.code_execution_eligible,
+                bypass_system_prompt=snapshot.bypass_system_prompt,
+            )
+
+        history_kwargs: dict[str, Any] = {
+            "query": snapshot.user_input,
+            "permanent_memories": permanent_memories,
+            "memories_enabled": snapshot.memories_enabled,
+            "user_system_instructions": snapshot.user_system_instructions,
+            "num_ctx": num_ctx,
+            "code_execution_eligible": snapshot.code_execution_eligible,
+            "bypass_system_prompt": snapshot.bypass_system_prompt,
+        }
+        if reserved_attachments:
+            history_kwargs["attachments"] = reserved_attachments
+        chat_history = engine.fit_history_to_context(working_history, **history_kwargs)
 
         self._check_cancelled(cancellation_event)
         generate_kwargs: dict[str, Any] = {

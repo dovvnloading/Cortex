@@ -540,8 +540,16 @@ class SynthesisAgent:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
-        """Keep the newest history that fits beside prompts, memories, and output."""
+        """Keep the newest history that fits beside prompts, memories, and output.
+
+        ``attachments`` are already-fitted reference text (see
+        ``fit_attachments_to_context``); they are threaded into the same
+        per-candidate prompt sizing used here purely so history leaves them
+        room, mirroring the fixed overhead memories and the system prompt
+        already contribute.
+        """
         output_reservation = cls.output_token_reservation(num_ctx)
         selected: list[dict] = []
 
@@ -554,14 +562,20 @@ class SynthesisAgent:
                 permanent_memories,
                 memories_enabled,
                 user_system_instructions,
+                attachments,
                 code_execution_eligible=code_execution_eligible,
                 bypass_system_prompt=bypass_system_prompt,
             )
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
                 selected = candidate
-            elif selected:
-                break
+            # Candidate sizes are not monotonic: dropping a newly-unpaired
+            # trailing assistant message (see _format_history_messages)
+            # shrinks the *next* candidate, so an oversized exchange must not
+            # stop the walk -- older, smaller exchanges further back can
+            # still fit. Stopping here previously discarded the entire
+            # history whenever the single newest exchange alone was too
+            # large for the budget.
 
         return cls._format_history_messages(selected)
 
