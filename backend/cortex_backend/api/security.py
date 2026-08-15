@@ -89,8 +89,8 @@ class SessionManager:
     def exchange(self, bootstrap_token: str) -> SessionExchange:
         with self._lock:
             if self._bootstrap_used or self._bootstrap_expires_at <= datetime.now(timezone.utc) or not hmac.compare_digest(
-                bootstrap_token,
-                self._bootstrap_token,
+                bootstrap_token.encode("utf-8"),
+                self._bootstrap_token.encode("utf-8"),
             ):
                 raise SessionSecurityError("invalid bootstrap token")
             self._bootstrap_used = True
