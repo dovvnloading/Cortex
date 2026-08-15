@@ -76,6 +76,7 @@ class GenerationEngine(Protocol):
         user_system_instructions: str | None,
         options: dict[str, Any],
         attachments: Sequence[GenerationAttachment] = (),
+        cancellation_event: Event | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """Generate a response and validated memory command."""
 
@@ -213,9 +214,12 @@ class GenerationService:
             "options": dict(snapshot.model_options),
         }
         # Keep the legacy headless engine protocol compatible for callers that
-        # do not use attachments; real engines receive the resolved payload.
+        # do not use attachments or cancellation; real engines receive the
+        # resolved payload.
         if snapshot.attachments:
             generate_kwargs["attachments"] = snapshot.attachments
+        if cancellation_event is not None:
+            generate_kwargs["cancellation_event"] = cancellation_event
         response, thoughts, memory_command, stats = engine.generate(
             **generate_kwargs,
         )
