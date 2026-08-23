@@ -886,6 +886,8 @@ class SynthesisAgent:
             validate_code_source(source)
             requested_grants = CodeCapabilities.from_mapping(capabilities)
             required_grants = capabilities_required_by_source(source)
+            if required_grants.process:
+                raise CodeExecutionError("process_capability_unavailable")
             grants = requested_grants.restricted_to(required_grants)
             if grants != requested_grants:
                 logging.warning(

@@ -25,6 +25,7 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<string | null>(null);
   const [codeSources, setCodeSources] = useState<Map<string, CodeExecutionSourceResponse>>(() => new Map());
   const [loadingSource, setLoadingSource] = useState<Set<string>>(() => new Set());
+  const [sourceErrors, setSourceErrors] = useState<Map<string, string>>(() => new Map());
   const taskGroups = groupTasks(tasks);
   const activeTasks = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)
     && !["pending", "denied", "expired"].includes(task.approval_state ?? "not_required"));
@@ -85,18 +86,36 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
     }
   };
 
-  const loadSource = async (jobId: string) => {
-    if (!onLoadCodeSource || codeSources.has(jobId) || loadingSource.has(jobId)) return;
-    setLoadingSource((current) => new Set(current).add(jobId));
+  const loadSource = async (task: ExecutionTaskSummary) => {
+    if (!onLoadCodeSource || loadingSource.has(task.job_id)) return;
+    const existing = codeSources.get(task.job_id);
+    if (existing && sourceMetadataMatchesTask(task, existing)) return;
+    setLoadingSource((current) => new Set(current).add(task.job_id));
+    setSourceErrors((current) => {
+      const next = new Map(current);
+      next.delete(task.job_id);
+      return next;
+    });
     try {
-      const source = await onLoadCodeSource(jobId);
-      setCodeSources((current) => new Map(current).set(jobId, source));
+      const source = await onLoadCodeSource(task.job_id);
+      if (!(await sourceMatchesTask(task, source))) {
+        throw new Error("source_verification_failed");
+      }
+      setCodeSources((current) => new Map(current).set(task.job_id, source));
     } catch {
-      // The source remains collapsed if it is no longer available.
+      setCodeSources((current) => {
+        const next = new Map(current);
+        next.delete(task.job_id);
+        return next;
+      });
+      setSourceErrors((current) => new Map(current).set(
+        task.job_id,
+        "The generated source could not be verified. Retry the review or deny this task.",
+      ));
     } finally {
       setLoadingSource((current) => {
         const next = new Set(current);
-        next.delete(jobId);
+        next.delete(task.job_id);
         return next;
       });
     }
@@ -153,7 +172,8 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
                   groupCount={group.count}
                   codeSource={codeSources.get(task.job_id)}
                   loadingSource={loadingSource.has(task.job_id)}
-                  onLoadSource={onLoadCodeSource ? () => void loadSource(task.job_id) : undefined}
+                  sourceError={sourceErrors.get(task.job_id)}
+                  onLoadSource={onLoadCodeSource ? () => void loadSource(task) : undefined}
                   onDecideApproval={onDecideApproval ? (decision) => void decide(task.job_id, decision) : undefined}
                 />
               ) : (
@@ -195,6 +215,7 @@ function CodeTaskSummary({
   groupCount,
   codeSource,
   loadingSource,
+  sourceError,
   onLoadSource,
   onDecideApproval,
 }: {
@@ -205,11 +226,13 @@ function CodeTaskSummary({
   groupCount: number;
   codeSource?: CodeExecutionSourceResponse;
   loadingSource: boolean;
+  sourceError?: string;
   onLoadSource?: () => void;
   onDecideApproval?: (decision: ExecutionApprovalDecision) => void;
 }) {
   const title = task.intent_summary || task.approval_reason || task.message || "Local Python task";
   const status = approvalPending ? "Approval needed" : formatTaskStatus(task.status);
+  const sourceReviewed = Boolean(codeSource && sourceMetadataMatchesTask(task, codeSource));
   return (
     <div className="execution-task-code-content">
       <div className="execution-task-code-heading">
@@ -233,26 +256,43 @@ function CodeTaskSummary({
       {task.status === "failed" && (
         <div className="execution-task-failure" role="alert"><AlertTriangle size={13} aria-hidden="true" /><span>{formatCodeFailure(task)}</span></div>
       )}
+      {approvalPending && !sourceReviewed && (
+        <div className="execution-task-warning" role="note"><AlertTriangle size={13} aria-hidden="true" /><span>Open and verify the generated source before allowing this task.</span></div>
+      )}
       {task.result && <CodeResult result={task.result} />}
       {onLoadSource && (
         <details className="execution-task-code-details" onToggle={(event) => { if (event.currentTarget.open) onLoadSource(); }}>
-          <summary><ChevronDown size={13} aria-hidden="true" />Inspect generated source</summary>
+          <summary><ChevronDown size={13} aria-hidden="true" />Review generated source</summary>
           {loadingSource && <span className="execution-task-source-loading">Loading source…</span>}
+          {sourceError && (
+            <div className="execution-task-failure" role="alert">
+              <AlertTriangle size={13} aria-hidden="true" />
+              <span>{sourceError}</span>
+              <button className="button button-secondary execution-task-decision" type="button" onClick={onLoadSource} disabled={loadingSource}>Retry</button>
+            </div>
+          )}
           {codeSource && <div className="execution-task-source">
             <span>Digest {codeSource.source_digest.slice(0, 16)}…</span>
             <pre>{codeSource.source}</pre>
           </div>}
         </details>
       )}
-      {approvalPending && onDecideApproval && <ApprovalActions task={task} decision={approvalDecision} onDecide={onDecideApproval} />}
+      {approvalPending && onDecideApproval && (
+        <ApprovalActions
+          task={task}
+          decision={approvalDecision}
+          onDecide={onDecideApproval}
+          allowDisabled={!sourceReviewed}
+        />
+      )}
     </div>
   );
 }
 
-function ApprovalActions({ task, decision, onDecide }: { task: ExecutionTaskSummary; decision?: ExecutionApprovalDecision; onDecide: (decision: ExecutionApprovalDecision) => void }) {
+function ApprovalActions({ task, decision, onDecide, allowDisabled = false }: { task: ExecutionTaskSummary; decision?: ExecutionApprovalDecision; onDecide: (decision: ExecutionApprovalDecision) => void; allowDisabled?: boolean }) {
   return (
     <div className="execution-task-approval-actions" aria-label={`Approval actions for background task ${task.job_id}`}>
-      <button className="button button-primary execution-task-decision" type="button" onClick={() => onDecide("approved")} disabled={Boolean(decision)} aria-label={`Allow background task ${task.job_id} once`}>
+      <button className="button button-primary execution-task-decision" type="button" onClick={() => onDecide("approved")} disabled={Boolean(decision) || allowDisabled} aria-label={`Allow background task ${task.job_id} once`} title={allowDisabled ? "Review and verify the generated source first." : undefined}>
         {decision === "approved" ? "Allowing…" : "Allow once"}
       </button>
       <button className="button button-secondary execution-task-decision" type="button" onClick={() => onDecide("denied")} disabled={Boolean(decision)} aria-label={`Deny background task ${task.job_id}`}>
@@ -260,6 +300,41 @@ function ApprovalActions({ task, decision, onDecide }: { task: ExecutionTaskSumm
       </button>
     </div>
   );
+}
+
+function sourceMetadataMatchesTask(
+  task: ExecutionTaskSummary,
+  source: CodeExecutionSourceResponse,
+): boolean {
+  if (
+    task.profile !== "code.exec.v1"
+    || source.job_id !== task.job_id
+    || source.language !== "python"
+    || !task.source_digest
+    || source.source_digest !== task.source_digest
+    || !task.intent_summary
+    || source.intent_summary !== task.intent_summary
+    || !task.capabilities
+  ) {
+    return false;
+  }
+  return (["filesystem", "process", "network"] as const).every((capability) => (
+    typeof source.capabilities[capability] === "boolean"
+    && source.capabilities[capability] === task.capabilities?.[capability]
+  ));
+}
+
+async function sourceMatchesTask(
+  task: ExecutionTaskSummary,
+  source: CodeExecutionSourceResponse,
+): Promise<boolean> {
+  if (!sourceMetadataMatchesTask(task, source) || !globalThis.crypto?.subtle) return false;
+  const encoded = new TextEncoder().encode(source.source);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
+  const actualDigest = [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+  return actualDigest === source.source_digest;
 }
 
 function CodeTaskState({
@@ -340,6 +415,7 @@ function formatCodeFailure(task: ExecutionTaskSummary): string {
     worker_failed: "The isolated worker stopped before returning output.",
     worker_output_invalid: "The isolated worker returned an invalid result.",
     process_isolation_unavailable: "The required process isolation could not be established.",
+    process_capability_unavailable: "Process access is unavailable until native sandbox isolation is enabled.",
     runtime_limit: "The code exceeded the execution limits.",
     memory_limit: "The code exceeded the memory limit.",
   };

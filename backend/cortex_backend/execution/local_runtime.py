@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hmac
 import json
+import logging
 import multiprocessing
 import os
 import shutil
@@ -54,7 +55,11 @@ from .recipe_coordinator import (
 )
 from .recipe_provider import RecipeImageProvider, RecipeProviderError
 from .recipes import RecipeValidationError, parse_image_transform
-from .repository import ExecutionRepository, LeaseConflict
+from .repository import (
+    ExecutionRepository,
+    ExecutionTransitionConflict,
+    LeaseConflict,
+)
 from .scratch_compute import (
     SCRATCH_COMPUTE_PROFILE,
     SCRATCH_PAYLOAD_SCHEMA,
@@ -536,6 +541,8 @@ class LocalExecutionCoordinator:
         self.code_timeout_seconds = min(float(code_timeout_seconds), MAX_CODE_TIMEOUT_SECONDS)
         self._supervisor_owner = f"local-supervisor-{uuid4().hex}"
         self._supervisor_lease_active = False
+        self._supervisor_stop_event = Event()
+        self._supervisor_thread: Thread | None = None
         self._scratch_lock = Lock()
         self._scratch_threads: dict[str, Thread] = {}
         self._scratch_cancel_events: dict[str, Event] = {}
@@ -754,31 +761,59 @@ class LocalExecutionCoordinator:
     def startup_recover(self) -> list[str]:
         if self._supervisor_lease_active:
             return []
+        existing_thread = self._supervisor_thread
+        if existing_thread is not None and existing_thread.is_alive():
+            # A timed-out shutdown may leave a lease renewal blocked inside
+            # SQLite. Do not reuse its stop event or start another heartbeat
+            # until that thread has actually exited; callers can safely retry.
+            raise RuntimeError("Execution supervisor is still stopping.")
+        self._supervisor_thread = None
         self.repository.claim_supervisor_lease(
             lease_owner=self._supervisor_owner,
             ttl_seconds=self.supervisor_lease_seconds,
         )
         self._supervisor_lease_active = True
-        recovered = self.repository.recover_expired_leases()
-        self.repository.expire_approvals()
-        self._recipe.recover_jobs(recovered)
-        for job_id in recovered:
-            job = self.repository.get_job(job_id)
-            if job is None or job.profile != SCRATCH_COMPUTE_PROFILE:
-                continue
-            self._recover_scratch(job)
         try:
-            owner = self.repository.installation_principal_id
-            for job in self.repository.list_jobs(owner=owner, include_terminal=False, limit=200):
-                if job.profile == CODE_EXECUTION_PROFILE:
-                    self._launch_code(job.job_id)
+            recovered = self.repository.recover_expired_leases()
+            self.repository.expire_approvals()
+            self._recipe.recover_jobs(recovered)
+            for job_id in recovered:
+                job = self.repository.get_job(job_id)
+                if job is None or job.profile != SCRATCH_COMPUTE_PROFILE:
+                    continue
+                self._recover_scratch(job)
+            try:
+                owner = self.repository.installation_principal_id
+                for job in self.repository.list_jobs(
+                    owner=owner,
+                    include_terminal=False,
+                    limit=200,
+                ):
+                    if job.profile == CODE_EXECUTION_PROFILE:
+                        self._launch_code(job.job_id)
+            except Exception:
+                pass
         except Exception:
-            pass
+            self.repository.release_supervisor_lease(
+                lease_owner=self._supervisor_owner
+            )
+            self._supervisor_lease_active = False
+            raise
+        try:
+            self._start_supervisor_heartbeat()
+        except Exception:
+            self.repository.release_supervisor_lease(
+                lease_owner=self._supervisor_owner
+            )
+            self._supervisor_lease_active = False
+            raise
         return recovered
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
+        self._supervisor_stop_event.set()
+        supervisor_thread = self._supervisor_thread
         with self._scratch_lock:
             events = list(self._scratch_cancel_events.values())
             attempts = list(self._scratch_attempts.values())
@@ -801,9 +836,62 @@ class LocalExecutionCoordinator:
         for thread in code_threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._recipe.shutdown(timeout=max(0.0, deadline - time.monotonic()))
+        if supervisor_thread is not None:
+            supervisor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        supervisor_stopped = supervisor_thread is None or not supervisor_thread.is_alive()
+        self._supervisor_thread = None if supervisor_stopped else supervisor_thread
         if self._supervisor_lease_active:
-            self.repository.release_supervisor_lease(lease_owner=self._supervisor_owner)
+            if supervisor_stopped:
+                self.repository.release_supervisor_lease(
+                    lease_owner=self._supervisor_owner
+                )
+            else:
+                # Releasing while a renewal is still inside SQLite can race:
+                # the late renewal may recreate a supposedly released lease.
+                # Leave the record to expire instead of opening split-brain
+                # recovery; the stop event makes the thread exit afterward.
+                logging.warning(
+                    "Cortex execution supervisor did not stop before shutdown timeout; "
+                    "its lease will expire naturally."
+                )
             self._supervisor_lease_active = False
+
+    def _start_supervisor_heartbeat(self) -> None:
+        thread = self._supervisor_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._supervisor_stop_event.clear()
+        thread = Thread(
+            target=self._renew_supervisor_lease,
+            name="cortex-execution-supervisor-lease",
+            daemon=True,
+        )
+        self._supervisor_thread = thread
+        thread.start()
+
+    def _renew_supervisor_lease(self) -> None:
+        interval = max(0.001, min(self.supervisor_lease_seconds / 3.0, 5.0))
+        while not self._supervisor_stop_event.wait(interval):
+            if not self._supervisor_lease_active:
+                return
+            try:
+                self.repository.claim_supervisor_lease(
+                    lease_owner=self._supervisor_owner,
+                    ttl_seconds=self.supervisor_lease_seconds,
+                )
+            except LeaseConflict:
+                self._supervisor_lease_active = False
+                logging.error(
+                    "Cortex execution supervisor lost its durable lease to another coordinator."
+                )
+                return
+            except Exception as exc:
+                # A transient SQLite failure should be retried before the lease
+                # expires. Never log database paths or lease owner tokens.
+                logging.warning(
+                    "Cortex execution supervisor lease renewal failed (%s).",
+                    type(exc).__name__,
+                )
 
     @staticmethod
     def _canonical_payload(payload: Mapping[str, Any]) -> str:
@@ -834,6 +922,7 @@ class LocalExecutionCoordinator:
     def _run_code(self, job_id: str, cancel_event: Event) -> None:
         lease_owner = f"code-coordinator-{uuid4().hex}"
         attempt: _LocalCodeAttempt | None = None
+        lease_claimed = False
         with self._code_lock:
             self._code_cancel_events[job_id] = cancel_event
         try:
@@ -868,6 +957,7 @@ class LocalExecutionCoordinator:
                 lease_owner=lease_owner,
                 ttl_seconds=self.lease_seconds,
             )
+            lease_claimed = True
             current = self.repository.get_job(job_id)
             if current is None or current.status in {"cancelled", "cancelling"}:
                 return
@@ -909,18 +999,37 @@ class LocalExecutionCoordinator:
             if cancel_event.is_set() or (current is not None and current.status == "cancelling"):
                 raise CodeExecutionError("cancelled")
             payload = result.as_payload()
-            self.repository.transition(
-                job_id,
-                status="succeeded",
-                event="code.completed",
-                phase="completed",
-                data={"message": "Local code execution completed."},
-                result=payload,
-            )
+            try:
+                completed = self.repository.transition(
+                    job_id,
+                    status="succeeded",
+                    event="code.completed",
+                    phase="completed",
+                    data={"message": "Local code execution completed."},
+                    result=payload,
+                    expected_status="running",
+                )
+            except ExecutionTransitionConflict:
+                latest = self.repository.get_job(job_id)
+                if cancel_event.is_set() or (
+                    latest is not None
+                    and latest.status in {"cancelling", "cancelled"}
+                ):
+                    raise CodeExecutionError("cancelled") from None
+                raise CodeExecutionError("completion_conflict") from None
+            if completed.status != "succeeded":
+                if cancel_event.is_set() or completed.status in {
+                    "cancelling",
+                    "cancelled",
+                }:
+                    raise CodeExecutionError("cancelled")
+                raise CodeExecutionError("completion_conflict")
         except CodeExecutionError as exc:
             self._finish_code_failure(job_id, cancel_event, exc.code)
         except LeaseConflict:
-            self._finish_code_failure(job_id, cancel_event, "lease_unavailable")
+            # Another live coordinator owns this exact attempt. It is not a job
+            # failure and must not overwrite that coordinator's eventual result.
+            return
         except Exception:
             self._finish_code_failure(job_id, cancel_event, "coordinator_failed")
         finally:
@@ -930,17 +1039,20 @@ class LocalExecutionCoordinator:
                 self._code_attempts.pop(job_id, None)
                 self._code_cancel_events.pop(job_id, None)
                 self._code_threads.pop(job_id, None)
-            try:
-                self.repository.release_lease(job_id, lease_owner=lease_owner)
-            except Exception:
-                pass
-            try:
-                self._cleanup_code_workspace(job_id)
-            except CodeExecutionError:
-                # Cleanup failure never reopens the job or grants access; the
-                # orphan remains under the validated artifact root for a later
-                # maintenance pass.
-                pass
+            if lease_claimed:
+                try:
+                    try:
+                        self._cleanup_code_workspace(job_id)
+                    except CodeExecutionError:
+                        # Cleanup failure never reopens the job or grants access;
+                        # the orphan remains under the validated artifact root for
+                        # a later maintenance pass.
+                        pass
+                finally:
+                    try:
+                        self.repository.release_lease(job_id, lease_owner=lease_owner)
+                    except Exception:
+                        pass
 
     @staticmethod
     def _code_request_from_job(job: ExecutionJob) -> CodeExecutionRequest:
@@ -963,25 +1075,46 @@ class LocalExecutionCoordinator:
             if expected_digest != request.source_digest:
                 raise CodeExecutionError("recovery_invalid_payload")
             return request
-        except (CodeExecutionError, TypeError, ValueError):
+        except CodeExecutionError as exc:
+            if exc.code == "process_capability_unavailable":
+                raise
+            raise CodeExecutionError("recovery_invalid_payload") from None
+        except (TypeError, ValueError):
             raise CodeExecutionError("recovery_invalid_payload") from None
 
     def _finish_code_failure(self, job_id: str, cancel_event: Event, failure_code: str) -> None:
-        current = self.repository.get_job(job_id)
-        if current is None or current.status in TerminalExecutionStatus:
-            return
-        cancelled = failure_code == "cancelled" or cancel_event.is_set() or current.status == "cancelling"
-        try:
-            self.repository.transition(
-                job_id,
-                status="cancelled" if cancelled else "failed",
-                event="code.cancelled" if cancelled else "code.failed",
-                phase="cancelled" if cancelled else "failed",
-                data={"message": "Local code execution was cancelled." if cancelled else "Local code execution failed safely."},
-                error="cancelled" if cancelled else failure_code,
+        # Re-evaluate after a guarded-transition conflict so a cancellation
+        # that commits first cannot be overwritten by a late worker failure.
+        for _ in range(3):
+            current = self.repository.get_job(job_id)
+            if current is None or current.status in TerminalExecutionStatus:
+                return
+            cancelled = (
+                failure_code == "cancelled"
+                or cancel_event.is_set()
+                or current.status == "cancelling"
             )
-        except Exception:
-            pass
+            try:
+                self.repository.transition(
+                    job_id,
+                    status="cancelled" if cancelled else "failed",
+                    event="code.cancelled" if cancelled else "code.failed",
+                    phase="cancelled" if cancelled else "failed",
+                    data={
+                        "message": (
+                            "Local code execution was cancelled."
+                            if cancelled
+                            else "Local code execution failed safely."
+                        )
+                    },
+                    error="cancelled" if cancelled else failure_code,
+                    expected_status=current.status,
+                )
+                return
+            except ExecutionTransitionConflict:
+                continue
+            except Exception:
+                return
 
     @staticmethod
     def _scratch_request_from_job(job: ExecutionJob) -> ScratchComputeRequest:

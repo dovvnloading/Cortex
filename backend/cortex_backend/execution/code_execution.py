@@ -171,6 +171,16 @@ class CodeExecutionRequest:
         if not isinstance(self.capabilities, CodeCapabilities):
             raise CodeExecutionError("capabilities_invalid")
         validate_code_source(self.source)
+        if (
+            self.capabilities.process
+            or capabilities_required_by_source(self.source).process
+        ):
+            # A normal Windows subprocess inherits the user's ambient file and
+            # network authority. A Job Object bounds resources and descendants,
+            # but it is not an AppContainer or restricted-token sandbox. Keep
+            # this capability fail-closed until the platform can enforce the
+            # same authority boundary promised by the broker APIs.
+            raise CodeExecutionError("process_capability_unavailable")
 
     @property
     def source_digest(self) -> str:
@@ -1299,8 +1309,10 @@ class _ExecutionGuard:
 def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = None, workspace: str | None = None) -> CodeExecutionResult:
     """Execute validated source inside a child process boundary."""
 
-    validate_code_source(source)
+    required = capabilities_required_by_source(source)
     grants = CodeCapabilities.from_mapping(capabilities)
+    if grants.process or required.process:
+        raise CodeExecutionError("process_capability_unavailable")
     started = time.monotonic()
     stdout = _BoundedTextWriter()
     stderr = _BoundedTextWriter()
