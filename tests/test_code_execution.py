@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -17,7 +18,7 @@ from cortex_backend.execution.code_execution import (
 )
 from cortex_backend.execution import code_execution
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
-from cortex_backend.execution.repository import ExecutionRepository
+from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
 
 
@@ -297,23 +298,255 @@ def test_pending_code_approval_expires_while_coordinator_is_live(tmp_path) -> No
     coordinator.shutdown()
 
 
-def test_approved_process_capability_runs_through_the_worker(tmp_path) -> None:
+def test_process_capability_fails_closed_before_a_job_is_created(tmp_path) -> None:
     repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
     coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
     owner = repository.installation_principal_id
-    request = CodeExecutionRequest(
-        owner=owner,
-        request_id="code-process",
-        source="_result = cortex.process.run(['cmd', '/c', 'echo', 'worker'])",
-        intent_summary="Run one approved local process.",
-        capabilities=CodeCapabilities(process=True),
+    with pytest.raises(CodeExecutionError, match="process_capability_unavailable"):
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-process",
+            source="_result = cortex.process.run(['cmd', '/c', 'type', '../outside.txt'])",
+            intent_summary="Read outside the brokered workspace.",
+            capabilities=CodeCapabilities(process=True),
+        )
+    with pytest.raises(CodeExecutionError, match="process_capability_unavailable"):
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-process-without-grant",
+            source="_result = cortex.process.run(['cmd', '/c', 'echo', 'worker'])",
+            intent_summary="Try to reference the disabled process broker.",
+        )
+    with pytest.raises(CodeExecutionError, match="process_capability_unavailable"):
+        run_code_in_worker(
+            "_result = cortex.process.run(['cmd', '/c', 'echo', 'worker'])",
+            {"process": True},
+        )
+    assert repository.list_jobs(owner=owner, include_terminal=True) == []
+    coordinator.shutdown()
+
+
+def test_cancellation_wins_if_requested_before_code_completion_commits(
+    tmp_path, monkeypatch
+) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    owner = repository.installation_principal_id
+    completion_started = Event()
+    release_completion = Event()
+    original_transition = repository.transition
+
+    def delayed_transition(job_id, **kwargs):
+        if kwargs.get("event") == "code.completed":
+            completion_started.set()
+            assert release_completion.wait(timeout=3.0)
+        return original_transition(job_id, **kwargs)
+
+    monkeypatch.setattr(repository, "transition", delayed_transition)
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-cancel-completion-race",
+            source="_result = 42",
+            intent_summary="Exercise the cancellation commit boundary.",
+        )
     )
-    job = coordinator.start_code(request)
     repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    assert completion_started.wait(timeout=5.0)
+
+    cancelling = coordinator.cancel(job.job_id, owner=owner)
+    assert cancelling.status == "cancelling"
+    release_completion.set()
+    completed = coordinator.wait(job.job_id, timeout=5.0)
+
+    assert completed.status == "cancelled"
+    assert completed.result is None
+    events = repository.events(job.job_id)
+    assert events[-1].event == "code.cancelled"
+    assert not any(event.event == "code.completed" for event in events)
+    coordinator.shutdown()
+
+
+def test_cancellation_wins_if_requested_before_code_failure_commits(
+    tmp_path, monkeypatch
+) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    owner = repository.installation_principal_id
+    failure_started = Event()
+    release_failure = Event()
+    original_transition = repository.transition
+
+    def delayed_transition(job_id, **kwargs):
+        if kwargs.get("event") == "code.failed":
+            failure_started.set()
+            assert release_failure.wait(timeout=3.0)
+        return original_transition(job_id, **kwargs)
+
+    monkeypatch.setattr(repository, "transition", delayed_transition)
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-cancel-failure-race",
+            source="_result = 1 / 0",
+            intent_summary="Exercise the failure commit boundary.",
+        )
+    )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    assert failure_started.wait(timeout=5.0)
+
+    cancelling = coordinator.cancel(job.job_id, owner=owner)
+    assert cancelling.status == "cancelling"
+    release_failure.set()
+    completed = coordinator.wait(job.job_id, timeout=5.0)
+
+    assert completed.status == "cancelled"
+    assert completed.result is None
+    events = repository.events(job.job_id)
+    assert events[-1].event == "code.cancelled"
+    assert not any(event.event == "code.failed" for event in events)
+    coordinator.shutdown()
+
+
+def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    first = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+    second = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+    first.startup_recover()
+    time.sleep(0.2)
+
+    with pytest.raises(LeaseConflict, match="supervisor is already running"):
+        second.startup_recover()
+
+    first.shutdown()
+    second.startup_recover()
+    second.shutdown()
+
+
+def test_supervisor_restart_waits_for_timed_out_heartbeat(
+    tmp_path, monkeypatch
+) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+    original_claim = repository.claim_supervisor_lease
+    renewal_entered = Event()
+    release_renewal = Event()
+    claim_count = 0
+
+    def blocked_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+        nonlocal claim_count
+        claim_count += 1
+        if claim_count == 2:
+            renewal_entered.set()
+            assert release_renewal.wait(timeout=3.0)
+        return original_claim(lease_owner=lease_owner, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(repository, "claim_supervisor_lease", blocked_claim)
+    coordinator.startup_recover()
+    assert renewal_entered.wait(timeout=3.0)
+    coordinator.shutdown(timeout=0)
+
+    with pytest.raises(RuntimeError, match="still stopping"):
+        coordinator.startup_recover()
+    assert claim_count == 2
+
+    release_renewal.set()
+    old_thread = coordinator._supervisor_thread
+    assert old_thread is not None
+    old_thread.join(timeout=3.0)
+    assert not old_thread.is_alive()
+
+    coordinator.startup_recover()
+    assert coordinator._supervisor_thread is not old_thread
+    coordinator.shutdown()
+
+
+def test_foreign_live_job_lease_does_not_mark_code_as_failed(tmp_path) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    owner = repository.installation_principal_id
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-foreign-live-lease",
+            source="_result = 42",
+            intent_summary="Do not overwrite another coordinator.",
+        )
+    )
+    repository.claim_lease(
+        job.job_id,
+        lease_owner="foreign-live-coordinator",
+        ttl_seconds=3.0,
+    )
+    foreign_workspace = repository.artifact_root / ".code_workspaces" / job.job_id
+    foreign_workspace.mkdir(parents=True)
+    sentinel = foreign_workspace / "foreign-owner.txt"
+    sentinel.write_text("in use", encoding="utf-8")
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    for _ in range(200):
+        with coordinator._code_lock:
+            active = job.job_id in coordinator._code_threads
+        if not active:
+            break
+        time.sleep(0.005)
+
+    untouched = repository.get_job(job.job_id)
+    assert untouched is not None
+    assert untouched.status == "queued"
+    assert untouched.error is None
+    assert not any(event.event == "code.failed" for event in repository.events(job.job_id))
+    assert sentinel.read_text(encoding="utf-8") == "in use"
+
+    repository.release_lease(
+        job.job_id,
+        lease_owner="foreign-live-coordinator",
+    )
+    coordinator._launch_code(job.job_id)
     completed = coordinator.wait(job.job_id, timeout=5.0)
     assert completed.status == "succeeded"
-    assert completed.result is not None
-    assert completed.result["value"]["stdout"].strip() == "worker"
+    coordinator.shutdown()
+
+
+def test_code_workspace_cleanup_happens_before_lease_release(
+    tmp_path, monkeypatch
+) -> None:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    owner = repository.installation_principal_id
+    cleanup_observed = Event()
+    cleanup_had_lease: list[bool] = []
+    original_cleanup = coordinator._cleanup_code_workspace
+
+    def tracked_cleanup(job_id: str) -> None:
+        with repository.connect() as connection:
+            lease = connection.execute(
+                "SELECT 1 FROM execution_leases WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        cleanup_had_lease.append(lease is not None)
+        original_cleanup(job_id)
+        cleanup_observed.set()
+
+    monkeypatch.setattr(coordinator, "_cleanup_code_workspace", tracked_cleanup)
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-cleanup-lease-order",
+            source="_result = 42",
+            intent_summary="Keep cleanup fenced by the job lease.",
+        )
+    )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+
+    completed = coordinator.wait(job.job_id, timeout=5.0)
+    assert completed.status == "succeeded"
+    assert cleanup_observed.wait(timeout=3.0)
+    assert cleanup_had_lease == [True]
+    with repository.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM execution_leases WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone() is None
     coordinator.shutdown()
 
 
@@ -346,18 +579,13 @@ def test_model_proposal_drops_unused_capabilities() -> None:
     }
 
 
-def test_model_proposal_keeps_referenced_capability() -> None:
+def test_model_proposal_rejects_the_unavailable_process_capability() -> None:
     agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
     agent._parse_and_clean_response(
         "<code_execution_request>{\"language\":\"python\",\"source\":\"_result = cortex.process.run(['cmd', '/c', 'echo', 'x'])\",\"intent_summary\":\"Run x\",\"capabilities\":{\"process\":true}}</code_execution_request>",
         None,
     )
-    assert agent.last_code_proposal is not None
-    assert agent.last_code_proposal.capabilities == {
-        "filesystem": False,
-        "process": True,
-        "network": False,
-    }
+    assert agent.last_code_proposal is None
 
     malformed, _, _ = agent._parse_and_clean_response(
         "<code_execution_request>{not-json}</code_execution_request>", None,

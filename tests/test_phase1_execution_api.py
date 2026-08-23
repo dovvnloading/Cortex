@@ -205,6 +205,77 @@ def test_task_list_keeps_code_failure_reason_for_diagnosis(tmp_path):
         assert task["error"] == "worker_timeout"
 
 
+def test_task_list_prioritizes_pending_approval_over_terminal_history(tmp_path):
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        owner = _owner(app, headers)
+        repository = _pending_approval(
+            app,
+            owner=owner,
+            job_id="older-actionable-approval",
+        )
+        for index in range(20):
+            job_id = f"newer-terminal-{index:02d}"
+            repository.create_job(
+                job_id=job_id,
+                owner=owner,
+                request_id=f"request-{job_id}",
+                profile="fake.v1",
+                payload={},
+            )
+            repository.transition(
+                job_id,
+                status="succeeded",
+                event="completed",
+                phase="completed",
+                data={"message": "Terminal history."},
+                result={"index": index},
+            )
+
+        tasks = client.get(
+            "/api/v1/execution/tasks?include_terminal=true&limit=20",
+            headers=headers,
+        )
+
+        assert tasks.status_code == 200
+        task_ids = [item["job_id"] for item in tasks.json()["tasks"]]
+        assert len(task_ids) == 20
+        assert task_ids[0] == "older-actionable-approval"
+        assert "newer-terminal-19" in task_ids
+
+
+def test_task_list_does_not_prioritize_expired_approval_rows(tmp_path):
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        owner = _owner(app, headers)
+        repository = _pending_approval(
+            app,
+            owner=owner,
+            job_id="older-actionable-approval",
+        )
+        for index in range(20):
+            job_id = f"newer-expired-approval-{index:02d}"
+            _pending_approval(app, owner=owner, job_id=job_id)
+            with repository.connect() as connection:
+                connection.execute(
+                    "UPDATE execution_approvals SET expires_at = ? WHERE job_id = ?",
+                    ("2000-01-01T00:00:00+00:00", job_id),
+                )
+
+        tasks = client.get(
+            "/api/v1/execution/tasks?include_terminal=true&limit=20",
+            headers=headers,
+        )
+
+        assert tasks.status_code == 200
+        task_ids = [item["job_id"] for item in tasks.json()["tasks"]]
+        assert len(task_ids) == 20
+        assert task_ids[0] == "older-actionable-approval"
+        assert "newer-expired-approval-19" in task_ids
+
+
 def test_approval_api_is_owner_scoped_exactly_once_and_redacted(tmp_path):
     app = _app(tmp_path)
     with TestClient(app) as client:

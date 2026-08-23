@@ -64,6 +64,10 @@ class LeaseConflict(ExecutionRepositoryError):
     """Another live coordinator owns the execution lease."""
 
 
+class ExecutionTransitionConflict(ExecutionRepositoryError):
+    """A concurrent actor changed a job before a guarded transition."""
+
+
 class ApprovalPolicyError(ExecutionRepositoryError):
     """An approval request violates the profile or transition policy."""
 
@@ -432,10 +436,16 @@ class ExecutionRepository:
                 FROM execution_jobs j
                 LEFT JOIN execution_approvals a ON a.job_id = j.job_id
                 WHERE j.owner = ? {terminal_clause.replace('status', 'j.status')}
-                ORDER BY j.updated_at DESC, j.job_id DESC
+                ORDER BY
+                    CASE
+                        WHEN a.state = 'pending' AND a.expires_at > ? THEN 0
+                        ELSE 1
+                    END,
+                    j.updated_at DESC,
+                    j.job_id DESC
                 LIMIT ?
                 """,
-                (now, owner, limit),
+                (now, owner, now, limit),
             ).fetchall()
         return [self._job_from_row(row) for row in rows]
 
@@ -449,6 +459,7 @@ class ExecutionRepository:
         data: Mapping[str, Any] | None = None,
         result: Mapping[str, Any] | None = None,
         error: str | None = None,
+        expected_status: ExecutionStatus | None = None,
     ) -> ExecutionJob:
         now = self._now()
         with self.connect() as connection:
@@ -468,6 +479,10 @@ class ExecutionRepository:
                 # state is immutable; late callbacks must not append a second
                 # terminal event or overwrite the validated result.
                 return self._job_from_row(row)
+            if expected_status is not None and row["status"] != expected_status:
+                raise ExecutionTransitionConflict(
+                    f"Execution job is {row['status']}, not {expected_status}."
+                )
             approval = connection.execute(
                 "SELECT state FROM execution_approvals WHERE job_id = ?",
                 (job_id,),

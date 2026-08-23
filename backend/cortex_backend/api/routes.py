@@ -716,6 +716,9 @@ def build_router() -> APIRouter:
                 "source_too_large": "Code is too large to run locally.",
                 "syntax_invalid": "The code could not be parsed safely.",
                 "syntax_not_allowed": "That code uses an unsupported construct.",
+                "process_capability_unavailable": (
+                    "Process access is unavailable until native sandbox isolation is enabled."
+                ),
             }.get(exc.code, "Code execution request is invalid.")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT if exc.code == "request_conflict" else status.HTTP_422_UNPROCESSABLE_ENTITY,

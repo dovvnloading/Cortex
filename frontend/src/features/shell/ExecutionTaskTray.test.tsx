@@ -24,6 +24,7 @@ const codeTask: ExecutionTaskSummary = {
   phase: "completed",
   message: "Local code execution completed.",
   intent_summary: "Summarize the local data",
+  source_digest: "b8a86ce3ec917cee7a187e89c6a0a8cad33e7df8f37e47c237e864a023f910e3",
   capabilities: { filesystem: false, process: false, network: false },
   result: { stdout: "Rows: 3\n", stderr: "", value: { rows: 3 }, truncated: false },
   can_cancel: false,
@@ -152,7 +153,7 @@ describe("ExecutionTaskTray", () => {
       job_id: "code-1",
       language: "python",
       source: "print('Rows: 3')",
-      source_digest: "a".repeat(64),
+      source_digest: codeTask.source_digest,
       intent_summary: "Summarize the local data",
       capabilities: { filesystem: false, process: false, network: false },
     });
@@ -163,9 +164,111 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByText("Output")).toBeVisible();
     expect(screen.getByText("Rows: 3")).toBeVisible();
 
-    await user.click(screen.getByText("Inspect generated source"));
+    await user.click(screen.getByText("Review generated source"));
     await waitFor(() => expect(onLoadCodeSource).toHaveBeenCalledWith("code-1"));
     expect(await screen.findByText("print('Rows: 3')")).toBeVisible();
+  });
+
+  it("requires a verified source review before approving code", async () => {
+    const user = userEvent.setup();
+    const onDecideApproval = vi.fn().mockResolvedValue(undefined);
+    const onLoadCodeSource = vi.fn().mockResolvedValue({
+      job_id: "code-1",
+      language: "python",
+      source: "print('Rows: 3')",
+      source_digest: codeTask.source_digest,
+      intent_summary: codeTask.intent_summary,
+      capabilities: codeTask.capabilities,
+    });
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...codeTask, status: "queued", approval_state: "pending", result: null }]}
+        onDecideApproval={onDecideApproval}
+        onLoadCodeSource={onLoadCodeSource}
+      />,
+    );
+
+    const allow = screen.getByRole("button", { name: "Allow background task code-1 once" });
+    expect(allow).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny background task code-1" })).toBeEnabled();
+    expect(allow).toHaveAttribute("title", "Review and verify the generated source first.");
+
+    await user.click(screen.getByText("Review generated source"));
+    expect(await screen.findByText("print('Rows: 3')")).toBeVisible();
+    await waitFor(() => expect(allow).toBeEnabled());
+    await user.click(allow);
+    expect(onDecideApproval).toHaveBeenCalledWith("code-1", "approved");
+  });
+
+  it("fails closed and offers retry when source review cannot be loaded", async () => {
+    const user = userEvent.setup();
+    const onLoadCodeSource = vi.fn().mockRejectedValue(new Error("offline"));
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...codeTask, status: "queued", approval_state: "pending", result: null }]}
+        onDecideApproval={vi.fn().mockResolvedValue(undefined)}
+        onLoadCodeSource={onLoadCodeSource}
+      />,
+    );
+
+    await user.click(screen.getByText("Review generated source"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be verified");
+    expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny background task code-1" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onLoadCodeSource).toHaveBeenCalledTimes(2));
+  });
+
+  it.each([
+    {
+      name: "digest",
+      response: {
+        job_id: "code-1",
+        language: "python" as const,
+        source: "print('Rows: 3')",
+        source_digest: "0".repeat(64),
+        intent_summary: codeTask.intent_summary,
+        capabilities: codeTask.capabilities,
+      },
+    },
+    {
+      name: "capabilities",
+      response: {
+        job_id: "code-1",
+        language: "python" as const,
+        source: "print('Rows: 3')",
+        source_digest: codeTask.source_digest,
+        intent_summary: codeTask.intent_summary,
+        capabilities: { filesystem: true, process: false, network: false },
+      },
+    },
+    {
+      name: "source bytes",
+      response: {
+        job_id: "code-1",
+        language: "python" as const,
+        source: "print('Rows: 4')",
+        source_digest: codeTask.source_digest,
+        intent_summary: codeTask.intent_summary,
+        capabilities: codeTask.capabilities,
+      },
+    },
+  ])("fails closed when reviewed source $name does not match the approved task", async ({ response }) => {
+    const user = userEvent.setup();
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...codeTask, status: "queued", approval_state: "pending", result: null }]}
+        onDecideApproval={vi.fn().mockResolvedValue(undefined)}
+        onLoadCodeSource={vi.fn().mockResolvedValue(response)}
+      />,
+    );
+
+    await user.click(screen.getByText("Review generated source"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be verified");
+    expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeDisabled();
+    expect(screen.queryByText("print('Rows: 3')")).not.toBeInTheDocument();
   });
 
   it("makes broad code access explicit before approval", () => {
@@ -179,6 +282,7 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByText("Broad local access requested. Review the source before allowing.")).toBeVisible();
     expect(screen.getByText("Files")).toBeVisible();
     expect(screen.getByText("Processes")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny background task code-1" })).toBeEnabled();
   });
 });
