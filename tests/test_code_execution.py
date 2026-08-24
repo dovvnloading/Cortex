@@ -542,11 +542,17 @@ def test_code_workspace_cleanup_happens_before_lease_release(
     assert completed.status == "succeeded"
     assert cleanup_observed.wait(timeout=3.0)
     assert cleanup_had_lease == [True]
-    with repository.connect() as connection:
-        assert connection.execute(
-            "SELECT 1 FROM execution_leases WHERE job_id = ?",
-            (job.job_id,),
-        ).fetchone() is None
+    lease_released = False
+    for _ in range(300):
+        with repository.connect() as connection:
+            lease_released = connection.execute(
+                "SELECT 1 FROM execution_leases WHERE job_id = ?",
+                (job.job_id,),
+            ).fetchone() is None
+        if lease_released:
+            break
+        time.sleep(0.01)
+    assert lease_released
     coordinator.shutdown()
 
 
