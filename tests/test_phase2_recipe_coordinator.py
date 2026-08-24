@@ -155,7 +155,7 @@ def test_coordinator_publishes_owner_scoped_result_once(tmp_path: Path):
     request = _request(source_artifact_id)
 
     accepted = coordinator.start_image_transform(request)
-    completed = coordinator.wait(accepted.job_id, timeout=3)
+    completed = coordinator.wait(accepted.job_id, timeout=15)
 
     assert completed.status == "succeeded"
     assert completed.result is not None

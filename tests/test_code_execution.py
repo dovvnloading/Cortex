@@ -408,17 +408,30 @@ def test_cancellation_wins_if_requested_before_code_failure_commits(
     coordinator.shutdown()
 
 
-def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path) -> None:
+def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) -> None:
     repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
     first = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
     second = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+    original_claim = repository.claim_supervisor_lease
+    renewal_seen = Event()
+    claim_count = 0
+
+    def observed_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+        nonlocal claim_count
+        result = original_claim(lease_owner=lease_owner, ttl_seconds=ttl_seconds)
+        claim_count += 1
+        if claim_count >= 2:
+            renewal_seen.set()
+        return result
+
+    monkeypatch.setattr(repository, "claim_supervisor_lease", observed_claim)
     first.startup_recover()
-    time.sleep(0.2)
-
-    with pytest.raises(LeaseConflict, match="supervisor is already running"):
-        second.startup_recover()
-
-    first.shutdown()
+    try:
+        assert renewal_seen.wait(timeout=3.0)
+        with pytest.raises(LeaseConflict, match="supervisor is already running"):
+            second.startup_recover()
+    finally:
+        first.shutdown()
     second.startup_recover()
     second.shutdown()
 
