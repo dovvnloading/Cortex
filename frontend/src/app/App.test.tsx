@@ -227,6 +227,48 @@ describe("App", () => {
     expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
   });
 
+  it("does not start a second execution-task poll while the first is pending", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let executionTaskCalls = 0;
+    let resolveExecutionTasks: ((response: Response) => void) | undefined;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) {
+        executionTaskCalls += 1;
+        return new Promise<Response>((resolve) => { resolveExecutionTasks = resolve; });
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+    let intervalHandler: (() => void) | undefined;
+    const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation((handler) => {
+      intervalHandler = handler as () => void;
+      return 1;
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    await waitFor(() => expect(executionTaskCalls).toBe(1));
+    expect(intervalHandler).toBeDefined();
+    act(() => intervalHandler?.());
+    expect(executionTaskCalls).toBe(1);
+
+    await act(async () => {
+      resolveExecutionTasks?.(json({ tasks: [] }));
+      await Promise.resolve();
+    });
+    intervalSpy.mockRestore();
+  });
+
   it("does not replay terminal tasks from before the current backend session", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {

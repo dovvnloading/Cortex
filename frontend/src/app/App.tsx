@@ -108,6 +108,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
   const chatsRef = useRef(chats);
+  const executionTaskRefreshRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     chatsRef.current = chats;
@@ -170,26 +171,42 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     if (route.kind === "not-found") navigate("/chat/new", { replace: true });
   }, [route.kind]);
 
+  const refreshExecutionTasks = useCallback((): Promise<void> => {
+    const inFlight = executionTaskRefreshRef.current;
+    if (inFlight) return inFlight;
+
+    // Defer the request one microtask so the in-flight marker is installed
+    // before an unusually eager fetch implementation can resolve or throw.
+    const refresh = Promise.resolve().then(async () => {
+      try {
+        const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+        setExecutionTasks(response.tasks);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      }
+    });
+    executionTaskRefreshRef.current = refresh;
+    void refresh.then(
+      () => {
+        if (executionTaskRefreshRef.current === refresh) executionTaskRefreshRef.current = null;
+      },
+      () => {
+        if (executionTaskRefreshRef.current === refresh) executionTaskRefreshRef.current = null;
+      },
+    );
+    return refresh;
+  }, [api, onSessionExpired]);
+
   useEffect(() => {
     if (!system?.execution_preview_available) {
       return undefined;
     }
-    let disposed = false;
-    const refresh = async () => {
-      try {
-        const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
-        if (!disposed) setExecutionTasks(response.tasks);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 1000);
+    void refreshExecutionTasks();
+    const timer = window.setInterval(() => void refreshExecutionTasks(), 1000);
     return () => {
-      disposed = true;
       window.clearInterval(timer);
     };
-  }, [api, onSessionExpired, system?.execution_preview_available]);
+  }, [refreshExecutionTasks, system?.execution_preview_available]);
 
   // Only poll the local llama.cpp runtime state while a GGUF model is
   // actually selected -- Ollama users never spend cycles on this. A GGUF
@@ -223,8 +240,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const cancelExecution = async (jobId: string) => {
     try {
       await api.cancelExecution(jobId);
-      const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
-      setExecutionTasks(response.tasks);
+      await refreshExecutionTasks();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onSessionExpired();
       else notify(apiMessage(error, "Could not stop the background task."), "error");
@@ -237,8 +253,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   ) => {
     try {
       await api.decideExecutionApproval(jobId, decision);
-      const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
-      setExecutionTasks(response.tasks);
+      await refreshExecutionTasks();
       notify(decision === "approved" ? "Background task approved once." : "Background task denied.", "success");
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onSessionExpired();
