@@ -179,6 +179,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 sessionExpired = true;
                 break;
               }
+              if (statusError instanceof ApiError && (statusError.status === 403 || statusError.status === 404)) {
+                terminal = true;
+                onFailed(job.threadId, statusError.detail || "Generation is no longer available.");
+                break;
+              }
               useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
               await delay(RECONNECT_DELAY_MS);
             }

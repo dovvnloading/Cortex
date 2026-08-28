@@ -285,6 +285,24 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
+  it("stops retrying and clears the tracked generation when the status fallback says the job is gone", async () => {
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const generationStatus = vi.fn().mockRejectedValue(new ApiError(404, "Generation job not found."));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-status-404", "thread-status-404", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith("thread-status-404", "Generation job not found."));
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(generationStatus).toHaveBeenCalledTimes(1);
+    expect(readActiveJob()).toBeNull();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+  });
+
   it("reconnects with the accumulated cursor after a transient (non-401) stream error", async () => {
     const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-9", kind: "generation", status: "running", sequence: 1 });
     const streamGeneration = vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
