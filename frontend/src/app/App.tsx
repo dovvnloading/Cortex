@@ -399,7 +399,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      notify(apiMessage(error, "Model operation failed."), "error");
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      else notify(apiMessage(error, "Model operation failed."), "error");
       return null;
     } finally { setModelBusy(false); }
   };

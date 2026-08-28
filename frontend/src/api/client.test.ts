@@ -43,6 +43,19 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Last-Event-ID")).toBe("0");
   });
 
+  it("clears the session when a model job event stream returns 401", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({ detail: "Local session expired." }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.streamJob("job-1", vi.fn())).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(api.hasSession).toBe(false);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
+  });
+
   it("binds an approval decision to the encoded execution job route", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       job_id: "job/approval",

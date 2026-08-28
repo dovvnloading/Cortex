@@ -77,6 +77,37 @@ describe("App", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
+  it("returns to onboarding when a model job stream reports an expired session", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/jobs/models") && init?.method === "POST") return json({ job_id: "model-job-401", kind: "models", status: "queued" }, 202);
+      if (url.endsWith("/jobs/model-job-401/events")) return json({ detail: "Local session expired." }, 401);
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await user.click(screen.getByRole("button", { name: "Rescan local models" }));
+
+    expect(await screen.findByRole("heading", { name: "Start local workspace" })).toBeVisible();
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
+  });
+
   it("opens the workspace when the model service is unavailable", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {

@@ -429,6 +429,7 @@ export class CortexApi {
       `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/events`,
       { headers, signal: options.signal },
     );
+    if (response.status === 401) this.clearSession();
     if (!response.ok || !response.body) {
       throw new ApiError(response.status, await this.errorDetail(response));
     }
