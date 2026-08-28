@@ -860,7 +860,7 @@ class ExecutionRepository:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT j.job_id FROM execution_jobs j
+                SELECT j.job_id, j.status FROM execution_jobs j
                 JOIN execution_leases l ON l.job_id = j.job_id
                 WHERE j.status IN ('queued', 'running', 'cancelling')
                   AND l.lease_expires_at <= ?
@@ -870,15 +870,30 @@ class ExecutionRepository:
             for row in rows:
                 job_id = str(row["job_id"])
                 connection.execute("DELETE FROM execution_leases WHERE job_id = ?", (job_id,))
-                self._append_event_connection(
-                    connection,
-                    job_id=job_id,
-                    event="recovered",
-                    status="queued",
-                    phase="recovery",
-                    data={"message": "Expired execution lease recovered."},
-                    now=now_text,
-                )
+                if row["status"] == "cancelling":
+                    connection.execute(
+                        "UPDATE execution_jobs SET error = 'Execution cancelled.' WHERE job_id = ?",
+                        (job_id,),
+                    )
+                    self._append_event_connection(
+                        connection,
+                        job_id=job_id,
+                        event="cancelled",
+                        status="cancelled",
+                        phase="recovery",
+                        data={"message": "Execution cancellation recovered."},
+                        now=now_text,
+                    )
+                else:
+                    self._append_event_connection(
+                        connection,
+                        job_id=job_id,
+                        event="recovered",
+                        status="queued",
+                        phase="recovery",
+                        data={"message": "Expired execution lease recovered."},
+                        now=now_text,
+                    )
                 recovered.append(job_id)
         return recovered
 

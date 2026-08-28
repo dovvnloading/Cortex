@@ -86,6 +86,30 @@ def test_leases_reject_live_foreign_owner_and_allow_expiry_recovery(tmp_path):
         repository.claim_lease(job.job_id, lease_owner="coordinator-b", ttl_seconds=10)
 
 
+def test_expired_lease_does_not_resurrect_a_persisted_cancellation(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-cancelled-before-restart",
+        owner="session-a",
+        request_id="request-cancelled-before-restart",
+        profile="fake.v1",
+        payload={},
+    )
+    repository.claim_lease(
+        job.job_id,
+        lease_owner="dead-coordinator",
+        ttl_seconds=0.01,
+    )
+    repository.request_cancel(job.job_id)
+    time.sleep(0.03)
+
+    assert repository.recover_expired_leases() == [job.job_id]
+    recovered = repository.get_job(job.job_id)
+    assert recovered is not None
+    assert recovered.status == "cancelled"
+    assert recovered.error == "Execution cancelled."
+
+
 def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
