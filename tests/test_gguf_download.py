@@ -7,9 +7,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
 from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api.schemas import ModelDownloadRequest
 from cortex_backend.llamacpp.download import (
     DownloadSource,
     GGUFDownloadError,
@@ -70,6 +72,31 @@ def test_resolve_download_url_rewrites_huggingface_blob_urls_to_resolve_urls() -
 def test_resolve_download_url_rejects_unsafe_requests(source: DownloadSource) -> None:
     with pytest.raises(GGUFDownloadError):
         resolve_download_url(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        DownloadSource(source="url", url="https://example.com/model.gguf\n"),
+        DownloadSource(source="huggingface", repo_id="owner/name\n", filename="model.gguf"),
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="model.gguf\n"),
+    ],
+)
+def test_resolve_download_url_rejects_control_characters(source: DownloadSource) -> None:
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(source)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "url", "url": "https://example.com/model.gguf\n"},
+        {"source": "huggingface", "repo_id": "owner/name", "filename": "model.gguf\n"},
+    ],
+)
+def test_model_download_request_rejects_control_characters(payload: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        ModelDownloadRequest.model_validate(payload)
 
 
 # -- download_gguf ------------------------------------------------------------

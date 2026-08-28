@@ -58,26 +58,36 @@ class DownloadSource:
     filename: str | None = None
 
 
+def _contains_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value)
+
+
 def resolve_download_url(request: DownloadSource) -> tuple[str, str]:
     """Return ``(download_url, target_filename)`` for a validated request."""
     if request.source == "huggingface":
-        if not request.repo_id or not _HF_REPO_PATTERN.match(request.repo_id):
+        if (
+            not isinstance(request.repo_id, str)
+            or _contains_control_character(request.repo_id)
+            or _HF_REPO_PATTERN.fullmatch(request.repo_id) is None
+        ):
             raise GGUFDownloadError("A Hugging Face repo id must look like 'owner/name'.")
         filename = request.filename or ""
-        if not _SAFE_FILENAME_PATTERN.match(filename):
+        if not isinstance(filename, str) or _SAFE_FILENAME_PATTERN.fullmatch(filename) is None:
             raise GGUFDownloadError("The requested file must be a plain '.gguf' filename.")
         url = f"https://huggingface.co/{request.repo_id}/resolve/main/{filename}"
         return url, filename
 
     if request.source == "url":
-        if not request.url:
+        if not isinstance(request.url, str) or not request.url:
             raise GGUFDownloadError("A download URL is required.")
+        if _contains_control_character(request.url):
+            raise GGUFDownloadError("The download URL contains invalid control characters.")
         normalized_url = _normalize_huggingface_blob_url(request.url)
         parts = urlsplit(normalized_url)
         if parts.scheme != "https":
             raise GGUFDownloadError("Only https:// download URLs are supported.")
         filename = os.path.basename(parts.path)
-        if not _SAFE_FILENAME_PATTERN.match(filename):
+        if _SAFE_FILENAME_PATTERN.fullmatch(filename) is None:
             raise GGUFDownloadError("The download URL must point directly at a '.gguf' file.")
         return normalized_url, filename
 
@@ -94,7 +104,7 @@ def _normalize_huggingface_blob_url(url: str) -> str:
     returns an HTML document, not the file, and would otherwise silently
     "succeed" at downloading a web page instead of a model.
     """
-    match = _HF_BLOB_URL_PATTERN.match(url)
+    match = _HF_BLOB_URL_PATTERN.fullmatch(url)
     if not match:
         return url
     normalized = f"{match.group(1)}/resolve/{match.group(2)}"
@@ -104,7 +114,11 @@ def _normalize_huggingface_blob_url(url: str) -> str:
 
 def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | None = None) -> tuple[str, ...]:
     """List ``*.gguf`` files in a public Hugging Face repo (unauthenticated)."""
-    if not _HF_REPO_PATTERN.match(repo_id):
+    if (
+        not isinstance(repo_id, str)
+        or _contains_control_character(repo_id)
+        or _HF_REPO_PATTERN.fullmatch(repo_id) is None
+    ):
         raise GGUFDownloadError("A Hugging Face repo id must look like 'owner/name'.")
     client = http_client or httpx
     try:
@@ -145,8 +159,10 @@ def download_gguf(
     -- so a cancelled or failed download never leaves a partial file at the
     filename the folder scan would pick up.
     """
-    if not _SAFE_FILENAME_PATTERN.match(target_filename):
+    if not isinstance(target_filename, str) or _SAFE_FILENAME_PATTERN.fullmatch(target_filename) is None:
         raise GGUFDownloadError("The target filename must be a plain '.gguf' filename.")
+    if not isinstance(url, str) or _contains_control_character(url):
+        raise GGUFDownloadError("The download URL contains invalid control characters.")
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / target_filename
     temp_path = directory / f".download-{uuid4().hex}.gguf"

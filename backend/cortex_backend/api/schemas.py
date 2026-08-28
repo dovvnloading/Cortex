@@ -312,6 +312,13 @@ class ModelDownloadRequest(APIModel):
     repo_id: str | None = Field(default=None, max_length=200, pattern=r"^[\w.\-]+/[\w.\-]+$")
     filename: str | None = Field(default=None, max_length=255)
 
+    @field_validator("url", "repo_id", "filename")
+    @classmethod
+    def _reject_control_characters(cls, value: str | None) -> str | None:
+        if value is not None and any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value):
+            raise ValueError("download fields cannot contain control characters")
+        return value
+
     @model_validator(mode="after")
     def _validate_source_fields(self) -> "ModelDownloadRequest":
         if self.source == "url" and not self.url:
