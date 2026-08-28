@@ -1090,13 +1090,28 @@ class ExecutionRepository:
         return content
 
     def purge_expired(self, *, now: str | None = None) -> int:
+        """Remove expired artifacts and terminal jobs without orphaning files."""
         cutoff = now or self._now()
-        removed = 0
         with self.connect() as connection:
             artifacts = connection.execute(
-                "SELECT artifact_id, path FROM execution_artifacts WHERE expires_at <= ?",
-                (cutoff,),
+                """
+                SELECT a.artifact_id, a.path
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.expires_at <= ?
+                   OR (
+                       j.status IN ('succeeded', 'failed', 'cancelled')
+                       AND j.updated_at <= ?
+                   )
+                """,
+                (cutoff, cutoff),
             ).fetchall()
+            root = self.artifact_root.resolve()
+            artifact_paths: list[tuple[str, Path]] = []
+            # Validate every path before unlinking any file.  The database
+            # transaction can roll back, but filesystem deletion cannot; a
+            # single tampered path must not make earlier valid artifacts
+            # disappear while their rows remain.
             for row in artifacts:
                 path = Path(row["path"])
                 if _is_reparse_point(path):
@@ -1105,17 +1120,19 @@ class ExecutionRepository:
                     resolved = path.resolve(strict=False)
                 except (OSError, RuntimeError):
                     raise ExecutionRepositoryError("Artifact path is unavailable.") from None
-                if not resolved.is_relative_to(self.artifact_root.resolve()):
+                if not resolved.is_relative_to(root):
                     raise ExecutionRepositoryError("Artifact path is unavailable.")
+                artifact_paths.append((str(row["artifact_id"]), path))
+
+            for artifact_id, path in artifact_paths:
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
                     raise ExecutionRepositoryError("Artifact cleanup failed.") from None
                 connection.execute(
                     "DELETE FROM execution_artifacts WHERE artifact_id = ?",
-                    (row["artifact_id"],),
+                    (artifact_id,),
                 )
-                removed += 1
             jobs = connection.execute(
                 """
                 SELECT job_id FROM execution_jobs
@@ -1125,7 +1142,7 @@ class ExecutionRepository:
             ).fetchall()
             for row in jobs:
                 connection.execute("DELETE FROM execution_jobs WHERE job_id = ?", (row["job_id"],))
-        return removed
+        return len(artifact_paths)
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:
