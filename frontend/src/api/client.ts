@@ -57,11 +57,13 @@ export class ApiError extends Error {
 }
 
 type FetchLike = typeof fetch;
+type SessionExpiredListener = () => void;
 
 export class CortexApi {
   private readonly baseUrl: string;
   private readonly fetcher: FetchLike;
   private sessionToken: string | null;
+  private readonly sessionExpiredListeners = new Set<SessionExpiredListener>();
 
   constructor(
     baseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1",
@@ -76,9 +78,18 @@ export class CortexApi {
     return this.sessionToken !== null;
   }
 
+  subscribeSessionExpired(listener: SessionExpiredListener): () => void {
+    this.sessionExpiredListeners.add(listener);
+    return () => this.sessionExpiredListeners.delete(listener);
+  }
+
   clearSession(): void {
+    const hadSession = this.sessionToken !== null;
     this.sessionToken = null;
     window.sessionStorage.removeItem("cortex.session.token");
+    if (hadSession) {
+      for (const listener of this.sessionExpiredListeners) listener();
+    }
   }
 
   async exchangeBootstrapToken(token: string): Promise<SessionExchangeResponse> {

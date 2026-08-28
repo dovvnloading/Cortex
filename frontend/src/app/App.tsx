@@ -44,6 +44,8 @@ export function App({ api: providedApi }: Props) {
   const [connecting, setConnecting] = useState(false);
   const handleSessionExpired = useCallback(() => setSessionReady(false), []);
 
+  useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
+
   if (!sessionReady) {
     return (
       <Onboarding

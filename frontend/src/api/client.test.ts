@@ -25,6 +25,20 @@ describe("CortexApi", () => {
     await expect(api.health()).rejects.toEqual(new ApiError(503, "The local workspace did not respond."));
   });
 
+  it("notifies subscribers when an authenticated request expires the session", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({ detail: "Local session expired." }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+  });
+
   it("parses ordered authenticated generation events from an SSE response", async () => {
     const sse = [
       'id: 1\nevent: generation.queued\ndata: {"event_id":1,"event":"generation.queued","job_id":"job-1","thread_id":"thread-1","data":{}}\n\n',
