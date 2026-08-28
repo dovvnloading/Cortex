@@ -51,6 +51,12 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-1", threadId: "thread-1" });
   });
 
+  it("ignores a valid JSON value that is not a complete persisted generation", () => {
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-only" }));
+
+    expect(readActiveJob()).toBeNull();
+  });
+
   it("batches rapid content_delta events into the store via requestAnimationFrame", async () => {
     let emit: ((event: unknown) => void) | null = null;
     const api = fakeApi({

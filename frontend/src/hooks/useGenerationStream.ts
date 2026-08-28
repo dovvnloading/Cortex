@@ -8,11 +8,24 @@ const ACTIVE_JOB_KEY = "cortex.active.generation";
 
 export type PersistedJob = { jobId: string; threadId: string; lastEventId: number };
 
+function isPersistedJob(value: unknown): value is PersistedJob {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PersistedJob>;
+  return typeof candidate.jobId === "string"
+    && candidate.jobId.length > 0
+    && typeof candidate.threadId === "string"
+    && candidate.threadId.length > 0
+    && typeof candidate.lastEventId === "number"
+    && Number.isSafeInteger(candidate.lastEventId)
+    && candidate.lastEventId >= 0;
+}
+
 export function readActiveJob(): PersistedJob | null {
   const raw = window.sessionStorage.getItem(ACTIVE_JOB_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as PersistedJob;
+    const value: unknown = JSON.parse(raw);
+    return isPersistedJob(value) ? value : null;
   } catch {
     return null;
   }
