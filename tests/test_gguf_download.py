@@ -17,6 +17,7 @@ from cortex_backend.llamacpp.download import (
     GGUFDownloadError,
     GGUFDownloadProgress,
     download_gguf,
+    list_huggingface_gguf_files,
     resolve_download_url,
 )
 
@@ -248,3 +249,13 @@ def test_huggingface_file_listing_route(monkeypatch) -> None:
         payload = response.json()
         assert payload["repo_id"] == "bartowski/tiny-model-GGUF"
         assert payload["files"] == ["model.Q4_K_M.gguf", "model.Q8_0.gguf"]
+
+
+def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=b"not-json")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
+            list_huggingface_gguf_files("owner/model", http_client=client)

@@ -130,7 +130,10 @@ def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | Non
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.") from exc
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.") from exc
     siblings = payload.get("siblings", []) if isinstance(payload, dict) else []
     names = sorted(
         entry["rfilename"]
