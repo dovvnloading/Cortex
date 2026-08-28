@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, CortexApi } from "./client";
 
 describe("CortexApi", () => {
+  afterEach(() => window.sessionStorage.clear());
+
   it("exchanges a bootstrap token and sends the session bearer on protected calls", async () => {
     const fetcher = vi.fn<typeof fetch>();
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -45,8 +47,8 @@ describe("CortexApi", () => {
       'id: 2\nevent: generation.content_delta\ndata: {"event_id":2,"event":"generation.content_delta","job_id":"job-1","thread_id":"thread-1","data":{"delta":"hello"}}\n\n',
     ].join("");
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
-    const api = new CortexApi("/api/v1", fetcher);
     window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
     const events: string[] = [];
 
     await api.streamGeneration("job-1", (event) => events.push(event.event), { afterEventId: 0 });
@@ -79,8 +81,8 @@ describe("CortexApi", () => {
       sequence: 3,
       approval_state: "approved",
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    const api = new CortexApi("/api/v1", fetcher);
     window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
 
     await api.decideExecutionApproval("job/approval", "approved");
 
@@ -100,8 +102,8 @@ describe("CortexApi", () => {
       status: "queued",
       sequence: 1,
     }), { status: 202, headers: { "Content-Type": "application/json" } }));
-    const api = new CortexApi("/api/v1", fetcher);
     window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
 
     await api.startRecipeImageTransform({
       request_id: "recipe-request",
@@ -138,8 +140,8 @@ describe("CortexApi", () => {
       sha256: "a".repeat(64),
       expires_at: "2026-07-20T00:00:00Z",
     }), { status: 201, headers: { "Content-Type": "application/json" } }));
-    const api = new CortexApi("/api/v1", fetcher);
     window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
 
     await api.stageAttachment({
       request_id: "attachment-request",
