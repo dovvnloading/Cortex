@@ -1,15 +1,17 @@
 <#
 .SYNOPSIS
-    Run Cortex's quality gates locally, the same ones .github/workflows/quality.yml runs.
+    Run Cortex's quality gates locally, including the fast gates in
+    .github/workflows/quality.yml.
 
 .DESCRIPTION
     Catches failures on your machine in ~2 minutes instead of waiting on CI.
 
     Tiers:
-      quick  (default) Lint, backend tests, contract drift, frontend types/lint/unit tests.
-                       This is what the pre-push hook runs.
-      full             Everything in quick, plus compileall, Playwright e2e, and the
-                       frontend bundle build.
+      quick  (default) Lint, backend tests, contract drift, security/watchdog
+                       qualification, and frontend types/lint/unit tests. This is
+                       what the pre-push hook runs.
+      full             Everything in quick, plus compileall, Playwright browser
+                       installation/e2e tests, and the frontend bundle build.
 
     Deliberately NOT included at any tier: PyInstaller packaging, the recipe-worker /
     coordinator qualification spikes, and WebView2 signature verification. Those take
@@ -80,6 +82,14 @@ if (-not $SkipBackend) {
         python -m pytest -q
     }
 
+    Invoke-Step 'Artifact boundary qualification' {
+        python tools/execution_spikes/artifact_security_review.py --json --strict
+    }
+
+    Invoke-Step 'Resource/watchdog qualification' {
+        python tools/execution_spikes/resource_watchdog_qualification.py --json --strict
+    }
+
     Invoke-Step 'API contracts are up to date' {
         # Regenerates in place, then fails if that produced a diff -- the same
         # check CI runs, and the usual cause of a red build after touching a
@@ -111,6 +121,10 @@ if (-not $SkipFrontend) {
     Invoke-Step 'Frontend unit tests (vitest)' { npm test -- --run } $frontend
 
     if ($Tier -eq 'full') {
+        Invoke-Step 'Install Playwright Chromium' {
+            npx playwright install chromium
+        } $frontend
+
         Invoke-Step 'Frontend browser tests (playwright)' {
             npm run e2e -- --workers=1
         } $frontend

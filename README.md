@@ -185,10 +185,12 @@ endpoint can be intentionally changed for a trusted local network setup with
 
 ## Development checks
 
-One script runs the same gates CI runs, from the repository root:
+The local check script covers the fast gates CI runs, from the repository root.
+For contributor setup, install `requirements-dev.txt` as described in
+`CONTRIBUTING.md` so the local Ruff version matches CI:
 
 ```powershell
-./scripts/check.ps1              # lint, tests, contracts, frontend -- about two minutes
+./scripts/check.ps1              # fast gates, including security/watchdog qualification
 ./scripts/check.ps1 -Tier full   # adds compileall, Playwright, and the bundle build
 ```
 

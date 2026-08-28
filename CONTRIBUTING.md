@@ -13,7 +13,7 @@ git clone https://github.com/dovvnloading/Cortex.git
 cd Cortex
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 python main.py --dev
 ```
 
@@ -23,16 +23,17 @@ data in tests or logs.
 
 ## Quality checks
 
-One script runs the same gates CI does, on your machine:
+The development requirements pin the same Ruff version used by CI. One script
+runs the repository's fast quality gates on your machine:
 
 ```powershell
 ./scripts/check.ps1
 ```
 
-That is the `quick` tier -- lint, backend tests, contract drift, and frontend
-types/lint/unit tests -- and takes roughly two minutes. Before opening a pull
-request, run the `full` tier, which adds `compileall`, the Playwright browser
-tests, and the bundle build:
+That is the `quick` tier -- lint, backend tests, contract drift,
+security/watchdog qualification, and frontend types/lint/unit tests. Before
+opening a pull request, run the `full` tier, which adds `compileall`, the
+Playwright browser installation and tests, and the bundle build:
 
 ```powershell
 ./scripts/check.ps1 -Tier full
