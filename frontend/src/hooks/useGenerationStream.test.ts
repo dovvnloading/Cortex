@@ -367,4 +367,47 @@ describe("useGenerationStream", () => {
 
     act(() => result.current.stop());
   });
+
+  it("keeps streaming when session storage is unavailable", async () => {
+    // Regression test: a browser that denies storage access (or has hit its
+    // quota) throws from setItem. persistActiveJob() runs inside the
+    // synchronous SSE event handler, so an escaping throw reached consume()
+    // as a stream failure -- it reconnected from the same cursor, replayed
+    // the same event, threw again, and looped forever without ever
+    // rendering a token.
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("QuotaExceededError", "QuotaExceededError");
+    });
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("SecurityError", "SecurityError");
+    });
+    try {
+      expect(readActiveJob()).toBeNull();
+
+      const { streamGeneration, emitEvent } = terminalAwareStream();
+      const generationStatus = vi.fn();
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-storage", "thread-storage", vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        emitEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-storage", thread_id: "thread-storage", data: { delta: "Hello" } });
+      });
+
+      await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("Hello"));
+      // No reconnect: the storage failure must not be mistaken for a dropped
+      // connection.
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+      expect(generationStatus).not.toHaveBeenCalled();
+
+      act(() => result.current.stop());
+    } finally {
+      setItem.mockRestore();
+      getItem.mockRestore();
+    }
+  });
 });
