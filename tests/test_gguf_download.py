@@ -259,3 +259,14 @@ def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
             list_huggingface_gguf_files("owner/model", http_client=client)
+
+
+@pytest.mark.parametrize("siblings", [None, 123])
+def test_huggingface_file_listing_rejects_malformed_siblings_shape(siblings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"siblings": siblings})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
+            list_huggingface_gguf_files("owner/model", http_client=client)
