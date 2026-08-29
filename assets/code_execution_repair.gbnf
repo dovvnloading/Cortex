@@ -1,0 +1,45 @@
+# Grammar for the single repair turn after a rejected code proposal.
+#
+# This is deliberately NOT applied to ordinary answers. Constraining a whole
+# turn stops a model from reasoning in prose first, which costs more quality
+# than it buys. It is applied only when the model has already produced one
+# malformed or invalid envelope and is being asked for nothing but a corrected
+# one -- there, guaranteeing a syntactically valid envelope is pure upside.
+#
+# The grammar also encodes two invariants the validator would otherwise reject
+# a second time: the language is always "python", and "process" is always
+# false, because process execution is fail-closed in the runtime regardless of
+# what a model asks for.
+#
+# Control characters are excluded from strings so a model cannot emit a raw
+# newline inside the JSON source field, which is the single most common way a
+# small model produces an envelope that json.loads() cannot read.
+
+root ::= "<code_execution_request>" ws object ws "</code_execution_request>"
+
+object ::=
+  "{" ws
+  "\"language\"" ws ":" ws "\"python\"" ws "," ws
+  "\"source\"" ws ":" ws string ws "," ws
+  "\"intent_summary\"" ws ":" ws string ws "," ws
+  "\"capabilities\"" ws ":" ws capabilities ws
+  "}"
+
+capabilities ::=
+  "{" ws
+  "\"filesystem\"" ws ":" ws boolean ws "," ws
+  "\"process\"" ws ":" ws "false" ws "," ws
+  "\"network\"" ws ":" ws boolean ws
+  "}"
+
+boolean ::= "true" | "false"
+
+string ::= "\"" char* "\""
+
+char ::= [^"\\\x00-\x1F] | "\\" escape
+
+escape ::= ["\\/bfnrt] | "u" hex hex hex hex
+
+hex ::= [0-9a-fA-F]
+
+ws ::= [ \t\n]*

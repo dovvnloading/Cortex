@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import type { CortexApi } from "../api/client";
 import { ApiError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
+import { useUiStore } from "../stores/useUiStore";
 
 const RECONNECT_DELAY_MS = 250;
 const ACTIVE_JOB_KEY = "cortex.active.generation";
@@ -130,6 +131,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       let cursor = job.lastEventId;
       let terminal = false;
       let sessionExpired = false;
+      let rejectionNotified = false;
       // Set alongside `terminal`, never awaited until the finally block below
       // -- endGeneration() must not clear the store's jobId (and unmount the
       // pending bubble) before the reload it triggers has actually put the
@@ -167,6 +169,21 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   contentFlusher.flushNow();
                   thoughtsFlusher.flushNow();
                   useChatStore.getState().markContentReady(job.jobId);
+                }
+                // The assistant asked to run something locally and the harness
+                // refused. The rejected block is stripped from the answer, so
+                // without this the task would simply never happen and the user
+                // would be left guessing why. The same payload rides both the
+                // status event and the job result, so it is announced once.
+                const rejection = data.code_execution_rejection;
+                if (
+                  !rejectionNotified
+                  && rejection
+                  && typeof rejection === "object"
+                  && typeof (rejection as { message?: unknown }).message === "string"
+                ) {
+                  rejectionNotified = true;
+                  useUiStore.getState().notify((rejection as { message: string }).message, "info");
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;

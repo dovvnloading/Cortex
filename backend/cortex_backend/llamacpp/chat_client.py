@@ -212,10 +212,25 @@ def _build_request_body(messages: list[dict], options: dict, *, stream: bool) ->
         ("temperature", "temperature"),
         ("top_p", "top_p"),
         ("top_k", "top_k"),
+        ("min_p", "min_p"),
         ("repeat_penalty", "repeat_penalty"),
     ):
         if option_key in options and options[option_key] is not None:
             body[body_key] = options[option_key]
+    # Constrained decoding: llama.cpp-specific, and the harness's only way to
+    # *guarantee* a parseable action envelope rather than hoping the model
+    # formats one correctly. llama-server treats "grammar" (GBNF) and
+    # "response_format" (JSON schema) as two ways of expressing the same
+    # constraint, so sending both at once is ambiguous -- grammar wins, being
+    # the more precise of the two. Neither field exists in the Ollama API;
+    # OllamaChatClient strips them from the shared options mapping before
+    # forwarding (see services/chat_client.py).
+    grammar = options.get("grammar")
+    response_format = options.get("response_format")
+    if isinstance(grammar, str) and grammar:
+        body["grammar"] = grammar
+    elif isinstance(response_format, dict):
+        body["response_format"] = response_format
     seed = options.get("seed")
     if isinstance(seed, int) and seed != -1:
         body["seed"] = seed

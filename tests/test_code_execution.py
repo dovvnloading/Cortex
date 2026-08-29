@@ -605,9 +605,18 @@ def test_model_proposal_rejects_the_unavailable_process_capability() -> None:
         None,
     )
     assert agent.last_code_proposal is None
+    assert agent.last_code_rejection is not None
+    assert agent.last_code_rejection.code == "process_capability_unavailable"
+    # No correction can grant a capability the runtime refuses outright, so the
+    # harness must not spend a repair turn asking for one.
+    assert agent.last_code_rejection.repairable is False
 
     malformed, _, _ = agent._parse_and_clean_response(
         "<code_execution_request>{not-json}</code_execution_request>", None,
     )
-    assert "code_execution_request" in malformed
+    # The unreadable envelope is stripped from the answer; the specific reason
+    # travels separately so the user gets an explanation rather than raw JSON.
+    assert "code_execution_request" not in malformed
     assert agent.last_code_proposal is None
+    assert agent.last_code_rejection is not None
+    assert agent.last_code_rejection.code == "invalid_json"

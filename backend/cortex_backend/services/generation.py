@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
+    CodeProposalRejection,
     GenerationAttachment,
     GenerationSnapshot,
     GenerationStats,
@@ -96,6 +97,10 @@ class GenerationServiceResult:
     thoughts: str | None
     memory_command: MemoryCommand
     code_execution_proposal: CodeExecutionProposal | None = None
+    # Set when the model asked to run code and the harness refused. Carried
+    # beside the answer so the API can explain the refusal instead of leaving
+    # the user with a silently missing task.
+    code_execution_rejection: CodeProposalRejection | None = None
     stats: GenerationStats | None = None
 
 
@@ -134,9 +139,18 @@ class GenerationService:
         # model_options by hand, so it stays in step with GenerationSettings'
         # own default rather than reintroducing the old, too-small one.
         num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
+        self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
+        engine = self._engine_factory(snapshot)
+        # ``fit_history`` marks an engine that understands the newer prompt
+        # shape, which is also the one that renders host observations. Older
+        # engines neither accept nor render them, so the extra argument is
+        # withheld rather than probed for.
+        observation_kwargs: dict[str, Any] = (
+            {"host_observations": snapshot.host_observations}
+            if callable(getattr(engine, "fit_history", None))
+            else {}
+        )
         if snapshot.memories_enabled:
-            self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
-            engine = self._engine_factory(snapshot)
             permanent_memories = engine.fit_memories_to_context(
                 permanent_memories,
                 query=snapshot.user_input,
@@ -144,10 +158,8 @@ class GenerationService:
                 num_ctx=num_ctx,
                 code_execution_eligible=snapshot.code_execution_eligible,
                 bypass_system_prompt=snapshot.bypass_system_prompt,
+                **observation_kwargs,
             )
-        else:
-            self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
-            engine = self._engine_factory(snapshot)
 
         # Optional: lets an engine (e.g. one backed by a locally-managed
         # llama.cpp runtime) report its own startup progress -- binary
@@ -189,6 +201,7 @@ class GenerationService:
                 num_ctx=num_ctx,
                 code_execution_eligible=snapshot.code_execution_eligible,
                 bypass_system_prompt=snapshot.bypass_system_prompt,
+                **observation_kwargs,
             )
 
         history_kwargs: dict[str, Any] = {
@@ -199,10 +212,27 @@ class GenerationService:
             "num_ctx": num_ctx,
             "code_execution_eligible": snapshot.code_execution_eligible,
             "bypass_system_prompt": snapshot.bypass_system_prompt,
+            **observation_kwargs,
         }
         if reserved_attachments:
             history_kwargs["attachments"] = reserved_attachments
-        chat_history = engine.fit_history_to_context(working_history, **history_kwargs)
+        # Preferred shape: the same retained exchanges as real user/assistant
+        # turns, which is what a chat-tuned model's template expects and what
+        # lets a local runtime reuse its cache across turns. One call returns
+        # both renderings because choosing which exchanges fit is the expensive
+        # part and must not be done twice. Engines that do not offer it (the
+        # narrower fakes in the test suite, and any older adapter) keep the
+        # flattened transcript.
+        structured_history: Sequence[Mapping[str, Any]] | None = None
+        fit_history = getattr(engine, "fit_history", None)
+        if callable(fit_history):
+            chat_history, structured_history = fit_history(
+                working_history, **history_kwargs
+            )
+        else:
+            chat_history = engine.fit_history_to_context(
+                working_history, **history_kwargs
+            )
 
         self._check_cancelled(cancellation_event)
         generate_kwargs: dict[str, Any] = {
@@ -212,6 +242,7 @@ class GenerationService:
             "memories_enabled": snapshot.memories_enabled,
             "user_system_instructions": snapshot.user_system_instructions,
             "options": dict(snapshot.model_options),
+            **observation_kwargs,
         }
         # Keep the legacy headless engine protocol compatible for callers that
         # do not use attachments or cancellation; real engines receive the
@@ -220,6 +251,15 @@ class GenerationService:
             generate_kwargs["attachments"] = snapshot.attachments
         if cancellation_event is not None:
             generate_kwargs["cancellation_event"] = cancellation_event
+        if structured_history is not None:
+            # Safe to pass unguarded: the two are one capability on the engine.
+            # An engine that can select structured history is by construction
+            # one whose generate() accepts it, so there is no signature to
+            # probe -- and retrying on TypeError would be actively harmful,
+            # because a TypeError raised from *inside* a working generate()
+            # would be indistinguishable from a signature mismatch and would
+            # silently run the model a second time.
+            generate_kwargs["history_messages"] = structured_history
         response, thoughts, memory_command, stats = engine.generate(
             **generate_kwargs,
         )
@@ -236,6 +276,9 @@ class GenerationService:
             proposal, CodeExecutionProposal
         ):
             proposal = None
+        rejection = getattr(engine, "last_code_rejection", None)
+        if not isinstance(rejection, CodeProposalRejection) or proposal is not None:
+            rejection = None
 
         if snapshot.translation_enabled:
             self._check_cancelled(cancellation_event)
@@ -275,6 +318,7 @@ class GenerationService:
             thoughts=thoughts,
             memory_command=memory_command,
             code_execution_proposal=proposal,
+            code_execution_rejection=rejection,
             stats=stats,
         )
 

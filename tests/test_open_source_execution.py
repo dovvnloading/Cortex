@@ -218,4 +218,9 @@ def test_explicit_math_request_adds_a_verified_local_observation_to_generation()
     assert coordinator.request.expression == "9 * 9"
     assert coordinator.wait_timeout is not None
     assert coordinator.closed is True
-    assert "9 * 9 = 81" in (captured[0].user_system_instructions or "")
+    # The verified result reaches the model as a host observation, not as a
+    # user instruction. Worker output is data: the prompt renders it in the
+    # user turn inside untrusted-reference delimiters, while the system role
+    # stays reserved for the user's own standing policy.
+    assert "9 * 9 = 81" in (captured[0].host_observations or "")
+    assert "9 * 9 = 81" not in (captured[0].user_system_instructions or "")

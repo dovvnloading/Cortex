@@ -91,6 +91,48 @@ class GenerationOptionsMergeTests(unittest.TestCase):
             raise AssertionError("out-of-range override should have been rejected")
 
 
+class CodeTurnSamplingTests(unittest.TestCase):
+    """A turn that may emit a code proposal samples differently from chat.
+
+    Chat defaults are tuned for conversation. Applied to code they are actively
+    harmful: a repetition penalty above 1.0 charges the model for the tokens
+    code repeats by necessity -- indentation, brackets, the fixed key names in
+    the request envelope -- and a chatty temperature loosens exactly the
+    structure the parser depends on.
+    """
+
+    def test_code_turns_neutralize_the_repetition_penalty(self):
+        settings = CortexSettings()
+        assert settings.generation.repeat_penalty > 1.0, "precondition for this test"
+
+        merged = _merged_model_options(settings, None, code_turn=True)
+
+        assert merged["repeat_penalty"] == 1.0
+
+    def test_code_turns_add_min_p_and_cap_temperature(self):
+        merged = _merged_model_options(CortexSettings(), None, code_turn=True)
+
+        assert merged["min_p"] == 0.05
+        assert merged["temperature"] <= 0.3
+
+    def test_a_deliberately_lower_temperature_is_preserved(self):
+        """The profile is a ceiling, not an assignment."""
+
+        override = GenerationOptionsOverride(temperature=0.05)
+        merged = _merged_model_options(CortexSettings(), override, code_turn=True)
+
+        assert merged["temperature"] == 0.05
+
+    def test_ordinary_chat_turns_are_left_exactly_as_they_were(self):
+        settings = CortexSettings()
+
+        merged = _merged_model_options(settings, None)
+
+        assert merged["repeat_penalty"] == settings.generation.repeat_penalty
+        assert merged["temperature"] == settings.generation.temperature
+        assert "min_p" not in merged
+
+
 class ExtractStatsTests(unittest.TestCase):
     """Unit coverage for services.llm._extract_stats."""
 
