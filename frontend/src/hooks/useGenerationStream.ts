@@ -31,7 +31,7 @@ function isPersistedJob(value: unknown): value is PersistedJob {
  * best-effort instead, exactly as the composer draft helpers already do.
  */
 export function readActiveJob(): PersistedJob | null {
-  let raw: string | null = null;
+  let raw: string | null;
   try {
     raw = window.sessionStorage.getItem(ACTIVE_JOB_KEY);
   } catch {
