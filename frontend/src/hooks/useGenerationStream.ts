@@ -252,7 +252,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
           if (stored?.jobId === job.jobId) clearActiveJob();
           useChatStore.getState().endGeneration(job.jobId);
         }
-        consumingRef.current = null;
+        // Only release the claim if it is still ours: a consumer that is
+        // finishing late (its terminal reload is awaited above) must not
+        // clear the marker a newer job has since installed, which would let
+        // a second consumer attach to that newer job in parallel.
+        if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }
     },
