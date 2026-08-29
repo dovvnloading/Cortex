@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CortexApi } from "../api/client";
 import { ApiError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
+import { useUiStore } from "../stores/useUiStore";
 import { readActiveJob, useGenerationStream } from "./useGenerationStream";
 
 type FakeGenerationEvent = { event: string; [key: string]: unknown };
@@ -35,7 +36,10 @@ function fakeApi(overrides: Partial<CortexApi> = {}): CortexApi {
 const ignoreSessionExpiry = () => undefined;
 
 describe("useGenerationStream", () => {
-  afterEach(() => window.sessionStorage.clear());
+  afterEach(() => {
+    window.sessionStorage.clear();
+    useUiStore.setState({ toasts: [] });
+  });
 
   it("start() persists the job to sessionStorage and moves the store to starting", () => {
     const api = fakeApi();
@@ -160,6 +164,66 @@ describe("useGenerationStream", () => {
     // The last buffered token flushes even though completion fired in the same tick.
     await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }));
     expect(readActiveJob()).toBeNull();
+  });
+
+  it("surfaces a refused code proposal, which is otherwise invisible", async () => {
+    // The rejected block is stripped from the answer so it cannot teach the
+    // model its own malformed format on the next turn. That leaves the toast
+    // as the only place the user learns the task they asked for never ran.
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-rej", "thread-rej", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.status",
+        job_id: "job-rej",
+        thread_id: "thread-rej",
+        data: {
+          message: "Cortex only runs code without imports.",
+          code_execution_rejection: {
+            code: "imports_not_allowed",
+            message: "Cortex only runs code without imports.",
+          },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toasts.map((toast) => toast.message)).toContain(
+        "Cortex only runs code without imports.",
+      ),
+    );
+  });
+
+  it("ignores a malformed rejection payload rather than showing an empty toast", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-rej2", "thread-rej2", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.status",
+        job_id: "job-rej2",
+        thread_id: "thread-rej2",
+        data: { code_execution_rejection: { code: "imports_not_allowed" } },
+      });
+    });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    expect(useUiStore.getState().toasts).toHaveLength(0);
   });
 
   it("waits for onCompleted's reload to finish before clearing the store's jobId", async () => {

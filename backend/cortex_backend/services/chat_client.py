@@ -5,6 +5,14 @@ Every :class:`ChatClient` implementation returns an Ollama-shaped response
 mapping, regardless of which runtime produced it, so nothing downstream
 (``services/llm.py``'s parsing, stats extraction, error classification) needs
 to know which backend served a call.
+
+The reverse direction is *not* symmetric: the ``options`` mapping a caller
+builds is shared by both backends (``RoutingChatClient`` hands the same dict to
+whichever client the model tag selects), but the backends do not accept the
+same option keys. Options only one runtime understands therefore have to be
+filtered out by the client that cannot use them -- see
+``_LLAMACPP_ONLY_OPTION_KEYS`` below -- so a caller can set them
+unconditionally without having to know which runtime will serve the call.
 """
 
 from __future__ import annotations
@@ -15,6 +23,27 @@ from typing import Any, Protocol
 # Ollama tags are ``name:tag`` and never contain this prefix, so it
 # unambiguously identifies a GGUF model id (see llamacpp/model_directory.py).
 GGUF_PREFIX = "gguf:"
+
+# Constrained-decoding controls that only llama-server understands (see
+# llamacpp/chat_client.py's _build_request_body). The Ollama API rejects
+# unknown option keys rather than ignoring them, so forwarding these would
+# turn a harmless "no constraint available on this backend" into a failed
+# turn. Note that min_p is deliberately absent: it is a legitimate Ollama
+# option and must keep flowing through.
+_LLAMACPP_ONLY_OPTION_KEYS = frozenset({"grammar", "response_format"})
+
+
+def _without_llamacpp_only_options(options: dict) -> dict:
+    """``options`` minus any llama.cpp-only key, without mutating the caller's
+    dict (it is reused across calls, and one turn can hit both backends).
+
+    Copies only when a stripped key is actually present, so the common case --
+    a plain chat turn with no constrained decoding requested -- stays
+    allocation-free.
+    """
+    if not any(key in options for key in _LLAMACPP_ONLY_OPTION_KEYS):
+        return options
+    return {key: value for key, value in options.items() if key not in _LLAMACPP_ONLY_OPTION_KEYS}
 
 
 class ChatClient(Protocol):
@@ -59,6 +88,9 @@ class OllamaChatClient:
         options: dict,
         cancellation_event: Event | None = None,
     ) -> dict:
+        # Rebound once up front so both the streaming and non-streaming
+        # branches below are guaranteed to send the filtered mapping.
+        options = _without_llamacpp_only_options(options)
         if cancellation_event is None:
             return self._client.chat(model=model, messages=messages, options=options)
         # ollama.Client(stream=True) returns a generator that owns an httpx

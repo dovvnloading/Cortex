@@ -16,7 +16,7 @@ const FIELDS: { field: OverrideField; label: string; min: number; max: number; s
   { field: "top_p", label: "Top P", min: 0, max: 1, step: 0.05 },
   { field: "top_k", label: "Top K", min: 0, max: 200, step: 1 },
   { field: "repeat_penalty", label: "Repeat penalty", min: 0.5, max: 2, step: 0.05 },
-  { field: "num_ctx", label: "Context window", min: 2048, max: 16384, step: 1024 },
+  { field: "num_ctx", label: "Context window", min: 2048, max: 65536, step: 1024 },
 ];
 
 const SAMPLING_FIELDS = FIELDS.slice(0, 4);

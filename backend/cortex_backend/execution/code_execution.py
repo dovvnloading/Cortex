@@ -152,6 +152,11 @@ class CodeExecutionRequest:
     source: str
     intent_summary: str
     capabilities: CodeCapabilities = CodeCapabilities()
+    # Set only for a run the model proposed inside a chat, so the finished
+    # result can be shown back to that same conversation. It is bookkeeping for
+    # the chat layer: the worker never receives it, recovery never needs it,
+    # and it grants no authority.
+    thread_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, str) or _SAFE_OWNER.fullmatch(self.owner) is None:
@@ -170,6 +175,11 @@ class CodeExecutionRequest:
             raise CodeExecutionError("intent_invalid")
         if not isinstance(self.capabilities, CodeCapabilities):
             raise CodeExecutionError("capabilities_invalid")
+        if self.thread_id is not None and (
+            not isinstance(self.thread_id, str)
+            or _SAFE_REQUEST_ID.fullmatch(self.thread_id) is None
+        ):
+            raise ValueError("thread_id is invalid")
         validate_code_source(self.source)
         if (
             self.capabilities.process
@@ -205,7 +215,7 @@ class CodeExecutionRequest:
         return hashlib.sha256(scope).hexdigest()
 
     def payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": CODE_EXECUTION_PAYLOAD_SCHEMA,
             "language": "python",
             "source": self.source,
@@ -213,6 +223,11 @@ class CodeExecutionRequest:
             "source_digest": self.source_digest,
             "capabilities": self.capabilities.as_dict(),
         }
+        # Omitted entirely when absent, so a run started through the public API
+        # keeps exactly the payload it has always had.
+        if self.thread_id:
+            payload["thread_id"] = self.thread_id
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1318,18 +1333,27 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     stderr = _BoundedTextWriter()
     runtime = _CapabilityRuntime(grants, workspace or os.getcwd())
     _apply_resource_limits()
-    globals_dict: dict[str, Any] = {
+    # One namespace, used as both globals and locals. Passing two distinct
+    # mappings makes top-level names locals, which a comprehension or generator
+    # expression cannot see: its implicit function scope resolves free names
+    # through *globals*, so `total = sum([data[i] for i in range(3)])` raises
+    # NameError for `data` even though the program is obviously correct. CPython
+    # 3.12 hid half of that by inlining list/set/dict comprehensions, which only
+    # made the failure version-dependent -- generator expressions still broke,
+    # and on 3.11 every comprehension did. Sharing the namespace removes the
+    # trap on every supported version. It grants nothing: the builtins mapping
+    # and the validated subset are unchanged.
+    namespace: dict[str, Any] = {
         "__builtins__": {name: getattr(builtins, name) for name in _ALLOWED_CALLS if hasattr(builtins, name)},
         "cortex": runtime,
     }
-    locals_dict: dict[str, Any] = {}
     old_stdout, old_stderr = sys.stdout, sys.stderr
     old_trace = sys.gettrace()
     guard = _ExecutionGuard()
     try:
         sys.stdout, sys.stderr = stdout, stderr
         sys.settrace(guard.trace)
-        exec(compile(source, "<cortex-code>", "exec"), globals_dict, locals_dict)
+        exec(compile(source, "<cortex-code>", "exec"), namespace)
     except CodeExecutionError:
         raise
     except MemoryError:
@@ -1343,7 +1367,7 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
         sys.settrace(old_trace)
     out, out_truncated = _bounded_text(stdout.getvalue())
     err, err_truncated = _bounded_text(stderr.getvalue())
-    value = locals_dict.get("_result", locals_dict.get("result"))
+    value = namespace.get("_result", namespace.get("result"))
     safe_value, value_truncated = _bounded_json_value(value)
     return CodeExecutionResult(
         stdout=out,

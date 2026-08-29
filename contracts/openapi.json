@@ -1632,7 +1632,7 @@
           "num_ctx": {
             "anyOf": [
               {
-                "maximum": 16384.0,
+                "maximum": 65536.0,
                 "minimum": 2048.0,
                 "type": "integer"
               },
@@ -1793,7 +1793,7 @@
           },
           "num_ctx": {
             "default": 8192,
-            "maximum": 16384.0,
+            "maximum": 65536.0,
             "minimum": 2048.0,
             "title": "Num Ctx",
             "type": "integer"

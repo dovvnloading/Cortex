@@ -61,7 +61,14 @@ class GenerationSettings(_SettingsModel):
     # actually supports (the smallest here is 40960). 8192 keeps the full
     # 30-exchange conversation even with memories and code-execution eligibility
     # both active; see the discussion around PR raising this default.
-    num_ctx: int = Field(default=8192, ge=2048, le=16384)
+    # The ceiling is what the machine can hold, not what the model supports:
+    # every locally installed model here advertises far more than 16384, and a
+    # coding turn (contract, transcript, program, its output) is exactly the
+    # shape that ran out of room first. Raised so a user with the memory can
+    # use it; the default stays conservative because published long-context
+    # evaluations show quality falling off well before a model's advertised
+    # limit, so more context is a deliberate choice rather than free.
+    num_ctx: int = Field(default=8192, ge=2048, le=65536)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
     # No length cap: whatever doesn't fit in the configured context window is
     # already handled gracefully by the history/memory/attachment budget
@@ -97,7 +104,7 @@ class GenerationOptionsOverride(_SettingsModel):
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=0, le=200)
     repeat_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
-    num_ctx: int | None = Field(default=None, ge=2048, le=16384)
+    num_ctx: int | None = Field(default=None, ge=2048, le=65536)
     seed: int | None = Field(default=None, ge=-1, le=2147483647)
 
 

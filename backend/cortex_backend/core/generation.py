@@ -142,6 +142,22 @@ class CodeExecutionProposal:
     capabilities: Mapping[str, bool] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class CodeProposalRejection:
+    """Why a model's local-code proposal was refused.
+
+    The validator only produces a stable code.  This value pairs that code
+    with the one sentence the user may see and with the single decision the
+    harness needs: whether spending another model turn on a correction could
+    plausibly help, or whether the refusal is permanent no matter what the
+    model sends back.
+    """
+
+    code: str
+    message: str
+    repairable: bool = False
+
+
 @dataclass(frozen=True)
 class GenerationAttachment:
     """Resolved attachment data supplied to one model generation call.
@@ -214,6 +230,13 @@ class GenerationSnapshot:
     translation_enabled: bool
     target_language: str
     user_system_instructions: str | None
+    # What local workers observed for this turn (a verified computation, the
+    # output of a code run the user approved). Kept separate from
+    # ``user_system_instructions`` on purpose: instructions are the user's
+    # standing policy and belong in the system role, while an observation is
+    # tool output that may contain fetched or generated text and must reach the
+    # model as clearly-marked data instead.
+    host_observations: str | None = None
     attachments: tuple[GenerationAttachment, ...] = field(default_factory=tuple)
     # The API computes this from the current turn and Settings.  It is carried
     # with the immutable job so prompt injection and proposal handling use the

@@ -35,7 +35,7 @@ def test_ordinary_or_educational_turns_do_not_request_code_guidance(query: str) 
         False,
         None,
     )
-    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" not in messages[0]["content"]
+    assert "LOCAL CODE EXECUTION" not in messages[0]["content"]
     assert "code_execution_request" not in messages[0]["content"]
 
 
@@ -58,7 +58,7 @@ def test_explicit_local_tasks_receive_the_jit_contract(query: str) -> None:
         None,
     )
     system = messages[0]["content"]
-    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" in system
+    assert "LOCAL CODE EXECUTION" in system
     assert "<code_execution_request>" in system
     assert "cortex.fs.read_text" in system
     assert "capabilities" in system
@@ -74,7 +74,7 @@ def test_python_output_request_receives_the_jit_contract() -> None:
         False,
         None,
     )
-    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" in messages[0]["content"]
+    assert "LOCAL CODE EXECUTION" in messages[0]["content"]
 
 
 def test_explicit_eligibility_can_disable_guidance_even_for_a_matching_turn() -> None:
@@ -86,7 +86,7 @@ def test_explicit_eligibility_can_disable_guidance_even_for_a_matching_turn() ->
         None,
         code_execution_eligible=False,
     )
-    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" not in messages[0]["content"]
+    assert "LOCAL CODE EXECUTION" not in messages[0]["content"]
 
 
 def test_generation_snapshot_binds_prompt_eligibility_to_turn_and_settings() -> None:
@@ -150,7 +150,7 @@ def test_bypass_system_prompt_leaves_jit_fragments_untouched() -> None:
     system = messages[0]["content"]
     assert messages[0]["role"] == "system"
     assert "Core System Instruction" not in system
-    assert "JUST-IN-TIME LOCAL CODE CAPABILITY" in system
+    assert "LOCAL CODE EXECUTION" in system
     assert "STRUCTURED MEMORY COMMANDS" in system
 
 
@@ -215,7 +215,16 @@ def test_ineligible_agent_does_not_accept_a_spontaneous_execution_envelope() -> 
     )
 
     assert agent.last_code_proposal is None
-    assert "code_execution_request" in visible
+    # The envelope is stripped rather than left in the answer: a persisted
+    # envelope becomes part of the next turn's history, teaching the model that
+    # emitting one on an unadmitted turn is normal. The refusal is reported
+    # through last_code_rejection instead of a raw JSON blob in the chat.
+    assert "code_execution_request" not in visible
+    assert agent.last_code_rejection is not None
+    assert agent.last_code_rejection.code == "not_offered"
+    # Admission is settled for the whole turn before the model answers, so no
+    # correction it could send would make this turn eligible.
+    assert agent.last_code_rejection.repairable is False
 
 
 def test_agent_defaults_to_fail_closed_for_code_proposals() -> None:
@@ -225,4 +234,6 @@ def test_agent_defaults_to_fail_closed_for_code_proposals() -> None:
         None,
     )
     assert agent.last_code_proposal is None
-    assert "code_execution_request" in visible
+    assert "code_execution_request" not in visible
+    assert agent.last_code_rejection is not None
+    assert agent.last_code_rejection.code == "not_offered"
