@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import { CortexApi } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
+import { useSettingsStore } from "../stores/useSettingsStore";
 import { ToastProvider } from "./ToastProvider";
 
 describe("App", () => {
@@ -316,5 +317,70 @@ describe("App", () => {
     expect(await screen.findByText("Current attachment staged.")).toBeVisible();
     expect(screen.queryByText("Old attachment staged.")).not.toBeInTheDocument();
     expect(screen.queryByText("Malformed legacy attachment staged.")).not.toBeInTheDocument();
+  });
+
+  it("selects a downloaded model without reverting settings saved while it downloaded", async () => {
+    // Regression test: a GGUF download runs for minutes and then selects
+    // what it fetched. Settings stays editable the whole time (Save is
+    // gated on `saving`, not on `modelBusy`), so the selection must send
+    // the *current* settings -- not the snapshot captured in the render
+    // that started the download, which silently reverted anything saved
+    // in between.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const storedSettings = {
+      models: { chat: null, title: null },
+      appearance: { theme: "dark" },
+      memory: { enabled: true },
+    };
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const settingsWrites: Record<string, unknown>[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/settings") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { settings: Record<string, unknown> };
+        settingsWrites.push(body.settings);
+        return json({ settings: body.settings });
+      }
+      if (url.endsWith("/settings")) return json({ settings: storedSettings });
+      if (url.endsWith("/models/gguf/downloads") && init?.method === "POST") {
+        return json({ job_id: "gguf-job", kind: "gguf_download", status: "queued" }, 202);
+      }
+      if (url.endsWith("/jobs/gguf-job/events")) {
+        // The user saves an unrelated settings change while the download is
+        // still streaming.
+        useSettingsStore.getState().setSettings({ ...storedSettings, memory: { enabled: false } } as never);
+        const event = { id: 1, job_id: "gguf-job", kind: "completed", status: "succeeded", phase: null, data: { filename: "demo.Q4_K_M.gguf" } };
+        return new Response(`data: ${JSON.stringify(event)}
+
+`, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "System" }));
+    await user.type(screen.getByLabelText(/Repo id/), "vendor/demo-GGUF");
+    await user.type(screen.getByLabelText(/File name/), "demo.Q4_K_M.gguf");
+    await user.click(screen.getByRole("button", { name: /Download model/ }));
+
+    await waitFor(() => expect(settingsWrites).toHaveLength(1));
+    expect(settingsWrites[0]).toMatchObject({
+      models: { chat: "gguf:demo.Q4_K_M.gguf", title: null },
+      memory: { enabled: false },
+    });
   });
 });

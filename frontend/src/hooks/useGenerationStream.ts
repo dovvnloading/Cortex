@@ -20,8 +20,23 @@ function isPersistedJob(value: unknown): value is PersistedJob {
     && candidate.lastEventId >= 0;
 }
 
+/**
+ * Session storage is a resilience side-channel here, never the source of
+ * truth -- the store is. A browser that denies storage access, or one that
+ * has hit its quota, throws on plain getItem/setItem/removeItem. Since
+ * persistActiveJob() runs inside the synchronous SSE event handler, an
+ * escaping throw would surface to consume() as a *stream* failure: it would
+ * reconnect from the same cursor, replay the same event, and throw again,
+ * looping forever without ever rendering a token. Treat storage as
+ * best-effort instead, exactly as the composer draft helpers already do.
+ */
 export function readActiveJob(): PersistedJob | null {
-  const raw = window.sessionStorage.getItem(ACTIVE_JOB_KEY);
+  let raw: string | null;
+  try {
+    raw = window.sessionStorage.getItem(ACTIVE_JOB_KEY);
+  } catch {
+    return null;
+  }
   if (!raw) return null;
   try {
     const value: unknown = JSON.parse(raw);
@@ -32,11 +47,20 @@ export function readActiveJob(): PersistedJob | null {
 }
 
 function persistActiveJob(job: PersistedJob): void {
-  window.sessionStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(job));
+  try {
+    window.sessionStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(job));
+  } catch {
+    // The live stream continues from its in-memory cursor; only resume
+    // across a full remount is lost.
+  }
 }
 
 function clearActiveJob(): void {
-  window.sessionStorage.removeItem(ACTIVE_JOB_KEY);
+  try {
+    window.sessionStorage.removeItem(ACTIVE_JOB_KEY);
+  } catch {
+    // Nothing to clean up if storage is unavailable in the first place.
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -228,7 +252,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
           if (stored?.jobId === job.jobId) clearActiveJob();
           useChatStore.getState().endGeneration(job.jobId);
         }
-        consumingRef.current = null;
+        // Only release the claim if it is still ours: a consumer that is
+        // finishing late (its terminal reload is awaited above) must not
+        // clear the marker a newer job has since installed, which would let
+        // a second consumer attach to that newer job in parallel.
+        if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }
     },

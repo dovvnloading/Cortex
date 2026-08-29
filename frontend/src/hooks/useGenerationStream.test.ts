@@ -367,4 +367,102 @@ describe("useGenerationStream", () => {
 
     act(() => result.current.stop());
   });
+
+  it("keeps streaming when session storage is unavailable", async () => {
+    // Regression test: a browser that denies storage access (or has hit its
+    // quota) throws from setItem. persistActiveJob() runs inside the
+    // synchronous SSE event handler, so an escaping throw reached consume()
+    // as a stream failure -- it reconnected from the same cursor, replayed
+    // the same event, threw again, and looped forever without ever
+    // rendering a token.
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("QuotaExceededError", "QuotaExceededError");
+    });
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("SecurityError", "SecurityError");
+    });
+    try {
+      expect(readActiveJob()).toBeNull();
+
+      const { streamGeneration, emitEvent } = terminalAwareStream();
+      const generationStatus = vi.fn();
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-storage", "thread-storage", vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        emitEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-storage", thread_id: "thread-storage", data: { delta: "Hello" } });
+      });
+
+      await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("Hello"));
+      // No reconnect: the storage failure must not be mistaken for a dropped
+      // connection.
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+      expect(generationStatus).not.toHaveBeenCalled();
+
+      act(() => result.current.stop());
+    } finally {
+      setItem.mockRestore();
+      getItem.mockRestore();
+    }
+  });
+
+  it("does not release another job's consumer claim when a previous job finishes late", async () => {
+    // Regression test: a completed job awaits its transcript reload before
+    // unwinding. If the user starts a second generation during that window,
+    // the first job's cleanup used to clear consumingRef unconditionally --
+    // dropping the second job's claim and letting a duplicate consumer
+    // attach to it (double-counting every token it then receives).
+    const streams = new Map<string, (event: FakeGenerationEvent) => void>();
+    const streamGeneration = vi.fn((jobId: string, onEvent, options: { signal?: AbortSignal } = {}) =>
+      new Promise<void>((resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        streams.set(jobId, (event) => {
+          (onEvent as (event: unknown) => void)(event);
+          if (event.event === "generation.completed") resolve();
+        });
+      }),
+    );
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    let finishReload: (() => void) | null = null;
+    const slowReload = vi.fn(() => new Promise<void>((resolve) => { finishReload = resolve; }));
+
+    act(() => {
+      void result.current.consume({ jobId: "job-a", threadId: "thread-a", lastEventId: 0 }, slowReload, vi.fn());
+    });
+    await waitFor(() => expect(streams.has("job-a")).toBe(true));
+
+    act(() => {
+      streams.get("job-a")!({ event_id: 1, event: "generation.completed", job_id: "job-a", thread_id: "thread-a", data: {} });
+    });
+    // job-a is now parked in its finally block, awaiting the reload.
+    await waitFor(() => expect(slowReload).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.start("job-b", "thread-b", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streams.has("job-b")).toBe(true));
+    expect(streamGeneration).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      finishReload?.();
+      await Promise.resolve();
+    });
+
+    // job-b is still the active consumer, so a second consume() for it is a
+    // no-op rather than a duplicate connection.
+    await act(async () => {
+      void result.current.consume({ jobId: "job-b", threadId: "thread-b", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+      await Promise.resolve();
+    });
+    expect(streamGeneration).toHaveBeenCalledTimes(2);
+
+    act(() => result.current.stop());
+  });
 });

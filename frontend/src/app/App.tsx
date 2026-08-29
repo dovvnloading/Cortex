@@ -454,13 +454,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   const chooseLocalModel = async (model: string): Promise<boolean> => {
-    if (!settings) return false;
+    // Read the store rather than this render's `settings`: a GGUF download
+    // runs for minutes before selecting what it fetched, and Settings stays
+    // editable throughout. Sending the snapshot captured when the download
+    // started would silently revert everything the user saved meanwhile.
+    const current = useSettingsStore.getState().settings;
+    if (!current) return false;
     setSaving(true);
     try {
       const response = await api.updateSettings({
         settings: {
-          ...settings,
-          models: { ...settings.models, chat: model, title: null },
+          ...current,
+          models: { ...current.models, chat: model, title: null },
         },
       });
       setSettings(response.settings);
