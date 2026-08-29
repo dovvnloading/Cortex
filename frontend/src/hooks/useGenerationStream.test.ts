@@ -51,6 +51,12 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-1", threadId: "thread-1" });
   });
 
+  it("ignores a valid JSON value that is not a complete persisted generation", () => {
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-only" }));
+
+    expect(readActiveJob()).toBeNull();
+  });
+
   it("batches rapid content_delta events into the store via requestAnimationFrame", async () => {
     let emit: ((event: unknown) => void) | null = null;
     const api = fakeApi({
@@ -281,6 +287,24 @@ describe("useGenerationStream", () => {
     expect(streamGeneration).toHaveBeenCalledTimes(1);
     expect(generationStatus).toHaveBeenCalledTimes(1);
     expect(onFailed).not.toHaveBeenCalled();
+    expect(readActiveJob()).toBeNull();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+  });
+
+  it("stops retrying and clears the tracked generation when the status fallback says the job is gone", async () => {
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const generationStatus = vi.fn().mockRejectedValue(new ApiError(404, "Generation job not found."));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-status-404", "thread-status-404", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith("thread-status-404", "Generation job not found."));
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(generationStatus).toHaveBeenCalledTimes(1);
     expect(readActiveJob()).toBeNull();
     expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });

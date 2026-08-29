@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
+from pathlib import Path
 import time
 
 import pytest
@@ -86,6 +87,30 @@ def test_leases_reject_live_foreign_owner_and_allow_expiry_recovery(tmp_path):
         repository.claim_lease(job.job_id, lease_owner="coordinator-b", ttl_seconds=10)
 
 
+def test_expired_lease_does_not_resurrect_a_persisted_cancellation(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-cancelled-before-restart",
+        owner="session-a",
+        request_id="request-cancelled-before-restart",
+        profile="fake.v1",
+        payload={},
+    )
+    repository.claim_lease(
+        job.job_id,
+        lease_owner="dead-coordinator",
+        ttl_seconds=0.01,
+    )
+    repository.request_cancel(job.job_id)
+    time.sleep(0.03)
+
+    assert repository.recover_expired_leases() == [job.job_id]
+    recovered = repository.get_job(job.job_id)
+    assert recovered is not None
+    assert recovered.status == "cancelled"
+    assert recovered.error == "Execution cancelled."
+
+
 def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
@@ -113,6 +138,37 @@ def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
     assert repository.purge_expired(now=future) == 1
     with pytest.raises(ExecutionRepositoryError):
         repository.read_artifact(artifact.artifact_id)
+
+
+def test_purging_a_terminal_job_removes_artifacts_before_cascade(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-terminal-artifact",
+        owner="session-a",
+        request_id="request-terminal-artifact",
+        profile="fake.v1",
+        payload={},
+    )
+    artifact = repository.publish_artifact(
+        job.job_id,
+        name="result.txt",
+        content=b"keep this file accounted for",
+        mime_type="text/plain",
+        retention_seconds=3_600,
+    )
+    repository.transition(
+        job.job_id,
+        status="succeeded",
+        event="completed",
+        phase="completed",
+        data={"ok": True},
+    )
+
+    assert repository.purge_expired(
+        now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+    ) == 1
+    assert not Path(artifact.path).exists()
+    assert repository.get_artifact(artifact.artifact_id) is None
 
 
 def test_terminal_state_is_immutable_and_wait_has_a_real_timeout(tmp_path):

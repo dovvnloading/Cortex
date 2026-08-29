@@ -7,14 +7,17 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
 from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api.schemas import ModelDownloadRequest
 from cortex_backend.llamacpp.download import (
     DownloadSource,
     GGUFDownloadError,
     GGUFDownloadProgress,
     download_gguf,
+    list_huggingface_gguf_files,
     resolve_download_url,
 )
 
@@ -70,6 +73,31 @@ def test_resolve_download_url_rewrites_huggingface_blob_urls_to_resolve_urls() -
 def test_resolve_download_url_rejects_unsafe_requests(source: DownloadSource) -> None:
     with pytest.raises(GGUFDownloadError):
         resolve_download_url(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        DownloadSource(source="url", url="https://example.com/model.gguf\n"),
+        DownloadSource(source="huggingface", repo_id="owner/name\n", filename="model.gguf"),
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="model.gguf\n"),
+    ],
+)
+def test_resolve_download_url_rejects_control_characters(source: DownloadSource) -> None:
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(source)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "url", "url": "https://example.com/model.gguf\n"},
+        {"source": "huggingface", "repo_id": "owner/name", "filename": "model.gguf\n"},
+    ],
+)
+def test_model_download_request_rejects_control_characters(payload: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        ModelDownloadRequest.model_validate(payload)
 
 
 # -- download_gguf ------------------------------------------------------------
@@ -221,3 +249,13 @@ def test_huggingface_file_listing_route(monkeypatch) -> None:
         payload = response.json()
         assert payload["repo_id"] == "bartowski/tiny-model-GGUF"
         assert payload["files"] == ["model.Q4_K_M.gguf", "model.Q8_0.gguf"]
+
+
+def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=b"not-json")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
+            list_huggingface_gguf_files("owner/model", http_client=client)
