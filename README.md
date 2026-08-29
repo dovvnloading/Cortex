@@ -194,6 +194,13 @@ For contributor setup, install `requirements-dev.txt` as described in
 ./scripts/check.ps1 -Tier full   # adds compileall, Playwright, and the bundle build
 ```
 
+For coding-agent work, read the repository-level [agent operating
+contract](AGENTS.md) first. The [local coding-agent harness
+standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md) records the researched
+target architecture and release gates. Cortex's current product boundary is
+still bounded local execution; the standard does not imply that arbitrary
+workspace or shell authority is enabled.
+
 To run them automatically before every push:
 
 ```powershell
@@ -242,6 +249,8 @@ before approving a run. See [SECURITY.md](SECURITY.md) for reporting guidance.
 
 ## Project documentation
 
+- [Agent operating contract](AGENTS.md)
+- [Local coding-agent harness standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md)
 - [Open-source execution plan](docs/OPEN_SOURCE_EXECUTION_PLAN.md)
 - [Attachment boundary](docs/CHAT_ATTACHMENTS.md)
 - [Execution architecture records](docs/adr/)
