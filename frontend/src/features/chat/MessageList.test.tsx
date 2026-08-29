@@ -170,6 +170,55 @@ describe("MessageList", () => {
     vi.resetModules();
   });
 
+  it("scrolls the virtualized transcript to its true bottom, not to the last message", async () => {
+    // The streaming bubble is rendered in the Footer slot, below the final
+    // item. scrollToIndex(last item) stops short of it, so a long transcript
+    // would scroll away from the answer being typed. Assert the handle
+    // targets the scroller's bottom instead.
+    vi.resetModules();
+    const scrollTo = vi.fn();
+    const scrollToIndex = vi.fn();
+    vi.doMock("react-virtuoso", () => ({
+      Virtuoso: forwardRef<VirtuosoHandle, VirtuosoProps<ChatMessage, unknown>>(function MockVirtuoso(_props, ref) {
+        useImperativeHandle(ref, () => ({
+          scrollToIndex,
+          scrollTo,
+          scrollBy: () => {},
+          autoscrollToBottom: () => {},
+          scrollIntoView: () => {},
+          getState: () => { throw new Error("not implemented in this test double"); },
+        }));
+        return <div data-testid="virtuoso-scroller" />;
+      }),
+    }));
+    const { MessageList: MockedMessageList } = await import("./MessageList");
+
+    const ref = createRef<MessageListHandle>();
+    render(
+      <MockedMessageList
+        ref={ref}
+        messages={makeMessages(45)}
+        isStreaming
+        finalAssistantId={null}
+        busy={false}
+        forkingMessageId={null}
+        onRegenerate={vi.fn()}
+        onFork={vi.fn()}
+        onNearEndChange={vi.fn()}
+        trailingContent={<div data-testid="pending-bubble">Streaming…</div>}
+      />,
+    );
+
+    ref.current?.scrollToBottom();
+
+    expect(scrollToIndex).not.toHaveBeenCalled();
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(scrollTo.mock.calls[0][0]).toMatchObject({ top: Number.MAX_SAFE_INTEGER });
+
+    vi.doUnmock("react-virtuoso");
+    vi.resetModules();
+  });
+
   it("reports near-end scroll state via onNearEndChange on the plain path", () => {
     const onNearEndChange = vi.fn();
     render(

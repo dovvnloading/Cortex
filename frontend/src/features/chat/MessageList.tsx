@@ -53,12 +53,17 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   useImperativeHandle(ref, () => ({
     scrollToBottom: () => {
       if (virtualized) {
-        virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, behavior: "auto" });
+        // Not scrollToIndex(last message): the in-flight streaming bubble
+        // lives in the Footer slot, *below* the final item, so targeting the
+        // last item leaves the answer being typed out of view for the whole
+        // response. Scroll the virtualized scroller to its true bottom, which
+        // is what the plain path's scrollTop = scrollHeight already does.
+        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: "auto" });
       } else if (plainRef.current) {
         plainRef.current.scrollTop = plainRef.current.scrollHeight;
       }
     },
-  }), [virtualized, messages.length]);
+  }), [virtualized]);
 
   const renderCard = (message: ChatMessage, index: number) => (
     <MessageCard
