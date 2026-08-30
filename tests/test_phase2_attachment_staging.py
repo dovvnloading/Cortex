@@ -94,6 +94,31 @@ def test_stage_bytes_enforces_configured_byte_and_retention_limits(tmp_path: Pat
     assert retention.value.code == "attachment_retention_invalid"
 
 
+def test_stage_failure_recording_failure_is_logged_not_swallowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    repository, service = _service(tmp_path)
+
+    def broken_transition(*_args: object, **_kwargs: object):
+        raise RuntimeError("simulated persistence outage")
+
+    monkeypatch.setattr(repository, "transition", broken_transition)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(AttachmentStagingError) as error:
+            service.stage(owner=OWNER, request_id="attach-outage", content=_image_bytes())
+
+    assert error.value.code == "attachment_persist_failed"
+    stuck = repository.list_jobs(owner=OWNER)
+    assert [job.status for job in stuck] == ["queued"]
+    assert any(
+        "could not record failure attachment_persist_failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_stage_bytes_duplicate_terminal_result_is_revalidated(tmp_path: Path):
     repository, service = _service(tmp_path)
     staged = service.stage(owner=OWNER, request_id="attach-integrity", content=_image_bytes())

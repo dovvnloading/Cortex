@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import logging
 import re
 from typing import Any
 from uuid import uuid4
@@ -234,6 +235,9 @@ class AttachmentStagingService:
         }.get(code, "attachment_invalid")
 
     def _fail(self, job_id: str, code: str) -> None:
+        # Best-effort: the caller is about to raise the real staging error, so a
+        # failure to record it must not replace that error -- but it may not be
+        # silent either, because the job is left in a non-terminal state.
         try:
             self.repository.transition(
                 job_id,
@@ -243,8 +247,14 @@ class AttachmentStagingService:
                 data={"message": "Attachment staging failed safely."},
                 error=code,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.error(
+                "Cortex attachment staging could not record failure %s for job %s (%s); "
+                "the job remains non-terminal.",
+                code,
+                job_id,
+                type(exc).__name__,
+            )
 
 
 __all__ = [
