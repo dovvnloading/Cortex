@@ -6,11 +6,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import tempfile
 from collections.abc import Iterator
 from threading import RLock
+from uuid import uuid4
 
 from cortex_backend.core.settings import CortexSettings
 
@@ -52,12 +55,16 @@ class SQLiteSettingsRepository:
     ) -> None:
         self.db_path = Path(db_path)
         self.backup_path = Path(f"{self.db_path}.bak")
+        # Keep one older verified snapshot so an interrupted backup rotation
+        # cannot discard the only recovery copy.
+        self.previous_backup_path = Path(f"{self.backup_path}.1")
+        self.last_corrupt_path: Path | None = None
         self.legacy = legacy
         # Fresh workspace loading fans out into settings and model requests.
         # Keep the one-time legacy import atomic within this process so those
         # requests cannot race to create the initial settings row.
         self._load_lock = RLock()
-        self._pre_schema_backup = self._create_backup()
+        self._pre_schema_backup = self._prepare_primary()
         self._ensure_schema()
         if adopt_from is not None:
             self._adopt_colocated_settings(Path(adopt_from))
@@ -200,23 +207,122 @@ class SQLiteSettingsRepository:
         except Exception as exc:
             raise SettingsRepositoryError("Could not initialize settings schema.") from exc
 
+    @staticmethod
+    def _database_is_valid(path: Path) -> bool:
+        """Return whether an existing SQLite file can be opened and checked."""
+        connection: sqlite3.Connection | None = None
+        try:
+            # Read-only mode is important here: validation must not create or
+            # mutate a file before we decide whether it is safe to back up.
+            connection = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro",
+                timeout=10.0,
+                uri=True,
+            )
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            return result is not None and str(result[0]).lower() == "ok"
+        except (OSError, sqlite3.Error):
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @classmethod
+    def _atomic_copy_database(cls, source: Path, destination: Path) -> None:
+        """Copy a verified SQLite file without exposing a partial destination."""
+        temporary_path: Path | None = None
+        try:
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+            )
+            os.close(fd)
+            temporary_path = Path(temporary_name)
+            shutil.copy2(source, temporary_path)
+            if not cls._database_is_valid(temporary_path):
+                raise OSError("database copy failed integrity validation")
+            os.replace(temporary_path, destination)
+            temporary_path = None
+        except (OSError, shutil.Error) as exc:
+            raise SettingsRepositoryError("Could not copy the settings database safely.") from exc
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except OSError as exc:
+                    raise SettingsRepositoryError(
+                        "Could not remove a temporary settings database copy."
+                    ) from exc
+
+    def _prepare_primary(self) -> str | None:
+        """Validate the primary before backup rotation, recovering if needed."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.db_path.exists():
+            return None
+        if self._database_is_valid(self.db_path):
+            return self._create_backup()
+
+        for candidate in (self.backup_path, self.previous_backup_path):
+            if not candidate.exists() or not self._database_is_valid(candidate):
+                continue
+            corrupt_path = Path(f"{self.db_path}.corrupt-{uuid4().hex}")
+            try:
+                os.replace(self.db_path, corrupt_path)
+            except OSError as exc:
+                raise SettingsRepositoryError(
+                    "Could not preserve the corrupt settings database before recovery."
+                ) from exc
+            try:
+                self._atomic_copy_database(candidate, self.db_path)
+            except SettingsRepositoryError:
+                try:
+                    os.replace(corrupt_path, self.db_path)
+                except OSError as rollback_exc:
+                    raise SettingsRepositoryError(
+                        "Settings recovery failed and the corrupt primary could not be restored; "
+                        f"it remains at {corrupt_path}."
+                    ) from rollback_exc
+                raise
+            self.last_corrupt_path = corrupt_path
+            return str(candidate)
+
+        raise SettingsRepositoryError(
+            "Settings database is corrupt and no valid backup is available."
+        )
+
     def _create_backup(self) -> str | None:
         if not self.db_path.exists():
             return None
+        if not self._database_is_valid(self.db_path):
+            raise SettingsRepositoryError(
+                "Could not create a settings database backup from an invalid database."
+            )
         try:
-            shutil.copy2(self.db_path, self.backup_path)
+            # Preserve the prior verified backup before replacing the current
+            # generation. If the new copy fails, the old .bak remains intact.
+            if self.backup_path.exists() and self._database_is_valid(self.backup_path):
+                self._atomic_copy_database(self.backup_path, self.previous_backup_path)
+            self._atomic_copy_database(self.db_path, self.backup_path)
+        except SettingsRepositoryError:
+            raise
         except OSError as exc:
             raise SettingsRepositoryError("Could not create a settings database backup.") from exc
         return str(self.backup_path)
 
     def restore_backup(self) -> None:
         """Restore the last verified database backup without changing QSettings."""
-        if not self.backup_path.exists():
-            raise SettingsRepositoryError("No settings database backup is available.")
-        try:
-            shutil.copy2(self.backup_path, self.db_path)
-        except OSError as exc:
-            raise SettingsRepositoryError("Could not restore the settings database backup.") from exc
+        candidate = next(
+            (
+                path
+                for path in (self.backup_path, self.previous_backup_path)
+                if path.exists() and self._database_is_valid(path)
+            ),
+            None,
+        )
+        if candidate is None:
+            raise SettingsRepositoryError("No valid settings database backup is available.")
+        self._atomic_copy_database(candidate, self.db_path)
         self._ensure_schema()
 
     def _read_row(self) -> tuple[CortexSettings, str] | None:
