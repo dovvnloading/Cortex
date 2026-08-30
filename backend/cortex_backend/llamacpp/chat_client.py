@@ -72,17 +72,23 @@ class LlamaCppChatClient:
         handle = self._provider.ensure_ready(model_path, num_ctx=num_ctx, on_status=self._status_callback)
         started = time.monotonic()
         if cancellation_event is None:
-            return self._chat_blocking(handle.base_url, messages, options, started)
-        return self._chat_abortable(handle.base_url, messages, options, started, cancellation_event)
+            return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
+        return self._chat_abortable(handle.base_url, messages, options, started, cancellation_event, handle.api_key)
 
-    def _chat_blocking(self, base_url: str, messages: list[dict], options: dict, started: float) -> dict:
+    def _chat_blocking(
+        self, base_url: str, messages: list[dict], options: dict, started: float, api_key: str | None
+    ) -> dict:
         """Single request/response call, unchanged from before cancellation
         support existed. Used whenever the caller has no cancellation_event
         to honor (title and translation calls, and anything else that isn't
         the main chat turn)."""
         body = _build_request_body(messages, options, stream=False)
         try:
-            response = self._http.post(f"{base_url}/v1/chat/completions", json=body)
+            response = self._http.post(
+                f"{base_url}/v1/chat/completions",
+                json=body,
+                headers=_auth_headers(api_key),
+            )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise LlamaCppError(
@@ -102,6 +108,7 @@ class LlamaCppChatClient:
         options: dict,
         started: float,
         cancellation_event: Event,
+        api_key: str | None,
     ) -> dict:
         """Streamed request whose consumption is checked against
         cancellation_event between chunks, so closing the response (which
@@ -113,7 +120,12 @@ class LlamaCppChatClient:
         usage: dict | None = None
         timings: dict | None = None
         try:
-            with self._http.stream("POST", f"{base_url}/v1/chat/completions", json=body) as response:
+            with self._http.stream(
+                "POST",
+                f"{base_url}/v1/chat/completions",
+                json=body,
+                headers=_auth_headers(api_key),
+            ) as response:
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
@@ -193,6 +205,10 @@ def _server_error_detail(response: httpx.Response) -> str:
     if not isinstance(detail, str) or not detail.strip():
         return f"The local model runtime failed with HTTP {response.status_code}."
     return detail.strip()[:_MAX_SERVER_ERROR_CHARS]
+
+
+def _auth_headers(api_key: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"} if api_key is not None else {}
 
 
 def _build_request_body(messages: list[dict], options: dict, *, stream: bool) -> dict[str, Any]:
