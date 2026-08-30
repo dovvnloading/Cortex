@@ -8,7 +8,8 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 

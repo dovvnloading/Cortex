@@ -146,7 +146,7 @@ class ChatMessage(APIModel):
     stats: GenerationStats | None = None
 
     @model_validator(mode="after")
-    def assistant_only_thoughts(self) -> "ChatMessage":
+    def assistant_only_thoughts(self) -> ChatMessage:
         """Reasoning metadata is never part of a user or system message."""
         if self.role != "assistant":
             self.thoughts = None
@@ -215,7 +215,7 @@ class AddMessageRequest(APIModel):
     attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
 
     @model_validator(mode="after")
-    def assistant_only_thoughts(self) -> "AddMessageRequest":
+    def assistant_only_thoughts(self) -> AddMessageRequest:
         """Ignore client-supplied reasoning metadata on non-assistant messages."""
         if self.role != "assistant":
             self.thoughts = None
@@ -320,7 +320,7 @@ class ModelDownloadRequest(APIModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_source_fields(self) -> "ModelDownloadRequest":
+    def _validate_source_fields(self) -> ModelDownloadRequest:
         if self.source == "url" and not self.url:
             raise ValueError("url is required when source is 'url'.")
         if self.source == "huggingface" and not (self.repo_id and self.filename):
@@ -479,7 +479,7 @@ class RecipeImageTransformRequest(APIModel):
             raise ValueError("typed image plan is invalid") from None
 
     @model_validator(mode="after")
-    def _bind_plan_to_source(self) -> "RecipeImageTransformRequest":
+    def _bind_plan_to_source(self) -> RecipeImageTransformRequest:
         if self.plan.input_artifact_id != self.source_artifact_id:
             raise ValueError("source artifact and plan input must match")
         return self

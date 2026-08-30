@@ -32,7 +32,8 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Literal, Protocol
+from collections.abc import Callable
 
 import httpx
 

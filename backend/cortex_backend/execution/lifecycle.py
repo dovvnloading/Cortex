@@ -11,7 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import re
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
+from collections.abc import Callable
 
 from .repository import ExecutionRepository
 
@@ -48,7 +49,7 @@ class RuntimeHealth:
             raise ValueError("runtime health message must be bounded and non-empty")
 
     @classmethod
-    def ready(cls, message: str = "Execution runtime is ready.") -> "RuntimeHealth":
+    def ready(cls, message: str = "Execution runtime is ready.") -> RuntimeHealth:
         return cls(available=True, code="ready", message=message)
 
     @classmethod
@@ -56,7 +57,7 @@ class RuntimeHealth:
         cls,
         code: str = "runtime_unavailable",
         message: str = "Execution runtime is unavailable.",
-    ) -> "RuntimeHealth":
+    ) -> RuntimeHealth:
         return cls(available=False, code=code, message=message)
 
 

@@ -15,7 +15,8 @@ import json
 import math
 import re
 from struct import Struct, error as StructError
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
+from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 

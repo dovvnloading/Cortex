@@ -10,7 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 from collections.abc import Callable
-from typing import Iterable
+from collections.abc import Iterable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

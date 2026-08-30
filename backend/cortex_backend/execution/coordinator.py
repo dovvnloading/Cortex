@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from threading import Event, Lock, Thread
 import time
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 from uuid import uuid4
 
 from .fake import FakeExecutionCancelled, FakeExecutionFailure, FakeExecutionPlan, FakeExecutionProvider

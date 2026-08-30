@@ -19,7 +19,8 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Final, Mapping
+from typing import Any, Final
+from collections.abc import Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization

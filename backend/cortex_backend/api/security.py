@@ -9,7 +9,7 @@ import hmac
 import re
 import secrets
 from threading import RLock
-from typing import Iterable
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, status

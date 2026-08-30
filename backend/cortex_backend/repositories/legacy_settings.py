@@ -11,7 +11,8 @@ from __future__ import annotations
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from pydantic import ValidationError
 

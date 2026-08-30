@@ -65,7 +65,7 @@ DEFAULT_MODEL_SHOW_DETAILS: dict[str, Any] = {
 }
 
 
-def _show_payload(state: "FakeOllamaState", model: str) -> dict[str, Any]:
+def _show_payload(state: FakeOllamaState, model: str) -> dict[str, Any]:
     overrides = state.model_details.get(model, DEFAULT_MODEL_SHOW_DETAILS)
     return {
         "capabilities": list(state.model_capabilities.get(model, ("completion",))),

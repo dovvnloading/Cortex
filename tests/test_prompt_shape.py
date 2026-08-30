@@ -144,7 +144,7 @@ def test_history_never_sends_two_user_turns_in_a_row() -> None:
     roles = [message["role"] for message in paired]
     assert roles == ["user", "assistant"]
     assert paired[0]["content"] == "asked again after a failure"
-    for earlier, later in zip(roles, roles[1:]):
+    for earlier, later in zip(roles, roles[1:], strict=False):
         assert earlier != later
 
 

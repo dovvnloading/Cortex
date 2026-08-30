@@ -164,7 +164,7 @@ def build_preview_app(
         settings_repository.load()
         if not paths.execution_database.is_file():
             return False
-        execution_repository.installation_principal_id
+        _ = execution_repository.installation_principal_id
         return True
 
     session_manager = SessionManager(

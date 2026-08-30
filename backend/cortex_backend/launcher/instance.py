@@ -34,7 +34,7 @@ class InstanceRecord:
         return asdict(self)
 
     @classmethod
-    def from_path(cls, path: Path) -> "InstanceRecord | None":
+    def from_path(cls, path: Path) -> InstanceRecord | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             return cls(
@@ -138,7 +138,7 @@ class InstanceLock:
                             pass
             self._record = None
 
-    def __enter__(self) -> "InstanceLock":
+    def __enter__(self) -> InstanceLock:
         return self
 
     def __exit__(self, *_exc: object) -> None:

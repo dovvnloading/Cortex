@@ -165,25 +165,26 @@ def _find_process_window(pid: int, title: str, *, timeout: float) -> int | None:
     user32.SetForegroundWindow.restype = wintypes.BOOL
 
     deadline = time.monotonic() + max(timeout, 0.0)
+    matches: list[int] = []
+
+    @enum_callback_type
+    def collect(hwnd: int, _lparam: int) -> bool:
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        title_length = user32.GetWindowTextLengthW(hwnd)
+        title_buffer = ctypes.create_unicode_buffer(title_length + 1)
+        user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
+        if (
+            owner.value == pid
+            and user32.IsWindowVisible(hwnd)
+            and title_buffer.value == title
+        ):
+            matches.append(hwnd)
+            return False
+        return True
+
     while True:
-        matches: list[int] = []
-
-        @enum_callback_type
-        def collect(hwnd: int, _lparam: int) -> bool:
-            owner = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-            title_length = user32.GetWindowTextLengthW(hwnd)
-            title_buffer = ctypes.create_unicode_buffer(title_length + 1)
-            user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
-            if (
-                owner.value == pid
-                and user32.IsWindowVisible(hwnd)
-                and title_buffer.value == title
-            ):
-                matches.append(hwnd)
-                return False
-            return True
-
+        matches.clear()
         user32.EnumWindows(collect, 0)
         if matches:
             return matches[0]

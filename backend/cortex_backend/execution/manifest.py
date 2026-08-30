@@ -15,7 +15,8 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
+from collections.abc import Mapping
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -145,7 +146,7 @@ class SignedRecipeManifest(_ManifestModel):
         return value
 
     @model_validator(mode="after")
-    def _unique_entries(self) -> "SignedRecipeManifest":
+    def _unique_entries(self) -> SignedRecipeManifest:
         recipe_ids = [entry.recipe_id for entry in self.entries]
         paths = [entry.bundle_path for entry in self.entries]
         if len(recipe_ids) != len(set(recipe_ids)) or len(paths) != len(set(paths)):

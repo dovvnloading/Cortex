@@ -23,7 +23,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]

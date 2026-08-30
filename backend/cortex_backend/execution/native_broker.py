@@ -22,7 +22,8 @@ import secrets
 import struct
 import sys
 from time import sleep
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -788,7 +789,7 @@ class NativeBrokerConnection:
             self._closed = True
             self._close_pipe()
 
-    def __enter__(self) -> "NativeBrokerConnection":
+    def __enter__(self) -> NativeBrokerConnection:
         self._ensure_open()
         return self
 
@@ -886,7 +887,7 @@ class NativeBrokerServer:
             self._handle = None
         self._closed = True
 
-    def __enter__(self) -> "NativeBrokerServer":
+    def __enter__(self) -> NativeBrokerServer:
         self.open()
         return self
 

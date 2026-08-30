@@ -215,8 +215,7 @@ def probe_appcontainer_isolation_smoke(run_smoke: bool) -> dict[str, Any]:
         completed = subprocess.run(
             [sys.executable, str(helper)],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=20,
             check=False,
@@ -591,8 +590,7 @@ def probe_guest_language_qualification(run_smoke: bool) -> dict[str, Any]:
         completed = subprocess.run(
             [sys.executable, str(helper), "--json"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=240,
             check=False,
@@ -650,8 +648,7 @@ def probe_containment_cancellation_corpus(run_smoke: bool) -> dict[str, Any]:
         completed = subprocess.run(
             [sys.executable, str(helper)],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=30,
             check=False,

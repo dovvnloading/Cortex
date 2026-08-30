@@ -14,7 +14,7 @@ import hmac
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -2332,7 +2332,6 @@ def _load_settings_result(deps: BackendDependenciesProtocol):
         return deps.settings.load()
     except Exception as exc:
         _raise_repository_error("load settings", exc)
-        raise AssertionError("unreachable")
 
 
 def _migration_response(report: SettingsMigrationReport | None):
@@ -2564,10 +2563,9 @@ def _job_status(
         return request.app.state.jobs.status(job_id, owner=principal.session_id)
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
-        raise AssertionError("unreachable")
 
 
-def _raise_job_error(exc: Exception) -> None:
+def _raise_job_error(exc: Exception) -> NoReturn:
     if isinstance(exc, JobNotFound):
         raise HTTPException(status_code=404, detail="Job not found.") from exc
     raise HTTPException(
@@ -2575,7 +2573,7 @@ def _raise_job_error(exc: Exception) -> None:
     ) from exc
 
 
-def _raise_repository_error(operation: str, exc: Exception) -> None:
+def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
     logging.error("Cortex API %s failed (%s).", operation, type(exc).__name__)
@@ -2670,7 +2668,7 @@ def _code_coordinator(request: Request):
     return coordinator
 
 
-def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
+def _raise_recipe_request_error(exc: RecipeExecutionError) -> NoReturn:
     """Map internal recipe categories to stable, non-sensitive HTTP responses."""
 
     if exc.code == "request_conflict":
@@ -2689,7 +2687,7 @@ def _raise_recipe_request_error(exc: RecipeExecutionError) -> None:
     ) from exc
 
 
-def _raise_scratch_request_error(exc: ScratchComputeError) -> None:
+def _raise_scratch_request_error(exc: ScratchComputeError) -> NoReturn:
     """Map scratch errors without exposing input or worker details."""
 
     if exc.code == "request_conflict":
@@ -2703,7 +2701,7 @@ def _raise_scratch_request_error(exc: ScratchComputeError) -> None:
     ) from exc
 
 
-def _raise_attachment_staging_error(exc: AttachmentStagingError) -> None:
+def _raise_attachment_staging_error(exc: AttachmentStagingError) -> NoReturn:
     """Map attachment stage categories to stable, non-sensitive responses."""
 
     if exc.code == "request_conflict":
@@ -2751,7 +2749,7 @@ def _attachment_owner(request: Request, principal: SessionPrincipal) -> str:
     )
 
 
-def _raise_chat_attachment_error(exc: ChatAttachmentError) -> None:
+def _raise_chat_attachment_error(exc: ChatAttachmentError) -> NoReturn:
     messages = {
         "attachment_too_large": "Files must be 10 MB or smaller.",
         "attachment_type_unsupported": "Cortex supports images and common text/code/config documents.",

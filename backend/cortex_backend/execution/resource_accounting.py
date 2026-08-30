@@ -13,7 +13,8 @@ from dataclasses import dataclass, replace
 import math
 import re
 from time import monotonic
-from typing import Callable, Final
+from typing import Final
+from collections.abc import Callable
 
 
 _SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -76,7 +77,7 @@ class ResourceBudget:
                 raise ValueError("idle timeout cannot exceed wall budget")
 
     @classmethod
-    def scratch_auto_v1(cls) -> "ResourceBudget":
+    def scratch_auto_v1(cls) -> ResourceBudget:
         return cls(
             profile="scratch.auto.v1",
             wall_time_ms=10_000,
@@ -89,7 +90,7 @@ class ResourceBudget:
         )
 
     @classmethod
-    def artifact_transform_v1(cls) -> "ResourceBudget":
+    def artifact_transform_v1(cls) -> ResourceBudget:
         return cls(
             profile="artifact.transform.v1",
             wall_time_ms=60_000,
@@ -107,7 +108,7 @@ class ResourceBudget:
         wall_time_ms: int | None = None,
         idle_timeout_ms: int | None = None,
         max_messages: int | None = None,
-    ) -> "ResourceBudget":
+    ) -> ResourceBudget:
         """Return a bounded test/launch override without mutating this budget."""
 
         return replace(

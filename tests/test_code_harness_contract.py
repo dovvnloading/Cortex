@@ -107,7 +107,7 @@ def test_contract_only_advertises_constructs_the_validator_accepts() -> None:
         "string building with +=": "out = ''\nfor i in range(3):\n    out += 'x'",
         "listed builtins": "_result = [abs(-1), len('ab'), sorted([2, 1]), sum([1, 2]), max([1, 2])]",
     }
-    for label, source in accepted.items():
+    for source in accepted.values():
         validate_code_source(source)  # must not raise
 
 

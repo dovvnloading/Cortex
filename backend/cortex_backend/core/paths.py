@@ -24,7 +24,7 @@ class AppPaths:
     data_dir: Path
 
     @classmethod
-    def from_data_dir(cls, data_dir: str | os.PathLike[str]) -> "AppPaths":
+    def from_data_dir(cls, data_dir: str | os.PathLike[str]) -> AppPaths:
         """Create paths rooted at an injected directory without touching disk."""
         value = Path(data_dir).expanduser()
         if not value.is_absolute():
@@ -35,7 +35,7 @@ class AppPaths:
     def for_windows(
         cls,
         environ: Mapping[str, str] | None = None,
-    ) -> "AppPaths":
+    ) -> AppPaths:
         """Match Qt's Windows AppDataLocation for the legacy Cortex identity."""
         environment = os.environ if environ is None else environ
         app_data = str(environment.get("APPDATA", "")).strip()
@@ -53,7 +53,7 @@ class AppPaths:
         *,
         platform: str | None = None,
         environ: Mapping[str, str] | None = None,
-    ) -> "AppPaths":
+    ) -> AppPaths:
         """Resolve production paths for the currently supported platform."""
         current_platform = sys.platform if platform is None else platform
         if current_platform != "win32":

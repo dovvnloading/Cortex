@@ -13,7 +13,8 @@ runtime bits that shouldn't be silently auto-downloaded.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from typing import Literal
+from collections.abc import Mapping
 
 GpuBackend = Literal["cpu", "vulkan"]
 
