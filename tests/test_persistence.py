@@ -1,10 +1,13 @@
 """Persistence, migration, and recovery tests for local Cortex data."""
 
 import json
+import os
+import shutil
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cortex_backend.repositories.legacy_storage import (
     DatabaseManager,
@@ -148,6 +151,129 @@ class PersistenceTests(unittest.TestCase):
             recovered = PermanentMemoryManager(memory_file_path=str(memory_path))
 
             self.assertEqual(recovered.get_memos(), ["first"])
+
+    def test_permanent_memory_recovery_then_failed_save_preserves_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "memory_bank.json"
+            backup_path = Path(f"{memory_path}.bak")
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("first")
+            manager.add_memo("second")
+            memory_path.write_text("{interrupted", encoding="utf-8")
+
+            recovered = PermanentMemoryManager(memory_file_path=str(memory_path))
+            self.assertEqual(recovered.get_memos(), ["first"])
+            backup_before = backup_path.read_bytes()
+
+            real_replace = os.replace
+
+            def fail_primary_replace(source, destination):
+                if Path(destination) == memory_path:
+                    raise OSError("injected primary replace failure")
+                return real_replace(source, destination)
+
+            with patch(
+                "cortex_backend.repositories.legacy_storage.os.replace",
+                side_effect=fail_primary_replace,
+            ):
+                with self.assertRaises(PersistenceError):
+                    recovered.update_memos(["first", "third"])
+
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(
+                json.loads(memory_path.read_text(encoding="utf-8"))["memos"],
+                ["first"],
+            )
+            self.assertEqual(
+                PermanentMemoryManager(memory_file_path=str(memory_path)).get_memos(),
+                ["first"],
+            )
+
+    def test_permanent_memory_recovery_then_save_updates_primary_and_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "memory_bank.json"
+            backup_path = Path(f"{memory_path}.bak")
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("first")
+            manager.add_memo("second")
+            memory_path.write_text("{interrupted", encoding="utf-8")
+
+            recovered = PermanentMemoryManager(memory_file_path=str(memory_path))
+            recovered.update_memos(["first", "third"])
+
+            self.assertEqual(
+                json.loads(memory_path.read_text(encoding="utf-8"))["memos"],
+                ["first", "third"],
+            )
+            self.assertEqual(
+                json.loads(backup_path.read_text(encoding="utf-8"))["memos"],
+                ["first"],
+            )
+            self.assertEqual(
+                PermanentMemoryManager(memory_file_path=str(memory_path)).get_memos(),
+                ["first", "third"],
+            )
+
+    def test_failed_primary_repair_keeps_valid_backup_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "memory_bank.json"
+            backup_path = Path(f"{memory_path}.bak")
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("first")
+            manager.add_memo("second")
+            memory_path.write_text("{interrupted", encoding="utf-8")
+            backup_before = backup_path.read_bytes()
+
+            real_replace = os.replace
+
+            def fail_primary_repair(source, destination):
+                if Path(destination) == memory_path:
+                    raise OSError("injected primary repair failure")
+                return real_replace(source, destination)
+
+            with patch(
+                "cortex_backend.repositories.legacy_storage.os.replace",
+                side_effect=fail_primary_repair,
+            ):
+                recovered = PermanentMemoryManager(memory_file_path=str(memory_path))
+                self.assertEqual(recovered.get_memos(), ["first"])
+                with self.assertRaises(PersistenceError):
+                    recovered.add_memo("third")
+
+            self.assertEqual(memory_path.read_text(encoding="utf-8"), "{interrupted")
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(
+                PermanentMemoryManager(memory_file_path=str(memory_path)).get_memos(),
+                ["first"],
+            )
+
+    def test_failed_staged_backup_copy_does_not_truncate_existing_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "memory_bank.json"
+            backup_path = Path(f"{memory_path}.bak")
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("first")
+            manager.add_memo("second")
+            primary_before = memory_path.read_bytes()
+            backup_before = backup_path.read_bytes()
+            real_copy = shutil.copy2
+
+            def fail_primary_copy(source, destination):
+                if Path(source) == memory_path:
+                    Path(destination).write_text("{partial", encoding="utf-8")
+                    raise OSError("injected backup copy failure")
+                return real_copy(source, destination)
+
+            with patch(
+                "cortex_backend.repositories.legacy_storage.shutil.copy2",
+                side_effect=fail_primary_copy,
+            ):
+                with self.assertRaises(PersistenceError):
+                    manager.add_memo("third")
+
+            self.assertEqual(manager.get_memos(), ["first", "second"])
+            self.assertEqual(memory_path.read_bytes(), primary_before)
+            self.assertEqual(backup_path.read_bytes(), backup_before)
 
 
 if __name__ == "__main__":
