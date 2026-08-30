@@ -23,6 +23,7 @@ from cortex_backend.core.settings import CortexSettings, TranslationSettings
 from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
+from support import session_headers as _session
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
@@ -35,14 +36,6 @@ def _client(state: FakeOllamaState | None = None):
     )
     return app, TestClient(app)
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    response = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['session_token']}"}
 
 
 def _events(body: str) -> list[dict]:

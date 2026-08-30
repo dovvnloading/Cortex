@@ -20,14 +20,8 @@ from cortex_backend.llamacpp.download import (
     list_huggingface_gguf_files,
     resolve_download_url,
 )
+from support import session_headers as _session
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    token = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    ).json()["session_token"]
-    return {"Authorization": f"Bearer {token}"}
 
 
 # -- resolve_download_url ---------------------------------------------------

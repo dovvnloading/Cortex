@@ -18,6 +18,7 @@ from cortex_backend.execution.scratch_compute import (
 )
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
+from support import session_headers as _session
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
@@ -49,14 +50,6 @@ class _ImmediateScratchCoordinator:
     def shutdown(self) -> None:
         self.closed = True
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    response = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['session_token']}"}
 
 
 def _image_bytes() -> bytes:
