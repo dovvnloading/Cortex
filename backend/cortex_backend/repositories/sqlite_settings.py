@@ -12,7 +12,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
-from threading import RLock
+from threading import Lock, RLock
 from uuid import uuid4
 
 from cortex_backend.core.settings import CortexSettings
@@ -22,12 +22,22 @@ from .settings import (
     SettingsReadResult,
     SettingsRepository,
     SettingsRepositoryError,
+    SettingsRevisionConflict,
 )
 
 
 SETTINGS_SCHEMA_VERSION = 1
 MIGRATION_KEY = "qsettings-to-sqlite-v1"
 COLOCATED_MIGRATION_KEY = "chatdb-colocated-settings-to-own-file-v1"
+
+_WRITE_LOCKS_GUARD = Lock()
+_WRITE_LOCKS: dict[str, RLock] = {}
+
+
+def _write_lock_for(path: Path) -> RLock:
+    key = str(path.resolve(strict=False)).casefold()
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, RLock())
 
 
 def _utc_now() -> str:
@@ -60,14 +70,19 @@ class SQLiteSettingsRepository:
         self.previous_backup_path = Path(f"{self.backup_path}.1")
         self.last_corrupt_path: Path | None = None
         self.legacy = legacy
+        # Every repository instance for a database shares this lock. Backup
+        # rotation is file I/O rather than SQLite I/O, so SQLite's own
+        # transaction lock cannot serialize it for concurrent API requests.
+        self._write_lock = _write_lock_for(self.db_path)
         # Fresh workspace loading fans out into settings and model requests.
         # Keep the one-time legacy import atomic within this process so those
         # requests cannot race to create the initial settings row.
         self._load_lock = RLock()
-        self._pre_schema_backup = self._prepare_primary()
-        self._ensure_schema()
-        if adopt_from is not None:
-            self._adopt_colocated_settings(Path(adopt_from))
+        with self._write_lock:
+            self._pre_schema_backup = self._prepare_primary()
+            self._ensure_schema()
+            if adopt_from is not None:
+                self._adopt_colocated_settings(Path(adopt_from))
 
     def _adopt_colocated_settings(self, source_db: Path) -> None:
         """Move settings out of a database they used to share with chat data.
@@ -292,38 +307,40 @@ class SQLiteSettingsRepository:
         )
 
     def _create_backup(self) -> str | None:
-        if not self.db_path.exists():
-            return None
-        if not self._database_is_valid(self.db_path):
-            raise SettingsRepositoryError(
-                "Could not create a settings database backup from an invalid database."
-            )
-        try:
-            # Preserve the prior verified backup before replacing the current
-            # generation. If the new copy fails, the old .bak remains intact.
-            if self.backup_path.exists() and self._database_is_valid(self.backup_path):
-                self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-            self._atomic_copy_database(self.db_path, self.backup_path)
-        except SettingsRepositoryError:
-            raise
-        except OSError as exc:
-            raise SettingsRepositoryError("Could not create a settings database backup.") from exc
-        return str(self.backup_path)
+        with self._write_lock:
+            if not self.db_path.exists():
+                return None
+            if not self._database_is_valid(self.db_path):
+                raise SettingsRepositoryError(
+                    "Could not create a settings database backup from an invalid database."
+                )
+            try:
+                # Preserve the prior verified backup before replacing the current
+                # generation. If the new copy fails, the old .bak remains intact.
+                if self.backup_path.exists() and self._database_is_valid(self.backup_path):
+                    self._atomic_copy_database(self.backup_path, self.previous_backup_path)
+                self._atomic_copy_database(self.db_path, self.backup_path)
+            except SettingsRepositoryError:
+                raise
+            except OSError as exc:
+                raise SettingsRepositoryError("Could not create a settings database backup.") from exc
+            return str(self.backup_path)
 
     def restore_backup(self) -> None:
         """Restore the last verified database backup without changing QSettings."""
-        candidate = next(
-            (
-                path
-                for path in (self.backup_path, self.previous_backup_path)
-                if path.exists() and self._database_is_valid(path)
-            ),
-            None,
-        )
-        if candidate is None:
-            raise SettingsRepositoryError("No valid settings database backup is available.")
-        self._atomic_copy_database(candidate, self.db_path)
-        self._ensure_schema()
+        with self._write_lock:
+            candidate = next(
+                (
+                    path
+                    for path in (self.backup_path, self.previous_backup_path)
+                    if path.exists() and self._database_is_valid(path)
+                ),
+                None,
+            )
+            if candidate is None:
+                raise SettingsRepositoryError("No valid settings database backup is available.")
+            self._atomic_copy_database(candidate, self.db_path)
+            self._ensure_schema()
 
     def _read_row(self) -> tuple[CortexSettings, str] | None:
         with self.connect() as connection:
@@ -465,31 +482,77 @@ class SQLiteSettingsRepository:
                 migration=report,
             )
 
-    def save(self, settings: CortexSettings) -> None:
+    def save(
+        self, settings: CortexSettings, *, expected_revision: int | None = None
+    ) -> None:
         if not isinstance(settings, CortexSettings):
             raise TypeError("settings must be a validated CortexSettings snapshot")
-        self._create_backup()
-        try:
-            with self.connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO cortex_settings
-                        (id, schema_version, revision, payload, updated_at)
-                    VALUES (1, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        schema_version = excluded.schema_version,
-                        revision = excluded.revision,
-                        payload = excluded.payload,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
+        if expected_revision is not None and (
+            type(expected_revision) is not int or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        if expected_revision is not None and settings.revision != expected_revision + 1:
+            raise ValueError("settings revision must be expected_revision + 1")
+        with self._write_lock:
+            self._create_backup()
+            try:
+                with self.connect() as connection:
+                    values = (
                         SETTINGS_SCHEMA_VERSION,
                         settings.revision,
                         settings.model_dump_json(),
                         _utc_now(),
-                    ),
-                )
-        except SettingsRepositoryError:
-            raise
-        except Exception as exc:
-            raise SettingsRepositoryError("Could not save Cortex settings.") from exc
+                    )
+                    if expected_revision is None:
+                        connection.execute(
+                            """
+                            INSERT INTO cortex_settings
+                                (id, schema_version, revision, payload, updated_at)
+                            VALUES (1, ?, ?, ?, ?)
+                            ON CONFLICT(id) DO UPDATE SET
+                                schema_version = excluded.schema_version,
+                                revision = excluded.revision,
+                                payload = excluded.payload,
+                                updated_at = excluded.updated_at
+                            """,
+                            values,
+                        )
+                        return
+
+                    result = connection.execute(
+                        """
+                        UPDATE cortex_settings
+                        SET schema_version = ?, revision = ?, payload = ?, updated_at = ?
+                        WHERE id = 1 AND revision = ?
+                        """,
+                        (*values, expected_revision),
+                    )
+                    if result.rowcount == 1:
+                        return
+                    if expected_revision == 0:
+                        try:
+                            connection.execute(
+                                """
+                                INSERT INTO cortex_settings
+                                    (id, schema_version, revision, payload, updated_at)
+                                VALUES (1, ?, ?, ?, ?)
+                                """,
+                                values,
+                            )
+                            return
+                        except sqlite3.IntegrityError:
+                            pass
+                    actual = connection.execute(
+                        "SELECT revision FROM cortex_settings WHERE id = 1"
+                    ).fetchone()
+                    found = int(actual[0]) if actual is not None else 0
+                    raise SettingsRevisionConflict(
+                        "Settings revision changed "
+                        f"(expected {expected_revision}, found {found})."
+                    )
+            except SettingsRevisionConflict:
+                raise
+            except SettingsRepositoryError:
+                raise
+            except Exception as exc:
+                raise SettingsRepositoryError("Could not save Cortex settings.") from exc

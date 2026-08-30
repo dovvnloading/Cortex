@@ -8,6 +8,7 @@ import pytest
 from cortex_backend.core.settings import CortexSettings
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository
 from cortex_backend.repositories.settings import SettingsRepositoryError
+from cortex_backend.repositories.settings import SettingsRevisionConflict
 
 
 def _repository_with_valid_backup(tmp_path: Path) -> tuple[SQLiteSettingsRepository, CortexSettings]:
@@ -138,3 +139,26 @@ def test_recovery_falls_back_to_older_verified_backup_generation(tmp_path: Path)
     recovered = SQLiteSettingsRepository(repository.db_path)
 
     assert recovered.load().settings == original
+
+
+def test_save_compare_and_swap_rejects_stale_revision_without_overwrite(tmp_path: Path):
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    original = repository.load().settings
+    first = original.model_copy(
+        update={
+            "revision": 1,
+            "appearance": original.appearance.model_copy(update={"theme": "light"}),
+        }
+    )
+    stale = original.model_copy(
+        update={
+            "revision": 1,
+            "appearance": original.appearance.model_copy(update={"theme": "system"}),
+        }
+    )
+
+    repository.save(first, expected_revision=0)
+    with pytest.raises(SettingsRevisionConflict):
+        repository.save(stale, expected_revision=0)
+
+    assert repository.load().settings == first
