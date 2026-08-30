@@ -59,6 +59,21 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Last-Event-ID")).toBe("0");
   });
 
+  it("delivers a final SSE frame the stream closed without terminating", async () => {
+    const sse = [
+      'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"state","status":"running"}\n\n',
+      'id: 2\ndata: {"id":2,"job_id":"job-1","kind":"completed","status":"succeeded"}',
+    ].join("");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const kinds: string[] = [];
+
+    await api.streamJob("job-1", (event) => kinds.push(event.kind));
+
+    expect(kinds).toEqual(["state", "completed"]);
+  });
+
   it("clears the session when a model job event stream returns 401", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
       JSON.stringify({ detail: "Local session expired." }),

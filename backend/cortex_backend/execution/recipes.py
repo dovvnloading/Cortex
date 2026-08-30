@@ -11,7 +11,8 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localco
 import hashlib
 import json
 import re
-from typing import Annotated, Any, Literal, Mapping, Union
+from typing import Annotated, Any, Literal
+from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -116,7 +117,7 @@ class ContrastStep(_StrictModel):
     _factor = field_validator("factor")(_bounded_decimal)
 
     @model_validator(mode="after")
-    def _within_image_range(self) -> "ContrastStep":
+    def _within_image_range(self) -> ContrastStep:
         if not Decimal("0") <= self.factor <= Decimal("4"):
             raise ValueError("contrast factor is outside the supported range")
         return self
@@ -130,7 +131,7 @@ class BrightnessStep(_StrictModel):
     _factor = field_validator("factor")(_bounded_decimal)
 
     @model_validator(mode="after")
-    def _within_image_range(self) -> "BrightnessStep":
+    def _within_image_range(self) -> BrightnessStep:
         if not Decimal("0") <= self.factor <= Decimal("4"):
             raise ValueError("brightness factor is outside the supported range")
         return self
@@ -156,7 +157,7 @@ class RotateStep(_StrictModel):
 
 
 ImageStep = Annotated[
-    Union[GrayscaleStep, ContrastStep, BrightnessStep, CropStep, ResizeStep, RotateStep],
+    GrayscaleStep | ContrastStep | BrightnessStep | CropStep | ResizeStep | RotateStep,
     Field(discriminator="op"),
 ]
 
@@ -195,7 +196,7 @@ class CalculatorPlan(_StrictModel):
     _operands = field_validator("operands")(_validate_operands)
 
     @model_validator(mode="after")
-    def _validate_divisors(self) -> "CalculatorPlan":
+    def _validate_divisors(self) -> CalculatorPlan:
         if self.operation == "divide" and any(operand == 0 for operand in self.operands[1:]):
             raise ValueError("division by zero is not supported")
         return self
@@ -226,7 +227,7 @@ class CheckPlan(_StrictModel):
     _tolerance = field_validator("tolerance")(_bounded_optional_decimal)
 
     @model_validator(mode="after")
-    def _validate_tolerance(self) -> "CheckPlan":
+    def _validate_tolerance(self) -> CheckPlan:
         if self.operation == "is_close":
             if self.tolerance is None or self.tolerance <= 0:
                 raise ValueError("is_close requires a positive tolerance")

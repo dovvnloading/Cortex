@@ -11,14 +11,8 @@ from fastapi.testclient import TestClient
 import cortex_backend.api.routes as api_routes
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
+from support import session_headers as _session
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    token = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    ).json()["session_token"]
-    return {"Authorization": f"Bearer {token}"}
 
 
 def _events(body: str) -> list[dict]:

@@ -22,7 +22,8 @@ import hmac
 import json
 import re
 import time
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
+from collections.abc import Callable, Mapping
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -176,7 +177,7 @@ class ReleaseReviewAttestation(_ReleaseReviewModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_window(self) -> "ReleaseReviewAttestation":
+    def _validate_window(self) -> ReleaseReviewAttestation:
         if self.expires_at <= self.issued_at:
             raise ValueError("review expiry must be after issue time")
         if self.expires_at - self.issued_at > MAX_REVIEW_VALIDITY_SECONDS:

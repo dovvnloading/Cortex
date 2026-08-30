@@ -9,18 +9,11 @@ from fastapi.testclient import TestClient
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.repository import ExecutionRepository
+from support import session_headers as _session
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    response = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['session_token']}"}
 
 
 def test_code_api_is_pending_until_approved_and_source_is_owner_scoped(tmp_path) -> None:

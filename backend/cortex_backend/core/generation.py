@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
+from collections.abc import Mapping
 
 
 ConnectionStatus = Literal["connecting", "connected", "error"]
@@ -20,7 +21,7 @@ class GenerationResult:
     error_details: str | None = None
     job_id: str | None = None
     thread_id: str | None = None
-    memory_command: "MemoryCommand | None" = None
+    memory_command: MemoryCommand | None = None
 
     @classmethod
     def succeeded(
@@ -30,8 +31,8 @@ class GenerationResult:
         *,
         job_id: str,
         thread_id: str,
-        memory_command: "MemoryCommand | None" = None,
-    ) -> "GenerationResult":
+        memory_command: MemoryCommand | None = None,
+    ) -> GenerationResult:
         return cls(
             success=True,
             response=response,
@@ -49,7 +50,7 @@ class GenerationResult:
         error_details: str | None = None,
         job_id: str,
         thread_id: str,
-    ) -> "GenerationResult":
+    ) -> GenerationResult:
         return cls(
             success=False,
             error=error,
@@ -77,7 +78,7 @@ class ConnectionResult:
         *,
         missing_models: tuple[str, ...] = (),
         optional_missing_models: tuple[str, ...] = (),
-    ) -> "ConnectionResult":
+    ) -> ConnectionResult:
         return cls(
             success=True,
             status="connected",
@@ -94,7 +95,7 @@ class ConnectionResult:
         details: str | None = None,
         missing_models: tuple[str, ...] = (),
         optional_missing_models: tuple[str, ...] = (),
-    ) -> "ConnectionResult":
+    ) -> ConnectionResult:
         return cls(
             success=False,
             status="error",
@@ -185,7 +186,7 @@ class TranslationResult:
     error_details: str | None = None
 
     @classmethod
-    def succeeded(cls, text: str) -> "TranslationResult":
+    def succeeded(cls, text: str) -> TranslationResult:
         return cls(success=True, text=text)
 
     @classmethod
@@ -194,7 +195,7 @@ class TranslationResult:
         error: str,
         *,
         error_details: str | None = None,
-    ) -> "TranslationResult":
+    ) -> TranslationResult:
         return cls(success=False, error=error, error_details=error_details)
 
 

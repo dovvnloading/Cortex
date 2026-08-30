@@ -16,18 +16,11 @@ import pytest
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.api.jobs import JobConflict, JobRegistry
 from cortex_backend.testing.fake_ollama import FakeOllamaState
+from support import session_headers as _session
 
 
 THREAD_ID = "generation-admission-race"
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    response = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['session_token']}"}
 
 
 def _events(body: str) -> list[dict[str, Any]]:

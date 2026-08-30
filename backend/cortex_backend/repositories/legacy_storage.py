@@ -257,7 +257,7 @@ class DatabaseManager:
                 continue
 
             try:
-                with open(file_path, 'r', encoding='utf-8') as stream:
+                with open(file_path, encoding='utf-8') as stream:
                     chat_data = self._parse_legacy_chat(json.load(stream))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 logging.error("Quarantining invalid legacy chat %s: %s", filename, exc)
@@ -852,7 +852,7 @@ class VectorDatabaseManager:
                         continue # Dimension mismatch skip
 
                     # Cosine Similarity: (A . B) / (||A|| * ||B||)
-                    dot_product = sum(a*b for a,b in zip(query_vector, vector))
+                    dot_product = sum(a*b for a,b in zip(query_vector, vector, strict=False))
                     vector_norm = math.sqrt(sum(x*x for x in vector))
                     
                     if vector_norm == 0:
@@ -945,7 +945,7 @@ class PermanentMemoryManager:
             if not os.path.exists(candidate):
                 continue
             try:
-                with open(candidate, 'r', encoding='utf-8') as stream:
+                with open(candidate, encoding='utf-8') as stream:
                     return self._validate_memo_data(json.load(stream))
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 logging.error("Failed to load permanent memory file %s: %s", candidate, exc)
@@ -967,7 +967,7 @@ class PermanentMemoryManager:
                 stream.flush()
                 os.fsync(stream.fileno())
 
-            with open(temporary_path, 'r', encoding='utf-8') as stream:
+            with open(temporary_path, encoding='utf-8') as stream:
                 self._validate_memo_data(json.load(stream))
             if os.path.exists(self.memory_file_path):
                 shutil.copy2(self.memory_file_path, self.backup_file_path)

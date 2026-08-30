@@ -133,26 +133,43 @@ def _recipe_worker_main(
             pass
 
 
+def _process_is_alive(process: Any) -> bool:
+    try:
+        return bool(process.is_alive())
+    except Exception:
+        return False
+
+
 def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS) -> None:
     """Bounded clean-up for a worker that may have stopped responding."""
 
+    grace = max(0.0, grace_seconds)
     try:
-        process.join(timeout=max(0.0, grace_seconds))
+        process.join(timeout=grace)
+    except Exception:
+        pass
+    if not _process_is_alive(process):
+        return
+    try:
+        process.terminate()
+    except Exception:
+        pass
+    try:
+        process.join(timeout=grace)
+    except Exception:
+        pass
+    if not _process_is_alive(process):
+        return
+    # A worker that survives terminate() would otherwise be leaked while still
+    # holding its sandbox resources, so escalate to an unconditional kill.
+    try:
+        process.kill()
     except Exception:
         return
     try:
-        alive = bool(process.is_alive())
+        process.join(timeout=grace)
     except Exception:
-        return
-    if alive:
-        try:
-            process.terminate()
-        except Exception:
-            return
-        try:
-            process.join(timeout=max(0.0, grace_seconds))
-        except Exception:
-            pass
+        pass
 
 
 class LocalRecipeWorkerAttempt:

@@ -39,7 +39,7 @@ Why the specific rules here:
 from __future__ import annotations
 
 import json
-from typing import Mapping
+from collections.abc import Mapping
 
 from cortex_backend.core.generation import CodeProposalRejection
 

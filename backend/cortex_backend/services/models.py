@@ -33,7 +33,7 @@ class ModelCatalog(Protocol):
     surface -- routes.py needs no changes to support either.
     """
 
-    def inventory(self) -> tuple[tuple["InstalledModel", ...], ConnectionResult]:
+    def inventory(self) -> tuple[tuple[InstalledModel, ...], ConnectionResult]:
         """Read one authoritative local inventory and its connection result."""
 
     def list_installed(self) -> tuple[str, ...]:
@@ -43,7 +43,7 @@ class ModelCatalog(Protocol):
         self,
         model: str,
         *,
-        progress_callback: Callable[["ModelPullProgress"], None] | None = None,
+        progress_callback: Callable[[ModelPullProgress], None] | None = None,
         cancellation_event: Event | None = None,
         verify: bool = True,
     ) -> bool:
@@ -54,7 +54,7 @@ class ModelCatalog(Protocol):
         *,
         required_models: Iterable[str],
         optional_models: Iterable[str] = (),
-        progress_callback: Callable[["ModelPullProgress"], None] | None = None,
+        progress_callback: Callable[[ModelPullProgress], None] | None = None,
         cancellation_event: Event | None = None,
     ) -> ConnectionResult:
         """Verify required tags and report optional tags without pulling them."""

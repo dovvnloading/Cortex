@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Event
-from typing import Callable, Literal, Mapping, Any
+from typing import Literal, Any
+from collections.abc import Callable, Mapping
 
 
 FakeOutcome = Literal["success", "failure"]

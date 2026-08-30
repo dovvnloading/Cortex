@@ -569,7 +569,7 @@ class Win32SuspendedWorker:
             pass
         self._win.userenv.DeleteAppContainerProfile(self._profile_name)
 
-    def __enter__(self) -> "Win32SuspendedWorker":
+    def __enter__(self) -> Win32SuspendedWorker:
         return self
 
     def __exit__(self, *_exc: object) -> None:

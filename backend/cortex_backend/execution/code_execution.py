@@ -28,7 +28,8 @@ import sys
 import signal
 from threading import Event as ThreadEvent, Lock as ThreadLock, Thread
 import time
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import (
@@ -107,7 +108,7 @@ class CodeCapabilities:
     network: bool = False
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any] | None) -> "CodeCapabilities":
+    def from_mapping(cls, value: Mapping[str, Any] | None) -> CodeCapabilities:
         if value is None:
             return cls()
         if not isinstance(value, Mapping):
@@ -133,7 +134,7 @@ class CodeCapabilities:
             "network": self.network,
         }
 
-    def restricted_to(self, required: "CodeCapabilities") -> "CodeCapabilities":
+    def restricted_to(self, required: CodeCapabilities) -> CodeCapabilities:
         """Keep only grants the validated source can actually use."""
 
         if not isinstance(required, CodeCapabilities):

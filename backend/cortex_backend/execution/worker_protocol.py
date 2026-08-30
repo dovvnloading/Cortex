@@ -230,7 +230,7 @@ class WorkerResult(_WorkerModel):
         *,
         request_id: str,
         job_id: str,
-    ) -> "WorkerResult":
+    ) -> WorkerResult:
         return WorkerResult(
             schema_version="recipe.worker.result.v1",
             request_id=request_id,

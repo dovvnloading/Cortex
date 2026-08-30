@@ -14,7 +14,8 @@ from queue import Empty, Queue
 import re
 from threading import Event, Thread
 from time import process_time_ns
-from typing import Any, Callable, Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
+from collections.abc import Callable
 
 from .broker import BrokerMessage
 from .lifecycle import RuntimeHealth
@@ -390,7 +391,7 @@ class RecipeWorkerBrokerRuntime:
                     completion_thread = None
                     active_request = None
                     if isinstance(error, WorkerRuntimeError):
-                        raise error
+                        raise error from None
                     if isinstance(error, WorkerProtocolError):
                         if error.code == "cancelled" and cancel_acknowledged:
                             terminal = "cancelled"

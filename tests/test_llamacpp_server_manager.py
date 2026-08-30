@@ -106,6 +106,9 @@ class _FakeResponse:
         self.status_code = status_code
 
 
+_ANY_RELEASE = object()
+
+
 class _FakeFetcher:
     def __init__(self) -> None:
         self.ensure_binary_calls: list[str] = []
@@ -130,7 +133,7 @@ def _manager(
     http_client,
     gpu_backend: str = "cpu",
     health_timeout_seconds: float = 5.0,
-    release=object(),
+    release=_ANY_RELEASE,
 ) -> LlamaServerManager:
     return LlamaServerManager(
         runtime_dir=tmp_path,

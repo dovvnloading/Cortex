@@ -17,9 +17,57 @@ from cortex_backend.execution.code_execution import (
     run_code_in_worker,
 )
 from cortex_backend.execution import code_execution
-from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
+from cortex_backend.execution.local_runtime import LocalExecutionCoordinator, _stop_process
 from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
+
+
+class _StubbornProcess:
+    """Fake worker that only dies when it is hard-killed."""
+
+    def __init__(self, *, dies_on_terminate: bool, join_raises: bool = False) -> None:
+        self._dies_on_terminate = dies_on_terminate
+        self._join_raises = join_raises
+        self.alive = True
+        self.calls: list[str] = []
+
+    def join(self, timeout: float | None = None) -> None:
+        self.calls.append("join")
+        if self._join_raises:
+            self._join_raises = False
+            raise ValueError("join failed once")
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+        if self._dies_on_terminate:
+            self.alive = False
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.alive = False
+
+
+def test_stop_process_escalates_to_kill_when_terminate_is_ignored() -> None:
+    ignored = _StubbornProcess(dies_on_terminate=False)
+    _stop_process(ignored, grace_seconds=0.0)
+    assert "kill" in ignored.calls
+    assert not ignored.alive
+
+    graceful = _StubbornProcess(dies_on_terminate=True)
+    _stop_process(graceful, grace_seconds=0.0)
+    assert "kill" not in graceful.calls
+    assert not graceful.alive
+
+
+def test_stop_process_still_cleans_up_after_a_failed_join() -> None:
+    process = _StubbornProcess(dies_on_terminate=False, join_raises=True)
+    _stop_process(process, grace_seconds=0.0)
+    assert "terminate" in process.calls
+    assert "kill" in process.calls
+    assert not process.alive
 
 
 def test_code_source_requires_bounded_constructs_and_explicit_capabilities() -> None:
@@ -418,7 +466,14 @@ def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) 
 
     def observed_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
         nonlocal claim_count
-        result = original_claim(lease_owner=lease_owner, ttl_seconds=ttl_seconds)
+        # The coordinator's 0.06s lease keeps the heartbeat fast (~20ms) so the
+        # renewal is observed quickly, but a lease that short also expires
+        # within 60ms of being written. That is long enough on an idle machine
+        # and not on a loaded CI runner, where the scheduler can stall the test
+        # thread past the expiry and let `second` claim a free lease instead of
+        # conflicting. Persist a long lease so the assertion below measures
+        # ownership rather than wall-clock luck.
+        result = original_claim(lease_owner=lease_owner, ttl_seconds=max(ttl_seconds, 30.0))
         claim_count += 1
         if claim_count >= 2:
             renewal_seen.set()

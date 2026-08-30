@@ -18,6 +18,7 @@ from cortex_backend.repositories.chats import (
 )
 from cortex_backend.repositories.legacy_storage import DatabaseManager
 from cortex_backend.testing.fake_ollama import FakeOllamaState
+from support import session_headers as _session
 
 
 def test_inmemory_append_is_compare_and_swap_and_atomic():
@@ -58,13 +59,6 @@ def test_sqlite_chat_revision_conflict_is_atomic(tmp_path: Path):
     chat = repository.get_chat("thread")
     assert [message["content"] for message in chat["messages"]] == ["one"]
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    token = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    ).json()["session_token"]
-    return {"Authorization": f"Bearer {token}"}
 
 
 def _events(body: str) -> list[dict]:

@@ -64,10 +64,10 @@ class _MemoryDuplex:
     client_to_server: queue.Queue[bytes]
 
     @classmethod
-    def create(cls) -> "_MemoryDuplex":
+    def create(cls) -> _MemoryDuplex:
         return cls(queue.Queue(), queue.Queue())
 
-    def endpoint(self, role: str) -> "_MemoryEndpoint":
+    def endpoint(self, role: str) -> _MemoryEndpoint:
         if role == "server":
             return _MemoryEndpoint(self.client_to_server, self.server_to_client)
         return _MemoryEndpoint(self.server_to_client, self.client_to_server)

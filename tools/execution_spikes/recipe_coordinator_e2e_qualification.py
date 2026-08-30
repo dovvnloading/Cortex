@@ -24,7 +24,8 @@ import shutil
 import sys
 import time
 from tempfile import mkdtemp
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 SPIKE_ROOT = Path(__file__).resolve().parent

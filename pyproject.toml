@@ -1,3 +1,58 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cortex-backend"
+version = "0.1.0"
+description = "Windows-first, local-first desktop assistant backend."
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "ollama>=0.4,<1",
+    "gguf>=0.13,<1",
+    "pydantic>=2.13,<2.14",
+    "fastapi>=0.139,<0.140",
+    "starlette>=0.40,<2",
+    "uvicorn>=0.51,<0.52",
+    "httpx>=0.27,<1",
+    "pywebview>=6.2,<6.3",
+    "cryptography>=49,<50",
+    "Pillow>=12.3,<12.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "ruff==0.15.17",
+]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["cortex_backend*"]
+
+[tool.setuptools.package-data]
+cortex_backend = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["Chat_LLM"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency injection intentionally calls these in parameter defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Body",
+    "fastapi.Query",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.File",
+    "fastapi.Form",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

@@ -110,7 +110,7 @@ class _JobRecord:
 class JobProgressSink:
     """Adapt typed service progress into this job's retained event stream."""
 
-    def __init__(self, registry: "JobRegistry", record: _JobRecord):
+    def __init__(self, registry: JobRegistry, record: _JobRecord):
         self._registry = registry
         self._record = record
 

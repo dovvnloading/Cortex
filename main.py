@@ -112,13 +112,13 @@ def _frontend_root() -> Path:
 
 def _resource_root() -> Path:
     if _is_packaged():
-        return Path(getattr(sys, "_MEIPASS"))
+        return Path(sys._MEIPASS)
     return ROOT / "packaging" / ".runtime"
 
 
 def _app_asset_root() -> Path:
     """Resolve assets from the source tree or PyInstaller's bundled root."""
-    return Path(getattr(sys, "_MEIPASS")) if _is_packaged() else ROOT
+    return Path(sys._MEIPASS) if _is_packaged() else ROOT
 
 
 def _free_port() -> int:

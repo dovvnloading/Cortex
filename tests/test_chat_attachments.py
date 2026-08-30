@@ -19,6 +19,7 @@ from cortex_backend.services.attachments import (
 from cortex_backend.services.llm import PromptTemplate
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 from cortex_backend.execution.repository import ExecutionRepository
+from support import session_headers as _session
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
@@ -29,14 +30,6 @@ def _png_bytes() -> bytes:
     Image.new("RGB", (2, 2), (220, 120, 40)).save(stream, format="PNG")
     return stream.getvalue()
 
-
-def _session(client: TestClient, app) -> dict[str, str]:
-    response = client.post(
-        "/api/v1/session/exchange",
-        json={"bootstrap_token": app.state.session_manager.bootstrap_token},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['session_token']}"}
 
 
 def test_text_documents_are_staged_as_opaque_metadata_and_resolve_as_reference_text():
