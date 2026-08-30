@@ -207,19 +207,27 @@ export class CortexApi {
     );
   }
 
-  async streamGeneration(
+  streamGeneration(
     jobId: string,
     onEvent: (event: GenerationEvent) => void,
+    options: { signal?: AbortSignal; afterEventId?: number } = {},
+  ): Promise<void> {
+    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options);
+  }
+
+  private async streamEvents<T>(
+    path: string,
+    onEvent: (event: T) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
     const headers = this.authHeaders();
     if (options.afterEventId !== undefined) {
       headers.set("Last-Event-ID", String(options.afterEventId));
     }
-    const response = await this.fetcher(
-      `${this.baseUrl}/generations/${encodeURIComponent(jobId)}/events`,
-      { headers, signal: options.signal },
-    );
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      headers,
+      signal: options.signal,
+    });
     if (response.status === 401) {
       this.clearSession();
     }
@@ -227,6 +235,14 @@ export class CortexApi {
       throw new ApiError(response.status, await this.errorDetail(response));
     }
 
+    const emit = (frame: string) => {
+      const data = frame
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+      if (data) onEvent(JSON.parse(data) as T);
+    };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -235,25 +251,12 @@ export class CortexApi {
       buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
       const frames = buffer.split("\n\n");
       buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const data = frame
-          .split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim())
-          .join("\n");
-        if (!data) continue;
-        onEvent(JSON.parse(data) as GenerationEvent);
-      }
+      for (const frame of frames) emit(frame);
       if (chunk.done) break;
     }
-    if (buffer.trim()) {
-      const data = buffer
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-      if (data) onEvent(JSON.parse(data) as GenerationEvent);
-    }
+    // The backend may close the stream without terminating the last frame with a
+    // blank line, so anything left in the buffer is still a deliverable event.
+    if (buffer.trim()) emit(buffer);
   }
 
   async deleteChat(threadId: string): Promise<void> {
@@ -397,68 +400,20 @@ export class CortexApi {
     );
   }
 
-  async streamExecution(
+  streamExecution(
     jobId: string,
     onEvent: (event: ExecutionSSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    const headers = this.authHeaders();
-    if (options.afterEventId !== undefined) headers.set("Last-Event-ID", String(options.afterEventId));
-    const response = await this.fetcher(
-      `${this.baseUrl}/execution/${encodeURIComponent(jobId)}/events`,
-      { headers, signal: options.signal },
-    );
-    if (response.status === 401) this.clearSession();
-    if (!response.ok || !response.body) throw new ApiError(response.status, await this.errorDetail(response));
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const chunk = await reader.read();
-      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const data = frame.split("\n").filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim()).join("\n");
-        if (data) onEvent(JSON.parse(data) as ExecutionSSEEvent);
-      }
-      if (chunk.done) break;
-    }
+    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options);
   }
 
-  async streamJob(
+  streamJob(
     jobId: string,
     onEvent: (event: SSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    const headers = this.authHeaders();
-    if (options.afterEventId !== undefined) {
-      headers.set("Last-Event-ID", String(options.afterEventId));
-    }
-    const response = await this.fetcher(
-      `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/events`,
-      { headers, signal: options.signal },
-    );
-    if (response.status === 401) this.clearSession();
-    if (!response.ok || !response.body) {
-      throw new ApiError(response.status, await this.errorDetail(response));
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const chunk = await reader.read();
-      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const data = frame.split("\n").filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim()).join("\n");
-        if (data) onEvent(JSON.parse(data) as SSEEvent);
-      }
-      if (chunk.done) break;
-    }
+    return this.streamEvents(`/jobs/${encodeURIComponent(jobId)}/events`, onEvent, options);
   }
 
   memories(): Promise<MemoryResponse> {
