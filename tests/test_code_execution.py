@@ -466,7 +466,14 @@ def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) 
 
     def observed_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
         nonlocal claim_count
-        result = original_claim(lease_owner=lease_owner, ttl_seconds=ttl_seconds)
+        # The coordinator's 0.06s lease keeps the heartbeat fast (~20ms) so the
+        # renewal is observed quickly, but a lease that short also expires
+        # within 60ms of being written. That is long enough on an idle machine
+        # and not on a loaded CI runner, where the scheduler can stall the test
+        # thread past the expiry and let `second` claim a free lease instead of
+        # conflicting. Persist a long lease so the assertion below measures
+        # ownership rather than wall-clock luck.
+        result = original_claim(lease_owner=lease_owner, ttl_seconds=max(ttl_seconds, 30.0))
         claim_count += 1
         if claim_count >= 2:
             renewal_seen.set()
