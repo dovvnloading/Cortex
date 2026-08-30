@@ -109,7 +109,7 @@ Useful focused commands include:
 
 ```powershell
 python -m pytest -q
-python -m ruff check backend tests tools main.py
+python -m ruff check backend tests tools main.py Cortex_Preview.py
 python tools/generate_contracts.py
 Push-Location frontend
 npm run typecheck
