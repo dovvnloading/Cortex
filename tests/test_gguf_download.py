@@ -524,6 +524,28 @@ def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
             list_huggingface_gguf_files("owner/model", http_client=client)
 
 
+def test_huggingface_file_listing_only_advertises_resolver_safe_filenames() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "siblings": [
+                    {"rfilename": "weights/model.gguf"},
+                    {"rfilename": "../escape.gguf"},
+                    {"rfilename": "model.gguf\n"},
+                    {"rfilename": "model.gguf"},
+                    {"rfilename": "README.md"},
+                    {"rfilename": 123},
+                    {},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert list_huggingface_gguf_files("owner/model", http_client=client) == ("model.gguf",)
+
+
 @pytest.mark.parametrize("siblings", [None, 123])
 def test_huggingface_file_listing_rejects_malformed_siblings_shape(siblings) -> None:
     def handler(request: httpx.Request) -> httpx.Response:

@@ -174,7 +174,7 @@ def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | Non
         for entry in siblings
         if isinstance(entry, dict)
         and isinstance(entry.get("rfilename"), str)
-        and entry["rfilename"].lower().endswith(".gguf")
+        and _SAFE_FILENAME_PATTERN.fullmatch(entry["rfilename"]) is not None
     )
     return tuple(names)
 
