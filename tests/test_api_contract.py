@@ -334,6 +334,12 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         assert "qwen3:8b" in models.json()["installed_models"]
 
 
+def test_generation_input_is_trimmed_and_rejects_invisible_text():
+    assert GenerationRequest(user_input="  hello\n").user_input == "hello"
+    with pytest.raises(ValueError, match="visible text"):
+        GenerationRequest(user_input="\u200b")
+
+
 def test_generation_sse_is_ordered_replayable_and_redacts_failures(caplog):
     app, client = _client()
     with client:

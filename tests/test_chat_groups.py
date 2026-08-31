@@ -255,10 +255,44 @@ def test_group_names_are_bounded_and_non_empty() -> None:
         headers = _session(client, app)
         assert client.post(
             "/api/v1/chat-groups", json={"name": "   "}, headers=headers
-        ).status_code in (201, 422)
+        ).status_code == 422
         assert client.post(
             "/api/v1/chat-groups", json={"name": ""}, headers=headers
         ).status_code == 422
         assert client.post(
             "/api/v1/chat-groups", json={"name": "x" * 121}, headers=headers
+        ).status_code == 422
+
+
+def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input() -> None:
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        chat = client.post(
+            "/api/v1/chats", json={"title": "  Project  "}, headers=headers
+        )
+        assert chat.status_code == 201
+        chat_payload = chat.json()
+        assert chat_payload["title"] == "Project"
+
+        thread_id = chat_payload["id"]
+        message = client.post(
+            f"/api/v1/chats/{thread_id}/messages",
+            json={"role": "user", "content": " hello "},
+            headers=headers,
+        )
+        assert message.status_code == 200
+        assert message.json()["messages"][-1]["content"] == "hello"
+        assert client.patch(
+            f"/api/v1/chats/{thread_id}",
+            json={"title": "\t\n"},
+            headers=headers,
+        ).status_code == 422
+        assert client.post(
+            "/api/v1/chat-groups", json={"name": "\u200b"}, headers=headers
+        ).status_code == 422
+        assert client.post(
+            f"/api/v1/chats/{thread_id}/messages",
+            json={"role": "user", "content": " \n\t "},
+            headers=headers,
         ).status_code == 422
