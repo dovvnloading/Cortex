@@ -7,22 +7,25 @@ afterward, so there is no separate download-tracking state to maintain.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Literal
 from uuid import uuid4
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+_MAX_DOWNLOAD_REDIRECTS = 5
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 _HF_API_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 _HF_REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+$")
@@ -175,42 +178,57 @@ def download_gguf(
     notify = progress_callback or (lambda progress: None)
     notify(GGUFDownloadProgress(filename=target_filename, status="starting"))
     try:
-        with client.stream("GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT) as response:
-            response.raise_for_status()
-            total = _content_length(response)
-            completed = 0
-            first_chunk = True
-            with temp_path.open("wb") as handle:
-                for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
-                    if cancellation_event is not None and cancellation_event.is_set():
-                        raise GGUFDownloadError("Download cancelled.")
-                    if first_chunk:
-                        first_chunk = False
-                        # Fail fast on the very first chunk rather than
-                        # downloading a potentially large wrong file (e.g. a
-                        # Hugging Face "blob" page returns an HTML document,
-                        # not the model, and would otherwise "succeed" at
-                        # saving a web page as a .gguf file).
-                        if not chunk.startswith(GGUF_MAGIC):
-                            raise GGUFDownloadError(
-                                "This link did not return a GGUF model file (got something else, such as a "
-                                "web page, instead). Use the file's direct download link, not the page you "
-                                "view it on."
+        current_url = _validate_download_url(url)
+        for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
+            with client.stream("GET", current_url, follow_redirects=False, timeout=_DOWNLOAD_TIMEOUT) as response:
+                if response.is_redirect:
+                    if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
+                        raise GGUFDownloadError("The download exceeded the redirect limit.")
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise GGUFDownloadError("The download redirect did not include a target URL.")
+                    current_url = _validate_download_url(urljoin(current_url, location))
+                    continue
+
+                _validate_download_url(str(response.url))
+                response.raise_for_status()
+                total = _content_length(response)
+                completed = 0
+                first_chunk = True
+                with temp_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                        if cancellation_event is not None and cancellation_event.is_set():
+                            raise GGUFDownloadError("Download cancelled.")
+                        if first_chunk:
+                            first_chunk = False
+                            # Fail fast on the very first chunk rather than
+                            # downloading a potentially large wrong file (e.g. a
+                            # Hugging Face "blob" page returns an HTML document,
+                            # not the model, and would otherwise silently
+                            # save a web page as a .gguf file).
+                            if not chunk.startswith(GGUF_MAGIC):
+                                raise GGUFDownloadError(
+                                    "This link did not return a GGUF model file (got something else, such as a "
+                                    "web page, instead). Use the file's direct download link, not the page you "
+                                    "view it on."
+                                )
+                        handle.write(chunk)
+                        completed += len(chunk)
+                        notify(
+                            GGUFDownloadProgress(
+                                filename=target_filename,
+                                status="downloading",
+                                completed=completed,
+                                total=total,
                             )
-                    handle.write(chunk)
-                    completed += len(chunk)
-                    notify(
-                        GGUFDownloadProgress(
-                            filename=target_filename,
-                            status="downloading",
-                            completed=completed,
-                            total=total,
                         )
-                    )
-            if first_chunk:
-                # The server returned an empty body -- there was never a
-                # first chunk to validate above.
-                raise GGUFDownloadError("The download returned no data.")
+                if first_chunk:
+                    # The server returned an empty body -- there was never a
+                    # first chunk to validate above.
+                    raise GGUFDownloadError("The download returned no data.")
+                break
+        else:  # pragma: no cover - the loop always returns or breaks
+            raise GGUFDownloadError("The download exceeded the redirect limit.")
         os.replace(temp_path, destination)
     except httpx.HTTPError as exc:
         raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
@@ -225,3 +243,74 @@ def _content_length(response: httpx.Response) -> int | None:
         return int(response.headers["Content-Length"])
     except (KeyError, ValueError):
         return None
+
+
+def _validate_download_url(url: str) -> str:
+    """Validate one GGUF URL before it is requested.
+
+    ``httpx``'s automatic redirect handling follows a ``Location`` header
+    without giving this module a chance to enforce its HTTPS-only and
+    public-host policy.  Resolve hostnames before each request so a redirect
+    cannot point the downloader at Cortex or another private service.
+    """
+    if not isinstance(url, str) or _contains_control_character(url):
+        raise GGUFDownloadError("The download URL contains invalid control characters.")
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise GGUFDownloadError("The download URL is invalid.") from None
+    if (
+        parts.scheme.casefold() != "https"
+        or not host
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+    ):
+        raise GGUFDownloadError("Only public https:// download URLs are supported.")
+    if port is not None and not 1 <= port <= 65_535:
+        raise GGUFDownloadError("The download URL is invalid.")
+
+    normalized_host = host.rstrip(".").casefold()
+    if normalized_host in {"localhost", "localhost.localdomain"} or normalized_host.endswith(
+        (".localhost", ".local", ".internal")
+    ):
+        raise GGUFDownloadError("Download URLs may not target a private or loopback host.")
+
+    try:
+        literal_address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None:
+        addresses = (literal_address,)
+    else:
+        try:
+            resolved = socket.getaddrinfo(
+                normalized_host,
+                port or 443,
+                type=socket.SOCK_STREAM,
+            )
+        except (OSError, UnicodeError):
+            raise GGUFDownloadError("Could not resolve the download host.") from None
+        addresses = []
+        for answer in resolved:
+            try:
+                addresses.append(ipaddress.ip_address(answer[4][0]))
+            except (IndexError, KeyError, ValueError, TypeError):
+                raise GGUFDownloadError("Could not resolve the download host.") from None
+        if not addresses:
+            raise GGUFDownloadError("Could not resolve the download host.")
+
+    if any(
+        not address.is_global
+        or address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+        for address in addresses
+    ):
+        raise GGUFDownloadError("Download URLs may not target a private or loopback host.")
+    return url

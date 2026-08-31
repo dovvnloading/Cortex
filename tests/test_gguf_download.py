@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
+import cortex_backend.llamacpp.download as download_module
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.api.schemas import ModelDownloadRequest
 from cortex_backend.llamacpp.download import (
@@ -21,6 +22,16 @@ from cortex_backend.llamacpp.download import (
     resolve_download_url,
 )
 from support import session_headers as _session
+
+
+@pytest.fixture(autouse=True)
+def _mock_download_dns(monkeypatch) -> None:
+    """Keep MockTransport download tests independent of external DNS."""
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("93.184.216.34", port))],
+    )
 
 
 
@@ -160,6 +171,107 @@ def test_download_gguf_cancellation_leaves_no_partial_file(tmp_path: Path) -> No
         )
     assert not (tmp_path / "model.gguf").exists()
     assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+def test_download_gguf_rejects_https_to_http_redirect(tmp_path: Path) -> None:
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "http://example.com/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="https"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_redirect_target(tmp_path: Path) -> None:
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "https://127.0.0.1/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_dns_redirect_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("10.0.0.7", port))],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "https://private.example/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_dns_on_initial_url(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("100.64.0.7", port))],
+    )
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"GGUF"))),
+        )
+
+
+def test_download_gguf_rejects_redirect_loop(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(302, headers={"Location": f"https://example.com/redirect-{calls}.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="redirect limit"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 6
+
+
+def test_download_gguf_allows_valid_https_redirect(tmp_path: Path) -> None:
+    content = b"GGUF" + b"valid model"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example.com/model.gguf"})
+        return httpx.Response(200, content=content)
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert destination.read_bytes() == content
 
 
 # -- route: job-kind isolation -------------------------------------------------
