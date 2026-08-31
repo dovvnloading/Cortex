@@ -341,7 +341,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save settings."), "error"); }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // The server's compare-and-swap rejected a concurrent settings write.
+        // Refresh the authoritative document so a mounted SettingsPanel can
+        // merge its still-local edits against the newer revision before the
+        // user retries, instead of leaving a stale snapshot in the store.
+        try {
+          const latest = await api.settings();
+          setSettings(latest.settings);
+          setTheme(latest.settings.appearance?.theme ?? "dark");
+          notify("Settings changed elsewhere. Review the latest values and save again.", "error");
+        } catch (refreshError) {
+          notify(apiMessage(refreshError, "Could not refresh settings after the conflict."), "error");
+        }
+      } else {
+        notify(apiMessage(error, "Could not save settings."), "error");
+      }
+    }
     finally { setSaving(false); }
   };
 
