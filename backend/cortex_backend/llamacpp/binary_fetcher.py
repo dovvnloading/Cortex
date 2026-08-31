@@ -90,14 +90,18 @@ class BinaryFetcher:
         self._http = http_client
         self._verification_cache: dict[Path, tuple[_TreeIdentity, bool]] = {}
 
-    def _verify_directory(self, target_dir: Path, asset: AssetSpec) -> bool:
+    def _verify_directory(
+        self, target_dir: Path, asset: AssetSpec, *, force_hash: bool = False
+    ) -> bool:
         """Re-verify the whole extracted directory against the pinned manifest hash.
 
         Run before every launch (not just once after download) so a corrupted or
         tampered-with cached install is caught rather than trusted forever. This
         isn't a single-file TOCTOU-resistant stat-hash-stat check (a multi-file
         tree walk can't be made atomic that cheaply); it is still a large
-        improvement over trusting an unverified cache indefinitely.
+        improvement over trusting an unverified cache indefinitely. ``force_hash``
+        bypasses the stat-based memoization for the launch boundary, because a
+        local replacement can preserve both size and mtime.
 
         The full SHA-256 walk (``hash_directory``) only actually runs when the
         tree's cheap ``_tree_identity`` fingerprint has changed since the last
@@ -111,7 +115,7 @@ class BinaryFetcher:
         try:
             identity = _tree_identity(target_dir)
             cached = self._verification_cache.get(target_dir)
-            if cached is not None and cached[0] == identity:
+            if not force_hash and cached is not None and cached[0] == identity:
                 return cached[1]
             result = hash_directory(target_dir) == asset.directory_sha256
             self._verification_cache[target_dir] = (identity, result)
@@ -135,7 +139,12 @@ class BinaryFetcher:
         asset = release.assets[backend]
         target_dir = self._target_dir(release, backend)
         exe_path = target_dir / asset.executable_relpath
-        if self._verify_directory(target_dir, asset):
+        # This is the trust decision immediately before the path is returned
+        # to the process launcher. A stat-only identity can be forged by an
+        # ordinary local replacement (same size, restored mtime), so launch
+        # must always perform the pinned content hash. Status polling still
+        # uses the cheap memoized path through is_cached().
+        if self._verify_directory(target_dir, asset, force_hash=True):
             return exe_path
 
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +162,7 @@ class BinaryFetcher:
             if extract_tmp.exists():
                 shutil.rmtree(extract_tmp, ignore_errors=True)
 
-        if not self._verify_directory(target_dir, asset):
+        if not self._verify_directory(target_dir, asset, force_hash=True):
             raise BinaryVerificationError(
                 f"Downloaded llama.cpp binary for '{backend}' failed verification."
             )

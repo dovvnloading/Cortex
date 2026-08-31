@@ -137,6 +137,29 @@ def test_tampered_cached_exe_is_re_downloaded(tmp_path: Path) -> None:
     assert restored_path.read_bytes() == _EXE_CONTENT
 
 
+def test_same_size_replacement_with_restored_mtime_is_re_downloaded(tmp_path: Path) -> None:
+    """A forged stat identity must not bypass the launch-time hash check."""
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    fetcher = BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes))
+    exe_path = fetcher.ensure_binary(release, "cpu")
+    original_stat = exe_path.stat()
+
+    evil_content = b"E" * len(_EXE_CONTENT)
+    assert len(evil_content) == original_stat.st_size
+    exe_path.write_bytes(evil_content)
+    os.utime(exe_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert exe_path.stat().st_size == original_stat.st_size
+    assert exe_path.stat().st_mtime_ns == original_stat.st_mtime_ns
+    # The cheap status-poll cache cannot distinguish this forged identity;
+    # the launch path must still perform a fresh content verification.
+    assert fetcher.is_cached(release, "cpu") is True
+
+    restored_path = fetcher.ensure_binary(release, "cpu")
+
+    assert restored_path.read_bytes() == _EXE_CONTENT
+
+
 def test_tampered_companion_dll_is_detected_even_though_the_exe_stub_is_untouched(tmp_path: Path) -> None:
     """The scenario the old exe-only hash would have missed: the launched
     entry point is a tiny stub, and the actual code lives in a
