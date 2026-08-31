@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import getpass
 import os
 from pathlib import Path
+import stat
+import subprocess
 import sys
+from pathlib import PureWindowsPath
 
 
 ORGANIZATION_NAME = "ChatLLM"
@@ -15,6 +19,86 @@ APPLICATION_NAME = "ChatLLM-Assistant"
 
 class AppPathError(RuntimeError):
     """Raised when Cortex cannot resolve a safe application-data directory."""
+
+
+_WINDOWS_REPARSE_POINT = 0x0400
+_WINDOWS_PRIVATE_GROUP_SIDS = (
+    "*S-1-1-0",       # Everyone
+    "*S-1-5-11",      # Authenticated Users
+    "*S-1-5-32-545",  # Built-in Users
+)
+
+
+def _running_on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _canonical_data_root(data_dir: str | os.PathLike[str]) -> Path:
+    value = Path(data_dir).expanduser()
+    if _running_on_windows() and PureWindowsPath(str(value)).anchor.startswith("\\\\"):
+        raise AppPathError("Cortex data directories cannot use UNC paths.")
+    if not value.is_absolute():
+        value = Path.cwd() / value
+
+    # Check existing components before resolving so a junction/symlink cannot
+    # silently redirect a custom root to another user's data.
+    current = Path(value.anchor) if value.anchor else Path.cwd().anchor
+    for component in value.parts[1:] if value.anchor else value.parts:
+        current /= component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise AppPathError("Cortex could not inspect the data directory.") from exc
+        if stat.S_ISLNK(info.st_mode) or (
+            _running_on_windows()
+            and bool(getattr(info, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
+        ):
+            raise AppPathError("Cortex data directories cannot traverse reparse points.")
+    try:
+        return value.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise AppPathError("Cortex could not canonicalize the data directory.") from exc
+
+
+def secure_private_path(path: str | os.PathLike[str], *, directory: bool) -> Path:
+    """Apply a per-user ACL/mode to a Cortex-owned path, failing closed."""
+
+    target = Path(path)
+    try:
+        if _running_on_windows():
+            identity = os.environ.get("USERDOMAIN", "").strip()
+            try:
+                username = getpass.getuser().strip()
+            except (KeyError, OSError, RuntimeError) as exc:
+                raise AppPathError("Cortex could not identify the current Windows user.") from exc
+            if not username or any(char in username for char in '\"\r\n'):
+                raise AppPathError("Cortex could not identify the current Windows user.")
+            account = f"{identity}\\{username}" if identity else username
+            rights = "(OI)(CI)F" if directory else "F"
+            result = subprocess.run(
+                [
+                    "icacls",
+                    str(target),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{account}:{rights}",
+                    "/remove:g",
+                    *_WINDOWS_PRIVATE_GROUP_SIDS,
+                ],
+                check=False,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=15,
+            )
+            if result.returncode != 0:
+                raise AppPathError("Cortex could not secure its private data permissions.")
+        else:
+            os.chmod(target, 0o700 if directory else 0o600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AppPathError("Cortex could not secure its private data permissions.") from exc
+    return target
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +110,7 @@ class AppPaths:
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike[str]) -> AppPaths:
         """Create paths rooted at an injected directory without touching disk."""
-        value = Path(data_dir).expanduser()
-        if not value.is_absolute():
-            value = value.resolve(strict=False)
-        return cls(data_dir=value)
+        return cls(data_dir=_canonical_data_root(data_dir))
 
     @classmethod
     def for_windows(
@@ -127,5 +208,13 @@ class AppPaths:
 
     def ensure_data_dir(self) -> Path:
         """Create the data root only when a caller explicitly requests it."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        return self.data_dir
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AppPathError("Cortex could not create its data directory.") from exc
+        # Re-check after creation to catch a raced replacement/reparse point.
+        canonical = _canonical_data_root(self.data_dir)
+        if canonical != self.data_dir or not canonical.is_dir():
+            raise AppPathError("Cortex data directory changed while it was being prepared.")
+        secure_private_path(canonical, directory=True)
+        return canonical

@@ -9,8 +9,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from cortex_backend.core.paths import AppPathError, AppPaths
+from cortex_backend.core import paths as paths_module
 from cortex_backend.repositories.legacy_storage import (
     DatabaseManager,
     PermanentMemoryManager,
@@ -52,6 +55,36 @@ class AppPathsTests(unittest.TestCase):
     def test_unsupported_platform_requires_injected_paths(self):
         with self.assertRaisesRegex(AppPathError, "Windows only"):
             AppPaths.for_current_user(platform="linux", environ={})
+
+    def test_windows_data_roots_reject_unc_paths(self):
+        with mock.patch.object(paths_module.sys, "platform", "win32"):
+            with self.assertRaisesRegex(AppPathError, "UNC"):
+                AppPaths.from_data_dir(r"\\server\share\cortex")
+
+    def test_windows_data_roots_reject_existing_symlink_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+            with mock.patch.object(paths_module.sys, "platform", "win32"):
+                with self.assertRaisesRegex(AppPathError, "reparse"):
+                    AppPaths.from_data_dir(link / "child")
+
+    def test_windows_private_acl_failure_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(paths_module.sys, "platform", "win32"):
+                with mock.patch.object(
+                    paths_module.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=1),
+                ):
+                    with self.assertRaisesRegex(AppPathError, "permissions"):
+                        paths_module.secure_private_path(directory, directory=True)
 
     def test_persistence_managers_use_an_injected_app_paths_root(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -150,7 +150,12 @@ def _startup_log_path(data_dir: Path | None) -> Path:
     """Choose a user-writable diagnostic path without touching chat data."""
 
     if data_dir is not None:
-        return Path(data_dir).expanduser() / STARTUP_LOG_NAME
+        try:
+            return AppPaths.from_data_dir(data_dir).data_dir / STARTUP_LOG_NAME
+        except AppPathError:
+            # A rejected custom root must not become a reason to write a log
+            # through an untrusted junction; use the isolated temp fallback.
+            return Path(tempfile.gettempdir()) / "Cortex" / STARTUP_LOG_NAME
     try:
         return AppPaths.for_current_user().data_dir / STARTUP_LOG_NAME
     except AppPathError:

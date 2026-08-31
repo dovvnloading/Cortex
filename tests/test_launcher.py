@@ -16,7 +16,7 @@ from cortex_backend.launcher import desktop as desktop_module
 from cortex_backend.launcher import webview_runtime as runtime_module
 from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
-from cortex_backend.launcher.instance import InstanceLock
+from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
 
 
@@ -519,6 +519,25 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert recovered.port == 8766
     second.release()
     assert second.read_record() is None
+
+
+def test_instance_lock_does_not_follow_a_record_to_an_arbitrary_secret(tmp_path: Path):
+    lock = InstanceLock(tmp_path)
+    record = lock.acquire(port=8765)
+    assert record is not None
+    try:
+        decoy = tmp_path / "decoy.secret"
+        decoy.write_text("do-not-read", encoding="utf-8")
+        forged = InstanceRecord(
+            pid=record.pid,
+            port=record.port,
+            instance_id=record.instance_id,
+            created_at=record.created_at,
+            handoff_secret_path=str(decoy),
+        )
+        assert lock.read_secret(forged) is None
+    finally:
+        lock.release()
 
 
 def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
