@@ -279,6 +279,7 @@ def test_webview2_bootstrap_installs_and_rechecks_runtime(
     versions = iter((None, "150.0.1.2"))
     calls: list[tuple[list[str], dict[str, object]]] = []
     monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", lambda _path: None)
     monkeypatch.setattr(runtime_module, "webview2_version", lambda: next(versions))
 
     def fake_run(command, **kwargs):
@@ -300,6 +301,51 @@ def test_webview2_bootstrap_fails_closed_when_bundle_is_missing(
 
     with pytest.raises(WebViewRuntimeError, match="bootstrapper is missing"):
         runtime_module.ensure_webview2_runtime(tmp_path)
+
+
+def test_webview2_bootstrap_rejects_an_invalid_runtime_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bootstrapper = tmp_path / "webview2" / runtime_module.WEBVIEW2_BOOTSTRAPPER
+    bootstrapper.parent.mkdir()
+    bootstrapper.write_bytes(b"tampered")
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: None)
+
+    def reject_signature(_path: Path) -> None:
+        raise WebViewRuntimeError("signature verification failed")
+
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", reject_signature)
+
+    with pytest.raises(WebViewRuntimeError, match="signature verification"):
+        runtime_module.ensure_webview2_runtime(tmp_path)
+
+
+def test_webview2_signature_check_uses_noninteractive_powershell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bootstrapper = tmp_path / "MicrosoftEdgeWebview2Setup.exe"
+    bootstrapper.write_bytes(b"signed")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
+
+    runtime_module._verify_microsoft_signature(bootstrapper)
+
+    assert calls[0][0][0] == "powershell.exe"
+    assert "-NoProfile" in calls[0][0]
+    assert "-NonInteractive" in calls[0][0]
+    assert "-Command" in calls[0][0]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["timeout"] == 30
+    signature_environment = calls[0][1]["env"]
+    assert isinstance(signature_environment, dict)
+    assert signature_environment["CORTEX_WEBVIEW_BOOTSTRAPPER"] == str(bootstrapper)
+    assert "WindowsPowerShell" in signature_environment["PSModulePath"]
 
 
 def test_default_runtime_starts_backend_then_native_window(
