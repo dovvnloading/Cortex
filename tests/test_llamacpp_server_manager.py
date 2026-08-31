@@ -806,9 +806,20 @@ class _FakeProcessWithPid:
 class _FakeWin32Job:
     """Records the kernel32 call sequence without touching real Windows APIs."""
 
-    def __init__(self, *, create_job_result: int = 1, set_info_result: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        create_job_result: int = 1,
+        set_info_result: bool = True,
+        open_process_result: int = 1,
+        assign_result: bool = True,
+        close_result: bool = True,
+    ) -> None:
         self.create_job_result = create_job_result
         self.set_info_result = set_info_result
+        self.open_process_result = open_process_result
+        self.assign_result = assign_result
+        self.close_result = close_result
         self.calls: list[tuple] = []
         self._next_handle = 100
 
@@ -834,6 +845,9 @@ class _FakeWin32Job:
         return 1 if self.set_info_result else 0
 
     def OpenProcess(self, access, inherit_handle, pid):
+        if not self.open_process_result:
+            self.calls.append(("OpenProcess", access, inherit_handle, pid, 0))
+            return 0
         self._next_handle += 1
         handle = self._next_handle
         self.calls.append(("OpenProcess", access, inherit_handle, pid, handle))
@@ -841,11 +855,11 @@ class _FakeWin32Job:
 
     def AssignProcessToJobObject(self, job, process):
         self.calls.append(("AssignProcessToJobObject", job, process))
-        return 1
+        return 1 if self.assign_result else 0
 
     def CloseHandle(self, handle):
         self.calls.append(("CloseHandle", handle))
-        return 1
+        return 1 if self.close_result else 0
 
 
 def test_job_object_launcher_applies_kill_on_close_policy_and_reuses_the_job():
@@ -892,34 +906,83 @@ def test_job_object_launcher_applies_kill_on_close_policy_and_reuses_the_job():
     assert assign_calls[1][1] == job_handle
 
 
-def test_job_object_launcher_does_not_break_startup_if_job_creation_fails():
-    """A Job Object is defense in depth, not a hard requirement -- if kernel32
-    refuses (sandboxed environment, exhausted handle quota, anything), the
-    local model runtime must still start normally rather than the failure
-    propagating and blocking generation entirely."""
-    from cortex_backend.llamacpp.server_manager import _JobObjectLauncher
+def test_job_object_launcher_fails_closed_if_job_creation_fails():
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
 
     fake_win32 = _FakeWin32Job(create_job_result=0)
     launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
 
-    launcher._apply_job_policy(_FakeProcessWithPid(pid=1))  # must not raise
+    with pytest.raises(_JobObjectContainmentError, match="create"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
 
     assert launcher._job is None
     assert not any(call[0] == "SetInformationJobObject" for call in fake_win32.calls)
 
 
-def test_job_object_launcher_discards_a_misconfigured_job_instead_of_reusing_it():
-    from cortex_backend.llamacpp.server_manager import _JobObjectLauncher
+def test_job_object_launcher_closes_a_misconfigured_job_and_fails_closed():
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
 
     fake_win32 = _FakeWin32Job(set_info_result=False)
     launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
 
-    launcher._apply_job_policy(_FakeProcessWithPid(pid=1))  # must not raise
+    with pytest.raises(_JobObjectContainmentError, match="configure"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
 
     assert launcher._job is None
     close_calls = [call for call in fake_win32.calls if call[0] == "CloseHandle"]
     assert len(close_calls) == 1, "the unusable job handle must be closed, not leaked"
     assert not any(call[0] == "AssignProcessToJobObject" for call in fake_win32.calls)
+
+
+@pytest.mark.parametrize(
+    ("field", "message", "expected_closed"),
+    [
+        ("open_process_result", "open the model process", 1),
+        ("assign_result", "assign the model process", 2),
+    ],
+)
+def test_job_object_launcher_fails_closed_for_process_containment_failures(
+    field: str, message: str, expected_closed: int
+) -> None:
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    fake_win32 = _FakeWin32Job(**{field: 0})
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+
+    with pytest.raises(_JobObjectContainmentError, match=message):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
+
+    close_calls = [call for call in fake_win32.calls if call[0] == "CloseHandle"]
+    assert len(close_calls) == expected_closed
+    assert launcher._job is None
+
+
+def test_job_object_launcher_fails_closed_when_handle_close_fails() -> None:
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    fake_win32 = _FakeWin32Job(close_result=False)
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+
+    with pytest.raises(_JobObjectContainmentError, match="close"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
+
+    assert launcher._job is None
+
+
+def test_job_object_launcher_terminates_a_process_when_containment_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cortex_backend.llamacpp import server_manager
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    process = _FakePopen()
+    fake_win32 = _FakeWin32Job(create_job_result=0)
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+    monkeypatch.setattr(server_manager, "_spawn_process", lambda _argv, *, cwd: process)
+    monkeypatch.setattr(server_manager.sys, "platform", "win32")
+
+    with pytest.raises(_JobObjectContainmentError):
+        launcher(["llama-server"], cwd=Path("."))
+
+    assert process.terminated is True
 
 
 def test_default_launcher_is_a_job_object_launcher():

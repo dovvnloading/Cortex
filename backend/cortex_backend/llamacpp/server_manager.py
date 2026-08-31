@@ -180,6 +180,10 @@ _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 
 
+class _JobObjectContainmentError(RuntimeError):
+    """Raised when a model process cannot be contained by a Job Object."""
+
+
 class _JobObjectBasicLimitInformation(ctypes.Structure):
     _fields_ = [
         ("per_process_user_time", ctypes.c_int64),
@@ -265,17 +269,22 @@ class _JobObjectLauncher:
     def __call__(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
         process = _spawn_process(argv, cwd=cwd)
         if sys.platform == "win32":
-            self._apply_job_policy(process)
+            try:
+                self._apply_job_policy(process)
+            except Exception:
+                self._terminate_uncontained_process(process)
+                raise
         return process
 
     def _apply_job_policy(self, process: subprocess.Popen) -> None:
         try:
             win32 = self._win32 or self._win32_factory()
             job = self._job
-            if job is None:
+            new_job = job is None
+            if new_job:
                 job = win32.CreateJobObjectW(None, None)
                 if not job:
-                    return
+                    raise _JobObjectContainmentError("could not create a process containment job")
                 limits = _JobObjectExtendedLimitInformation()
                 limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 if not win32.SetInformationJobObject(
@@ -284,24 +293,82 @@ class _JobObjectLauncher:
                     ctypes.byref(limits),
                     ctypes.sizeof(limits),
                 ):
-                    win32.CloseHandle(job)
-                    return
-                self._win32 = win32
-                self._job = job
+                    self._close_handle(win32, job)
+                    raise _JobObjectContainmentError("could not configure the process containment job")
+
+            assert job is not None
             process_handle = win32.OpenProcess(
                 _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
             )
             if not process_handle:
-                return
+                if new_job:
+                    self._close_handle(win32, job)
+                raise _JobObjectContainmentError("could not open the model process for containment")
+            assigned = False
+            assignment_error: Exception | None = None
             try:
-                win32.AssignProcessToJobObject(job, process_handle)
+                try:
+                    assigned = bool(win32.AssignProcessToJobObject(job, process_handle))
+                except Exception as exc:
+                    assignment_error = exc
             finally:
-                win32.CloseHandle(process_handle)
-        except OSError:
-            logger.warning(
-                "Could not attach the local model runtime to a Job Object; "
-                "it may keep running if Cortex exits abnormally."
-            )
+                process_close_error: _JobObjectContainmentError | None = None
+                try:
+                    self._close_handle(win32, process_handle)
+                except _JobObjectContainmentError as exc:
+                    process_close_error = exc
+                if process_close_error is not None:
+                    if new_job:
+                        try:
+                            self._close_handle(win32, job)
+                        except _JobObjectContainmentError:
+                            pass
+                    raise process_close_error
+            if not assigned:
+                if new_job:
+                    self._close_handle(win32, job)
+                if assignment_error is not None:
+                    raise _JobObjectContainmentError(
+                        "could not assign the model process to containment"
+                    ) from assignment_error
+                raise _JobObjectContainmentError("could not assign the model process to containment")
+
+            if new_job:
+                self._win32 = win32
+                self._job = job
+        except _JobObjectContainmentError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise _JobObjectContainmentError(
+                "could not initialize process containment"
+            ) from exc
+
+    @staticmethod
+    def _close_handle(win32: _JobWin32, handle: int) -> None:
+        try:
+            closed = win32.CloseHandle(handle)
+        except OSError as exc:
+            raise _JobObjectContainmentError("could not close a process containment handle") from exc
+        if not closed:
+            raise _JobObjectContainmentError("could not close a process containment handle")
+
+    @staticmethod
+    def _terminate_uncontained_process(process: subprocess.Popen) -> None:
+        try:
+            process.terminate()
+            process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                logger.error("The uncontained local model runtime did not exit cleanly.")
+        except (OSError, ProcessLookupError):
+            try:
+                process.kill()
+                process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                logger.error("The uncontained local model runtime could not be stopped.")
 
 
 default_launcher: ProcessLauncher = _JobObjectLauncher()
