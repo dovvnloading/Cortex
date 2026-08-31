@@ -186,13 +186,22 @@ export function LocalModelMenu({
   ) : null;
 
   if (localModels.length === 1) {
+    const singleModel = localModels[0];
+    const singleModelSelected = selected === singleModel;
     return (
       <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${displayModelName(localModels[0])}`}>
-        <span className="local-model-menu-single-label" title={displayModelName(localModels[0])}>
-          <span>
-            <span className="local-model-menu-name">{displayModelName(localModels[0])}</span>
+        <button
+          className="local-model-menu-trigger local-model-menu-single-trigger"
+          type="button"
+          aria-label={singleModelSelected ? `Selected local model: ${displayModelName(singleModel)}` : `Use local model: ${displayModelName(singleModel)}`}
+          title={singleModelSelected ? displayModelName(singleModel) : `Use ${displayModelName(singleModel)} for local chat`}
+          disabled={interactionDisabled}
+          onClick={() => void selectModel(0)}
+        >
+          <span className="local-model-menu-trigger-label">
+            <span className="local-model-menu-name">{displayModelName(singleModel)}</span>
           </span>
-        </span>
+        </button>
         {renderRescan()}
       </div>
     );
