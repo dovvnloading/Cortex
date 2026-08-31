@@ -60,6 +60,37 @@ def test_desktop_url_keeps_bootstrap_token_in_fragment():
     assert url == "http://127.0.0.1:43125/#bootstrap=one%20time%2Ftoken"
 
 
+def test_startup_diagnostic_is_durable_bounded_and_redacts_credential_like_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main, "_last_startup_log_path", None)
+    path = launcher_main._write_startup_diagnostic(
+        stage="desktop startup",
+        error=RuntimeError("token=do-not-store prompt=private text"),
+        data_dir=tmp_path,
+    )
+
+    assert path == tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert launcher_main._last_startup_log_path == path
+    detail = path.read_text(encoding="utf-8")
+    assert "stage=desktop startup" in detail
+    assert "error_type=RuntimeError" in detail
+    assert "token=<redacted>" in detail
+    assert "prompt=<redacted>" in detail
+    assert "do-not-store" not in detail
+    assert "private text" not in detail
+
+    for _ in range(100):
+        launcher_main._write_startup_diagnostic(
+            stage="retry",
+            error=RuntimeError("x" * 800),
+            data_dir=tmp_path,
+        )
+    assert path.stat().st_size <= launcher_main.MAX_STARTUP_LOG_BYTES
+    assert str(path) in launcher_main._startup_dialog_message(path)
+    assert "Ctrl+C" in launcher_main._startup_dialog_message(path)
+
+
 def test_native_window_uses_private_isolated_edge_webview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

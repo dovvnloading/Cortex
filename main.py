@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import socket
 import signal
 import sys
+import tempfile
 import time
+import re
 
 
 ROOT = Path(__file__).resolve().parent
@@ -42,6 +45,9 @@ from cortex_backend.launcher.supervisor import (  # noqa: E402
 DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
 CORTEX_VERSION = "0.1.0"
+STARTUP_LOG_NAME = "startup.log"
+MAX_STARTUP_LOG_BYTES = 64 * 1024
+_last_startup_log_path: Path | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,6 +141,72 @@ def _desktop_url(port: int, token: str) -> str:
     from urllib.parse import quote
 
     return f"http://127.0.0.1:{port}/#bootstrap={quote(token, safe='')}"
+
+
+def _startup_log_path(data_dir: Path | None) -> Path:
+    """Choose a user-writable diagnostic path without touching chat data."""
+
+    if data_dir is not None:
+        return Path(data_dir).expanduser() / STARTUP_LOG_NAME
+    try:
+        return AppPaths.for_current_user().data_dir / STARTUP_LOG_NAME
+    except AppPathError:
+        return Path(tempfile.gettempdir()) / "Cortex" / STARTUP_LOG_NAME
+
+
+def _redact_startup_detail(value: object) -> str:
+    """Keep startup diagnostics useful without recording credential-like text."""
+
+    detail = str(value).replace("\r", " ").replace("\n", " ")
+    detail = re.sub(
+        r"(?i)\b(?:bootstrap(?:_token)?|token|secret|authorization|password|prompt)\b\s*[=:]\s*[^\s,;]+",
+        lambda match: f"{match.group(0).split('=')[0].split(':')[0]}=<redacted>",
+        detail,
+    )
+    return detail[:800]
+
+
+def _write_startup_diagnostic(
+    *,
+    stage: str,
+    error: BaseException,
+    data_dir: Path | None,
+) -> Path | None:
+    """Append one bounded, privacy-safe startup record and return its path."""
+
+    global _last_startup_log_path
+    path = _startup_log_path(data_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = (
+            f"{datetime.now(timezone.utc).isoformat()} "
+            f"stage={_redact_startup_detail(stage)} "
+            f"error_type={type(error).__name__} "
+            f"detail={_redact_startup_detail(error)}\n"
+        )
+        try:
+            current_size = path.stat().st_size if path.exists() else 0
+        except OSError:
+            current_size = 0
+        mode = "w" if current_size + len(entry.encode("utf-8")) > MAX_STARTUP_LOG_BYTES else "a"
+        with path.open(mode, encoding="utf-8") as handle:
+            handle.write(entry)
+        _last_startup_log_path = path
+        return path
+    except (OSError, UnicodeError):
+        _last_startup_log_path = None
+        return None
+
+
+def _startup_dialog_message(log_path: Path | None) -> str:
+    if log_path is None:
+        return "Cortex could not start.\n\nCortex could not write its diagnostic log."
+    return (
+        "Cortex could not start.\n\n"
+        "A privacy-safe diagnostic log was written to:\n"
+        f"{log_path}\n\n"
+        "Press Ctrl+C in this dialog to copy this message."
+    )
 
 
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
@@ -242,6 +314,11 @@ def _run_web(args: argparse.Namespace) -> int:
                 cortex_version=CORTEX_VERSION,
             )
         except FrontendBuildError as exc:
+            _write_startup_diagnostic(
+                stage="frontend build",
+                error=exc,
+                data_dir=args.data_dir,
+            )
             print(f"Frontend build failed: {exc}", file=sys.stderr)
             return 2
         print(f"Frontend bundle ready at {dist}")
@@ -368,6 +445,11 @@ def _run_web(args: argparse.Namespace) -> int:
             TimeoutError,
             WebViewRuntimeError,
         ) as exc:
+            _write_startup_diagnostic(
+                stage="desktop startup/runtime",
+                error=exc,
+                data_dir=args.data_dir,
+            )
             print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
             return 1
         finally:
@@ -390,15 +472,28 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = _run_web(args)
     except AppPathError as exc:
+        _write_startup_diagnostic(
+            stage="data path resolution",
+            error=exc,
+            data_dir=args.data_dir,
+        )
         print(f"Cortex data-path error: {exc}", file=sys.stderr)
         result = 2
+    except Exception as exc:
+        _write_startup_diagnostic(
+            stage="uncaught startup",
+            error=exc,
+            data_dir=args.data_dir,
+        )
+        print(f"Cortex startup error: {exc}", file=sys.stderr)
+        result = 1
     if result and _is_packaged() and os.name == "nt":
         try:
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(
                 None,
-                "Cortex could not start. Run the package from a terminal for diagnostics.",
+                _startup_dialog_message(_last_startup_log_path),
                 "Cortex startup error",
                 0x10,
             )
