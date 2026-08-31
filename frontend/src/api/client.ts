@@ -60,6 +60,35 @@ export class ApiError extends Error {
 type FetchLike = typeof fetch;
 type SessionExpiredListener = () => void;
 
+const SESSION_TOKEN_KEY = "cortex.session.token";
+
+function readPersistedSessionToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    // sessionStorage is an optional resilience layer. Browsers can deny both
+    // access to the storage object and individual storage operations.
+    return null;
+  }
+}
+
+function persistSessionToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+  } catch {
+    // Keep the exchanged token in memory when persistence is unavailable.
+  }
+}
+
+function removePersistedSessionToken(): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    // Clearing the in-memory session and notifying subscribers still matters
+    // when the browser denies storage access.
+  }
+}
+
 export class CortexApi {
   private readonly baseUrl: string;
   private readonly fetcher: FetchLike;
@@ -72,7 +101,7 @@ export class CortexApi {
   ) {
     this.baseUrl = normalizeApiBaseUrl(baseUrl, import.meta.env.PROD);
     this.fetcher = fetcher;
-    this.sessionToken = window.sessionStorage.getItem("cortex.session.token");
+    this.sessionToken = readPersistedSessionToken();
   }
 
   get hasSession(): boolean {
@@ -87,7 +116,7 @@ export class CortexApi {
   clearSession(): void {
     const hadSession = this.sessionToken !== null;
     this.sessionToken = null;
-    window.sessionStorage.removeItem("cortex.session.token");
+    removePersistedSessionToken();
     if (hadSession) {
       for (const listener of this.sessionExpiredListeners) listener();
     }
@@ -103,7 +132,7 @@ export class CortexApi {
       },
     );
     this.sessionToken = response.session_token;
-    window.sessionStorage.setItem("cortex.session.token", response.session_token);
+    persistSessionToken(response.session_token);
     return response;
   }
 

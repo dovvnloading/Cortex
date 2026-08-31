@@ -4,6 +4,90 @@ import { ApiError, CortexApi } from "./client";
 describe("CortexApi", () => {
   afterEach(() => window.sessionStorage.clear());
 
+  it("starts without throwing when sessionStorage access is denied", () => {
+    const storageGetter = vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+
+    try {
+      const api = new CortexApi("/api/v1", vi.fn<typeof fetch>());
+
+      expect(api.hasSession).toBe(false);
+    } finally {
+      storageGetter.mockRestore();
+    }
+  });
+
+  it("keeps the exchanged session in memory when sessionStorage persistence fails", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    const originalStorage = window.sessionStorage;
+    const setItem = vi.fn<Storage["setItem"]>(() => {
+      throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      value: {
+        clear: originalStorage.clear.bind(originalStorage),
+        getItem: originalStorage.getItem.bind(originalStorage),
+        key: originalStorage.key.bind(originalStorage),
+        length: originalStorage.length,
+        removeItem: originalStorage.removeItem.bind(originalStorage),
+        setItem,
+      } as Storage,
+    });
+    const api = new CortexApi("/api/v1", fetcher);
+
+    try {
+      await expect(api.exchangeBootstrapToken("bootstrap")).resolves.toMatchObject({
+        session_token: "session-1",
+      });
+      expect(setItem).toHaveBeenCalledWith("cortex.session.token", "session-1");
+      expect(api.hasSession).toBe(true);
+    } finally {
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        value: originalStorage,
+      });
+    }
+  });
+
+  it("notifies session listeners and stays safe when clearing storage fails", () => {
+    const originalStorage = window.sessionStorage;
+    originalStorage.setItem("cortex.session.token", "session-1");
+    const removeItem = vi.fn<Storage["removeItem"]>(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      value: {
+        clear: originalStorage.clear.bind(originalStorage),
+        getItem: originalStorage.getItem.bind(originalStorage),
+        key: originalStorage.key.bind(originalStorage),
+        length: originalStorage.length,
+        removeItem,
+        setItem: originalStorage.setItem.bind(originalStorage),
+      } as Storage,
+    });
+    const api = new CortexApi("/api/v1", vi.fn<typeof fetch>());
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    try {
+      expect(() => api.clearSession()).not.toThrow();
+      expect(api.hasSession).toBe(false);
+      expect(removeItem).toHaveBeenCalledWith("cortex.session.token");
+      expect(onSessionExpired).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        value: originalStorage,
+      });
+    }
+  });
+
   it("exchanges a bootstrap token and sends the session bearer on protected calls", async () => {
     const fetcher = vi.fn<typeof fetch>();
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
