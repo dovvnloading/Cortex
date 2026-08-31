@@ -2906,6 +2906,8 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
 def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
     response = _execution_status_response(repository, job)
     code_fields = _code_job_fields(job, include_result=True)
+    if job.profile != CODE_EXECUTION_PROFILE:
+        code_fields = {"result": _generic_execution_result(job.result)}
     return ExecutionTaskSummary(
         job_id=response.job_id,
         profile=response.profile,
@@ -2922,6 +2924,50 @@ def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSumma
         updated_at=datetime.fromisoformat(job.updated_at),
         **code_fields,
     )
+
+
+MAX_GENERIC_TASK_RESULT_BYTES = 16 * 1024
+
+
+def _generic_execution_result(result: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a bounded, JSON-safe result summary for the task tray.
+
+    Non-code profiles use small, typed result envelopes (for example an
+    opaque artifact descriptor or a scratch-computation value).  Keep the
+    shared task-list response bounded even if a future profile returns a
+    larger mapping, while retaining artifact metadata so a caller can still
+    download the published output.
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    try:
+        candidate = dict(result)
+        encoded = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return {"truncated": True}
+    if len(encoded.encode("utf-8")) <= MAX_GENERIC_TASK_RESULT_BYTES:
+        return candidate
+
+    summary: dict[str, Any] = {"truncated": True}
+    for key in (
+        "schema_version",
+        "artifact_id",
+        "mime_type",
+        "size",
+        "sha256",
+        "expires_at",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            summary[key] = value
+    return summary
 
 
 def _code_job_fields(job: ExecutionJob, *, include_result: bool = False) -> dict[str, Any]:

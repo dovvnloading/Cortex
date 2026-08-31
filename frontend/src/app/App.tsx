@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
+import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
 import { ChatPage } from "../features/chat/ChatPage";
@@ -370,6 +371,23 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     } catch (error) { notify(apiMessage(error, "Could not rename chat."), "error"); return false; }
   };
 
+  const downloadExecutionArtifact = async (artifact: ExecutionArtifactResult) => {
+    try {
+      const response = await api.downloadExecutionArtifact(artifact.artifact_id);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `cortex-result.${artifactFileExtension(artifact.mime_type)}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      else notify(apiMessage(error, "Could not download the execution artifact."), "error");
+    }
+  };
+
   const deleteChat = async (id: string): Promise<boolean> => {
     try {
       await api.deleteChat(id);
@@ -704,7 +722,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <>
-      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
+      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         {route.kind === "settings"
           ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
           : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
@@ -763,4 +781,14 @@ function shouldShowExecutionTask(task: ExecutionTaskSummary, runtimeStartedAt: s
 
 function apiMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.detail : fallback;
+}
+
+function artifactFileExtension(mimeType: string): string {
+  return ({
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "text/plain": "txt",
+    "application/json": "json",
+  } as Record<string, string>)[mimeType] ?? "bin";
 }

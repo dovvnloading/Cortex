@@ -592,6 +592,7 @@ a { color: inherit; text-decoration: none; }
 .execution-task-result pre { max-height: 96px; margin: 0; overflow: auto; color: var(--text); font: 0.68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .execution-task-result-stderr { color: var(--danger) !important; }
 .execution-task-result-empty { color: var(--text-faint); font-size: 0.68rem; }
+.execution-task-artifact-download { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 29px; padding: 0 8px; font-size: 0.68rem; }
 .execution-task-failure { display: flex; align-items: flex-start; gap: 6px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line)); border-left: 2px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--danger); font-size: 0.68rem; line-height: 1.4; }
 .execution-task-failure svg { flex: 0 0 auto; margin-top: 1px; }
 .execution-task-code-details { margin-top: -2px; color: var(--text-muted); font-size: 0.67rem; }

@@ -4,7 +4,7 @@ import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionAppr
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
 import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
-import { ExecutionTaskTray } from "./ExecutionTaskTray";
+import { ExecutionTaskTray, type ExecutionArtifactResult } from "./ExecutionTaskTray";
 import { ChatLibrary } from "./ChatLibrary";
 import { NavigationLink } from "./NavigationLink";
 
@@ -26,6 +26,7 @@ type Props = {
   onCancelExecution?: (jobId: string) => Promise<void>;
   onDecideExecutionApproval?: (jobId: string, decision: ExecutionApprovalDecisionRequest["decision"]) => Promise<void>;
   onLoadCodeSource?: (jobId: string) => Promise<CodeExecutionSourceResponse>;
+  onDownloadArtifact?: (artifact: ExecutionArtifactResult) => Promise<void>;
   children: ReactNode;
 };
 
@@ -47,6 +48,7 @@ export function AppShell({
   onCancelExecution,
   onDecideExecutionApproval,
   onLoadCodeSource,
+  onDownloadArtifact,
   children,
 }: Props) {
   const navigate = useNavigate();
@@ -180,6 +182,7 @@ export function AppShell({
         onCancel={onCancelExecution}
         onDecideApproval={onDecideExecutionApproval}
         onLoadCodeSource={onLoadCodeSource}
+        onDownloadArtifact={onDownloadArtifact}
       />
     </div>
   );
