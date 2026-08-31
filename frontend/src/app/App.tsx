@@ -368,7 +368,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response = await api.addMemory(memo);
       setMemos(response.memos);
       notify("Memory saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save memory."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not save memory."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 
@@ -378,7 +381,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response: MemoryResponse = await api.clearMemories();
       setMemos(response.memos);
       notify("Permanent memories cleared.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not clear memories."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not clear memories."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 
@@ -388,7 +394,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response = await api.replaceMemories(next);
       setMemos(response.memos);
       notify("Memory changes saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save memory changes."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not save memory changes."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 

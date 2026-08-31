@@ -44,4 +44,85 @@ describe("MemoryPanel", () => {
 
     expect(onReplace).toHaveBeenCalledWith(["Edited"]);
   });
+
+  it("only appends a memory after the add succeeds", async () => {
+    const user = userEvent.setup();
+    const onAdd = vi.fn<(memo: string) => Promise<void>>().mockRejectedValue(new Error("save failed"));
+    render(
+      <MemoryPanel
+        memos={[]}
+        busy={false}
+        onAdd={onAdd}
+        onReplace={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClear={vi.fn<() => Promise<void>>().mockResolvedValue()}
+      />,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "New memory" }), "Failed memory");
+    await user.click(screen.getByRole("button", { name: "Add memory" }));
+
+    expect(await screen.findByRole("textbox", { name: "New memory" })).toHaveValue("Failed memory");
+    expect(screen.queryByRole("textbox", { name: "Memory 1" })).not.toBeInTheDocument();
+  });
+
+  it("only clears the draft after clear succeeds", async () => {
+    const user = userEvent.setup();
+    const onClear = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("clear failed"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <MemoryPanel
+        memos={["Keep this"]}
+        busy={false}
+        onAdd={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplace={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClear={onClear}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Clear all" }));
+
+    expect(onClear).toHaveBeenCalledOnce();
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Keep this");
+  });
+
+  it("clears the draft after clear succeeds", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <MemoryPanel
+        memos={["Remove this"]}
+        busy={false}
+        onAdd={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplace={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClear={vi.fn<() => Promise<void>>().mockResolvedValue()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Clear all" }));
+
+    expect(screen.queryByRole("textbox", { name: "Memory 1" })).not.toBeInTheDocument();
+    expect(screen.getByText("No permanent memories stored.")).toBeInTheDocument();
+  });
+
+  it("keeps edited rows available when saving changes fails", async () => {
+    const user = userEvent.setup();
+    const onReplace = vi.fn<(memos: string[]) => Promise<void>>().mockRejectedValue(new Error("save failed"));
+    render(
+      <MemoryPanel
+        memos={["Original"]}
+        busy={false}
+        onAdd={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplace={onReplace}
+        onClear={vi.fn<() => Promise<void>>().mockResolvedValue()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox", { name: "Memory 1" });
+    await user.clear(input);
+    await user.type(input, "Edited");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(onReplace).toHaveBeenCalledWith(["Edited"]);
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Edited");
+  });
 });
