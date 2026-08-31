@@ -333,15 +333,16 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const renameChat = async (id: string, title: string) => {
+  const renameChat = async (id: string, title: string): Promise<boolean> => {
     try {
       const chat = await api.renameChat(id, title);
       setChats((current) => current.map((item) => item.id === id ? { ...item, title: chat.title, timestamp: chat.timestamp } : item));
       notify("Chat renamed.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not rename chat."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not rename chat."), "error"); return false; }
   };
 
-  const deleteChat = async (id: string) => {
+  const deleteChat = async (id: string): Promise<boolean> => {
     try {
       await api.deleteChat(id);
       const fallbackChatId = chatsRef.current.find((chat) => chat.id !== id)?.id ?? null;
@@ -352,10 +353,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         navigate(fallbackChatId ? chatPath(fallbackChatId) : "/chat/new", { replace: true });
       }
       notify("Chat deleted.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); return false; }
   };
 
-  const createGroup = async (name: string) => {
+  const createGroup = async (name: string): Promise<boolean> => {
     try {
       const group = await api.createChatGroup(name);
       if (mountedRef.current) {
@@ -366,20 +368,22 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         upsertGroup(group);
       }
       notify("Group created.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); return false; }
   };
 
-  const renameGroup = async (groupId: string, name: string) => {
+  const renameGroup = async (groupId: string, name: string): Promise<boolean> => {
     try {
       const group = await api.updateChatGroup(groupId, { name });
       if (mountedRef.current) {
         ++groupLoadGenerationRef.current;
         upsertGroup(group);
       }
-    } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); return false; }
   };
 
-  const deleteGroup = async (groupId: string) => {
+  const deleteGroup = async (groupId: string): Promise<boolean> => {
     try {
       await api.deleteChatGroup(groupId);
       // Local mirror of the server rule: the group goes, its chats stay and
@@ -389,7 +393,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         removeGroup(groupId);
       }
       notify("Group deleted. Its chats moved back to the main list.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); return false; }
   };
 
   const toggleGroup = (groupId: string, collapsed: boolean) => {

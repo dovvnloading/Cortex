@@ -15,11 +15,11 @@ type Props = {
   modelConnection: ModelResponse["connection"];
   theme: "light" | "dark" | "system";
   onOpenSettings: () => void;
-  onRenameChat: (id: string, title: string) => Promise<void>;
-  onDeleteChat: (id: string) => Promise<void>;
-  onCreateGroup: (name: string) => Promise<void>;
-  onRenameGroup: (groupId: string, name: string) => Promise<void>;
-  onDeleteGroup: (groupId: string) => Promise<void>;
+  onRenameChat: (id: string, title: string) => Promise<void | boolean>;
+  onDeleteChat: (id: string) => Promise<void | boolean>;
+  onCreateGroup: (name: string) => Promise<void | boolean>;
+  onRenameGroup: (groupId: string, name: string) => Promise<void | boolean>;
+  onDeleteGroup: (groupId: string) => Promise<void | boolean>;
   onToggleGroup: (groupId: string, collapsed: boolean) => void;
   onMoveChat: (threadId: string, groupId: string | null) => void;
   executionTasks?: ExecutionTaskSummary[];
@@ -165,7 +165,11 @@ export function AppShell({
       </div>
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}
-      {deleteTarget && <DeleteChatDialog chat={deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={async () => { await onDeleteChat(deleteTarget.id); setDeleteTarget(null); }} />}
+      {deleteTarget && <DeleteChatDialog chat={deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={async () => {
+        const result = await onDeleteChat(deleteTarget.id);
+        if (result !== false) setDeleteTarget(null);
+        return result;
+      }} />}
       <ExecutionTaskTray
         tasks={executionTasks}
         onCancel={onCancelExecution}
@@ -182,23 +186,33 @@ function isCompactWindow(): boolean {
     && window.matchMedia("(max-width: 760px)").matches;
 }
 
-function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: () => void; onSave: (id: string, title: string) => Promise<void> }) {
+function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: () => void; onSave: (id: string, title: string) => Promise<void | boolean> }) {
   const [title, setTitle] = useState(displayChatTitle(chat.title));
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (title.trim()) void onSave(chat.id, title.trim()).then(onClose);
+    if (!title.trim() || busy) return;
+    setBusy(true);
+    try {
+      const result = await onSave(chat.id, title.trim());
+      if (result !== false) onClose();
+    } catch {
+      // A rejected mutation is a failure too: preserve the dialog and input.
+    } finally {
+      setBusy(false);
+    }
   };
   return (
-    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
       <DialogContent>
         <Dialog.Title>Rename chat</Dialog.Title>
         <form onSubmit={submit} className="stack-lg">
           <label className="field-label" htmlFor="rename-chat">Chat title
-            <input id="rename-chat" value={title} onChange={(event) => setTitle(event.target.value)} autoFocus maxLength={200} />
+            <input id="rename-chat" value={title} onChange={(event) => setTitle(event.target.value)} autoFocus maxLength={200} disabled={busy} />
           </label>
           <div className="dialog-actions">
-            <button type="button" className="button button-secondary" onClick={onClose}>Cancel</button>
-            <button type="submit" className="button button-primary" disabled={!title.trim()}>Save title</button>
+            <button type="button" className="button button-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="button button-primary" disabled={!title.trim() || busy}>{busy ? "Saving…" : "Save title"}</button>
           </div>
         </form>
       </DialogContent>
@@ -206,7 +220,7 @@ function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: (
   );
 }
 
-function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onClose: () => void; onConfirm: () => Promise<void> }) {
+function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onClose: () => void; onConfirm: () => Promise<void | boolean> }) {
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const title = displayChatTitle(chat.title);

@@ -14,9 +14,9 @@ export type ChatLibraryProps = {
   onSelectChat: (id: string) => void;
   onRenameChat: (chat: ChatSummary) => void;
   onDeleteChat: (chat: ChatSummary) => void;
-  onCreateGroup: (name: string) => Promise<void>;
-  onRenameGroup: (groupId: string, name: string) => Promise<void>;
-  onDeleteGroup: (groupId: string) => Promise<void>;
+  onCreateGroup: (name: string) => Promise<void | boolean>;
+  onRenameGroup: (groupId: string, name: string) => Promise<void | boolean>;
+  onDeleteGroup: (groupId: string) => Promise<void | boolean>;
   onToggleGroup: (groupId: string, collapsed: boolean) => void;
   onMoveChat: (threadId: string, groupId: string | null) => void;
 };
@@ -182,8 +182,9 @@ export function ChatLibrary({
           chatCount={(byGroup.buckets.get(deleteGroupTarget.id) ?? []).length}
           onClose={() => setDeleteGroupTarget(null)}
           onConfirm={async () => {
-            await onDeleteGroup(deleteGroupTarget.id);
-            setDeleteGroupTarget(null);
+            const result = await onDeleteGroup(deleteGroupTarget.id);
+            if (result !== false) setDeleteGroupTarget(null);
+            return result;
           }}
         />
       )}
@@ -323,7 +324,7 @@ function GroupNameDialog({
   submitLabel: string;
   initialValue?: string;
   onClose: () => void;
-  onSave: (name: string) => Promise<void>;
+  onSave: (name: string) => Promise<void | boolean>;
 }) {
   const [name, setName] = useState(initialValue);
   const [busy, setBusy] = useState(false);
@@ -333,8 +334,10 @@ function GroupNameDialog({
     if (!name.trim() || busy) return;
     setBusy(true);
     try {
-      await onSave(name.trim());
-      onClose();
+      const result = await onSave(name.trim());
+      if (result !== false) onClose();
+    } catch {
+      // A rejected mutation is a failure too: preserve the dialog and input.
     } finally {
       setBusy(false);
     }
@@ -380,7 +383,7 @@ function DeleteGroupDialog({
   group: ChatGroup;
   chatCount: number;
   onClose: () => void;
-  onConfirm: () => Promise<void>;
+  onConfirm: () => Promise<void | boolean>;
 }) {
   const [busy, setBusy] = useState(false);
   return (
@@ -398,7 +401,11 @@ function DeleteGroupDialog({
             type="button"
             className="button button-danger"
             disabled={busy}
-            onClick={async () => { setBusy(true); try { await onConfirm(); } finally { setBusy(false); } }}
+            onClick={async () => {
+              if (busy) return;
+              setBusy(true);
+              try { await onConfirm(); } catch { /* Preserve the dialog on failure. */ } finally { setBusy(false); }
+            }}
           >
             {busy ? "Deleting…" : "Delete group"}
           </button>

@@ -146,6 +146,21 @@ describe("ChatLibrary", () => {
     expect(props.onCreateGroup).toHaveBeenCalledWith("Research");
   });
 
+  it("keeps the create-group dialog and input when creation fails", async () => {
+    const user = userEvent.setup();
+    const onCreateGroup = vi.fn<(name: string) => Promise<boolean>>().mockResolvedValue(false);
+    renderLibrary({ onCreateGroup });
+
+    await user.click(screen.getByRole("button", { name: "New group" }));
+    const field = screen.getByLabelText("Group name");
+    await user.type(field, "Research");
+    await user.click(screen.getByRole("button", { name: "Create group" }));
+
+    expect(onCreateGroup).toHaveBeenCalledWith("Research");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(field).toHaveValue("Research");
+  });
+
   it("explains that deleting a group keeps its chats, and confirms without a gauntlet", async () => {
     const user = userEvent.setup();
     const { props } = renderLibrary({
@@ -173,6 +188,34 @@ describe("ChatLibrary", () => {
     await user.click(screen.getByRole("button", { name: "Save name" }));
 
     expect(props.onRenameGroup).toHaveBeenCalledWith("g1", "Deep Research");
+  });
+
+  it("keeps the group rename dialog and input when renaming fails", async () => {
+    const user = userEvent.setup();
+    const onRenameGroup = vi.fn<(id: string, name: string) => Promise<boolean>>().mockResolvedValue(false);
+    renderLibrary({ groups: [group("g1", "Research")], onRenameGroup });
+
+    await user.click(screen.getByRole("button", { name: "Rename group Research" }));
+    const field = screen.getByLabelText("Group name");
+    await user.clear(field);
+    await user.type(field, "Deep Research");
+    await user.click(screen.getByRole("button", { name: "Save name" }));
+
+    expect(onRenameGroup).toHaveBeenCalledWith("g1", "Deep Research");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(field).toHaveValue("Deep Research");
+  });
+
+  it("keeps the group delete dialog open when deletion fails", async () => {
+    const user = userEvent.setup();
+    const onDeleteGroup = vi.fn<(id: string) => Promise<boolean>>().mockResolvedValue(false);
+    renderLibrary({ groups: [group("g1", "Research")], onDeleteGroup });
+
+    await user.click(screen.getByRole("button", { name: "Delete group Research" }));
+    await user.click(screen.getByRole("button", { name: "Delete group" }));
+
+    expect(onDeleteGroup).toHaveBeenCalledWith("g1");
+    expect(screen.getByRole("dialog")).toBeVisible();
   });
 
   it("marks only the active chat, and not while another route is showing", () => {
