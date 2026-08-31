@@ -166,6 +166,52 @@ describe("useGenerationStream", () => {
     expect(readActiveJob()).toBeNull();
   });
 
+  it("forwards a model clear proposal only after a successful terminal event", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+    act(() => {
+      result.current.start("job-clear", "thread-clear", onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-clear",
+        thread_id: "thread-clear",
+        data: { clear_requested: true },
+      });
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-clear", true, "job-clear"));
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards a clear proposal when reconnect status confirms successful completion", async () => {
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-clear-status",
+      kind: "generation",
+      status: "succeeded",
+      sequence: 2,
+      result: { clear_requested: true },
+    });
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+    act(() => {
+      result.current.start("job-clear-status", "thread-clear-status", onCompleted, vi.fn());
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-clear-status", true, "job-clear-status"));
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

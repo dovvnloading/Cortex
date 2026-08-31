@@ -230,6 +230,38 @@ def test_model_memory_proposal_is_not_persisted_and_does_not_invalidate_assistan
         ]
 
 
+def test_model_clear_proposal_is_returned_without_clearing_memory(monkeypatch):
+    dependencies = build_demo_dependencies()
+    dependencies.memories.add_memo("keep this memory")
+    clear_observations: list[bool] = []
+
+    def fail_clear():
+        clear_observations.append(True)
+        raise AssertionError("model output must not clear permanent memory")
+
+    monkeypatch.setattr(dependencies.memories, "clear_memos", fail_clear)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "clear-proposal-1", "user_input": "!clear-memory"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        assert events[-1]["event"] == "generation.completed"
+        assert events[-1]["data"]["clear_requested"] is True
+        assert clear_observations == []
+        assert dependencies.memories.get_memos() == ["keep this memory"]
+
+
 def test_precommit_cancellation_waits_for_worker_and_skips_response_persistence():
     state = FakeOllamaState(
         generation_delay_seconds=0.2,

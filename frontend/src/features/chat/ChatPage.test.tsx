@@ -42,7 +42,7 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
   } as unknown as CortexApi;
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null) {
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
   return render(
     <ChatPage
       api={api}
@@ -58,6 +58,7 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onThreadCreated={vi.fn()}
       onChatChanged={vi.fn()}
       onForked={vi.fn()}
+      onClearMemory={onClearMemory}
       onSessionExpired={vi.fn()}
     />,
   );
@@ -65,6 +66,7 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
 
 describe("ChatPage composer integration", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     window.sessionStorage.clear();
     useChatStore.setState({ generationOptionsByThread: {} });
   });
@@ -76,6 +78,90 @@ describe("ChatPage composer integration", () => {
 
     expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
+  });
+
+  it("asks before clearing memories requested by a completed generation", async () => {
+    const user = userEvent.setup();
+    const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    const api = chatApi({
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-clear-ui",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-clear-ui",
+      }),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a", null, clearMemory);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Please clear memories");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-clear-ui",
+        thread_id: "thread-a",
+        data: { clear_requested: true },
+      });
+      resolveStream?.();
+    });
+
+    await waitFor(() => expect(clearMemory).toHaveBeenCalledTimes(1));
+    expect(confirm).toHaveBeenCalledWith("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.");
+  });
+
+  it("does not clear memories when the user declines a generation proposal", async () => {
+    const user = userEvent.setup();
+    const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    const api = chatApi({
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-clear-decline",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-clear-decline",
+      }),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a", null, clearMemory);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Please clear memories");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-clear-decline",
+        thread_id: "thread-a",
+        data: { clear_requested: true },
+      });
+      resolveStream?.();
+    });
+
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    expect(clearMemory).not.toHaveBeenCalled();
   });
 
   it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {

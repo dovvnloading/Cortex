@@ -7,6 +7,7 @@ import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
+import { useUiStore } from "../../stores/useUiStore";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
@@ -35,6 +36,7 @@ type Props = {
   onThreadCreated: (threadId: string) => void;
   onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
+  onClearMemory?: () => Promise<void>;
   onSessionExpired: () => void;
 };
 
@@ -85,6 +87,7 @@ export function ChatPage({
   onThreadCreated,
   onChatChanged,
   onForked,
+  onClearMemory,
   onSessionExpired,
 }: Props) {
   const generation = useChatStore((state) => state.generation);
@@ -129,6 +132,7 @@ export function ChatPage({
   // A deliberate submit does not pass this key and therefore starts a new
   // user turn with a fresh request id.
   const pendingAdmissionRef = useRef<PendingAdmission | null>(null);
+  const handledClearRequestsRef = useRef(new Set<string>());
 
   const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
     setGenerationError({ threadId: failedThreadId, message });
@@ -214,7 +218,7 @@ export function ChatPage({
           ? "starting"
           : "ready";
 
-  async function reconcileChat(id: string): Promise<void> {
+  const reconcileChat = useCallback(async (id: string): Promise<void> => {
     const requestVersion = (chatRequestVersionsRef.current.get(id) ?? 0) + 1;
     chatRequestVersionsRef.current.set(id, requestVersion);
     const isLatestRequest = () => chatRequestVersionsRef.current.get(id) === requestVersion;
@@ -234,7 +238,28 @@ export function ChatPage({
       if (!isLatestRequest()) return;
       setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
     }
-  }
+  }, [api, onChatChanged]);
+
+  const completeGeneration = useCallback(async (id: string, clearRequested = false, jobId?: string): Promise<void> => {
+    await reconcileChat(id);
+    if (!clearRequested) return;
+    const requestKey = jobId ?? id;
+    if (handledClearRequestsRef.current.has(requestKey)) return;
+    handledClearRequestsRef.current.add(requestKey);
+    if (!onClearMemory) {
+      useUiStore.getState().notify("Cortex requested clearing permanent memories. Review Settings to confirm.", "info");
+      return;
+    }
+    if (!window.confirm("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.")) {
+      useUiStore.getState().notify("Permanent memories were not cleared.", "info");
+      return;
+    }
+    try {
+      await onClearMemory();
+    } catch (error) {
+      useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not clear memories.", "error");
+    }
+  }, [onClearMemory, reconcileChat]);
 
   useEffect(() => {
     viewThreadIdRef.current = threadId;
@@ -265,7 +290,7 @@ export function ChatPage({
         if (replayFromStart || !warmForThisJob) {
           useChatStore.getState().beginGeneration(job.jobId, job.threadId);
         }
-        void consume(job, reconcileChat, reportGenerationFailure);
+        void consume(job, completeGeneration, reportGenerationFailure);
       } else {
         initialMountRef.current = false;
         const current = useChatStore.getState().generation;
@@ -336,7 +361,7 @@ export function ChatPage({
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
       setResolvedThreadId(jobThreadId);
-      start(accepted.job_id, jobThreadId, reconcileChat, reportGenerationFailure);
+      start(accepted.job_id, jobThreadId, completeGeneration, reportGenerationFailure);
       if (pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
       }

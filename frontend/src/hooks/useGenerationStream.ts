@@ -68,9 +68,17 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-type OnCompleted = (threadId: string) => Promise<void>;
+type OnCompleted = (threadId: string, clearRequested?: boolean, jobId?: string) => Promise<void>;
 type OnFailed = (threadId: string, message: string) => void;
 type OnSessionExpired = () => void;
+
+function hasClearRequest(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const result = value as { clear_requested?: unknown; memory_command?: unknown };
+  if (result.clear_requested === true) return true;
+  if (!result.memory_command || typeof result.memory_command !== "object") return false;
+  return (result.memory_command as { clear_requested?: unknown }).clear_requested === true;
+}
 
 /**
  * Coalesces many rapid push() calls into at most one flush per animation
@@ -187,7 +195,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
-                  completion = onCompleted(job.threadId);
+                  const clearRequested = hasClearRequest(data);
+                  completion = clearRequested
+                    ? onCompleted(job.threadId, true, job.jobId)
+                    : onCompleted(job.threadId);
                 }
                 if (event.event === "generation.failed" || event.event === "generation.cancelled") {
                   terminal = true;
@@ -214,7 +225,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (snapshot.status !== "succeeded") {
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 }
-                completion = onCompleted(job.threadId);
+                const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
+                completion = clearRequested
+                  ? onCompleted(job.threadId, true, job.jobId)
+                  : onCompleted(job.threadId);
               } else {
                 if (snapshot.status === "cancelling") useChatStore.getState().markStopping(job.jobId);
                 useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
