@@ -12,7 +12,7 @@ if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
 
 if (-not $SkipDependencyInstall) {
     python -m pip install --disable-pip-version-check -r requirements.txt
-    python -m pip install --disable-pip-version-check "pyinstaller>=6.14,<7"
+    python -m pip install --disable-pip-version-check "pyinstaller==6.14.2"
 }
 
 & (Join-Path $PSScriptRoot "prepare_webview2.ps1")

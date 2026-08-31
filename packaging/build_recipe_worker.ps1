@@ -90,7 +90,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "The dependency installation failed; refusing to package a stale worker."
         }
-        python -m pip install --disable-pip-version-check "pyinstaller>=6.14,<7"
+        python -m pip install --disable-pip-version-check "pyinstaller==6.14.2"
         if ($LASTEXITCODE -ne 0) {
             throw "The PyInstaller installation failed; refusing to package a stale worker."
         }

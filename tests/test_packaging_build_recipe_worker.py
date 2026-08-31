@@ -49,7 +49,9 @@ def _powershell_build(
     mode = f"""
         if ($arguments -contains 'pip') {{
             if (('{fail_phase_literal}' -eq 'requirements' -and $arguments -contains '-r') -or
-                ('{fail_phase_literal}' -eq 'pyinstaller-install' -and $arguments -contains 'pyinstaller>=6.14,<7')) {{
+                ('{fail_phase_literal}' -eq 'pyinstaller-install' -and
+                    ($arguments -contains 'pyinstaller>=6.14,<7' -or
+                        $arguments -contains 'pyinstaller==6.14.2'))) {{
                 $global:LASTEXITCODE = 22
                 return
             }}
