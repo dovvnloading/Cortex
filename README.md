@@ -132,14 +132,6 @@ writes, no process access, no network. The task activity tray on the right reads
 "Review before running" with Allow once and Deny
 controls.](.github/images/execution-approval.png)
 
-The tray names the requested host access, flags broad access as a high-risk
-choice for that run, and lets the generated source be inspected before anything
-executes. A finished task keeps its captured output alongside it:
-
-![The Cortex task activity tray: a pending task requesting Files access with a
-broad-local-access warning, an "Inspect generated source" disclosure, and Allow
-once and Deny buttons; below it a completed task showing its captured output and
-return value.](.github/images/execution-tray.png)
 
 Code execution is a separate capability from scratch computation:
 
