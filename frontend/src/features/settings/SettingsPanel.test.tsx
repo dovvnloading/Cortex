@@ -305,4 +305,52 @@ describe("SettingsPanel", () => {
       generation: expect.objectContaining({ bypass_system_prompt: true }),
     }));
   });
+
+  it("blocks GGUF downloads until an edited folder is saved", async () => {
+    const user = userEvent.setup();
+    const onDownloadGGUF = vi.fn().mockResolvedValue(undefined);
+    const settings: CortexSettings = {
+      models: { chat: null, title: null, gguf_directory: "C:\\models\\old" },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: [],
+      models: [],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "C:\\models\\old" }}
+        onDownloadGGUF={onDownloadGGUF}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "System" }));
+    const directory = screen.getByRole("textbox", { name: "GGUF models folder" });
+    await user.clear(directory);
+    await user.type(directory, "C:\\models\\new");
+    await user.type(screen.getByLabelText("Repo id"), "owner/model");
+    await user.type(screen.getByLabelText("File name"), "model.Q4_K_M.gguf");
+
+    const download = screen.getByRole("button", { name: "Download model" });
+    expect(download).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Save the folder setting before downloading");
+    expect(onDownloadGGUF).not.toHaveBeenCalled();
+  });
 });

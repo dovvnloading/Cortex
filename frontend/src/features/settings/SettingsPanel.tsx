@@ -363,6 +363,7 @@ export function SettingsPanel({
               llamacppStatus={llamacppStatus}
               gguf={{
                 directory: modelSettings.gguf_directory ?? "",
+                directoryDirty: (modelSettings.gguf_directory ?? "") !== (settings.models?.gguf_directory ?? ""),
                 onDirectoryChange: (value) => update({ models: { ...modelSettings, gguf_directory: value || null } }),
                 onDownload: onDownloadGGUF,
                 busy: modelBusy,
