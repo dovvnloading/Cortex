@@ -540,6 +540,126 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(composer).toHaveFocus());
   });
 
+  it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-replayed",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-replayed",
+      });
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Replay this admission");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).toBe(generate.mock.calls[0][0].request_id);
+  });
+
+  it("retries the original admission payload after chat context and options change", async () => {
+    const user = userEvent.setup();
+    let revision = 3;
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-replayed-context",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-replayed-context",
+      });
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => ({ ...emptyChat(id), revision })),
+      generate,
+    });
+    useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.2 });
+    const view = renderChat(api, "thread-a");
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Replay with its original context");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+    const originalPayload = generate.mock.calls[0][0];
+
+    revision = 9;
+    useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.8 });
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-b"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-a"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toEqual(originalPayload);
+  });
+
+  it("uses a fresh admission key for a deliberate new user turn after failure", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-new-turn",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-new-turn",
+      });
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "First turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.clear(composer);
+    await user.type(composer, "Second turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+    expect(generate.mock.calls[1][0].user_input).toBe("Second turn");
+  });
+
   it("clears the submitted draft only after the backend accepts it", async () => {
     const user = userEvent.setup();
     let accept!: (value: { job_id: string; kind: "generation"; status: "queued"; thread_id: string; user_message_id: string }) => void;

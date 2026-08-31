@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
+import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
@@ -58,6 +58,15 @@ type AttachmentDraftTarget = {
   threadId: string | null;
 };
 
+type PendingAdmission = {
+  requestId: string;
+  operation: "generate" | "regenerate";
+  threadId: string | null;
+  baseRevision?: number;
+  options?: GenerationOptionsOverride;
+  messageId?: string;
+};
+
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENTS = 8;
@@ -114,6 +123,12 @@ export function ChatPage({
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
+  // A POST can be admitted before its response reaches the browser. Keep its
+  // idempotency key across that ambiguous failure so Retry can replay the
+  // admission instead of creating a second job (or a second new-chat thread).
+  // A deliberate submit does not pass this key and therefore starts a new
+  // user turn with a fresh request id.
+  const pendingAdmissionRef = useRef<PendingAdmission | null>(null);
 
   const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
     setGenerationError({ threadId: failedThreadId, message });
@@ -263,7 +278,13 @@ export function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, loadChat]);
 
-  const startGeneration = async (prompt: string, regenerateMessageId?: string, suppliedAttachments: readonly ChatAttachment[] = attachments): Promise<StartedGeneration | null> => {
+  const startGeneration = async (
+    prompt: string,
+    regenerateMessageId?: string,
+    suppliedAttachments: readonly ChatAttachment[] = attachments,
+    requestIdOverride?: string,
+    admissionOverride?: PendingAdmission,
+  ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
     if (!input || generation.jobId || startingRef.current) return null;
     if (!runtimeReady) {
@@ -279,17 +300,46 @@ export function ChatPage({
     setLastPrompt(input);
     setLastAttachments([...suppliedAttachments]);
     setGenerationError(null);
+    const requestId = requestIdOverride ?? createRequestId();
+    const requestThreadId = admissionOverride ? admissionOverride.threadId : threadId;
+    const options = admissionOverride ? admissionOverride.options : threadOptions ?? undefined;
+    const baseRevision = admissionOverride
+      ? admissionOverride.baseRevision
+      : currentChat?.revision ?? 0;
+    const pendingAdmission: PendingAdmission = admissionOverride ?? {
+      requestId,
+      operation: regenerateMessageId ? "regenerate" : "generate",
+      threadId: requestThreadId,
+      baseRevision: regenerateMessageId ? undefined : baseRevision,
+      options,
+      messageId: regenerateMessageId,
+    };
     try {
-      const requestId = createRequestId();
-      const options = threadOptions ?? undefined;
+      if (!requestIdOverride) pendingAdmissionRef.current = pendingAdmission;
       const accepted = regenerateMessageId
-        ? await api.regenerate(threadId ?? "", { request_id: requestId, message_id: regenerateMessageId, user_input: input, attachments: [...suppliedAttachments], options })
-        : await api.generate({ request_id: requestId, thread_id: threadId, user_input: input, attachments: [...suppliedAttachments], base_revision: currentChat?.revision ?? 0, options });
-      const jobThreadId = accepted.thread_id ?? threadId;
+        ? await api.regenerate(requestThreadId ?? "", {
+            request_id: requestId,
+            message_id: regenerateMessageId,
+            user_input: input,
+            attachments: [...suppliedAttachments],
+            options,
+          })
+        : await api.generate({
+            request_id: requestId,
+            thread_id: requestThreadId,
+            user_input: input,
+            attachments: [...suppliedAttachments],
+            base_revision: baseRevision,
+            options,
+          });
+      const jobThreadId = accepted.thread_id ?? requestThreadId;
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
       setResolvedThreadId(jobThreadId);
       start(accepted.job_id, jobThreadId, reconcileChat, reportGenerationFailure);
+      if (pendingAdmissionRef.current?.requestId === requestId) {
+        pendingAdmissionRef.current = null;
+      }
       if (!regenerateMessageId) {
         setChat((current) => ({
           id: jobThreadId,
@@ -320,6 +370,18 @@ export function ChatPage({
       }
       return { threadId: jobThreadId };
     } catch (requestError) {
+      // A response with a client-side rejection is authoritative: the
+      // admission did not happen and its key must not leak into a later
+      // retry. Network failures and server errors remain ambiguous because
+      // the backend may have admitted the job before the response was lost.
+      if (
+        requestError instanceof ApiError
+        && requestError.status >= 400
+        && requestError.status < 500
+        && pendingAdmissionRef.current?.requestId === requestId
+      ) {
+        pendingAdmissionRef.current = null;
+      }
       setGenerationError({
         threadId,
         message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
@@ -440,7 +502,14 @@ export function ChatPage({
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
-    const started = await startGeneration(lastPrompt, undefined, lastAttachments);
+    const pendingAdmission = pendingAdmissionRef.current;
+    const started = await startGeneration(
+      lastPrompt,
+      pendingAdmission?.operation === "regenerate" ? pendingAdmission.messageId : undefined,
+      lastAttachments,
+      pendingAdmission?.requestId,
+      pendingAdmission ?? undefined,
+    );
     if (started && !threadId) onThreadCreated(started.threadId);
     return Boolean(started);
   };
