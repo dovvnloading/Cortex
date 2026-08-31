@@ -10,8 +10,12 @@ import threading
 import time
 from typing import Any
 from collections.abc import Callable
+from collections.abc import Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+
+DEV_SERVER_ID_HEADER = "X-Cortex-Dev-Server"
 
 
 def wait_for_http(
@@ -19,6 +23,7 @@ def wait_for_http(
     *,
     timeout: float = 30.0,
     is_alive: Callable[[], bool] | None = None,
+    expected_headers: Mapping[str, str] | None = None,
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -27,7 +32,11 @@ def wait_for_http(
         try:
             request = Request(url, headers={"Host": "127.0.0.1"})
             with urlopen(request, timeout=1.0) as response:
-                if 200 <= response.status < 300:
+                headers_match = all(
+                    response.headers.get(name) == value
+                    for name, value in (expected_headers or {}).items()
+                )
+                if 200 <= response.status < 300 and headers_match:
                     return True
         except (OSError, URLError):
             time.sleep(0.1)

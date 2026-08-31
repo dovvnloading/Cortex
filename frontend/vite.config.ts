@@ -1,6 +1,19 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { normalizeApiBaseUrl } from "./src/api/baseUrl";
+
+function cortexDevIdentityPlugin(nonce: string | undefined): Plugin {
+  return {
+    name: "cortex-dev-identity",
+    configureServer(server) {
+      if (!nonce) return;
+      server.middlewares.use((_request, response, next) => {
+        response.setHeader("X-Cortex-Dev-Server", nonce);
+        next();
+      });
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => {
   // Vite embeds VITE_* values into the production bundle. Fail before the
@@ -9,7 +22,7 @@ export default defineConfig(({ mode }) => {
   normalizeApiBaseUrl(process.env.VITE_API_BASE_URL, mode === "production");
 
   return {
-    plugins: [react()],
+    plugins: [react(), cortexDevIdentityPlugin(process.env.CORTEX_DEV_SERVER_NONCE)],
     server: {
       port: Number(process.env.CORTEX_FRONTEND_PORT ?? 5173),
       proxy: {

@@ -13,6 +13,7 @@ import main as launcher_main
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
+from cortex_backend.launcher import supervisor as supervisor_module
 from cortex_backend.launcher import webview_runtime as runtime_module
 from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
@@ -35,6 +36,52 @@ def test_explicit_backend_port_remains_strict():
     args = launcher_main.build_parser().parse_args(["--port", "8765"])
 
     assert launcher_main._requested_port(args.port) == 8765
+
+
+def test_dev_server_readiness_requires_the_owned_identity_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Response:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    alive = iter((True, False))
+    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert supervisor_module.wait_for_http(
+        "http://127.0.0.1:5173",
+        timeout=1,
+        is_alive=lambda: next(alive),
+        expected_headers={supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"},
+    ) is False
+
+
+def test_dev_server_readiness_accepts_matching_identity_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Response:
+        status = 200
+        headers = {supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert supervisor_module.wait_for_http(
+        "http://127.0.0.1:5173",
+        timeout=1,
+        expected_headers={supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"},
+    ) is True
 
 
 def test_windowed_launcher_does_not_configure_uvicorn_console_logging_without_stderr(

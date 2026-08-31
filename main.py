@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import re
+import secrets
 
 
 ROOT = Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ from cortex_backend.launcher import (  # noqa: E402
 )
 from cortex_backend.launcher.supervisor import (  # noqa: E402
     ChildProcessSupervisor,
+    DEV_SERVER_ID_HEADER,
     ServerSupervisor,
     wait_for_http,
 )
@@ -400,9 +402,11 @@ def _run_web(args: argparse.Namespace) -> int:
             browser_port = backend_port
             if args.dev:
                 frontend_port = _free_port()
+                dev_server_nonce = secrets.token_urlsafe(32)
                 environment = os.environ.copy()
                 environment["CORTEX_BACKEND_PORT"] = str(backend_port)
                 environment["CORTEX_FRONTEND_PORT"] = str(frontend_port)
+                environment["CORTEX_DEV_SERVER_NONCE"] = dev_server_nonce
                 npm = "npm.cmd" if os.name == "nt" else "npm"
                 frontend = ChildProcessSupervisor(
                     [npm, "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
@@ -414,6 +418,7 @@ def _run_web(args: argparse.Namespace) -> int:
                     f"http://127.0.0.1:{frontend_port}",
                     timeout=30,
                     is_alive=lambda: frontend.running,
+                    expected_headers={DEV_SERVER_ID_HEADER: dev_server_nonce},
                 ):
                     raise RuntimeError("Vite did not become ready within 30 seconds.")
                 browser_port = frontend_port
