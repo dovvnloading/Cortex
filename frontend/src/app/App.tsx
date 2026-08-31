@@ -13,6 +13,7 @@ import { useChatStore } from "../stores/useChatStore";
 import { useModelStore, type ModelProgress } from "../stores/useModelStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import { useToast } from "./ToastProvider";
+import { resolveRuntimeAvailability } from "./runtimeAvailability";
 
 type Props = { api?: CortexApi };
 
@@ -566,13 +567,19 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const selectedModel = settings.models?.chat?.trim() || null;
   const selectedModelSupportsVision = models.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
   const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
-  // A GGUF-selected model runs through Cortex's own managed local runtime,
-  // not Ollama -- Ollama's connection state is irrelevant to it.
-  const runtimeConnected = isGGUFModel(selectedModel) || (models.connection?.success ?? true);
   // The initial system response seeds the store, while polling updates it as
   // the managed runtime starts/stops. Settings must consume that live value
   // rather than the immutable workspace snapshot.
   const llamacppStatus = liveLlamacppStatus ?? system.llamacpp ?? DEFAULT_LLAMACPP_STATUS;
+  // Resolve readiness against the runtime selected by the user. Ollama's
+  // connection state must not affect a GGUF selection (or vice versa).
+  const runtimeAvailability = resolveRuntimeAvailability({
+    selectedModel,
+    selectedModelAvailable,
+    ollamaConnected: models.connection?.success ?? true,
+    ollamaMessage: models.connection?.message,
+    llamacppStatus,
+  });
   const routeChatId = route.kind === "chat" ? route.threadId : null;
   const openSettings = () => {
     // Settings can be opened from either the shell header or the command
@@ -592,7 +599,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         {route.kind === "settings"
           ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
-          : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
+          : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
       </AppShell>
       <CommandPalette
         chats={chats}

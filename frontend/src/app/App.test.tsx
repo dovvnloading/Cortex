@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
+import { resolveRuntimeAvailability } from "./runtimeAvailability";
 import { CortexApi } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
@@ -133,6 +134,30 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Ollama is unavailable" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
+  });
+
+  it("reports a specific disable reason when no chat model is selected", () => {
+    expect(resolveRuntimeAvailability({
+      selectedModel: null,
+      selectedModelAvailable: false,
+      ollamaConnected: false,
+      ollamaMessage: "Ollama is not running.",
+      llamacppStatus: { state: "idle" },
+    })).toEqual({
+      ready: false,
+      reason: "no-model-selected",
+      message: "Select a local model before sending a message.",
+    });
+  });
+
+  it("ignores Ollama availability for an installed GGUF selection", () => {
+    expect(resolveRuntimeAvailability({
+      selectedModel: "gguf:demo.Q4_K_M.gguf",
+      selectedModelAvailable: true,
+      ollamaConnected: false,
+      ollamaMessage: "Ollama is not running.",
+      llamacppStatus: { state: "idle" },
+    })).toEqual({ ready: true, reason: null, message: null });
   });
 
   it("renders live llama.cpp status updates in mounted Settings", async () => {
