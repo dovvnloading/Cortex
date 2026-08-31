@@ -17,6 +17,7 @@ import base64
 from io import BytesIO
 import mimetypes
 import re
+import warnings
 from pathlib import PurePath
 from typing import Any
 from unicodedata import normalize
@@ -31,6 +32,12 @@ CHAT_ATTACHMENT_PROFILE = "chat.attachment.v1"
 MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_CHAT_ATTACHMENTS = 8
 MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024
+# Keep chat-image decoding bounded independently from Pillow's process-global
+# bomb threshold and the fixed-function recipe provider's limits.  The encoded
+# attachment cap alone does not bound the memory implied by image dimensions.
+MAX_CHAT_IMAGE_PIXELS = 64 * 1024 * 1024
+MAX_CHAT_IMAGE_DIMENSION = 16_384
+MAX_CHAT_IMAGE_DECODED_BYTES = 256 * 1024 * 1024
 MAX_DOCUMENT_TEXT_CHARS = 160_000
 DEFAULT_CHAT_ATTACHMENT_RETENTION_SECONDS = 30 * 86_400
 MAX_CHAT_ATTACHMENT_RETENTION_SECONDS = 30 * 86_400
@@ -182,11 +189,39 @@ def _validate_image(content: bytes) -> tuple[str, str]:
     if detected is None:
         raise ChatAttachmentError("attachment_image_invalid")
     try:
-        with Image.open(BytesIO(content)) as image:
-            image.verify()
+        # Pillow's bomb warning is intentionally promoted to an exception. A
+        # warning left at its default level would allow verify() to succeed,
+        # while the explicit limits below cover dimensions below Pillow's
+        # process-global threshold.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(content)) as image:
+                _validate_image_dimensions(image)
+                image.verify()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise ChatAttachmentError("attachment_image_invalid") from None
     except Exception:
         raise ChatAttachmentError("attachment_image_invalid") from None
     return detected
+
+
+def _validate_image_dimensions(image: Any) -> None:
+    try:
+        width, height = int(image.width), int(image.height)
+        frames = int(getattr(image, "n_frames", 1))
+        mode = str(image.mode)
+    except Exception:
+        raise ChatAttachmentError("attachment_image_invalid") from None
+    if width <= 0 or height <= 0 or frames <= 0:
+        raise ChatAttachmentError("attachment_image_invalid")
+    pixels = width * height
+    if width > MAX_CHAT_IMAGE_DIMENSION or height > MAX_CHAT_IMAGE_DIMENSION:
+        raise ChatAttachmentError("attachment_image_invalid")
+    if pixels > MAX_CHAT_IMAGE_PIXELS:
+        raise ChatAttachmentError("attachment_image_invalid")
+    channels = {"1": 1, "L": 1, "P": 1, "LA": 2, "RGB": 3, "RGBA": 4}.get(mode, 4)
+    if pixels * channels * frames > MAX_CHAT_IMAGE_DECODED_BYTES:
+        raise ChatAttachmentError("attachment_image_invalid")
 
 
 def _classify(filename: str, content: bytes) -> tuple[str, str]:
@@ -460,6 +495,9 @@ __all__ = [
     "MAX_CHAT_ATTACHMENT_BYTES",
     "MAX_CHAT_ATTACHMENTS",
     "MAX_CHAT_ATTACHMENT_TOTAL_BYTES",
+    "MAX_CHAT_IMAGE_DECODED_BYTES",
+    "MAX_CHAT_IMAGE_DIMENSION",
+    "MAX_CHAT_IMAGE_PIXELS",
     "MAX_DOCUMENT_TEXT_CHARS",
     "ResolvedChatAttachment",
 ]
