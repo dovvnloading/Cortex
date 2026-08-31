@@ -123,7 +123,12 @@ export function AppShell({
 
       <div className="workspace-body">
         {sidebarVisible && <button className="sidebar-scrim" aria-label="Close chat history" onClick={() => setSidebarVisible(false)} />}
-        <aside className="sidebar" aria-label="Chat history">
+        <aside
+          className="sidebar"
+          aria-label="Chat history"
+          aria-hidden={!sidebarVisible}
+          inert={!sidebarVisible ? true : undefined}
+        >
           <div className="sidebar-brand">
             <span className="sidebar-brand-mark" aria-hidden="true"><img src="/cortex.svg" alt="" /></span>
             <span className="sidebar-brand-copy"><strong>Cortex</strong></span>

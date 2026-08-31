@@ -57,6 +57,23 @@ describe("AppShell", () => {
     expect(window.location.pathname).toBe("/chat/new");
   });
 
+  it("removes the collapsed sidebar from the accessibility and tab trees", async () => {
+    const user = userEvent.setup();
+    renderShell();
+    const sidebar = screen.getByRole("complementary", { name: "Chat history" });
+
+    expect(sidebar).not.toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).not.toHaveAttribute("inert");
+
+    await user.click(screen.getByRole("button", { name: "Hide chat history" }));
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+
+    await user.click(screen.getByRole("button", { name: "Show chat history" }));
+    expect(sidebar).toHaveAttribute("aria-hidden", "false");
+    expect(sidebar).not.toHaveAttribute("inert");
+  });
+
   it("captures the routed thread before opening settings", async () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
