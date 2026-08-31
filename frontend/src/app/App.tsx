@@ -38,9 +38,30 @@ const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
 };
 
 function readBootstrapToken(): string {
-  const searchToken = new URLSearchParams(window.location.search).get("bootstrap");
-  if (searchToken) return searchToken;
-  return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("bootstrap") ?? "";
+  const url = new URL(window.location.href);
+  const search = url.searchParams;
+  const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+  const searchToken = search.get("bootstrap");
+  const token = searchToken || hash.get("bootstrap") || "";
+
+  // Handoff credentials are valid only for this one exchange. Remove them
+  // from the visible URL before rendering either onboarding or the workspace,
+  // while preserving unrelated query/hash state for the surrounding shell.
+  let changed = false;
+  if (search.has("bootstrap")) {
+    search.delete("bootstrap");
+    changed = true;
+  }
+  if (hash.has("bootstrap")) {
+    hash.delete("bootstrap");
+    changed = true;
+  }
+  if (changed) {
+    const nextHash = hash.toString();
+    url.hash = nextHash ? `#${nextHash}` : "";
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+  return token;
 }
 
 export function App({ api: providedApi }: Props) {
@@ -64,7 +85,14 @@ export function App({ api: providedApi }: Props) {
           setOnboardingError(null);
           try {
             await api.exchangeBootstrapToken(token);
-            window.history.replaceState({}, "", window.location.pathname);
+            // Keep any unrelated route state, but never restore the one-time
+            // bootstrap credential after an exchange attempt.
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete("bootstrap");
+            const cleanHash = new URLSearchParams(cleanUrl.hash.replace(/^#/, ""));
+            cleanHash.delete("bootstrap");
+            cleanUrl.hash = cleanHash.toString() ? `#${cleanHash}` : "";
+            window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
             // Bootstrap credentials are one-time handoff tokens. Keep the
             // session token in the API client, but never retain a token that
             // would fail if a later 401 returns us to the onboarding screen.

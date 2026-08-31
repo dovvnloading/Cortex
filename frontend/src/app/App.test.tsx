@@ -23,6 +23,33 @@ describe("App", () => {
     expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
+  it("scrubs a bootstrap query credential before rendering an existing session", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.history.replaceState({}, "", "/?bootstrap=query-secret&view=compact#pane=chat");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(window.location.search).toBe("?view=compact");
+    expect(window.location.hash).toBe("#pane=chat");
+    expect(window.location.href).not.toContain("query-secret");
+    expect(fetcher.mock.calls.some(([input]) => String(input).endsWith("/session/exchange"))).toBe(false);
+  });
+
   it("does not reuse a consumed bootstrap token after the local session expires", async () => {
     window.history.replaceState({}, "", "/?bootstrap=desktop-handoff");
     const fetcher = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
