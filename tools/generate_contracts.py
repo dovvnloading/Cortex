@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from cortex_backend.api import create_app  # noqa: E402
-from cortex_backend.api.schemas import ExecutionSSEEvent  # noqa: E402
 
 
 CONTRACT_DIR = ROOT / "contracts"
@@ -24,13 +23,6 @@ def main() -> None:
     CONTRACT_DIR.mkdir(parents=True, exist_ok=True)
     app = create_app(allowed_hosts=("127.0.0.1", "localhost", "::1"))
     specification = app.openapi()
-    # StreamingResponse does not automatically register the JSON envelope
-    # carried by text/event-stream. Keep that shared client contract generated
-    # from the Pydantic model rather than maintaining a hand-written tail.
-    schemas = specification.setdefault("components", {}).setdefault("schemas", {})
-    schemas["ExecutionSSEEvent"] = ExecutionSSEEvent.model_json_schema(
-        ref_template="#/components/schemas/{model}"
-    )
     OPENAPI_PATH.write_text(
         json.dumps(specification, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

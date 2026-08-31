@@ -61,6 +61,56 @@ def test_generation_stream_openapi_declares_sse_media_type():
     }
 
 
+def test_authenticated_openapi_declares_bearer_security_and_execution_sse_contract():
+    app = create_app(allowed_hosts=ALLOWED_HOSTS)
+    specification = app.openapi()
+    execution_events = specification["paths"]["/api/v1/execution/{job_id}/events"]["get"]
+    handoff = specification["paths"]["/api/v1/session/handoff"]["post"]
+
+    assert specification["components"]["securitySchemes"]["CortexSession"] == {
+        "type": "http",
+        "description": (
+            "Short-lived bearer session token returned by /session/exchange. "
+            "Requests remain restricted to the local API host."
+        ),
+        "scheme": "bearer",
+    }
+    assert execution_events["security"] == [{"CortexSession": []}]
+    assert {
+        parameter["name"]: parameter
+        for parameter in execution_events["parameters"]
+    }["Last-Event-ID"] == {
+        "name": "Last-Event-ID",
+        "in": "header",
+        "required": False,
+        "schema": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": "Resume after this event sequence number.",
+            "title": "Last-Event-Id",
+        },
+        "description": "Resume after this event sequence number.",
+    }
+    assert execution_events["responses"]["200"]["content"] == {
+        "text/event-stream": {
+            "schema": {"$ref": "#/components/schemas/ExecutionSSEEvent"}
+        }
+    }
+    assert execution_events["responses"]["200"]["headers"] == {
+        "Cache-Control": {
+            "description": "Prevent intermediary caching of the live event stream.",
+            "schema": {"type": "string"},
+        },
+        "X-Accel-Buffering": {
+            "description": "Disable proxy buffering for incremental events.",
+            "schema": {"type": "string", "enum": ["no"]},
+        },
+    }
+    handoff_header = handoff["parameters"][0]
+    assert handoff_header["name"] == "X-Cortex-Handoff"
+    assert handoff_header["in"] == "header"
+    assert handoff_header["required"] is False
+
+
 def test_api_factory_is_headless_and_session_exchange_is_one_time():
     app, client = _client()
     with client:
