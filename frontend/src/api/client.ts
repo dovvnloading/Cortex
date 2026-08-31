@@ -213,14 +213,14 @@ export class CortexApi {
     onEvent: (event: GenerationEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options);
+    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
   }
 
   private async streamEvents<T>(
     path: string,
     onEvent: (event: T) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<void> {
+  ): Promise<T | null> {
     const headers = this.authHeaders();
     if (options.afterEventId !== undefined) {
       headers.set("Last-Event-ID", String(options.afterEventId));
@@ -236,13 +236,21 @@ export class CortexApi {
       throw new ApiError(response.status, await this.errorDetail(response));
     }
 
+    let terminalEvent: T | null = null;
     const emit = (frame: string) => {
       const data = frame
         .split("\n")
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("\n");
-      if (data) onEvent(JSON.parse(data) as T);
+      if (data) {
+        const event = JSON.parse(data) as T;
+        onEvent(event);
+        const status = (event as { status?: unknown }).status;
+        if (status === "succeeded" || status === "failed" || status === "cancelled") {
+          terminalEvent = event;
+        }
+      }
     };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -258,6 +266,7 @@ export class CortexApi {
     // The backend may close the stream without terminating the last frame with a
     // blank line, so anything left in the buffer is still a deliverable event.
     if (buffer.trim()) emit(buffer);
+    return terminalEvent;
   }
 
   async deleteChat(threadId: string): Promise<void> {
@@ -279,6 +288,10 @@ export class CortexApi {
 
   models(): Promise<ModelResponse> {
     return this.request<ModelResponse>("/models");
+  }
+
+  jobStatus(jobId: string): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(`/jobs/${encodeURIComponent(jobId)}`);
   }
 
   diagnostics(): Promise<DiagnosticsResponse> {
@@ -406,14 +419,14 @@ export class CortexApi {
     onEvent: (event: ExecutionSSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options);
+    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
   }
 
   streamJob(
     jobId: string,
     onEvent: (event: SSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<void> {
+  ): Promise<SSEEvent | null | void> {
     return this.streamEvents(`/jobs/${encodeURIComponent(jobId)}/events`, onEvent, options);
   }
 

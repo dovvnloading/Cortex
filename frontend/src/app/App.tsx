@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
@@ -393,7 +393,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     let completedData: Record<string, unknown> | null = null;
     let failureMessage: string | null = null;
     try {
-      await api.streamJob(accepted.job_id, (event) => {
+      const terminalEvent = await api.streamJob(accepted.job_id, (event) => {
         updateModelProgress(event, setModelProgress);
         if (event.kind === "completed") completedData = event.data ?? null;
         if (event.kind === "error") {
@@ -401,10 +401,36 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
           failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
         }
       });
-      if (failureMessage) {
-        notify(failureMessage, "error");
+
+      // A clean SSE close carries the terminal event back from streamJob. If
+      // the connection ends before that event, reconcile against the durable
+      // job snapshot before treating the operation as complete.
+      let terminalStatus: JobStatusResponse["status"] | null = terminalEvent ? terminalEvent.status : null;
+      if (!terminalEvent) {
+        const snapshot = await api.jobStatus(accepted.job_id);
+        terminalStatus = snapshot.status;
+        if (snapshot.status === "succeeded") completedData = snapshot.result ?? null;
+        if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+          failureMessage = snapshot.error ?? null;
+        }
+      }
+
+      if (terminalStatus === "failed" || terminalStatus === "cancelled") {
+        notify(
+          failureMessage
+            ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed."),
+          "error",
+        );
         return null;
       }
+      if (terminalStatus !== "succeeded") {
+        // Do not refresh inventory, announce success, or imply that a GGUF
+        // download produced a selectable file while the worker may continue.
+        setModelProgress({ model, status: "Model operation is still running; completion was not confirmed.", percent: null });
+        notify("Model operation is still running; completion was not confirmed.", "error");
+        return null;
+      }
+
       const refreshedModels = await api.models();
       setModels(refreshedModels);
       if (checkOllamaConnection && !refreshedModels.connection?.success) {

@@ -319,6 +319,60 @@ describe("App", () => {
     expect(screen.queryByText("Malformed legacy attachment staged.")).not.toBeInTheDocument();
   });
 
+  it.each([
+    { status: "succeeded", message: null, expected: "Local model inventory refreshed." },
+    { status: "failed", message: "Model pull failed safely.", expected: "Model pull failed safely." },
+    { status: "cancelled", message: "Job cancelled.", expected: "Job cancelled." },
+    { status: "running", message: null, expected: "completion was not confirmed" },
+  ] as const)("reconciles a model-job SSE EOF reported as $status", async ({ status, message, expected }) => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, responseStatus = 200) => new Response(JSON.stringify(body), {
+      status: responseStatus,
+      headers: { "Content-Type": "application/json" },
+    });
+    let modelRefreshes = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/jobs/models") && init?.method === "POST") return json({ job_id: "model-job-eof", kind: "models", status: "queued" }, 202);
+      if (url.endsWith("/jobs/model-job-eof/events")) {
+        const event = { id: 1, job_id: "model-job-eof", kind: "progress", status: "running", phase: "model_check", data: {} };
+        return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.endsWith("/jobs/model-job-eof")) {
+        return json({
+          job_id: "model-job-eof",
+          kind: "models",
+          status,
+          sequence: 2,
+          error: message,
+          result: status === "succeeded" ? { connection: { success: true } } : null,
+        });
+      }
+      if (url.endsWith("/models")) {
+        modelRefreshes += 1;
+        return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await user.click(screen.getByRole("button", { name: "Rescan local models" }));
+
+    expect(await screen.findByText((content) => content.includes(expected))).toBeVisible();
+    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/jobs/model-job-eof"))).toHaveLength(1);
+    expect(modelRefreshes).toBe(status === "succeeded" ? 2 : 1);
+    if (status !== "succeeded") expect(screen.queryByText("Local model inventory refreshed.")).not.toBeInTheDocument();
+  });
+
   it("selects a downloaded model without reverting settings saved while it downloaded", async () => {
     // Regression test: a GGUF download runs for minutes and then selects
     // what it fetched. Settings stays editable the whole time (Save is

@@ -69,9 +69,19 @@ describe("CortexApi", () => {
     const api = new CortexApi("/api/v1", fetcher);
     const kinds: string[] = [];
 
-    await api.streamJob("job-1", (event) => kinds.push(event.kind));
+    const terminal = await api.streamJob("job-1", (event) => kinds.push(event.kind));
 
     expect(kinds).toEqual(["state", "completed"]);
+    expect(terminal).toMatchObject({ kind: "completed", status: "succeeded" });
+  });
+
+  it("returns no terminal event when a job stream closes while still active", async () => {
+    const sse = 'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"progress","status":"running"}\n\n';
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.streamJob("job-1", vi.fn())).resolves.toBeNull();
   });
 
   it("clears the session when a model job event stream returns 401", async () => {
