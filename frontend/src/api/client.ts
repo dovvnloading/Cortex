@@ -43,6 +43,7 @@ import type {
   SystemResponse,
   SSEEvent,
 } from "../../../contracts/cortex-api";
+import { normalizeApiBaseUrl } from "./baseUrl";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -66,10 +67,10 @@ export class CortexApi {
   private readonly sessionExpiredListeners = new Set<SessionExpiredListener>();
 
   constructor(
-    baseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1",
+    baseUrl = import.meta.env.VITE_API_BASE_URL,
     fetcher: FetchLike = window.fetch.bind(window),
   ) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.baseUrl = normalizeApiBaseUrl(baseUrl, import.meta.env.PROD);
     this.fetcher = fetcher;
     this.sessionToken = window.sessionStorage.getItem("cortex.session.token");
   }
