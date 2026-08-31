@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import struct
@@ -201,6 +203,71 @@ def test_text_encoding_and_limits_are_checked_before_persistence():
             content=utf16,
         )
     assert conflict.value.code == "attachment_request_conflict"
+
+
+def test_in_memory_staging_is_idempotent_under_concurrent_requests():
+    service = ChatAttachmentService()
+    workers = 8
+
+    def stage_one() -> object:
+        return service.stage(
+            owner="concurrent-owner",
+            request_id="concurrent-request",
+            filename="reference.txt",
+            content=b"same reference",
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        descriptors = list(executor.map(lambda _: stage_one(), range(workers)))
+
+    assert len({descriptor.attachment_id for descriptor in descriptors}) == 1
+    assert service.resolve(owner="concurrent-owner", descriptor=descriptors[0]).text_content == "same reference"
+
+
+def test_in_memory_staging_evicts_expired_records_and_bounds_capacity(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(attachments_module, "MAX_CHAT_ATTACHMENT_MEMORY_RECORDS", 1)
+    service = ChatAttachmentService()
+    first = service.stage(
+        owner="memory-owner",
+        request_id="first",
+        filename="first.txt",
+        content=b"first",
+    )
+    second = service.stage(
+        owner="memory-owner",
+        request_id="second",
+        filename="second.txt",
+        content=b"second",
+    )
+    with pytest.raises(ChatAttachmentError) as evicted:
+        service.resolve(owner="memory-owner", descriptor=first)
+    assert evicted.value.code == "attachment_unavailable"
+    assert service.resolve(owner="memory-owner", descriptor=second).text_content == "second"
+
+    expired = service.stage(
+        owner="expired-owner",
+        request_id="expired",
+        filename="expired.txt",
+        content=b"expired",
+    )
+    service._memory[("expired-owner", "expired")] = attachments_module._MemoryRecord(
+        "expired-owner",
+        expired.__class__(
+            expired.attachment_id,
+            expired.filename,
+            expired.mime_type,
+            expired.size,
+            expired.sha256,
+            expired.kind,
+            (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        ),
+        b"expired",
+    )
+    service._memory_bytes = len(b"expired")
+    with pytest.raises(ChatAttachmentError) as unavailable:
+        service.resolve(owner="expired-owner", descriptor=expired)
+    assert unavailable.value.code == "attachment_unavailable"
+    assert ("expired-owner", "expired") not in service._memory
 
 
 def test_durable_staging_is_idempotent_and_integrity_checked(tmp_path: Path):

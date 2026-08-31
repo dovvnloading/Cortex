@@ -17,6 +17,7 @@ import base64
 from io import BytesIO
 import mimetypes
 import re
+from threading import RLock
 import warnings
 from pathlib import PurePath
 from typing import Any
@@ -32,6 +33,11 @@ CHAT_ATTACHMENT_PROFILE = "chat.attachment.v1"
 MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_CHAT_ATTACHMENTS = 8
 MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024
+# The demo/default service has no durable repository, so cap both its record
+# count and retained bytes.  Durable deployments use the repository's own
+# retention and cleanup policy instead.
+MAX_CHAT_ATTACHMENT_MEMORY_RECORDS = 128
+MAX_CHAT_ATTACHMENT_MEMORY_BYTES = MAX_CHAT_ATTACHMENT_TOTAL_BYTES
 # Keep chat-image decoding bounded independently from Pillow's process-global
 # bomb threshold and the fixed-function recipe provider's limits.  The encoded
 # attachment cap alone does not bound the memory implied by image dimensions.
@@ -270,6 +276,8 @@ class ChatAttachmentService:
         self.repository = repository
         self.retention_seconds = retention_seconds
         self._memory: dict[tuple[str, str], _MemoryRecord] = {}
+        self._memory_lock = RLock()
+        self._memory_bytes = 0
 
     def stage(
         self,
@@ -290,21 +298,32 @@ class ChatAttachmentService:
         digest = sha256(content).hexdigest()
         if self.repository is None:
             key = (owner, request_id)
-            existing = self._memory.get(key)
-            if existing is not None:
-                if existing.descriptor.sha256 != digest or existing.descriptor.filename != safe_name:
-                    raise ChatAttachmentError("attachment_request_conflict")
-                return existing.descriptor
-            descriptor = self._descriptor(
-                attachment_id=uuid4().hex,
-                filename=safe_name,
-                mime_type=mime_type,
-                size=len(content),
-                digest=digest,
-                kind=kind,
-            )
-            self._memory[key] = _MemoryRecord(owner, descriptor, content)
-            return descriptor
+            with self._memory_lock:
+                now = datetime.now(timezone.utc)
+                self._evict_expired_locked(now)
+                existing = self._memory.get(key)
+                if existing is not None:
+                    if existing.descriptor.sha256 != digest or existing.descriptor.filename != safe_name:
+                        raise ChatAttachmentError("attachment_request_conflict")
+                    return existing.descriptor
+                while self._memory and (
+                    len(self._memory) >= MAX_CHAT_ATTACHMENT_MEMORY_RECORDS
+                    or self._memory_bytes + len(content) > MAX_CHAT_ATTACHMENT_MEMORY_BYTES
+                ):
+                    oldest_key = next(iter(self._memory))
+                    evicted = self._memory.pop(oldest_key)
+                    self._memory_bytes -= len(evicted.content)
+                descriptor = self._descriptor(
+                    attachment_id=uuid4().hex,
+                    filename=safe_name,
+                    mime_type=mime_type,
+                    size=len(content),
+                    digest=digest,
+                    kind=kind,
+                )
+                self._memory[key] = _MemoryRecord(owner, descriptor, content)
+                self._memory_bytes += len(content)
+                return descriptor
 
         payload = {
             "filename": safe_name,
@@ -371,17 +390,25 @@ class ChatAttachmentService:
                 expiry = expiry.replace(tzinfo=timezone.utc)
         except ValueError:
             raise ChatAttachmentError("attachment_metadata_invalid") from None
-        if expiry <= datetime.now(timezone.utc):
-            raise ChatAttachmentError("attachment_unavailable")
         if self.repository is None:
-            records = [record for record in self._memory.values() if record.owner == owner]
-            record = next((item for item in records if item.descriptor.attachment_id == normalized.attachment_id), None)
-            if record is None:
-                raise ChatAttachmentError("attachment_unavailable")
-            if record.descriptor != normalized:
-                raise ChatAttachmentError("attachment_integrity_failed")
-            content = record.content
+            with self._memory_lock:
+                now = datetime.now(timezone.utc)
+                self._evict_expired_locked(now)
+                if expiry <= now:
+                    raise ChatAttachmentError("attachment_unavailable")
+                record = next(
+                    (item for item in self._memory.values()
+                     if item.owner == owner and item.descriptor.attachment_id == normalized.attachment_id),
+                    None,
+                )
+                if record is None:
+                    raise ChatAttachmentError("attachment_unavailable")
+                if record.descriptor != normalized:
+                    raise ChatAttachmentError("attachment_integrity_failed")
+                content = record.content
         else:
+            if expiry <= datetime.now(timezone.utc):
+                raise ChatAttachmentError("attachment_unavailable")
             artifact = self.repository.get_artifact(normalized.attachment_id, owner=owner)
             if artifact is None:
                 raise ChatAttachmentError("attachment_unavailable")
@@ -412,6 +439,28 @@ class ChatAttachmentService:
         if len(text) > MAX_DOCUMENT_TEXT_CHARS:
             text = text[:MAX_DOCUMENT_TEXT_CHARS] + "\n\n[Attachment text truncated by Cortex.]"
         return ResolvedChatAttachment(descriptor=normalized, text_content=text)
+
+    def _evict_expired_locked(self, now: datetime) -> None:
+        """Remove expired/corrupt in-memory records while holding the lock."""
+
+        expired = [
+            key
+            for key, record in self._memory.items()
+            if self._record_expired(record, now)
+        ]
+        for key in expired:
+            record = self._memory.pop(key)
+            self._memory_bytes -= len(record.content)
+
+    @staticmethod
+    def _record_expired(record: _MemoryRecord, now: datetime) -> bool:
+        try:
+            expiry = datetime.fromisoformat(record.descriptor.expires_at.replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except (AttributeError, TypeError, ValueError):
+            return True
+        return expiry <= now
 
     def _existing(self, job: Any, payload: Mapping[str, Any], content: bytes) -> ChatAttachment:
         if job.profile != CHAT_ATTACHMENT_PROFILE or dict(job.payload) != dict(payload) or job.status != "succeeded":
@@ -495,6 +544,8 @@ __all__ = [
     "MAX_CHAT_ATTACHMENT_BYTES",
     "MAX_CHAT_ATTACHMENTS",
     "MAX_CHAT_ATTACHMENT_TOTAL_BYTES",
+    "MAX_CHAT_ATTACHMENT_MEMORY_BYTES",
+    "MAX_CHAT_ATTACHMENT_MEMORY_RECORDS",
     "MAX_CHAT_IMAGE_DECODED_BYTES",
     "MAX_CHAT_IMAGE_DIMENSION",
     "MAX_CHAT_IMAGE_PIXELS",
