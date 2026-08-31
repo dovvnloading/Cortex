@@ -276,16 +276,29 @@ export function ChatPage({
       setResolvedThreadId(threadId);
       void loadChat({ preserveCurrent });
       const stored = readActiveJob();
-      if (stored) {
+      // The global store is authoritative while the app is alive. Storage is
+      // only a best-effort cold-start side channel, so a denied/quota-full
+      // sessionStorage must not make a live job look finished on re-entry.
+      const currentGeneration = useChatStore.getState().generation;
+      const activeJob = (
+        currentGeneration.jobId && currentGeneration.threadId
+          ? {
+              jobId: currentGeneration.jobId,
+              threadId: currentGeneration.threadId,
+              lastEventId: currentGeneration.lastEventId,
+            }
+          : null
+      ) ?? stored;
+      if (activeJob) {
         // Only rewind the event cursor when the store is actually cold for
         // this job. initialMountRef is per-instance, so it is true on EVERY
         // mount -- including a return from /settings, which unmounts this
         // page but leaves the module-level generation store populated.
         // Replaying from 0 onto already-accumulated text printed the answer
         // twice; keeping the stored cursor resumes where the buffer left off.
-        const warmForThisJob = useChatStore.getState().generation.jobId === stored.jobId;
+        const warmForThisJob = currentGeneration.jobId === activeJob.jobId;
         const replayFromStart = initialMountRef.current && !warmForThisJob;
-        const job: PersistedJob = replayFromStart ? { ...stored, lastEventId: 0 } : stored;
+        const job: PersistedJob = replayFromStart ? { ...activeJob, lastEventId: 0 } : activeJob;
         initialMountRef.current = false;
         if (replayFromStart || !warmForThisJob) {
           useChatStore.getState().beginGeneration(job.jobId, job.threadId);

@@ -160,6 +160,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (event.event_id <= cursor || event.thread_id !== job.threadId) return;
                 cursor = event.event_id;
                 persistActiveJob({ ...job, lastEventId: cursor });
+                useChatStore.getState().setGenerationCursor(job.jobId, cursor);
                 const data = event.data ?? {};
                 if (typeof data.message === "string") useChatStore.getState().setStatusText(job.jobId, data.message);
                 if (event.event === "generation.cancelling") useChatStore.getState().markStopping(job.jobId);

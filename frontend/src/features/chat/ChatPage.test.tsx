@@ -576,6 +576,36 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
   });
 
+  it("resumes the global job from its in-memory cursor when storage access is denied", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+    const streamCalls: Array<{ afterEventId?: number }> = [];
+    const api = chatApi({
+      streamGeneration: vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
+        streamCalls.push({ afterEventId: options.afterEventId });
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }),
+    });
+    useChatStore.getState().beginGeneration("job-memory", "thread-a");
+    useChatStore.getState().setGenerationCursor("job-memory", 4);
+
+    try {
+      const first = renderChat(api, "thread-a");
+      await waitFor(() => expect(streamCalls).toHaveLength(1));
+      first.unmount();
+
+      renderChat(api, "thread-a");
+      await waitFor(() => expect(streamCalls).toHaveLength(2));
+      expect(streamCalls).toEqual([{ afterEventId: 4 }, { afterEventId: 4 }]);
+      expect(useChatStore.getState().generation.jobId).toBe("job-memory");
+    } finally {
+      getItem.mockRestore();
+    }
+  });
+
   it("collapses the pending reasoning panel in step with contentReady, ahead of the swap to the real message", async () => {
     // The final MessageCard's reasoning panel defaults collapsed. If the
     // pending bubble's stayed forced-open the whole time, it would visibly

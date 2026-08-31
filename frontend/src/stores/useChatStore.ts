@@ -9,6 +9,8 @@ export type GenerationPhase = "idle" | "starting" | "streaming" | "stopping";
 export interface GenerationState {
   jobId: string | null;
   threadId: string | null;
+  /** Last SSE event applied to the globally tracked generation. */
+  lastEventId: number;
   phase: GenerationPhase;
   partialContent: string;
   partialThoughts: string;
@@ -46,6 +48,7 @@ interface ChatStoreState {
   beginGeneration: (jobId: string, threadId: string) => void;
   appendContentToken: (jobId: string, delta: string) => void;
   appendThinkingToken: (jobId: string, delta: string) => void;
+  setGenerationCursor: (jobId: string, eventId: number) => void;
   setStatusText: (jobId: string, text: string) => void;
   markContentReady: (jobId: string) => void;
   markStopping: (jobId: string) => void;
@@ -58,6 +61,7 @@ interface ChatStoreState {
 const idleGeneration: GenerationState = {
   jobId: null,
   threadId: null,
+  lastEventId: 0,
   phase: "idle",
   partialContent: "",
   partialThoughts: "",
@@ -130,6 +134,12 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? { generation: { ...state.generation, phase: "streaming", partialThoughts: state.generation.partialThoughts + delta } }
         : state,
     ),
+  setGenerationCursor: (jobId, eventId) =>
+    set((state) => (
+      state.generation.jobId === jobId && eventId >= state.generation.lastEventId
+        ? { generation: { ...state.generation, lastEventId: eventId } }
+        : state
+    )),
   setStatusText: (jobId, text) =>
     set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, statusText: text } } : state)),
   markContentReady: (jobId) =>
