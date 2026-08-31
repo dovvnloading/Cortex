@@ -5,10 +5,12 @@ import { App } from "./App";
 import { CortexApi } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
+import { useModelStore } from "../stores/useModelStore";
 import { ToastProvider } from "./ToastProvider";
 
 describe("App", () => {
   afterEach(() => {
+    useModelStore.getState().setLlamacppStatus(null);
     window.sessionStorage.clear();
     window.history.replaceState({}, "", "/");
   });
@@ -131,6 +133,50 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Ollama is unavailable" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
+  });
+
+  it("renders live llama.cpp status updates in mounted Settings", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({
+        status: "ok",
+        preview: true,
+        session_required: true,
+        started_at: "2026-07-21T18:00:00Z",
+        llamacpp: { state: "idle", binary_present: true, models_directory: "C:\\models" },
+      });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "gguf:demo.Q4_K_M.gguf", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["gguf:demo.Q4_K_M.gguf"], models: [{ name: "gguf:demo.Q4_K_M.gguf" }], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("link", { name: "Settings" }));
+    await userEvent.setup().click(await screen.findByRole("button", { name: "System" }));
+    expect(screen.getByText(/Cortex downloads and runs the local model runtime/)).toBeVisible();
+
+    act(() => {
+      useModelStore.getState().setLlamacppStatus({
+        state: "ready",
+        binary_present: true,
+        loaded_model: "gguf:demo.Q4_K_M.gguf",
+        models_directory: "C:\\models",
+        models_directory_exists: true,
+        active_backend: "vulkan",
+      });
+    });
+
+    expect(await screen.findByText(/Local runtime:/)).toHaveTextContent("GPU (Vulkan)");
+    expect(screen.getByText(/currently running demo/)).toBeVisible();
   });
 
   it("updates the document theme when the system color scheme changes", async () => {

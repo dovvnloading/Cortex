@@ -30,6 +30,12 @@ const UNAVAILABLE_MODELS: ModelResponse = {
   },
 };
 
+const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
+  state: "idle",
+  binary_present: false,
+  models_directory: "",
+};
+
 function readBootstrapToken(): string {
   const searchToken = new URLSearchParams(window.location.search).get("bootstrap");
   if (searchToken) return searchToken;
@@ -103,6 +109,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const modelBusy = useModelStore((state) => state.modelBusy);
   const setModelBusy = useModelStore((state) => state.setModelBusy);
   const modelProgress = useModelStore((state) => state.modelProgress);
+  const liveLlamacppStatus = useModelStore((state) => state.llamacppStatus);
   const setModelProgress = useModelStore((state) => state.setModelProgress);
   const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
@@ -562,7 +569,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // A GGUF-selected model runs through Cortex's own managed local runtime,
   // not Ollama -- Ollama's connection state is irrelevant to it.
   const runtimeConnected = isGGUFModel(selectedModel) || (models.connection?.success ?? true);
-  const llamacppStatus: LlamaCppRuntimeStatus = system.llamacpp ?? { state: "idle", binary_present: false, models_directory: "" };
+  // The initial system response seeds the store, while polling updates it as
+  // the managed runtime starts/stops. Settings must consume that live value
+  // rather than the immutable workspace snapshot.
+  const llamacppStatus = liveLlamacppStatus ?? system.llamacpp ?? DEFAULT_LLAMACPP_STATUS;
   const routeChatId = route.kind === "chat" ? route.threadId : null;
   const openSettings = () => {
     // Settings can be opened from either the shell header or the command
