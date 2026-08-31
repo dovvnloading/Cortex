@@ -18,6 +18,19 @@ from cortex_backend.repositories.legacy_storage import (
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_persistence_logs_omit_private_paths_and_chat_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private_db_path = Path(directory) / "Alice private records.sqlite"
+            private_title = "Alice's confidential launch plan"
+            with self.assertLogs(level="INFO") as captured:
+                manager = DatabaseManager(db_path=str(private_db_path))
+                manager.update_chat_title("private-thread-id", private_title)
+
+            rendered_logs = "\n".join(captured.output)
+            self.assertNotIn(str(private_db_path), rendered_logs)
+            self.assertNotIn(private_title, rendered_logs)
+            self.assertIn("private title omitted", rendered_logs)
+
     def test_chat_attachment_metadata_survives_sqlite_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))

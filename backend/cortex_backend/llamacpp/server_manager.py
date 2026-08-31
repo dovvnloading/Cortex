@@ -79,6 +79,19 @@ _DEFAULT_NUM_CTX = 4096
 _KNOWN_BAD_BACKEND_TTL_SECONDS = 24.0 * 3600.0
 
 
+def _safe_restart_reason(reason: str) -> str:
+    """Classify a restart without retaining model filenames or child text."""
+    if reason.startswith("the selected model changed"):
+        return "the selected model changed"
+    if reason.startswith("the context window increased"):
+        return reason
+    if reason.startswith("the runtime process exited unexpectedly"):
+        return reason
+    if reason.startswith("the runtime stopped responding to health checks"):
+        return "the runtime stopped responding to health checks"
+    return "the local model runtime required a restart"
+
+
 @dataclass(frozen=True, slots=True)
 class ServerHandle:
     """A ready-to-use running server, scoped to one model."""
@@ -455,10 +468,7 @@ class LlamaServerManager:
             if self._loaded_model_path != model_path:
                 return _ReuseVerdict(
                     reusable=False,
-                    reason=(
-                        f"the selected model changed from {self._loaded_model_path.name} "
-                        f"to {model_path.name}"
-                    ),
+                    reason="the selected model changed",
                 )
             if (
                 num_ctx is not None
@@ -543,8 +553,8 @@ class LlamaServerManager:
     ) -> None:
         assert verdict.reason is not None
         with self._state_lock:
-            self._last_restart_reason = verdict.reason
-            tail = list(self._stderr_tail[-20:])
+            safe_reason = _safe_restart_reason(verdict.reason)
+            self._last_restart_reason = safe_reason
             if verdict.failure:
                 crashed_key = (
                     (self._loaded_model_path, self._loaded_num_ctx)
@@ -562,9 +572,10 @@ class LlamaServerManager:
                 self._failure_times.clear()
                 self._failure_key = None
         log = logger.warning if verdict.failure else logger.info
-        log("Restarting the local model runtime: %s.", verdict.reason)
-        if verdict.failure and tail:
-            logger.warning("llama-server output before it was lost:\n%s", "\n".join(tail))
+        log("Restarting the local model runtime (%s).", safe_reason)
+        # The child process output is untrusted and may contain prompts,
+        # paths, credentials, or provider response text.  Retain its bounded
+        # tail in memory for lifecycle bookkeeping, but never emit it.
 
     def _guard_against_crash_loop(self, model_path: Path, effective_num_ctx: int) -> None:
         with self._state_lock:
@@ -578,10 +589,12 @@ class LlamaServerManager:
             )
             if not tripped:
                 return
-            reason = self._last_restart_reason or "the runtime kept failing"
+            reason = _safe_restart_reason(
+                self._last_restart_reason or "the runtime kept failing"
+            )
             message = (
-                f"The local model runtime for {model_path.name} failed "
-                f"{len(self._failure_times)} times in the last few minutes "
+                f"The local model runtime failed {len(self._failure_times)} times "
+                f"in the last few minutes "
                 f"(most recently: {reason}). It likely does not fit in available "
                 "memory. Choose a smaller model or quantization, or lower the "
                 "context window in Settings, and Cortex will try again."
@@ -657,7 +670,13 @@ class LlamaServerManager:
                     type(exc).__name__,
                 )
                 continue
-        message = str(last_exc) if last_exc else "The local model runtime could not start."
+        # ServerLaunchError may originate from the child process and include
+        # arbitrary stderr.  Keep status/API diagnostics stable and classify
+        # the failure by exception type instead of relaying that text.
+        message = (
+            "The local model runtime could not start. "
+            "Check System settings and try again."
+        )
         with self._state_lock:
             self._state = "failed"
             self._last_error = message
@@ -771,8 +790,7 @@ class LlamaServerManager:
                     if backend == "vulkan":
                         self._mark_backend_bad("vulkan", model_path, num_ctx)
                     raise ServerLaunchError(
-                        "The local model runtime exited before it became ready.\n"
-                        + "\n".join(stderr_tail[-20:])
+                        "The local model runtime exited before it became ready."
                     )
                 if not listening_port:
                     listening_event.wait(

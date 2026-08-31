@@ -82,7 +82,9 @@ class DatabaseManager:
             )
         self.db_path = db_path
         self.legacy_history_dir = legacy_history_dir
-        logging.info(f"Database path set to: {self.db_path}")
+        # Paths and chat metadata are private local data.  Keep startup
+        # diagnostics useful without copying them into process logs.
+        logging.info("Database storage configured (private path omitted).")
         self._ensure_parent_directory()
         self._create_tables()
 
@@ -344,12 +346,18 @@ class DatabaseManager:
             try:
                 chat_data = self._parse_legacy_chat(self._load_legacy_chat_file(file_path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
-                logging.error("Quarantining invalid legacy chat %s: %s", filename, exc)
+                logging.error(
+                    "Quarantining invalid legacy chat file failed (%s).",
+                    type(exc).__name__,
+                )
                 try:
                     self._quarantine_legacy_file(file_path)
                     quarantined += 1
                 except OSError as quarantine_error:
-                    logging.error("Could not quarantine legacy chat %s: %s", filename, quarantine_error)
+                    logging.error(
+                        "Could not quarantine legacy chat file (%s).",
+                        type(quarantine_error).__name__,
+                    )
                 continue
 
             try:
@@ -396,7 +404,10 @@ class DatabaseManager:
             try:
                 self._archive_legacy_file(file_path, archive_dir)
             except OSError as exc:
-                logging.error("Migrated %s but could not archive the source file: %s", filename, exc)
+                logging.error(
+                    "Migrated legacy chat but could not archive the source file (%s).",
+                    type(exc).__name__,
+                )
 
         result = MigrationResult(migrated=migrated, skipped=skipped, quarantined=quarantined)
         logging.info(
@@ -451,7 +462,7 @@ class DatabaseManager:
                     INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, messages_to_insert)
-                logging.info(f"Successfully created forked chat {thread_id} with {len(messages)} messages.")
+                logging.info("Successfully created forked chat with %s messages.", len(messages))
         except PersistenceError as exc:
             raise PersistenceError(
                 f"Failed to create forked chat {thread_id}.",
@@ -585,7 +596,7 @@ class DatabaseManager:
         try:
             with self.connect() as conn:
                 conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
-                logging.info(f"Deleted chat thread: {thread_id}")
+                logging.info("Deleted chat thread.")
         except PersistenceError as exc:
             raise PersistenceError(
                 f"Failed to delete chat {thread_id}.",
@@ -606,7 +617,7 @@ class DatabaseManager:
                         LIMIT 1
                     )
                 """, (thread_id,))
-                logging.info(f"Deleted the last assistant message for thread: {thread_id}")
+                logging.info("Deleted the last assistant message for a chat thread.")
         except PersistenceError as exc:
             raise PersistenceError(
                 f"Failed to delete last assistant message for thread {thread_id}.",
@@ -671,7 +682,7 @@ class DatabaseManager:
         try:
             with self.connect() as conn:
                 conn.execute("UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id))
-                logging.info(f"Renamed chat thread {thread_id} to '{new_title}'")
+                logging.info("Renamed chat thread (private title omitted).")
         except PersistenceError as exc:
             raise PersistenceError(
                 f"Failed to rename chat {thread_id}.",
@@ -855,7 +866,10 @@ class VectorDatabaseManager:
                 self._conn.row_factory = sqlite3.Row
                 logging.info("Successfully connected to the Vector database.")
             except sqlite3.Error as e:
-                logging.error(f"Vector database connection failed: {e}")
+                logging.error(
+                    "Vector database connection failed (%s).",
+                    type(e).__name__,
+                )
                 raise
 
     def _create_tables(self):
@@ -872,7 +886,7 @@ class VectorDatabaseManager:
                     );
                 """)
         except sqlite3.Error as e:
-            logging.error(f"Failed to create vector tables: {e}")
+            logging.error("Failed to create vector tables (%s).", type(e).__name__)
 
     def store_embedding(self, text: str, vector: list[float], metadata: dict = None):
         """
@@ -894,7 +908,7 @@ class VectorDatabaseManager:
                     (text, vector_blob, json.dumps(metadata) if metadata else None, _utc_now().isoformat())
                 )
         except Exception as e:
-            logging.error(f"Failed to store embedding: {e}")
+            logging.error("Failed to store embedding (%s).", type(e).__name__)
 
     def find_most_relevant(self, query_vector: list[float], limit: int = 5) -> list[dict]:
         """
@@ -955,7 +969,7 @@ class VectorDatabaseManager:
                 return results[:limit]
 
         except Exception as e:
-            logging.error(f"Error during vector search: {e}")
+            logging.error("Error during vector search (%s).", type(e).__name__)
             return []
 
     def clear_vectors(self):
@@ -965,7 +979,7 @@ class VectorDatabaseManager:
                 conn.execute("DELETE FROM vectors")
                 logging.info("Vector database cleared.")
         except sqlite3.Error as e:
-            logging.error(f"Failed to clear vector database: {e}")
+            logging.error("Failed to clear vector database (%s).", type(e).__name__)
 
 class PermanentMemoryManager:
     """Manages the persistence of long-term 'memory nuggets' for the AI."""
@@ -1069,7 +1083,10 @@ class PermanentMemoryManager:
             try:
                 memos = self._read_memos(candidate)
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-                logging.error("Failed to load permanent memory file %s: %s", candidate, exc)
+                logging.error(
+                    "Failed to load permanent memory file (%s).",
+                    type(exc).__name__,
+                )
                 continue
             if candidate == self.backup_file_path:
                 try:
@@ -1080,9 +1097,8 @@ class PermanentMemoryManager:
                     self._atomic_copy_memos(candidate, self.memory_file_path)
                 except PersistenceError as exc:
                     logging.error(
-                        "Could not restore permanent memory file %s from backup: %s",
-                        self.memory_file_path,
-                        exc,
+                        "Could not restore permanent memory file from backup (%s).",
+                        type(exc).__name__,
                     )
             return memos
         return []
@@ -1141,7 +1157,7 @@ class PermanentMemoryManager:
                 try:
                     os.remove(temporary_path)
                 except OSError:
-                    logging.warning("Could not remove temporary memory file %s.", temporary_path)
+                    logging.warning("Could not remove temporary permanent-memory file.")
 
     def get_memos(self) -> list[str]:
         """
@@ -1188,7 +1204,7 @@ class PermanentMemoryManager:
             except PersistenceError:
                 self.memos = previous_memos
                 raise
-            logging.info(f"Permanent memory updated with {len(self.memos)} memos.")
+            logging.info("Permanent memory updated with %s memos.", len(self.memos))
 
     def clear_memos(self):
         """Clears all memos from the list and saves the empty list to disk."""

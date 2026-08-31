@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cortex_backend.llamacpp.errors import LlamaCppError, ServerStartTimeoutError
+from cortex_backend.llamacpp.errors import LlamaCppError, ServerLaunchError, ServerStartTimeoutError
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 
 
@@ -549,7 +549,47 @@ def test_restart_reasons_are_recorded_never_anonymous(tmp_path: Path) -> None:
     assert "context window increased from 4096 to 8192" in (manager.status.last_restart_reason or "")
 
     manager.ensure_ready(tmp_path / "b.gguf", num_ctx=8192)
-    assert "model changed from a.gguf to b.gguf" in (manager.status.last_restart_reason or "")
+    assert manager.status.last_restart_reason == "the selected model changed"
+
+
+def test_restart_logging_omits_untrusted_child_output(tmp_path: Path, caplog) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "private-model-name.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager._stderr_tail = ["provider output: private prompt and C:\\Users\\Alice\\secret.txt"]
+
+    process = manager._process
+    assert process is not None
+    process.exit_code = 1
+
+    with caplog.at_level("WARNING"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert "private prompt" not in caplog.text
+    assert "secret.txt" not in caplog.text
+    assert "llama-server output" not in caplog.text
+    assert manager.status.last_restart_reason == "the runtime process exited unexpectedly (exit code 1)"
+
+
+def test_launch_failure_status_omits_raw_child_output(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    def fail_start(*args, **kwargs):
+        del args, kwargs
+        raise ServerLaunchError("provider output included private prompt and secret path")
+
+    manager._start_with_backend = fail_start
+
+    with pytest.raises(LlamaCppError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.last_error == (
+        "The local model runtime could not start. Check System settings and try again."
+    )
 
 
 def test_a_dead_process_is_restarted_with_the_exit_code_recorded(tmp_path: Path) -> None:
