@@ -214,7 +214,10 @@ class ExecutionCleanupSupervisor:
         # Refresh well before expiry so a slow filesystem operation cannot
         # overlap another supervisor's pass.
         interval = max(0.01, min(self.lease_seconds / 3.0, 30.0))
-        while not self._renew_stop.wait(interval):
+        # Renew once immediately. Waiting for the first interval would leave
+        # a very short lease exposed during thread startup/scheduling, which
+        # can make an otherwise healthy slow cleanup appear to lose ownership.
+        while not self._renew_stop.is_set():
             try:
                 if not self.repository.renew_cleanup_lease(
                     lease_owner=self._owner,
@@ -227,6 +230,8 @@ class ExecutionCleanupSupervisor:
                 _LOGGER.warning(
                     "Cortex cleanup lease renewal failed (%s).", type(exc).__name__
                 )
+                return
+            if self._renew_stop.wait(interval):
                 return
 
     def _record_failure(self, exc: Exception) -> None:
