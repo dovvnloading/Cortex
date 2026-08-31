@@ -183,6 +183,42 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/chat/thread-b");
   });
 
+  it("returns to the current chat after opening settings from the command palette", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.history.replaceState({}, "", "/chat/thread-command-palette");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const chat = {
+      id: "thread-command-palette",
+      title: "Command palette thread",
+      timestamp: "2026-07-21T18:00:00Z",
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([chat]);
+      if (url.endsWith("/chats/thread-command-palette")) return json({ ...chat, revision: 1, messages: [{ id: "message-command-palette", role: "assistant", content: "Command palette transcript" }] });
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByText("Command palette transcript")).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Open settings"));
+    expect(await screen.findByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(window.location.pathname).toBe("/chat/thread-command-palette");
+  });
+
   it("keeps an approval actionable and reports a safe API failure", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {

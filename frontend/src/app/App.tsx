@@ -548,6 +548,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const runtimeConnected = isGGUFModel(selectedModel) || (models.connection?.success ?? true);
   const llamacppStatus: LlamaCppRuntimeStatus = system.llamacpp ?? { state: "idle", binary_present: false, models_directory: "" };
   const routeChatId = route.kind === "chat" ? route.threadId : null;
+  const openSettings = () => {
+    // Settings can be opened from either the shell header or the command
+    // palette. Capture the route at the point of entry so Close returns to
+    // the chat that was actually visible, including a newly-created thread.
+    const currentRoute = parseAppRoute(window.location.pathname);
+    if (currentRoute.kind === "chat") setSettingsReturnChatId(currentRoute.threadId);
+    navigate("/settings");
+  };
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
     void saveSettings({ ...settings, appearance: { ...settings.appearance, theme: next } });
@@ -555,7 +563,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <>
-      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
+      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         {route.kind === "settings"
           ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
           : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
@@ -565,7 +573,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         localModels={localModels}
         selectedModel={selectedModel}
         onNewChat={() => navigate("/chat/new")}
-        onOpenSettings={() => navigate("/settings")}
+        onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}
         onSelectModel={(model) => void chooseLocalModel(model)}
         onSelectChat={(id) => navigate(chatPath(id))}
