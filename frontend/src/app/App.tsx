@@ -163,8 +163,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   }, [loadWorkspace]);
 
   useEffect(() => {
-    const resolved = theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : theme === "system" ? "light" : theme;
-    document.documentElement.dataset.theme = resolved;
+    const mediaQuery = theme === "system" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : undefined;
+    const applyTheme = () => {
+      const resolved = theme === "system" ? (mediaQuery?.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolved;
+    };
+
+    applyTheme();
+    if (!mediaQuery) return undefined;
+
+    const handleChange = () => applyTheme();
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+    mediaQuery.addListener?.(handleChange);
+    return () => mediaQuery.removeListener?.(handleChange);
   }, [theme]);
 
   useEffect(() => {

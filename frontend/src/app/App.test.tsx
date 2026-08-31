@@ -133,6 +133,55 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
   });
 
+  it("updates the document theme when the system color scheme changes", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const originalMatchMedia = window.matchMedia;
+    let matches = false;
+    const listeners = new Set<(event: MediaQueryListEvent) => void>();
+    const mediaQuery = {
+      get matches() { return matches; },
+      media: "(prefers-color-scheme: dark)",
+      addEventListener: (_type: "change", listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+      removeEventListener: (_type: "change", listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+    } as unknown as MediaQueryList;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => mediaQuery),
+    });
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "system" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    try {
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+      await screen.findByRole("heading", { name: "New thread" });
+      expect(document.documentElement.dataset.theme).toBe("light");
+      act(() => {
+        matches = true;
+        listeners.forEach((listener) => listener({ matches } as MediaQueryListEvent));
+      });
+      expect(document.documentElement.dataset.theme).toBe("dark");
+    } finally {
+      if (originalMatchMedia) {
+        Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia });
+      } else {
+        delete (window as Partial<Window>).matchMedia;
+      }
+    }
+  });
+
   it("keeps the shell selection aligned with browser route changes", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem("cortex.session.token", "local-session");
