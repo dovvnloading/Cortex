@@ -60,6 +60,12 @@ def test_desktop_url_keeps_bootstrap_token_in_fragment():
     assert url == "http://127.0.0.1:43125/#bootstrap=one%20time%2Ftoken"
 
 
+def test_desktop_url_carries_the_private_handoff_secret_in_the_fragment():
+    url = launcher_main._desktop_url(43125, "bootstrap", "handoff secret/token")
+
+    assert url == "http://127.0.0.1:43125/#bootstrap=bootstrap&handoff=handoff%20secret%2Ftoken"
+
+
 def test_startup_diagnostic_is_durable_bounded_and_redacts_credential_like_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -373,7 +379,7 @@ def test_default_runtime_starts_backend_then_native_window(
     assert [name for name, _value in calls] == ["runtime", "window"]
     window_config, monitor = calls[1][1]
     assert isinstance(window_config, DesktopWindowConfig)
-    assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token"
+    assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token&handoff=handoff-secret"
     assert window_config.storage_path == tmp_path / "webview"
     assert server.should_exit is True
     assert backend_instances[0].running is False

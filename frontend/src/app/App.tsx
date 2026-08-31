@@ -38,12 +38,15 @@ const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
   models_directory: "",
 };
 
-function readBootstrapToken(): string {
+type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
+
+function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
   const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
   const searchToken = search.get("bootstrap");
   const token = searchToken || hash.get("bootstrap") || "";
+  const handoffSecret = search.get("handoff") || hash.get("handoff") || "";
 
   // Handoff credentials are valid only for this one exchange. Remove them
   // from the visible URL before rendering either onboarding or the workspace,
@@ -57,21 +60,56 @@ function readBootstrapToken(): string {
     hash.delete("bootstrap");
     changed = true;
   }
+  if (search.has("handoff")) {
+    search.delete("handoff");
+    changed = true;
+  }
+  if (hash.has("handoff")) {
+    hash.delete("handoff");
+    changed = true;
+  }
   if (changed) {
     const nextHash = hash.toString();
     url.hash = nextHash ? `#${nextHash}` : "";
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }
-  return token;
+  return { bootstrapToken: token, handoffSecret };
 }
 
 export function App({ api: providedApi }: Props) {
   const [api] = useState(() => providedApi ?? new CortexApi());
   const [sessionReady, setSessionReady] = useState(api.hasSession);
-  const [bootstrapToken, setBootstrapToken] = useState(readBootstrapToken);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [launcherCredentials] = useState(readLauncherCredentials);
+  const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
+  const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const handleSessionExpired = useCallback(() => setSessionReady(false), []);
+  const reconnectInFlight = useRef<Promise<void> | null>(null);
+  const reconnect = useCallback(() => {
+    if (!handoffSecret || reconnectInFlight.current) return Promise.resolve();
+    const operation = (async () => {
+      setConnecting(true);
+      setOnboardingError(null);
+      try {
+        await api.rebootstrap(handoffSecret);
+        setSessionEpoch((epoch) => epoch + 1);
+        setSessionReady(true);
+      } catch (error) {
+        setOnboardingError(error instanceof ApiError ? error.detail : "Could not reopen the local workspace.");
+      } finally {
+        setConnecting(false);
+      }
+    })();
+    reconnectInFlight.current = operation;
+    return operation.finally(() => {
+      if (reconnectInFlight.current === operation) reconnectInFlight.current = null;
+    });
+  }, [api, handoffSecret]);
+  const handleSessionExpired = useCallback(() => {
+    setSessionReady(false);
+    void reconnect();
+  }, [reconnect]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
 
@@ -81,6 +119,7 @@ export function App({ api: providedApi }: Props) {
         initialToken={bootstrapToken}
         error={onboardingError}
         busy={connecting}
+        onRetry={handoffSecret ? reconnect : undefined}
         onSubmit={async (token) => {
           setConnecting(true);
           setOnboardingError(null);
@@ -109,7 +148,7 @@ export function App({ api: providedApi }: Props) {
     );
   }
 
-  return <AuthenticatedWorkspace api={api} onSessionExpired={handleSessionExpired} />;
+  return <AuthenticatedWorkspace key={sessionEpoch} api={api} onSessionExpired={handleSessionExpired} />;
 }
 
 function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onSessionExpired: () => void }) {
@@ -226,6 +265,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     } catch (error) {
       if (error instanceof ApiError && error.status === 401 && isCurrentLoad()) {
         onSessionExpired();
+        return;
       }
       if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {

@@ -137,10 +137,13 @@ def _requested_port(value: int) -> int:
     return _free_port() if value == 0 else value
 
 
-def _desktop_url(port: int, token: str) -> str:
+def _desktop_url(port: int, token: str, handoff_secret: str | None = None) -> str:
     from urllib.parse import quote
 
-    return f"http://127.0.0.1:{port}/#bootstrap={quote(token, safe='')}"
+    fragment = f"bootstrap={quote(token, safe='')}"
+    if handoff_secret:
+        fragment += f"&handoff={quote(handoff_secret, safe='')}"
+    return f"http://127.0.0.1:{port}/#{fragment}"
 
 
 def _startup_log_path(data_dir: Path | None) -> Path:
@@ -418,7 +421,7 @@ def _run_web(args: argparse.Namespace) -> int:
             print("Cortex is ready in its native desktop window.")
             run_desktop_window(
                 DesktopWindowConfig(
-                    url=_desktop_url(browser_port, token),
+                    url=_desktop_url(browser_port, token, handoff_secret),
                     storage_path=paths.webview_profile,
                     icon_path=_app_asset_root() / "assets" / "cortex.ico",
                     debug=args.dev,

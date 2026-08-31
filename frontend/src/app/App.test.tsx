@@ -74,6 +74,42 @@ describe("App", () => {
     expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
+  it("rebootstraps a live desktop window after its session expires", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.history.replaceState({}, "", "/#handoff=desktop-handoff");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let expireSystem = true;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system") && expireSystem) {
+        expireSystem = false;
+        return json({ detail: "Local session expired." }, 401);
+      }
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.endsWith("/session/handoff")) {
+        expect(new Headers(init?.headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
+        return json({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+      }
+      if (url.endsWith("/session/exchange")) return json({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input).endsWith("/session/handoff"))).toBe(true));
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/session/exchange"))).toHaveLength(1);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+  });
+
   it("returns to onboarding and clears a persisted generation when its stream session expires", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({

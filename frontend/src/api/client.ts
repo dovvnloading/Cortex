@@ -31,6 +31,7 @@ import type {
   JobAccepted,
   JobStatusResponse,
   HealthResponse,
+  HandoffResponse,
   MemoryResponse,
   ModelDownloadRequest,
   ModelPullRequest,
@@ -190,6 +191,15 @@ export class CortexApi {
     return response;
   }
 
+  async rebootstrap(handoffSecret: string): Promise<SessionExchangeResponse> {
+    const handoff = await this.request<HandoffResponse>("/session/handoff", {
+      method: "POST",
+      headers: { "X-Cortex-Handoff": handoffSecret },
+      authenticated: false,
+    });
+    return this.exchangeBootstrapToken(handoff.bootstrap_token);
+  }
+
   health(): Promise<HealthResponse> {
     return this.request<HealthResponse>("/health", { authenticated: false });
   }
@@ -305,6 +315,7 @@ export class CortexApi {
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<T | null> {
     const headers = this.authHeaders();
+    const sessionAtRequest = this.sessionToken;
     if (options.afterEventId !== undefined) {
       headers.set("Last-Event-ID", String(options.afterEventId));
     }
@@ -312,7 +323,7 @@ export class CortexApi {
       headers,
       signal: options.signal,
     });
-    if (response.status === 401) {
+    if (response.status === 401 && this.sessionToken === sessionAtRequest) {
       this.clearSession();
     }
     if (!response.ok || !response.body) {
@@ -555,11 +566,12 @@ export class CortexApi {
       headers.set("Content-Type", "application/json");
     }
 
+    const sessionAtRequest = authenticated ? this.sessionToken : null;
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
       ...requestInit,
       headers,
     });
-    if (response.status === 401 && authenticated) {
+    if (response.status === 401 && authenticated && this.sessionToken === sessionAtRequest) {
       this.clearSession();
     }
     if (!response.ok) {

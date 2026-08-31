@@ -104,6 +104,29 @@ describe("CortexApi", () => {
     expect(api.hasSession).toBe(true);
   });
 
+  it("rebootstraps an expired desktop session through the launcher handoff", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-20T00:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.rebootstrap("desktop-handoff")).resolves.toMatchObject({
+      session_token: "session-2",
+    });
+
+    const handoffRequest = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(handoffRequest.headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
+    expect(new Headers(handoffRequest.headers).get("Authorization")).toBeNull();
+    expect(handoffRequest.body).toBeUndefined();
+    expect(api.hasSession).toBe(true);
+  });
+
   it("turns safe API errors into ApiError without assuming a response body", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 503 }));
     const api = new CortexApi("/api/v1", fetcher);
@@ -156,6 +179,59 @@ describe("CortexApi", () => {
 
     await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
     expect(onSessionExpired).toHaveBeenCalledOnce();
+  });
+
+  it("does not clear a replacement session when an older request returns 401", async () => {
+    let releaseExpiredRequest!: (response: Response) => void;
+    const expiredRequest = new Promise<Response>((resolve) => { releaseExpiredRequest = resolve; });
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockReturnValueOnce(expiredRequest);
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    const pending = api.system();
+    await api.exchangeBootstrapToken("fresh-bootstrap");
+    releaseExpiredRequest(new Response(JSON.stringify({ detail: "Local session expired." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(api.hasSession).toBe(true);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("session-2");
+  });
+
+  it("does not clear a replacement session when an older SSE request returns 401", async () => {
+    let releaseExpiredStream!: (response: Response) => void;
+    const expiredStream = new Promise<Response>((resolve) => { releaseExpiredStream = resolve; });
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockReturnValueOnce(expiredStream);
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    const pending = api.streamJob("job-1", vi.fn());
+    await api.exchangeBootstrapToken("fresh-bootstrap");
+    releaseExpiredStream(new Response(JSON.stringify({ detail: "Local session expired." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(api.hasSession).toBe(true);
   });
 
   it("parses ordered authenticated generation events from an SSE response", async () => {
