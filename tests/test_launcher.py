@@ -548,6 +548,19 @@ def test_frontend_manifest_tracks_node_and_npm_major_versions(
     assert frontend_module.needs_build(root) is True
 
 
+def test_frontend_build_lock_serializes_reentrant_builds(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    with frontend_module._frontend_build_lock(root):
+        with pytest.raises(FrontendBuildError, match="Another frontend build"):
+            with frontend_module._frontend_build_lock(root):
+                pass
+
+    # The persistent lock file is released, not deleted, so the next build
+    # can acquire the same inode without an unlink/recreate race.
+    with frontend_module._frontend_build_lock(root):
+        assert (root / frontend_module.BUILD_LOCK_NAME).is_file()
+
+
 def test_frontend_public_icon_matches_canonical_asset():
     repository_root = Path(__file__).resolve().parents[1]
     canonical = repository_root / "assets" / "cortex.svg"
