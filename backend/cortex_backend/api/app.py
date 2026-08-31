@@ -31,7 +31,9 @@ from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelCatalog, ModelService
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.lifecycle import ExecutionLifecycle
+from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from cortex_backend.testing.fake_ollama import (
     FakeGenerationEngine,
@@ -99,6 +101,7 @@ def create_app(
     readiness_check: Callable[[], bool] | None = None,
     execution_coordinator: DurableFakeCoordinator | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
+    cleanup_supervisor: ExecutionCleanupSupervisor | None = None,
     installation_principal_id: str | None = None,
     llamacpp_manager: LlamaServerManager | None = None,
     default_gguf_models_dir: Path | None = None,
@@ -121,6 +124,16 @@ def create_app(
     lifecycle_repository = (
         execution_lifecycle.repository if execution_lifecycle is not None else None
     )
+    attachment_repository = getattr(
+        getattr(dependencies, "attachments", None), "repository", None
+    ) if dependencies is not None else None
+    cleanup_repository = lifecycle_repository or (
+        execution_coordinator.repository if execution_coordinator is not None else None
+    ) or attachment_repository
+    if cleanup_supervisor is not None and cleanup_repository is not None and (
+        cleanup_supervisor.repository is not cleanup_repository
+    ):
+        raise ValueError("cleanup supervisor repository does not match app repository")
     repository_principal = (
         execution_coordinator.repository.installation_principal_id
         if execution_coordinator is not None
@@ -157,6 +170,8 @@ def create_app(
                 if lifecycle_snapshot.available
                 else None
             )
+        if app.state.cleanup_supervisor is not None:
+            app.state.cleanup_supervisor.start()
         app.state.ready = True
         try:
             yield
@@ -172,6 +187,13 @@ def create_app(
                 logger.exception(
                     "Cortex job registry shutdown raised; continuing with runtime teardown."
                 )
+            if app.state.cleanup_supervisor is not None:
+                try:
+                    app.state.cleanup_supervisor.stop()
+                except Exception:
+                    logger.exception(
+                        "Cortex retention cleanup shutdown raised; continuing with runtime teardown."
+                    )
             if app.state.execution_lifecycle is not None:
                 app.state.execution_lifecycle.stop()
             elif app.state.execution_coordinator is not None:
@@ -196,6 +218,14 @@ def create_app(
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
     app.state.execution_lifecycle = execution_lifecycle
+    # The ordinary/demo API accepts protocol-compatible fakes in tests.  The
+    # janitor is deliberately narrower: it relies on the durable tombstone
+    # protocol and must never be auto-wired to an in-memory stand-in.
+    app.state.cleanup_supervisor = cleanup_supervisor or (
+        ExecutionCleanupSupervisor(cleanup_repository)
+        if isinstance(cleanup_repository, ExecutionRepository)
+        else None
+    )
     app.state.execution_coordinator = execution_coordinator
     app.state.installation_principal_id = manager.installation_principal_id
     app.state.preview = preview
