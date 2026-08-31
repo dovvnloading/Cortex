@@ -1,5 +1,5 @@
 import { createRef, forwardRef, useEffect, useImperativeHandle } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { VirtuosoHandle, VirtuosoProps } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
@@ -58,6 +58,60 @@ describe("MessageList", () => {
 
     await waitFor(() => expect(document.querySelector(".transcript-virtual")).not.toBeNull());
     expect(document.querySelector('[data-testid="virtuoso-scroller"]')).not.toBeNull();
+  });
+
+  it("restores a reader's plain-scroll position when crossing the threshold", async () => {
+    vi.resetModules();
+    const scrollTo = vi.fn();
+    vi.doMock("react-virtuoso", () => ({
+      Virtuoso: forwardRef<VirtuosoHandle, VirtuosoProps<ChatMessage, unknown>>(function MockVirtuoso(_props, ref) {
+        useImperativeHandle(ref, () => ({
+          scrollTo,
+          scrollToIndex: () => {},
+          scrollBy: () => {},
+          autoscrollToBottom: () => {},
+          scrollIntoView: () => {},
+          getState: () => { throw new Error("not implemented in this test double"); },
+        }));
+        return <div data-testid="virtuoso-scroller" />;
+      }),
+    }));
+    const { MessageList: MockedMessageList } = await import("./MessageList");
+    const messages = makeMessages(39);
+    const { rerender } = render(
+      <MockedMessageList
+        messages={messages}
+        isStreaming={false}
+        finalAssistantId={null}
+        busy={false}
+        forkingMessageId={null}
+        onRegenerate={vi.fn()}
+        onFork={vi.fn()}
+        onNearEndChange={vi.fn()}
+      />,
+    );
+    const transcript = document.querySelector(".transcript") as HTMLElement;
+    Object.defineProperty(transcript, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(transcript, "clientHeight", { configurable: true, value: 400 });
+    transcript.scrollTop = 260;
+    fireEvent.scroll(transcript);
+
+    rerender(
+      <MockedMessageList
+        messages={makeMessages(40)}
+        isStreaming={false}
+        finalAssistantId={null}
+        busy={false}
+        forkingMessageId={null}
+        onRegenerate={vi.fn()}
+        onFork={vi.fn()}
+        onNearEndChange={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 260, behavior: "auto" }));
+    vi.doUnmock("react-virtuoso");
+    vi.resetModules();
   });
 
   it("renders trailingContent (the in-flight streaming bubble) inside the same scroll container, plain path", () => {

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef, type ReactNode } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { MessageCard } from "./MessageCard";
@@ -37,6 +37,36 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const plainRef = useRef<HTMLDivElement>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const virtualized = messages.length >= VIRTUALIZE_THRESHOLD;
+  const wasVirtualizedRef = useRef(virtualized);
+  const lastPlainScrollTopRef = useRef(0);
+  const lastPlainNearEndRef = useRef(true);
+
+  // The plain transcript is intentionally retained for short chats, but the
+  // implementation switch at the threshold must not discard a reader's
+  // viewport. Track the last real scroll position while the plain node still
+  // exists, then restore that pixel offset as soon as Virtuoso mounts. A
+  // reader already at the end keeps the existing bottom-biased initialization.
+  useLayoutEffect(() => {
+    if (!virtualized && plainRef.current) {
+      lastPlainScrollTopRef.current = plainRef.current.scrollTop;
+    }
+  }, [messages.length, virtualized]);
+
+  useLayoutEffect(() => {
+    const wasVirtualized = wasVirtualizedRef.current;
+    wasVirtualizedRef.current = virtualized;
+    if (!virtualized || wasVirtualized || lastPlainNearEndRef.current) return undefined;
+
+    const restoreScroll = () => {
+      virtuosoRef.current?.scrollTo({ top: lastPlainScrollTopRef.current, behavior: "auto" });
+    };
+    // Virtuoso exposes its handle during mount, but a second frame covers
+    // browsers that finish creating the internal scroller one layout later.
+    restoreScroll();
+    if (typeof window.requestAnimationFrame !== "function") return undefined;
+    const frame = window.requestAnimationFrame(restoreScroll);
+    return () => window.cancelAnimationFrame(frame);
+  }, [virtualized]);
 
   // Virtuoso remounts its Footer subtree whenever the `components.Footer`
   // *function* identity changes -- a fresh arrow function here every render
@@ -85,7 +115,9 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
         onScroll={() => {
           const node = plainRef.current;
           if (!node) return;
-          onNearEndChange(node.scrollHeight - node.scrollTop - node.clientHeight < 80);
+          lastPlainScrollTopRef.current = node.scrollTop;
+          lastPlainNearEndRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+          onNearEndChange(lastPlainNearEndRef.current);
         }}
       >
         {messages.map((message, index) => renderCard(message, index))}
@@ -101,7 +133,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       data={messages}
       computeItemKey={(index, message) => message.id ?? `${message.role}-${index}`}
       followOutput={isStreaming ? "smooth" : false}
-      initialTopMostItemIndex={messages.length - 1}
+      initialTopMostItemIndex={lastPlainNearEndRef.current ? messages.length - 1 : 0}
       alignToBottom
       atBottomStateChange={onNearEndChange}
       itemContent={(index, message) => renderCard(message, index)}
