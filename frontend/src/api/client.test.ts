@@ -111,6 +111,39 @@ describe("CortexApi", () => {
     await expect(api.health()).rejects.toEqual(new ApiError(503, "The local workspace did not respond."));
   });
 
+  it("turns FastAPI validation details into field-specific messages without exposing inputs", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({
+        detail: [
+          { loc: ["body", "name"], msg: "Field required", input: "private-name" },
+          { loc: ["body", "items", 0, "label"], msg: "Field required", input: "private-label" },
+        ],
+      }),
+      { status: 422, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toEqual(new ApiError(
+      422,
+      "name: Field required; items[0].label: Field required",
+    ));
+  });
+
+  it("falls back when validation details are malformed", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({
+        detail: [
+          { loc: "body.name", msg: "Do not expose this" },
+          { loc: ["body", "name"], msg: { value: "Do not expose this" }, input: "private-input" },
+        ],
+      }),
+      { status: 422, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toEqual(new ApiError(422, "The local workspace did not respond."));
+  });
+
   it("notifies subscribers when an authenticated request expires the session", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
       JSON.stringify({ detail: "Local session expired." }),

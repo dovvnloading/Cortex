@@ -59,8 +59,62 @@ export class ApiError extends Error {
 
 type FetchLike = typeof fetch;
 type SessionExpiredListener = () => void;
+type ValidationIssue = { loc?: unknown; msg?: unknown };
+type ErrorBody = {
+  detail?: string | { message?: string } | ValidationIssue[];
+};
 
 const SESSION_TOKEN_KEY = "cortex.session.token";
+const VALIDATION_ISSUE_LIMIT = 8;
+const VALIDATION_TEXT_LIMIT = 240;
+const REQUEST_LOCATION_MARKERS = new Set(["body", "query", "path", "header", "cookie"]);
+
+function cleanValidationText(value: string): string {
+  const withoutControls = Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
+  }).join("");
+  return withoutControls
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, VALIDATION_TEXT_LIMIT);
+}
+
+function formatValidationLocation(location: unknown): string | null {
+  if (!Array.isArray(location) || location.length === 0) return null;
+
+  const parts: string[] = [];
+  for (const part of location) {
+    if (typeof part === "string") {
+      const cleaned = cleanValidationText(part);
+      if (!cleaned) return null;
+      parts.push(cleaned);
+    } else if (typeof part === "number" && Number.isSafeInteger(part) && part >= 0) {
+      parts.push(String(part));
+    } else {
+      return null;
+    }
+  }
+
+  if (REQUEST_LOCATION_MARKERS.has(parts[0]?.toLowerCase() ?? "")) parts.shift();
+  if (parts.length === 0) return null;
+
+  return parts.reduce((path, part, index) => {
+    if (/^\d+$/.test(part)) return index === 0 ? `[${part}]` : `${path}[${part}]`;
+    return index === 0 ? part : `${path}.${part}`;
+  }, "");
+}
+
+function formatValidationIssues(detail: ValidationIssue[]): string | null {
+  const messages = detail.slice(0, VALIDATION_ISSUE_LIMIT).flatMap((issue) => {
+    if (!issue || typeof issue !== "object" || Array.isArray(issue)) return [];
+    const location = formatValidationLocation(issue.loc);
+    const message = typeof issue.msg === "string" ? cleanValidationText(issue.msg) : "";
+    if (!location || !message) return [];
+    return [`${location}: ${message}`];
+  });
+  return messages.length > 0 ? messages.join("; ") : null;
+}
 
 function readPersistedSessionToken(): string | null {
   try {
@@ -530,11 +584,13 @@ export class CortexApi {
   }
 
   private async errorDetail(response: Response): Promise<string> {
-    const body = (await response.json().catch(() => null)) as
-      | { detail?: string | { message?: string } }
-      | null;
+    const body = (await response.json().catch(() => null)) as ErrorBody | null;
+    if (response.status === 422 && Array.isArray(body?.detail)) {
+      const validationDetail = formatValidationIssues(body.detail);
+      if (validationDetail) return validationDetail;
+    }
     if (typeof body?.detail === "string") return body.detail;
-    if (body?.detail && typeof body.detail.message === "string") {
+    if (body?.detail && typeof body.detail === "object" && !Array.isArray(body.detail) && typeof body.detail.message === "string") {
       return body.detail.message;
     }
     return "The local workspace did not respond.";
