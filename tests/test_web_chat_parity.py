@@ -175,7 +175,7 @@ def test_failed_generation_keeps_user_turn_without_successful_assistant():
         assert [message["role"] for message in chat["messages"]] == ["user"]
 
 
-def test_derived_effect_failures_do_not_invalidate_the_persisted_assistant(
+def test_model_memory_proposal_is_not_persisted_and_does_not_invalidate_assistant(
     monkeypatch,
 ):
     dependencies = build_demo_dependencies()
@@ -217,7 +217,9 @@ def test_derived_effect_failures_do_not_invalidate_the_persisted_assistant(
 
         assert events[-1]["event"] == "generation.completed"
         assert code_observations == [True]
-        assert memory_observations == [True]
+        # Model proposals are untrusted and no longer reach the memory
+        # repository without an explicit user-confirmation flow.
+        assert memory_observations == []
         assert dependencies.memories.get_memos() == []
         chat = client.get(
             f"/api/v1/chats/{accepted['thread_id']}", headers=headers

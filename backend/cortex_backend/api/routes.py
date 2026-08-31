@@ -1980,13 +1980,11 @@ async def _start_generation_job(
                     data={"code_execution_rejection": code_execution_rejection},
                 )
 
-            for memo in result.memory_command.additions:
-                try:
-                    deps.memories.add_memo(memo)
-                except Exception as exc:
-                    logging.warning(
-                        "Cortex memory update failed (%s).", type(exc).__name__
-                    )
+            # Model-produced memory additions are proposals, not an authority
+            # to write durable state.  Permanent memories can only be created
+            # through the explicit memory-management API (or a future UI
+            # confirmation flow), so an instruction-like model response cannot
+            # become a persistent prompt injection on its own.
 
             updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
             title = str(updated_chat.get("title") or "New Chat")

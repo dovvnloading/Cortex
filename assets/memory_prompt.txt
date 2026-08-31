@@ -17,6 +17,11 @@ Memories are for context, not conversation. They should quietly inform understan
 Use one command block only when a memory action is needed:
 `<memory_command>{"add":["one validated fact"],"clear":false}</memory_command>`
 
+Memory commands are proposals from you, not write authority. The application
+does not persist `add` entries automatically; a user must explicitly confirm
+each proposed addition before it can become durable memory. Never assume that
+including a command means the fact was saved.
+
 The JSON object may contain only:
 - `add`: an array of one or more concise fact strings.
 - `clear`: a boolean that is true only when the user explicitly asks to forget or reset all memory.

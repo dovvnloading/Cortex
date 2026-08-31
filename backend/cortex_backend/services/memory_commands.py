@@ -10,11 +10,12 @@ from cortex_backend.core.generation import MemoryCommand
 
 @dataclass(frozen=True)
 class MemoryActionResult:
-    """Summary of actions applied after user confirmation."""
+    """Summary of actions applied after explicit user confirmation."""
 
     added_count: int = 0
     cleared: bool = False
     clear_skipped: bool = False
+    pending_additions: tuple[str, ...] = ()
 
 
 def apply_memory_command(
@@ -22,11 +23,14 @@ def apply_memory_command(
     command: MemoryCommand | None,
     *,
     confirm_clear: Callable[[], bool],
+    confirm_additions: Callable[[tuple[str, ...]], bool] | None = None,
 ) -> MemoryActionResult:
-    """Apply additions and conditionally destructive actions.
+    """Apply explicitly confirmed memory actions.
 
     The callback is intentionally required even when a clear request is present;
     model output never receives authority to erase permanent memory directly.
+    Additions are proposals too: unless a caller supplies a confirmation
+    callback, they are returned as pending and are not written to storage.
     """
     if not isinstance(command, MemoryCommand) or not command.has_actions:
         return MemoryActionResult()
@@ -40,11 +44,16 @@ def apply_memory_command(
         else:
             clear_skipped = True
 
-    for memo in command.additions:
-        memory_manager.add_memo(memo)
+    pending_additions = command.additions
+    if command.additions and confirm_additions is not None:
+        if confirm_additions(command.additions):
+            for memo in command.additions:
+                memory_manager.add_memo(memo)
+            pending_additions = ()
 
     return MemoryActionResult(
-        added_count=len(command.additions),
+        added_count=len(command.additions) - len(pending_additions),
         cleared=cleared,
         clear_skipped=clear_skipped,
+        pending_additions=pending_additions,
     )
