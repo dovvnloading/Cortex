@@ -438,8 +438,9 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert second.read_record() is None
 
 
-def test_frontend_manifest_detects_source_changes(tmp_path: Path):
+def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _frontend_fixture(tmp_path)
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
     dist = root / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("built", encoding="utf-8")
@@ -473,6 +474,77 @@ def test_frontend_manifest_detects_source_changes(tmp_path: Path):
     (root / "public").mkdir()
     (root / "public" / "cortex.svg").write_text("<svg />", encoding="utf-8")
 
+    assert frontend_module.needs_build(root) is True
+
+
+def test_frontend_manifest_tracks_external_contract_and_vite_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
+    monkeypatch.setenv("VITE_API_BASE_URL", "/api/v1")
+    dist = root / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("built", encoding="utf-8")
+    manifest = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(manifest.as_dict()), encoding="utf-8"
+    )
+
+    assert frontend_module.needs_build(root) is False
+    monkeypatch.setenv("VITE_API_BASE_URL", "/api/v1/changed")
+    assert frontend_module.needs_build(root) is True
+
+    # The generated contract is outside frontend/ but is imported by the
+    # staged source tree, so it must invalidate the same bundle.
+    contract = tmp_path / "contracts" / "cortex-api.ts"
+    contract.parent.mkdir()
+    contract.write_text("export interface Changed {}\n", encoding="utf-8")
+    refreshed = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(refreshed.as_dict()), encoding="utf-8"
+    )
+    contract.write_text("export interface Changed { value: string }\n", encoding="utf-8")
+    assert frontend_module.needs_build(root) is True
+
+
+def test_frontend_manifest_tracks_node_and_npm_major_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    versions = {"node": 24, "npm": 11}
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: versions[command])
+    dist = root / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("built", encoding="utf-8")
+    manifest = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(manifest.as_dict()), encoding="utf-8"
+    )
+
+    assert frontend_module.needs_build(root) is False
+    versions["npm"] = 12
     assert frontend_module.needs_build(root) is True
 
 

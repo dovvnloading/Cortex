@@ -57,8 +57,17 @@ class FrontendManifest:
 
 def _digest_files(frontend_root: Path, paths: list[Path]) -> str:
     digest = hashlib.sha256()
-    for path in sorted(paths, key=lambda item: item.relative_to(frontend_root).as_posix()):
-        relative = path.relative_to(frontend_root).as_posix().encode("utf-8")
+    def relative_path(path: Path) -> str:
+        try:
+            return path.relative_to(frontend_root).as_posix()
+        except ValueError:
+            # The generated API contract lives beside (not under) the
+            # frontend tree.  Include a stable relative label without ever
+            # resolving arbitrary paths outside the repository layout.
+            return Path(os.path.relpath(path, frontend_root)).as_posix()
+
+    for path in sorted(paths, key=relative_path):
+        relative = relative_path(path).encode("utf-8")
         digest.update(relative)
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -76,6 +85,10 @@ def _tracked_files(frontend_root: Path) -> list[Path]:
     public_dir = frontend_root / "public"
     if public_dir.is_dir():
         files.extend(path for path in public_dir.rglob("*") if path.is_file())
+    files.extend(path for path in frontend_root.glob(".env*") if path.is_file())
+    contract = frontend_root.parent / "contracts" / "cortex-api.ts"
+    if contract.is_file():
+        files.append(contract)
     return [path for path in files if path.is_file()]
 
 
@@ -87,7 +100,17 @@ def lock_digest(frontend_root: Path) -> str:
 
 
 def source_digest(frontend_root: Path) -> str:
-    return _digest_files(frontend_root, _tracked_files(frontend_root))
+    digest = hashlib.sha256(_digest_files(frontend_root, _tracked_files(frontend_root)).encode("ascii"))
+    # Vite embeds VITE_* process variables in the bundle even when there is no
+    # corresponding .env file.  Hash names and values, never persist values in
+    # the manifest itself.
+    for name, value in sorted(os.environ.items()):
+        if name.startswith("VITE_"):
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _tool_name(name: str) -> str:
@@ -136,9 +159,13 @@ def needs_build(frontend_root: Path, *, force: bool = False) -> bool:
     manifest = read_manifest(dist)
     if manifest is None:
         return True
+    node_major = _major_version("node")
+    npm_major = _major_version("npm")
     return (
         manifest.lock_digest != lock_digest(frontend_root)
         or manifest.source_digest != source_digest(frontend_root)
+        or manifest.node_major != node_major
+        or manifest.npm_major != npm_major
     )
 
 
