@@ -82,7 +82,9 @@ export function ChatLibrary({
     />
   );
 
-  const hasAnything = filtered.length > 0 || groups.length > 0;
+  // During a search, only matching chats produce visible rows; groups without
+  // matches are omitted above and must not suppress the empty search state.
+  const hasAnything = searching ? filtered.length > 0 : filtered.length > 0 || groups.length > 0;
 
   return (
     <div className="chat-library">

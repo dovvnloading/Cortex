@@ -103,6 +103,16 @@ describe("ChatLibrary", () => {
     expect(screen.getByText("No chats match your search.")).toBeVisible();
   });
 
+  it("reports no matches when existing groups contain no matching chats", () => {
+    renderLibrary({
+      groups: [group("g1", "Research")],
+      chats: [chat("c1", "Vector stores", "g1")],
+      query: "zzz",
+    });
+
+    expect(screen.getByText("No chats match your search.")).toBeVisible();
+  });
+
   it("moves a chat into a group and back out again", async () => {
     const user = userEvent.setup();
     const { props } = renderLibrary({
