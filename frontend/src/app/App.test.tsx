@@ -136,6 +136,106 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
   });
 
+  it("does not let a stale initial group response replace a newly created group", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let resolveInitialGroups: ((response: Response) => void) | undefined;
+    const initialGroups = new Promise<Response>((resolve) => { resolveInitialGroups = resolve; });
+    const createdGroup = { id: "group-created", name: "Created while loading", collapsed: false, created_at: "2026-07-21T18:00:00Z", updated_at: "2026-07-21T18:00:00Z" };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/chat-groups") && init?.method === "POST") return json(createdGroup, 201);
+      if (url.endsWith("/chat-groups")) return initialGroups;
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "New group" }));
+    await user.type(screen.getByLabelText("Group name"), createdGroup.name);
+    await user.click(screen.getByRole("button", { name: "Create group" }));
+    expect(await screen.findByText(createdGroup.name)).toBeVisible();
+
+    await act(async () => { resolveInitialGroups?.(json([])); });
+    expect(useChatStore.getState().groups).toEqual([createdGroup]);
+  });
+
+  it("does not let a stale initial model response replace a post-rescan inventory", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let resolveInitialModels: ((response: Response) => void) | undefined;
+    const initialModels = new Promise<Response>((resolve) => { resolveInitialModels = resolve; });
+    let modelRequests = 0;
+    const latestModels = { required_models: [], optional_models: [], installed_models: ["rescanned-model"], connection: { success: true, status: "connected", message: "Ready" } };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/jobs/models") && init?.method === "POST") return json({ job_id: "model-race", kind: "models", status: "queued" }, 202);
+      if (url.endsWith("/jobs/model-race/events")) {
+        const event = { id: 1, job_id: "model-race", kind: "completed", status: "succeeded", phase: null, data: {} };
+        return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.endsWith("/models")) {
+        modelRequests += 1;
+        return modelRequests === 1 ? initialModels : json(latestModels);
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await user.click(screen.getByRole("button", { name: "Rescan local models" }));
+    await waitFor(() => expect(useModelStore.getState().models?.installed_models).toEqual(["rescanned-model"]));
+
+    await act(async () => { resolveInitialModels?.(json({ required_models: [], optional_models: [], installed_models: ["stale-model"], connection: { success: true, status: "connected", message: "Stale" } })); });
+    expect(useModelStore.getState().models?.installed_models).toEqual(["rescanned-model"]);
+  });
+
+  it("ignores a deferred initial inventory response after the workspace unmounts", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let resolveInitialGroups: ((response: Response) => void) | undefined;
+    const initialGroups = new Promise<Response>((resolve) => { resolveInitialGroups = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return initialGroups;
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    const { unmount } = render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    unmount();
+    await act(async () => { resolveInitialGroups?.(json([{ id: "late-group", name: "Late", collapsed: false }])); });
+    expect(useChatStore.getState().groups).toEqual([]);
+  });
+
   it("reports a specific disable reason when no chat model is selected", () => {
     expect(resolveRuntimeAvailability({
       selectedModel: null,

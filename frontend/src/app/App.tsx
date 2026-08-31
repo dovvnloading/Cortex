@@ -117,12 +117,42 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
   const chatsRef = useRef(chats);
   const executionTaskRefreshRef = useRef<Promise<void> | null>(null);
+  // These guards cover requests whose results are deliberately loaded out of
+  // band. A response can outlive both the load that started it and this
+  // authenticated workspace instance (for example when a 401 returns the
+  // app to onboarding). Keep each mutable inventory independent so a group
+  // mutation does not invalidate an unrelated model refresh and vice versa.
+  const mountedRef = useRef(false);
+  const workspaceLoadGenerationRef = useRef(0);
+  const groupLoadGenerationRef = useRef(0);
+  const modelGenerationRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      workspaceLoadGenerationRef.current += 1;
+      groupLoadGenerationRef.current += 1;
+      modelGenerationRef.current += 1;
+      // The model job itself is durable on the backend, but its UI ownership
+      // ends with this authenticated workspace. Do not strand a busy flag in
+      // the process-wide store after logout or a remount.
+      setModelBusy(false);
+      setModelProgress(null);
+    };
+  }, [setModelBusy, setModelProgress]);
 
   useEffect(() => {
     chatsRef.current = chats;
   }, [chats]);
 
   const loadWorkspace = useCallback(async () => {
+    const loadGeneration = ++workspaceLoadGenerationRef.current;
+    const groupGeneration = ++groupLoadGenerationRef.current;
+    const modelGeneration = ++modelGenerationRef.current;
+    const isCurrentLoad = () => mountedRef.current && workspaceLoadGenerationRef.current === loadGeneration;
+    const isCurrentGroupLoad = () => isCurrentLoad() && groupLoadGenerationRef.current === groupGeneration;
+    const isCurrentModelLoad = () => isCurrentLoad() && modelGenerationRef.current === modelGeneration;
     setLoading(true);
     setLoadError(null);
     try {
@@ -132,6 +162,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         api.settings(),
         api.memories(),
       ]);
+      if (!isCurrentLoad()) return;
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
@@ -140,28 +171,36 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // library still opens with every chat present, just ungrouped. Blocking
       // the whole workspace on filing metadata would be the wrong trade.
       void api.chatGroups()
-        .then(setGroups)
+        .then((nextGroups) => {
+          if (isCurrentGroupLoad()) setGroups(nextGroups);
+        })
         .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) onSessionExpired();
-          else setGroups([]);
+          if (error instanceof ApiError && error.status === 401) {
+            if (isCurrentLoad()) onSessionExpired();
+          }
+          else if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
-      setModels(UNAVAILABLE_MODELS);
+      if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
       void api.models()
-        .then(setModels)
+        .then((nextModels) => {
+          if (isCurrentModelLoad()) setModels(nextModels);
+        })
         .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) onSessionExpired();
-          else setModels(UNAVAILABLE_MODELS);
+          if (error instanceof ApiError && error.status === 401) {
+            if (isCurrentLoad()) onSessionExpired();
+          }
+          else if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
         });
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
+      if (error instanceof ApiError && error.status === 401 && isCurrentLoad()) {
         onSessionExpired();
       }
-      setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
+      if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }, [api, onSessionExpired, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
 
@@ -318,14 +357,25 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   const createGroup = async (name: string) => {
     try {
-      upsertGroup(await api.createChatGroup(name));
+      const group = await api.createChatGroup(name);
+      if (mountedRef.current) {
+        // Invalidate the initial snapshot only once the mutation succeeded.
+        // A failed mutation must still allow that snapshot to populate the
+        // library, while a late successful snapshot must not erase this row.
+        ++groupLoadGenerationRef.current;
+        upsertGroup(group);
+      }
       notify("Group created.", "success");
     } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); }
   };
 
   const renameGroup = async (groupId: string, name: string) => {
     try {
-      upsertGroup(await api.updateChatGroup(groupId, { name }));
+      const group = await api.updateChatGroup(groupId, { name });
+      if (mountedRef.current) {
+        ++groupLoadGenerationRef.current;
+        upsertGroup(group);
+      }
     } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); }
   };
 
@@ -334,7 +384,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       await api.deleteChatGroup(groupId);
       // Local mirror of the server rule: the group goes, its chats stay and
       // reappear in the ungrouped list.
-      removeGroup(groupId);
+      if (mountedRef.current) {
+        ++groupLoadGenerationRef.current;
+        removeGroup(groupId);
+      }
       notify("Group deleted. Its chats moved back to the main list.", "success");
     } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); }
   };
@@ -342,11 +395,22 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const toggleGroup = (groupId: string, collapsed: boolean) => {
     const previous = useChatStore.getState().groups.find((group) => group.id === groupId);
     if (!previous) return;
+    ++groupLoadGenerationRef.current;
     // Optimistic: collapsing is a high-frequency, zero-risk interaction and
     // must feel instant. The persisted value is only a preference, so a
     // failed write rolls the row back and stays quiet.
     upsertGroup({ ...previous, collapsed });
-    void api.updateChatGroup(groupId, { collapsed }).catch(() => upsertGroup(previous));
+    void api.updateChatGroup(groupId, { collapsed }).catch(() => {
+      if (!mountedRef.current) return;
+      // Roll back only the failed preference field. A later rename or toggle
+      // may have legitimately changed other fields while this request was in
+      // flight, and must not be clobbered by the old whole-row snapshot.
+      setGroups((current) => current.map((group) => (
+        group.id === groupId && group.collapsed === collapsed
+          ? { ...group, collapsed: previous.collapsed }
+          : group
+      )));
+    });
   };
 
   const moveChat = (threadId: string, groupId: string | null) => {
@@ -438,13 +502,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean } = {},
   ): Promise<Record<string, unknown> | null> => {
     const { checkOllamaConnection = true, notifyOnSuccess = true } = options;
+    const generation = ++modelGenerationRef.current;
+    const isCurrentModelJob = () => mountedRef.current && modelGenerationRef.current === generation;
     setModelBusy(true);
     setModelProgress({ model, status: "Starting...", percent: null });
     let completedData: Record<string, unknown> | null = null;
     let failureMessage: string | null = null;
     try {
       const terminalEvent = await api.streamJob(accepted.job_id, (event) => {
-        updateModelProgress(event, setModelProgress);
+        if (mountedRef.current && modelGenerationRef.current === generation) updateModelProgress(event, setModelProgress);
         if (event.kind === "completed") completedData = event.data ?? null;
         if (event.kind === "error") {
           const message = event.data?.message;
@@ -466,22 +532,27 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
 
       if (terminalStatus === "failed" || terminalStatus === "cancelled") {
-        notify(
-          failureMessage
-            ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed."),
-          "error",
-        );
+        if (isCurrentModelJob()) {
+          notify(
+            failureMessage
+              ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed."),
+            "error",
+          );
+        }
         return null;
       }
       if (terminalStatus !== "succeeded") {
         // Do not refresh inventory, announce success, or imply that a GGUF
         // download produced a selectable file while the worker may continue.
-        setModelProgress({ model, status: "Model operation is still running; completion was not confirmed.", percent: null });
-        notify("Model operation is still running; completion was not confirmed.", "error");
+        if (isCurrentModelJob()) {
+          setModelProgress({ model, status: "Model operation is still running; completion was not confirmed.", percent: null });
+          notify("Model operation is still running; completion was not confirmed.", "error");
+        }
         return null;
       }
 
       const refreshedModels = await api.models();
+      if (!isCurrentModelJob()) return completedData;
       setModels(refreshedModels);
       if (checkOllamaConnection && !refreshedModels.connection?.success) {
         notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
@@ -492,10 +563,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Model operation failed."), "error");
+      if (error instanceof ApiError && error.status === 401) {
+        if (isCurrentModelJob()) onSessionExpired();
+      }
+      else if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
       return null;
-    } finally { setModelBusy(false); }
+    } finally {
+      if (isCurrentModelJob()) setModelBusy(false);
+    }
   };
 
   const checkModels = async () => {
