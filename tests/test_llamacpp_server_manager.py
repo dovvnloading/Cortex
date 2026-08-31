@@ -28,7 +28,12 @@ class _FakePopen:
         self.exit_code: int | None = None
         self.terminated = False
         self.killed = False
-        self.stdout = io.BytesIO(b"")
+        # llama-server chooses the ephemeral port itself and reports it once
+        # its listening socket is bound. The manager must wait for this line
+        # before probing, rather than selecting and closing a port first.
+        self.stdout = io.BytesIO(
+            b"main: server is listening on http://127.0.0.1:43125 - starting the main loop\n"
+        )
 
     def poll(self):
         if self._exit_immediately:
@@ -74,14 +79,27 @@ class _QueueLauncher:
 
 
 class _AlwaysHealthyClient:
-    def get(self, url: str, timeout=None):
-        del url, timeout
-        return _FakeResponse(200)
+    def get(self, url: str, timeout=None, headers=None):
+        del url, timeout, headers
+        return _FakeResponse(200, {"status": "ok", "model_path": "/fake/model.gguf", "build_info": "fake"})
+
+
+class _RecordingAttestationClient:
+    def __init__(self, props: dict) -> None:
+        self.props = props
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def get(self, url: str, timeout=None, headers=None):
+        del timeout
+        self.calls.append((url, headers))
+        if url.endswith("/health"):
+            return _FakeResponse(200, {"status": "ok"})
+        return _FakeResponse(200, self.props)
 
 
 class _AlwaysUnhealthyClient:
-    def get(self, url: str, timeout=None):
-        del url, timeout
+    def get(self, url: str, timeout=None, headers=None):
+        del url, timeout, headers
         return _FakeResponse(503)
 
 
@@ -92,18 +110,22 @@ class _FlakyHealthClient:
         self.fail_count = 0
         self.calls = 0
 
-    def get(self, url: str, timeout=None):
-        del url, timeout
+    def get(self, url: str, timeout=None, headers=None):
+        del url, timeout, headers
         self.calls += 1
         if self.fail_count > 0:
             self.fail_count -= 1
             raise httpx.ConnectTimeout("simulated slow health probe")
-        return _FakeResponse(200)
+        return _FakeResponse(200, {"status": "ok", "model_path": "/fake/model.gguf", "build_info": "fake"})
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, payload: dict | None = None) -> None:
         self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
 
 
 _ANY_RELEASE = object()
@@ -161,6 +183,76 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.state == "ready"
     assert manager.status.loaded_model == "gguf:model.gguf"
     assert manager.status.active_backend == "cpu"
+
+
+def test_start_uses_child_selected_port_and_authenticated_runtime_attestation(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    model_path = tmp_path / "model.gguf"
+    client = _RecordingAttestationClient({
+        "model_path": str(model_path),
+        "build_info": "b10311-test",
+    })
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=client)
+
+    handle = manager.ensure_ready(model_path, num_ctx=4096)
+
+    args = launcher.launch_args[0]
+    assert args[args.index("--port") + 1] == "0"
+    api_key = args[args.index("--api-key") + 1]
+    assert handle.api_key == api_key
+    assert api_key not in repr(handle)
+    assert client.calls[0] == ("http://127.0.0.1:43125/health", None)
+    assert client.calls[1] == (
+        "http://127.0.0.1:43125/props",
+        {"Authorization": f"Bearer {api_key}"},
+    )
+
+
+def test_start_rejects_a_generic_200_service_as_not_llamacpp(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"model")
+    client = _RecordingAttestationClient({})
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=client,
+        health_timeout_seconds=0.05,
+    )
+
+    with pytest.raises(ServerStartTimeoutError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(client.calls) >= 2
+
+
+def test_start_rejects_a_runtime_serving_the_wrong_model(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"model")
+    # A service that imitates the llama.cpp response but is serving a
+    # different model must still not be accepted as the child we launched.
+    client = _RecordingAttestationClient({
+        "model_path": str(tmp_path / "other-model.gguf"),
+        "build_info": "unrelated-service",
+    })
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=client,
+        health_timeout_seconds=0.05,
+    )
+
+    with pytest.raises(ServerStartTimeoutError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(client.calls) >= 2
+    assert manager.status.state == "starting"
 
 
 def test_status_reports_which_backend_actually_launched(tmp_path: Path) -> None:

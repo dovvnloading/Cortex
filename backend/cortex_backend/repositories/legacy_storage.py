@@ -911,6 +911,44 @@ class PermanentMemoryManager:
         return list(data['memos'])
 
     @classmethod
+    def _read_memos(cls, path: str) -> list[str]:
+        with open(path, encoding='utf-8') as stream:
+            return cls._validate_memo_data(json.load(stream))
+
+    @classmethod
+    def _atomic_copy_memos(cls, source: str, destination: str) -> None:
+        """Copy a validated memory file without exposing a partial destination."""
+        directory = os.path.dirname(os.path.abspath(destination))
+        temporary_path = None
+        try:
+            fd, temporary_path = tempfile.mkstemp(
+                prefix=f".{os.path.basename(destination)}.",
+                suffix='.tmp',
+                dir=directory,
+            )
+            os.close(fd)
+            shutil.copy2(source, temporary_path)
+            cls._read_memos(temporary_path)
+            os.replace(temporary_path, destination)
+            temporary_path = None
+        except (OSError, shutil.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PersistenceError(
+                "Could not copy permanent memory safely.",
+                operation="save_permanent_memory",
+                cause=exc,
+            ) from exc
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError as exc:
+                    raise PersistenceError(
+                        "Could not remove a temporary permanent-memory copy.",
+                        operation="save_permanent_memory",
+                        cause=exc,
+                    ) from exc
+
+    @classmethod
     def normalize_memos(cls, memos: list[str]) -> list[str]:
         """Validate, trim, cap, and case-insensitively deduplicate memos."""
         if not isinstance(memos, list):
@@ -945,11 +983,45 @@ class PermanentMemoryManager:
             if not os.path.exists(candidate):
                 continue
             try:
-                with open(candidate, encoding='utf-8') as stream:
-                    return self._validate_memo_data(json.load(stream))
+                memos = self._read_memos(candidate)
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 logging.error("Failed to load permanent memory file %s: %s", candidate, exc)
+                continue
+            if candidate == self.backup_file_path:
+                try:
+                    # A later save must never rotate a corrupt primary over the
+                    # only good backup. Repair the primary before returning the
+                    # recovered data, while keeping the backup unchanged if the
+                    # repair cannot be completed.
+                    self._atomic_copy_memos(candidate, self.memory_file_path)
+                except PersistenceError as exc:
+                    logging.error(
+                        "Could not restore permanent memory file %s from backup: %s",
+                        self.memory_file_path,
+                        exc,
+                    )
+            return memos
         return []
+
+    def _prepare_primary_for_save(self) -> None:
+        """Ensure the primary is valid before rotating it into the backup."""
+        if not os.path.exists(self.memory_file_path):
+            return
+        try:
+            self._read_memos(self.memory_file_path)
+            return
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            primary_error = exc
+
+        try:
+            self._read_memos(self.backup_file_path)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise PersistenceError(
+                "Cannot save permanent memory because the existing file is corrupt and no valid backup is available.",
+                operation="save_permanent_memory",
+                cause=primary_error,
+            ) from exc
+        self._atomic_copy_memos(self.backup_file_path, self.memory_file_path)
 
     def _save_memos(self):
         """Validate and atomically replace the memory file, retaining a backup."""
@@ -969,8 +1041,9 @@ class PermanentMemoryManager:
 
             with open(temporary_path, encoding='utf-8') as stream:
                 self._validate_memo_data(json.load(stream))
+            self._prepare_primary_for_save()
             if os.path.exists(self.memory_file_path):
-                shutil.copy2(self.memory_file_path, self.backup_file_path)
+                self._atomic_copy_memos(self.memory_file_path, self.backup_file_path)
             os.replace(temporary_path, self.memory_file_path)
             temporary_path = None
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:

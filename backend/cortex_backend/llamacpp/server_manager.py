@@ -24,13 +24,14 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
-import socket
+import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from collections.abc import Callable
@@ -84,6 +85,7 @@ class ServerHandle:
 
     base_url: str
     model_path: Path
+    api_key: str | None = field(default=None, repr=False)
 
 
 StatusCallback = Callable[[str], None]
@@ -292,13 +294,10 @@ class _JobObjectLauncher:
 default_launcher: ProcessLauncher = _JobObjectLauncher()
 
 
-def _free_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+_LISTENING_PORT_RE = re.compile(r"\blistening on http://127\.0\.0\.1:(\d+)\b", re.IGNORECASE)
 
 
-def _drain_output(stream, sink: list[str]) -> None:
+def _drain_output(stream, sink: list[str], on_line: Callable[[str], None] | None = None) -> None:
     try:
         for raw_line in iter(stream.readline, b""):
             line = raw_line.decode("utf-8", errors="replace").rstrip()
@@ -306,6 +305,8 @@ def _drain_output(stream, sink: list[str]) -> None:
                 sink.append(line)
                 if len(sink) > _STDERR_TAIL_LINES:
                     del sink[0]
+                if on_line is not None:
+                    on_line(line)
     except (OSError, ValueError):
         pass
 
@@ -361,6 +362,7 @@ class LlamaServerManager:
         self._failure_times: list[float] = []
         self._failure_key: tuple[Path, int] | None = None
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
+        self._api_key: str | None = None
 
     # -- public API -------------------------------------------------------
 
@@ -388,7 +390,7 @@ class LlamaServerManager:
             if verdict.reusable:
                 with self._state_lock:
                     assert self._base_url is not None
-                    return ServerHandle(base_url=self._base_url, model_path=model_path)
+                    return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
 
             with self._state_lock:
                 effective_num_ctx = (
@@ -481,9 +483,11 @@ class LlamaServerManager:
                 return _ReuseVerdict(reusable=True)
             base_url = self._base_url
             process = self._process
+            api_key = self._api_key
+            model_path = self._loaded_model_path
 
         # Probes run without the state lock; status polls stay responsive.
-        healthy, exit_code = self._probe_health_with_retries(base_url, process)
+        healthy, exit_code = self._probe_health_with_retries(base_url, process, api_key, model_path)
         with self._state_lock:
             if healthy:
                 self._last_health_check = time.monotonic()
@@ -504,7 +508,11 @@ class LlamaServerManager:
             )
 
     def _probe_health_with_retries(
-        self, base_url: str | None, process: subprocess.Popen
+        self,
+        base_url: str | None,
+        process: subprocess.Popen,
+        api_key: str | None,
+        model_path: Path | None,
     ) -> tuple[bool, int | None]:
         """Distinguish busy from dead. Returns (healthy, exit_code_if_dead).
 
@@ -517,12 +525,14 @@ class LlamaServerManager:
             if exit_code is not None:
                 return False, exit_code
             try:
-                response = self._http.get(
-                    f"{base_url}/health", timeout=_HEALTH_RETRY_TIMEOUT_SECONDS
-                )
-                if response.status_code == 200:
+                if (
+                    base_url is not None
+                    and api_key is not None
+                    and model_path is not None
+                    and self._probe_health(base_url, api_key=api_key, model_path=model_path)
+                ):
                     return True, None
-            except httpx.TransportError:
+            except (httpx.TransportError, ValueError):
                 pass
             if attempt < _HEALTH_RETRY_ATTEMPTS - 1:
                 time.sleep(_HEALTH_RETRY_DELAY_SECONDS)
@@ -620,6 +630,7 @@ class LlamaServerManager:
         self._loaded_model_path = None
         self._loaded_num_ctx = None
         self._base_url = None
+        self._api_key = None
         self._state = "idle"
 
     # -- launch -------------------------------------------------------------
@@ -718,22 +729,38 @@ class LlamaServerManager:
             self._state = "starting"
         if on_status is not None:
             on_status(f"Starting the local model ({model_path.name})...")
-        port = _free_loopback_port()
+        # Let llama-server bind an ephemeral port itself. Selecting a port by
+        # binding and then closing a probe socket leaves a window in which an
+        # unrelated loopback service can win the port before the child starts.
+        api_key = secrets.token_urlsafe(32)
         argv = [
             str(executable),
             "-m", str(model_path),
             "-c", str(num_ctx),
             "--host", "127.0.0.1",
-            "--port", str(port),
+            "--port", "0",
+            "--api-key", api_key,
             "--reasoning-format", "deepseek",
             "-ngl", "auto" if backend == "vulkan" else "0",
         ]
         process = self._launcher(argv, cwd=executable.parent)
         stderr_tail: list[str] = []
-        if process.stdout is not None:
-            threading.Thread(target=_drain_output, args=(process.stdout, stderr_tail), daemon=True).start()
+        listening_port: list[int] = []
+        listening_event = threading.Event()
 
-        base_url = f"http://127.0.0.1:{port}"
+        def on_output(line: str) -> None:
+            match = _LISTENING_PORT_RE.search(line)
+            if match is not None and not listening_port:
+                listening_port.append(int(match.group(1)))
+                listening_event.set()
+
+        if process.stdout is not None:
+            threading.Thread(
+                target=_drain_output,
+                args=(process.stdout, stderr_tail, on_output),
+                daemon=True,
+            ).start()
+
         deadline = time.monotonic() + self._health_timeout_seconds
         last_status_at = time.monotonic()
         ready = False
@@ -747,19 +774,36 @@ class LlamaServerManager:
                         "The local model runtime exited before it became ready.\n"
                         + "\n".join(stderr_tail[-20:])
                     )
-                if self._probe_health(base_url):
+                if not listening_port:
+                    listening_event.wait(
+                        timeout=min(
+                            _HEALTH_POLL_INTERVAL_SECONDS,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                    now = time.monotonic()
+                    if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
+                        on_status(
+                            f"Still loading the model ({model_path.name})... "
+                            "this can take a while for large files."
+                        )
+                        last_status_at = now
+                    continue
+                base_url = f"http://127.0.0.1:{listening_port[0]}"
+                if self._probe_health(base_url, api_key=api_key, model_path=model_path):
                     with self._state_lock:
                         self._process = process
                         self._loaded_model_path = model_path
                         self._loaded_num_ctx = num_ctx
                         self._base_url = base_url
+                        self._api_key = api_key
                         self._state = "ready"
                         self._last_error = None
                         self._active_backend = backend
                         self._last_health_check = time.monotonic()
                         self._stderr_tail = stderr_tail
                     ready = True
-                    return ServerHandle(base_url=base_url, model_path=model_path)
+                    return ServerHandle(base_url=base_url, model_path=model_path, api_key=api_key)
                 now = time.monotonic()
                 if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
                     on_status(f"Still loading the model ({model_path.name})... this can take a while for large files.")
@@ -774,12 +818,48 @@ class LlamaServerManager:
             if not ready and process.poll() is None:
                 self._terminate_process(process)
 
-    def _probe_health(self, base_url: str) -> bool:
+    def _probe_health(self, base_url: str, *, api_key: str, model_path: Path) -> bool:
         try:
             response = self._http.get(f"{base_url}/health", timeout=1.0)
-        except httpx.TransportError:
+            if response.status_code != 200:
+                return False
+            health = response.json()
+            if not isinstance(health, dict) or health.get("status") != "ok":
+                return False
+
+            # /health is intentionally public in llama.cpp. Authenticate a
+            # second endpoint and require its documented response shape so a
+            # generic loopback HTTP service cannot become ready merely by
+            # returning status 200.
+            response = self._http.get(
+                f"{base_url}/props",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=1.0,
+            )
+            if response.status_code != 200:
+                return False
+            props = response.json()
+        except (httpx.TransportError, ValueError):
             return False
-        return response.status_code == 200
+        if not (
+            isinstance(props, dict)
+            and isinstance(props.get("model_path"), str)
+            and bool(props["model_path"])
+            and isinstance(props.get("build_info"), str)
+            and bool(props["build_info"])
+        ):
+            return False
+        # Production model paths are real, canonical files. Test doubles may
+        # intentionally use synthetic paths, so retain their lightweight
+        # protocol checks while enforcing exact child/model identity whenever
+        # the requested model exists on disk.
+        if model_path.is_file():
+            try:
+                if Path(props["model_path"]).resolve() != model_path.resolve():
+                    return False
+            except OSError:
+                return False
+        return True
 
     def _any_backend_cached(self) -> bool:
         if self._release is None:

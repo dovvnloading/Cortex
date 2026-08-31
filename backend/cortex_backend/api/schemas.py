@@ -242,6 +242,7 @@ class SettingsResponse(APIModel):
 
 class SettingsUpdateRequest(APIModel):
     settings: CortexSettings
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class MemoryResponse(APIModel):

@@ -523,6 +523,7 @@ export interface SettingsResponse {
 
 export interface SettingsUpdateRequest {
   settings: CortexSettings;
+  expected_revision?: number | null;
 }
 
 export interface ShutdownResponse {

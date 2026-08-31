@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -170,14 +171,62 @@ def test_ollama_chat_client_streams_the_full_response_when_not_cancelled() -> No
 
 
 class _StaticProvider:
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, api_key: str | None = None) -> None:
         self._base_url = base_url
+        self._api_key = api_key
         self.received_on_status = None
 
     def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
         del num_ctx
         self.received_on_status = on_status
-        return ServerHandle(base_url=self._base_url, model_path=model_path)
+        return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+
+
+def test_llamacpp_chat_client_authenticates_blocking_and_streaming_requests(tmp_path: Path) -> None:
+    from threading import Event
+
+    import httpx
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    observed_authorization: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_authorization.append(request.headers.get("Authorization"))
+        request_body = json.loads(request.content)
+        if request_body["stream"]:
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"choices":[{"delta":{"content":"streamed"}}]}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "blocking"}}]},
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = _StaticProvider("http://fakellama", api_key="runtime-secret")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    blocking = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+    )
+    streaming = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=Event(),
+    )
+
+    assert blocking["message"]["content"] == "blocking"
+    assert streaming["message"]["content"] == "streamed"
+    assert observed_authorization == ["Bearer runtime-secret", "Bearer runtime-secret"]
 
 
 def test_llamacpp_chat_client_threads_status_callback_into_ensure_ready(tmp_path: Path) -> None:

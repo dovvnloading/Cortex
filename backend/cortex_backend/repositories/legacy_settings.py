@@ -154,7 +154,9 @@ class LegacySettingsReader(SettingsRepository):
             invalid_keys=tuple(invalid),
         )
 
-    def save(self, settings: CortexSettings) -> None:
+    def save(
+        self, settings: CortexSettings, *, expected_revision: int | None = None
+    ) -> None:
         raise SettingsRepositoryError(
             "Legacy settings are read-only; save through the SQLite repository."
         )

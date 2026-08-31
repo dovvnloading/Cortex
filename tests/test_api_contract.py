@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Event
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 import pytest
@@ -759,3 +760,26 @@ def test_lifespan_runtime_teardown_runs_even_if_job_shutdown_raises():
         pass
 
     assert fake_manager.stopped is True
+
+
+def test_concurrent_settings_updates_have_one_winner_and_no_lost_overwrite():
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        baseline = client.get("/api/v1/settings", headers=headers).json()["settings"]
+        payloads = []
+        for theme in ("light", "system"):
+            changed = dict(baseline)
+            changed["appearance"] = {**baseline["appearance"], "theme": theme}
+            payloads.append({"settings": changed, "expected_revision": baseline["revision"]})
+
+        def put(payload):
+            return client.put("/api/v1/settings", json=payload, headers=headers)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(put, payloads))
+
+        assert sorted(response.status_code for response in responses) == [200, 409]
+        saved = client.get("/api/v1/settings", headers=headers).json()["settings"]
+        assert saved["revision"] == baseline["revision"] + 1
+        assert saved["appearance"]["theme"] in {"light", "system"}

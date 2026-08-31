@@ -337,7 +337,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const saveSettings = async (next: CortexSettings) => {
     setSaving(true);
     try {
-      const response = await api.updateSettings({ settings: next });
+      const response = await api.updateSettings({ settings: next, expected_revision: next.revision });
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
@@ -467,6 +467,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
           ...current,
           models: { ...current.models, chat: model, title: null },
         },
+        expected_revision: current.revision,
       });
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");

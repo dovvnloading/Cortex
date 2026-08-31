@@ -40,7 +40,10 @@ from cortex_backend.repositories.chats import (
     ChatRepositoryError,
     ChatRevisionConflict,
 )
-from cortex_backend.repositories.settings import SettingsMigrationReport
+from cortex_backend.repositories.settings import (
+    SettingsMigrationReport,
+    SettingsRevisionConflict,
+)
 from cortex_backend.services.models import ModelPullProgress
 from cortex_backend.services.attachments import (
     ChatAttachmentError,
@@ -529,12 +532,17 @@ def build_router() -> APIRouter:
         _: SessionPrincipal = Depends(require_session),
     ) -> SettingsResponse:
         try:
-            current = deps.settings.load().settings
+            expected_revision = payload.expected_revision
+            if expected_revision is None:
+                # Older clients only sent the revision embedded in the snapshot.
+                expected_revision = payload.settings.revision
             updated = payload.settings.model_copy(
-                update={"revision": current.revision + 1}
+                update={"revision": expected_revision + 1}
             )
-            deps.settings.save(updated)
+            deps.settings.save(updated, expected_revision=expected_revision)
             loaded = deps.settings.load()
+        except SettingsRevisionConflict as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("save settings", exc)
         return SettingsResponse(

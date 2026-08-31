@@ -20,12 +20,14 @@ from .settings import (
     SettingsReadResult,
     SettingsRepository,
     SettingsRepositoryError,
+    SettingsRevisionConflict,
 )
 
 __all__ = [
     "ChatRepository",
     "ChatRepositoryError",
     "ChatRevisionConflict",
+    "SettingsRevisionConflict",
     "InMemoryChatRepository",
     "LegacyDatabaseChatRepository",
     "MemoryRepository",
