@@ -137,7 +137,9 @@ describe("App", () => {
 
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
-    expect(await screen.findByRole("heading", { name: "Start local workspace" })).toBeVisible();
+    // The chat route is intentionally code-split; allow the lazy module and
+    // its recovery stream to settle when the full suite is under load.
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 5_000 })).toBeVisible();
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/generations/job-expired/events"))).toHaveLength(1);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
     expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();

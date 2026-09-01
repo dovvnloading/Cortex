@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
-import { ChatPage } from "../features/chat/ChatPage";
+const loadChatPage = () => import("../features/chat/ChatPage").then(({ ChatPage: component }) => ({ default: component }));
+const ChatPage = lazy(loadChatPage);
 import { Onboarding } from "../features/shell/Onboarding";
-import { SettingsPanel, type SettingsPanelProps } from "../features/settings/SettingsPanel";
+const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
+import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useChatStore } from "../stores/useChatStore";
@@ -112,6 +114,16 @@ export function App({ api: providedApi }: Props) {
   }, [reconnect]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
+
+  // Start fetching the chat route while the authenticated workspace is
+  // loading its initial data. This keeps an active generation's recovery
+  // stream from waiting behind the lazy route chunk, without preloading chat
+  // code for direct Settings launches.
+  useEffect(() => {
+    if (sessionReady && parseAppRoute(window.location.pathname).kind === "chat") {
+      void loadChatPage().catch(() => undefined);
+    }
+  }, [sessionReady]);
 
   if (!sessionReady) {
     return (
@@ -763,9 +775,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   return (
     <>
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
-        {route.kind === "settings"
-          ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
-          : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
+        <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
+          {route.kind === "settings"
+            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
+            : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
+        </Suspense>
       </AppShell>
       <CommandPalette
         chats={chats}
