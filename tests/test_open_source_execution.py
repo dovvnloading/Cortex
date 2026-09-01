@@ -15,6 +15,7 @@ from cortex_backend.execution import ExecutionRepository, build_execution_lifecy
 from cortex_backend.execution.scratch_compute import (
     ScratchComputeError,
     evaluate_scratch_expression,
+    scratch_worker_main,
 )
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
@@ -85,6 +86,28 @@ def _app(tmp_path):
         execution_lifecycle=lifecycle,
         installation_principal_id=repository.installation_principal_id,
     )
+
+
+def test_scratch_worker_announces_readiness_before_evaluating():
+    class _Connection:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+            self.closed = False
+
+        def send(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = _Connection()
+    scratch_worker_main(connection, SimpleNamespace(is_set=lambda: False), "12 * 7")
+
+    assert connection.messages == [
+        {"ok": True, "event": "ready"},
+        {"ok": True, "value": "84"},
+    ]
+    assert connection.closed is True
 
 
 def test_safe_expression_language_rejects_python_and_host_capabilities():

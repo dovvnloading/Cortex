@@ -73,6 +73,7 @@ from .scratch_compute import (
 
 
 DEFAULT_SCRATCH_TIMEOUT_SECONDS = 3.0
+DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS = 15.0
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
 DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
 # Importing a frozen desktop process can take longer than evaluating a small
@@ -298,13 +299,15 @@ class _LocalScratchAttempt:
         self,
         *,
         timeout_seconds: float = DEFAULT_SCRATCH_TIMEOUT_SECONDS,
+        startup_timeout_seconds: float = DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
     ) -> None:
-        if timeout_seconds <= 0 or cancel_grace_seconds <= 0:
+        if timeout_seconds <= 0 or startup_timeout_seconds <= 0 or cancel_grace_seconds <= 0:
             raise ValueError("worker timeouts must be positive")
         self._context = multiprocessing.get_context("spawn")
         self._cancel_event = self._context.Event()
         self._timeout_seconds = float(timeout_seconds)
+        self._startup_timeout_seconds = float(startup_timeout_seconds)
         self._cancel_grace_seconds = float(cancel_grace_seconds)
         self._lock = Lock()
         self._process: Any | None = None
@@ -329,7 +332,8 @@ class _LocalScratchAttempt:
             process.start()
             sender.close()
             sender = None
-            deadline = time.monotonic() + self._timeout_seconds
+            startup_deadline = time.monotonic() + self._startup_timeout_seconds
+            deadline: float | None = None
             cancelled_at: float | None = None
             while True:
                 if cancel_event.is_set() or self._cancel_event.is_set():
@@ -342,6 +346,9 @@ class _LocalScratchAttempt:
                         raise ScratchComputeError("worker_failed") from None
                     if not isinstance(message, Mapping):
                         raise ScratchComputeError("worker_output_invalid")
+                    if message.get("ok") is True and message.get("event") == "ready":
+                        deadline = time.monotonic() + self._timeout_seconds
+                        continue
                     if message.get("ok") is not True:
                         code = message.get("code")
                         raise ScratchComputeError(
@@ -354,7 +361,9 @@ class _LocalScratchAttempt:
                 now = time.monotonic()
                 if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
                     raise ScratchComputeError("cancelled")
-                if now >= deadline:
+                if deadline is None and now >= startup_deadline:
+                    raise ScratchComputeError("worker_startup_timeout")
+                if deadline is not None and now >= deadline:
                     raise ScratchComputeError("worker_timeout")
         finally:
             if sender is not None:
@@ -542,6 +551,7 @@ class LocalExecutionCoordinator:
         lease_seconds: float = 60.0,
         supervisor_lease_seconds: float = 60.0,
         scratch_timeout_seconds: float = DEFAULT_SCRATCH_TIMEOUT_SECONDS,
+        scratch_startup_timeout_seconds: float = DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS,
         image_timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
         code_timeout_seconds: float = DEFAULT_CODE_TIMEOUT_SECONDS,
     ) -> None:
@@ -554,6 +564,7 @@ class LocalExecutionCoordinator:
         self.lease_seconds = float(lease_seconds)
         self.supervisor_lease_seconds = float(supervisor_lease_seconds)
         self.scratch_timeout_seconds = float(scratch_timeout_seconds)
+        self.scratch_startup_timeout_seconds = float(scratch_startup_timeout_seconds)
         self.image_timeout_seconds = float(image_timeout_seconds)
         self.code_timeout_seconds = min(float(code_timeout_seconds), MAX_CODE_TIMEOUT_SECONDS)
         self._supervisor_owner = f"local-supervisor-{uuid4().hex}"
@@ -1227,7 +1238,10 @@ class LocalExecutionCoordinator:
                 phase="worker",
                 data={"message": "Computing in an isolated local worker."},
             )
-            attempt = _LocalScratchAttempt(timeout_seconds=self.scratch_timeout_seconds)
+            attempt = _LocalScratchAttempt(
+                timeout_seconds=self.scratch_timeout_seconds,
+                startup_timeout_seconds=self.scratch_startup_timeout_seconds,
+            )
             with self._scratch_lock:
                 self._scratch_attempts[job_id] = attempt
             result = attempt.evaluate(request.expression, cancel_event)
@@ -1319,6 +1333,7 @@ __all__ = [
     "DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS",
     "DEFAULT_IMAGE_TIMEOUT_SECONDS",
     "DEFAULT_SCRATCH_TIMEOUT_SECONDS",
+    "DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS",
     "LocalExecutionCoordinator",
     "LocalRecipeWorkerAttempt",
 ]

@@ -331,6 +331,10 @@ def scratch_worker_main(
     """Process entrypoint. It returns a compact, redacted message only."""
 
     try:
+        # Keep process bootstrap separate from the small expression's wall-clock
+        # budget.  On a busy Windows desktop, importing the worker can take
+        # longer than evaluating a bounded expression.
+        connection.send({"ok": True, "event": "ready"})
         result = evaluate_scratch_expression(
             expression,
             cancel_check=lambda: bool(cancel_event.is_set()),
