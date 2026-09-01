@@ -140,7 +140,7 @@ def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
         repository.read_artifact(artifact.artifact_id)
 
 
-def test_purging_a_terminal_job_removes_artifacts_before_cascade(tmp_path):
+def test_purging_a_terminal_job_keeps_fresh_artifacts_for_retention(tmp_path):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
         job_id="job-terminal-artifact",
@@ -166,9 +166,9 @@ def test_purging_a_terminal_job_removes_artifacts_before_cascade(tmp_path):
 
     assert repository.purge_expired(
         now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-    ) == 1
-    assert not Path(artifact.path).exists()
-    assert repository.get_artifact(artifact.artifact_id) is None
+    ) == 0
+    assert Path(artifact.path).exists()
+    assert repository.get_artifact(artifact.artifact_id) is not None
 
 
 def test_terminal_state_is_immutable_and_wait_has_a_real_timeout(tmp_path):

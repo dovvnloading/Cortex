@@ -1,5 +1,5 @@
 import { Save, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   CortexSettings,
   LlamaCppRuntimeStatus,
@@ -36,6 +36,49 @@ export type SettingsPanelProps = {
 
 const DEFAULT_TRANSLATION_MODEL = "translategemma:4b";
 
+const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === "object" && value !== null && !Array.isArray(value)
+);
+
+const valuesEqual = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => hasOwn(right, key) && valuesEqual(left[key], right[key]));
+};
+
+/**
+ * Keep edits made in this dialog while adopting fields changed elsewhere.
+ * Settings are saved as a document, so submitting the original draft would
+ * otherwise replace a newer model/theme/revision with its stale values.
+ */
+const mergeChangedValues = <T,>(draft: T, baseline: T, current: T): T => {
+  if (valuesEqual(draft, baseline)) return current;
+  if (!isRecord(draft) || !isRecord(baseline)) return draft;
+
+  const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
+  const keys = new Set([...Object.keys(draft), ...Object.keys(baseline)]);
+  for (const key of keys) {
+    if (!hasOwn(draft, key)) {
+      // A deleted draft field is a local edit too. This is mostly defensive;
+      // the current controls generally update values rather than delete keys.
+      if (hasOwn(baseline, key)) delete merged[key];
+      continue;
+    }
+  if (!hasOwn(baseline, key)) {
+      merged[key] = draft[key];
+      continue;
+    }
+    const currentValue = isRecord(current) ? current[key] : undefined;
+    merged[key] = mergeChangedValues(draft[key], baseline[key], currentValue);
+  }
+  return merged as T;
+};
+
 const sections: { id: SettingsSection; label: string; detail: string }[] = [
   { id: "general", label: "General", detail: "Appearance and behavior" },
   { id: "model", label: "AI Model", detail: "Chat model and generation" },
@@ -64,7 +107,14 @@ export function SettingsPanel({
   onClose,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
+  const baselineRef = useRef(settings);
   const [section, setSection] = useState<SettingsSection>("general");
+  useEffect(() => {
+    const previousBaseline = baselineRef.current;
+    setDraft((currentDraft) => mergeChangedValues(currentDraft, previousBaseline, settings));
+    baselineRef.current = settings;
+  }, [settings]);
+
   const installedModels = localModelNames(models);
   const appearance = draft.appearance ?? {};
   const generation = draft.generation ?? {};
@@ -99,17 +149,24 @@ export function SettingsPanel({
     label: isGGUFModel(model) ? `${displayModelName(model)} (GGUF)` : model,
     detail: "Installed locally",
   }));
-  const saveDraft = () => onSave({
-    ...draft,
-    models: {
-      ...modelSettings,
-      // An empty inventory (Ollama down, a failed refresh) is a routine,
-      // recoverable state -- it must not overwrite a still-valid configured
-      // model with null just because the picker has nothing to offer right now.
-      chat: installedModels.length ? (selectedChatModel || null) : (modelSettings.chat ?? null),
-      title: null,
-    },
-  });
+  const saveDraft = () => {
+    const latest = mergeChangedValues(draft, baselineRef.current, settings);
+    const latestModels = latest.models ?? {};
+    const chatWasEdited = !valuesEqual(draft.models?.chat, baselineRef.current.models?.chat);
+    return onSave({
+      ...latest,
+      models: {
+        ...latestModels,
+        // An empty inventory (Ollama down, a failed refresh) is a routine,
+        // recoverable state -- it must not overwrite a still-valid configured
+        // model with null just because the picker has nothing to offer right
+        // now. Also preserve an externally selected model when this dialog
+        // did not edit the chat picker, even if its inventory refresh lags.
+        chat: chatWasEdited && installedModels.length ? (selectedChatModel || null) : (latestModels.chat ?? null),
+        title: null,
+      },
+    });
+  };
 
   return (
     <section className="settings-dialog" aria-labelledby="settings-title">
@@ -306,6 +363,7 @@ export function SettingsPanel({
               llamacppStatus={llamacppStatus}
               gguf={{
                 directory: modelSettings.gguf_directory ?? "",
+                directoryDirty: (modelSettings.gguf_directory ?? "") !== (settings.models?.gguf_directory ?? ""),
                 onDirectoryChange: (value) => update({ models: { ...modelSettings, gguf_directory: value || null } }),
                 onDownload: onDownloadGGUF,
                 busy: modelBusy,

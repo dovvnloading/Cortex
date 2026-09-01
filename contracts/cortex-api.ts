@@ -209,6 +209,16 @@ export interface ExecutionPreviewRequest {
   step_delay_seconds?: number;
 }
 
+export interface ExecutionSSEEvent {
+  id: number;
+  sequence: number;
+  job_id: string;
+  event: "execution.queued" | "execution.started" | "execution.progress" | "execution.cancelling" | "execution.recovered" | "execution.completed" | "execution.failed" | "execution.cancelled" | "execution.code.requested" | "execution.code.started" | "execution.code.output" | "execution.code.completed" | "execution.code.failed" | "execution.code.cancelled" | "execution.code.revoked";
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  phase?: string | null;
+  data?: Record<string, unknown>;
+}
+
 export interface ExecutionSettings {
   automatic_compute?: boolean;
   code_execution_enabled?: boolean;
@@ -566,14 +576,4 @@ export interface ValidationError {
   type: string;
   input?: unknown;
   ctx?: Record<string, unknown>;
-}
-
-export interface ExecutionSSEEvent {
-  id: number;
-  sequence: number;
-  job_id: string;
-  event: "execution.queued" | "execution.started" | "execution.progress" | "execution.cancelling" | "execution.recovered" | "execution.completed" | "execution.failed" | "execution.cancelled" | "execution.code.requested" | "execution.code.started" | "execution.code.output" | "execution.code.completed" | "execution.code.failed" | "execution.code.cancelled" | "execution.code.revoked";
-  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
-  phase?: string | null;
-  data?: Record<string, unknown>;
 }

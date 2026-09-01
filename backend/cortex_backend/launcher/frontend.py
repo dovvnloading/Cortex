@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -18,6 +19,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MANIFEST_NAME = ".cortex-build.json"
+BUILD_LOCK_NAME = ".cortex-frontend-build.lock"
 INSTALL_MANIFEST_NAME = ".cortex-install.json"
 INSTALL_CACHE_DIRNAME = ".cortex-install-cache"
 TRACKED_CONFIG = (
@@ -57,8 +59,17 @@ class FrontendManifest:
 
 def _digest_files(frontend_root: Path, paths: list[Path]) -> str:
     digest = hashlib.sha256()
-    for path in sorted(paths, key=lambda item: item.relative_to(frontend_root).as_posix()):
-        relative = path.relative_to(frontend_root).as_posix().encode("utf-8")
+    def relative_path(path: Path) -> str:
+        try:
+            return path.relative_to(frontend_root).as_posix()
+        except ValueError:
+            # The generated API contract lives beside (not under) the
+            # frontend tree.  Include a stable relative label without ever
+            # resolving arbitrary paths outside the repository layout.
+            return Path(os.path.relpath(path, frontend_root)).as_posix()
+
+    for path in sorted(paths, key=relative_path):
+        relative = relative_path(path).encode("utf-8")
         digest.update(relative)
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -76,6 +87,10 @@ def _tracked_files(frontend_root: Path) -> list[Path]:
     public_dir = frontend_root / "public"
     if public_dir.is_dir():
         files.extend(path for path in public_dir.rglob("*") if path.is_file())
+    files.extend(path for path in frontend_root.glob(".env*") if path.is_file())
+    contract = frontend_root.parent / "contracts" / "cortex-api.ts"
+    if contract.is_file():
+        files.append(contract)
     return [path for path in files if path.is_file()]
 
 
@@ -87,7 +102,17 @@ def lock_digest(frontend_root: Path) -> str:
 
 
 def source_digest(frontend_root: Path) -> str:
-    return _digest_files(frontend_root, _tracked_files(frontend_root))
+    digest = hashlib.sha256(_digest_files(frontend_root, _tracked_files(frontend_root)).encode("ascii"))
+    # Vite embeds VITE_* process variables in the bundle even when there is no
+    # corresponding .env file.  Hash names and values, never persist values in
+    # the manifest itself.
+    for name, value in sorted(os.environ.items()):
+        if name.startswith("VITE_"):
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _tool_name(name: str) -> str:
@@ -136,9 +161,13 @@ def needs_build(frontend_root: Path, *, force: bool = False) -> bool:
     manifest = read_manifest(dist)
     if manifest is None:
         return True
+    node_major = _major_version("node")
+    npm_major = _major_version("npm")
     return (
         manifest.lock_digest != lock_digest(frontend_root)
         or manifest.source_digest != source_digest(frontend_root)
+        or manifest.node_major != node_major
+        or manifest.npm_major != npm_major
     )
 
 
@@ -151,6 +180,57 @@ def _run(command: list[str], *, cwd: Path) -> None:
         raise FrontendBuildError(
             f"Frontend command failed with exit code {exc.returncode}."
         ) from exc
+
+
+@contextmanager
+def _frontend_build_lock(frontend_root: Path):
+    """Serialize source builds and shared install-cache mutation.
+
+    The lock is an OS-level byte-range lock on a persistent, ignored file. A
+    persistent inode avoids the unlink/recreate race that would let a second
+    process miss the first process's lock while it is cleaning up.
+    """
+
+    lock_path = frontend_root / BUILD_LOCK_NAME
+    try:
+        handle = lock_path.open("a+b")
+    except OSError as exc:
+        raise FrontendBuildError("Could not open the frontend build lock.") from exc
+    locked = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except (OSError, ImportError) as exc:
+            raise FrontendBuildError("Another frontend build is already running.") from exc
+        yield
+    finally:
+        if locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                logger.warning("Could not release the frontend build lock: %s", lock_path)
+        handle.close()
 
 
 def _reclaim_stale_staging_directories(parent: Path, keep: Path) -> None:
@@ -235,56 +315,57 @@ def build_frontend(
     frontend_root = frontend_root.resolve()
     if not (frontend_root / "package.json").is_file():
         raise FrontendBuildError("frontend/package.json is missing from the source checkout.")
-    build_root = _stage_frontend_source(frontend_root)
-    staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
-    dist = frontend_root / "dist"
-    backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
-    try:
-        lock = lock_digest(build_root)
-        source = source_digest(build_root)
-        node_major = _major_version("node")
-        npm_major = _major_version("npm")
-        _install_if_needed(build_root, lock, _install_cache_root(frontend_root))
-        _run(
-            [_tool_name("npm"), "run", "build", "--", "--outDir", str(staging)],
-            cwd=build_root,
-        )
-        if not (staging / "index.html").is_file():
-            raise FrontendBuildError("Frontend build completed without index.html.")
-        manifest = FrontendManifest(
-            lock_digest=lock,
-            source_digest=source,
-            node_major=node_major,
-            npm_major=npm_major,
-            built_at=datetime.now(timezone.utc).isoformat(),
-            cortex_version=cortex_version,
-        )
-        (staging / MANIFEST_NAME).write_text(
-            json.dumps(manifest.as_dict(), indent=2),
-            encoding="utf-8",
-        )
-        if dist.exists():
-            os.replace(dist, backup)
+    with _frontend_build_lock(frontend_root):
+        build_root = _stage_frontend_source(frontend_root)
+        staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
+        dist = frontend_root / "dist"
+        backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
         try:
-            os.replace(staging, dist)
-        except OSError:
+            lock = lock_digest(build_root)
+            source = source_digest(build_root)
+            node_major = _major_version("node")
+            npm_major = _major_version("npm")
+            _install_if_needed(build_root, lock, _install_cache_root(frontend_root))
+            _run(
+                [_tool_name("npm"), "run", "build", "--", "--outDir", str(staging)],
+                cwd=build_root,
+            )
+            if not (staging / "index.html").is_file():
+                raise FrontendBuildError("Frontend build completed without index.html.")
+            manifest = FrontendManifest(
+                lock_digest=lock,
+                source_digest=source,
+                node_major=node_major,
+                npm_major=npm_major,
+                built_at=datetime.now(timezone.utc).isoformat(),
+                cortex_version=cortex_version,
+            )
+            (staging / MANIFEST_NAME).write_text(
+                json.dumps(manifest.as_dict(), indent=2),
+                encoding="utf-8",
+            )
+            if dist.exists():
+                os.replace(dist, backup)
+            try:
+                os.replace(staging, dist)
+            except OSError:
+                if backup.exists() and not dist.exists():
+                    os.replace(backup, dist)
+                raise
+            if backup.exists():
+                shutil.rmtree(backup)
+            return dist
+        except FrontendBuildError:
+            raise
+        except OSError as exc:
+            raise FrontendBuildError("Could not atomically install the frontend bundle.") from exc
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if build_root.exists():
+                shutil.rmtree(build_root, ignore_errors=True)
             if backup.exists() and not dist.exists():
                 os.replace(backup, dist)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-        return dist
-    except FrontendBuildError:
-        raise
-    except OSError as exc:
-        raise FrontendBuildError("Could not atomically install the frontend bundle.") from exc
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if build_root.exists():
-            shutil.rmtree(build_root, ignore_errors=True)
-        if backup.exists() and not dist.exists():
-            os.replace(backup, dist)
 
 
 def ensure_frontend(

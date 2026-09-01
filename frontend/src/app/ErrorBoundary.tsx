@@ -23,7 +23,11 @@ export class ErrorBoundary extends Component<Props, State> {
       <main className="fatal-state" aria-labelledby="fatal-title">
         <AlertTriangle aria-hidden="true" size={28} />
         <h1 id="fatal-title">Cortex needs a restart</h1>
-        <p>The interface hit an unexpected state. Your local data was not changed.</p>
+        <p>
+          The interface hit an unexpected state. The crashed view took no further action.
+          Reload the workspace to try again; if the problem persists, collect diagnostics
+          after reloading.
+        </p>
         <button className="button button-primary" onClick={() => window.location.reload()}>
           <RotateCcw aria-hidden="true" size={16} />
           Reload workspace

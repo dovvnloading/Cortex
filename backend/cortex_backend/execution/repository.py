@@ -13,6 +13,7 @@ import secrets
 import sqlite3
 import stat
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Literal
 from uuid import uuid4
@@ -31,6 +32,7 @@ from .models import (
 SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
+DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,99}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
@@ -78,6 +80,21 @@ class ApprovalTransitionError(ExecutionRepositoryError):
 
 class ArtifactLimitError(ExecutionRepositoryError):
     """An artifact exceeded the configured Phase 1 limit."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCleanupResult:
+    """Bounded cleanup work completed by one janitor pass."""
+
+    artifacts: int = 0
+    jobs: int = 0
+    events: int = 0
+
+    @property
+    def rows(self) -> int:
+        """Return all durable rows removed by the pass."""
+
+        return self.artifacts + self.jobs + self.events
 
 
 class ExecutionRepository:
@@ -132,6 +149,10 @@ class ExecutionRepository:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(self.artifact_root) or _has_reparse_parent(self.artifact_root):
             raise ExecutionRepositoryError("Artifact root is unavailable.")
+        self.quarantine_root = self.artifact_root / ".quarantine"
+        self.quarantine_root.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_point(self.quarantine_root) or _has_reparse_parent(self.quarantine_root):
+            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
         with _SCHEMA_LOCK:
             self._ensure_schema_locked()
 
@@ -198,6 +219,18 @@ class ExecutionRepository:
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     lease_owner TEXT NOT NULL,
                     lease_expires_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS execution_cleanup_leases (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    lease_owner TEXT NOT NULL,
+                    lease_expires_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS execution_artifact_cleanup (
+                    artifact_id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    quarantine_path TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'quarantined', 'finalized')),
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS execution_installation_principal (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -787,6 +820,67 @@ class ExecutionRepository:
                 (lease_owner,),
             )
 
+    def claim_cleanup_lease(self, *, lease_owner: str, ttl_seconds: float = 120.0) -> str:
+        """Claim the installation-wide cleanup lease, reclaiming stale owners."""
+
+        if not lease_owner:
+            raise ValueError("lease_owner must be non-empty")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT lease_owner, lease_expires_at FROM execution_cleanup_leases WHERE id = 1"
+            ).fetchone()
+            if (
+                row is not None
+                and datetime.fromisoformat(row["lease_expires_at"]) > now
+                and row["lease_owner"] != lease_owner
+            ):
+                raise LeaseConflict("Execution cleanup supervisor is already running.")
+            connection.execute(
+                """
+                INSERT INTO execution_cleanup_leases (id, lease_owner, lease_expires_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    lease_owner = excluded.lease_owner,
+                    lease_expires_at = excluded.lease_expires_at
+                """,
+                (lease_owner, expires.isoformat()),
+            )
+        return expires.isoformat()
+
+    def release_cleanup_lease(self, *, lease_owner: str) -> None:
+        """Release only the cleanup lease owned by this process."""
+
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM execution_cleanup_leases WHERE id = 1 AND lease_owner = ?",
+                (lease_owner,),
+            )
+
+    def renew_cleanup_lease(self, *, lease_owner: str, ttl_seconds: float = 120.0) -> bool:
+        """Extend a live cleanup lease, returning false after ownership is lost."""
+
+        if not lease_owner:
+            raise ValueError("lease_owner must be non-empty")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE execution_cleanup_leases
+                SET lease_expires_at = ?
+                WHERE id = 1 AND lease_owner = ? AND lease_expires_at > ?
+                """,
+                (expires.isoformat(), lease_owner, now.isoformat()),
+            ).rowcount
+        return bool(updated)
+
     def events(self, job_id: str, *, after_sequence: int = 0) -> list[ExecutionEvent]:
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
@@ -1089,60 +1183,230 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Artifact integrity check failed.")
         return content
 
-    def purge_expired(self, *, now: str | None = None) -> int:
-        """Remove expired artifacts and terminal jobs without orphaning files."""
-        cutoff = now or self._now()
-        with self.connect() as connection:
-            artifacts = connection.execute(
-                """
-                SELECT a.artifact_id, a.path
-                FROM execution_artifacts a
-                JOIN execution_jobs j ON j.job_id = a.job_id
-                WHERE a.expires_at <= ?
-                   OR (
-                       j.status IN ('succeeded', 'failed', 'cancelled')
-                       AND j.updated_at <= ?
-                   )
-                """,
-                (cutoff, cutoff),
-            ).fetchall()
-            root = self.artifact_root.resolve()
-            artifact_paths: list[tuple[str, Path]] = []
-            # Validate every path before unlinking any file.  The database
-            # transaction can roll back, but filesystem deletion cannot; a
-            # single tampered path must not make earlier valid artifacts
-            # disappear while their rows remain.
-            for row in artifacts:
-                path = Path(row["path"])
-                if _is_reparse_point(path):
-                    raise ExecutionRepositoryError("Artifact path is unavailable.")
-                try:
-                    resolved = path.resolve(strict=False)
-                except (OSError, RuntimeError):
-                    raise ExecutionRepositoryError("Artifact path is unavailable.") from None
-                if not resolved.is_relative_to(root):
-                    raise ExecutionRepositoryError("Artifact path is unavailable.")
-                artifact_paths.append((str(row["artifact_id"]), path))
+    def cleanup_expired(
+        self,
+        *,
+        now: str | None = None,
+        terminal_job_retention_seconds: int = DEFAULT_TERMINAL_JOB_RETENTION_SECONDS,
+        limit: int = 100,
+    ) -> ExecutionCleanupResult:
+        """Run one bounded, restart-safe retention pass using quarantine tombstones."""
 
-            for artifact_id, path in artifact_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    raise ExecutionRepositoryError("Artifact cleanup failed.") from None
-                connection.execute(
-                    "DELETE FROM execution_artifacts WHERE artifact_id = ?",
-                    (artifact_id,),
-                )
+        if isinstance(limit, bool) or not 1 <= limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        if (
+            isinstance(terminal_job_retention_seconds, bool)
+            or not isinstance(terminal_job_retention_seconds, int)
+            or terminal_job_retention_seconds < 0
+        ):
+            raise ValueError("terminal_job_retention_seconds must be non-negative")
+        cutoff = now or self._now()
+        if not isinstance(cutoff, str):
+            raise ValueError("now must be an ISO timestamp")
+        try:
+            cutoff_time = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            raise ValueError("now must be an ISO timestamp") from None
+        if cutoff_time.tzinfo is None:
+            cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
+        cutoff_time = cutoff_time.astimezone(timezone.utc)
+        cutoff = cutoff_time.isoformat()
+        job_cutoff = (cutoff_time - timedelta(seconds=terminal_job_retention_seconds)).isoformat()
+
+        removed_artifacts = self._resume_artifact_cleanup(limit=limit)
+        remaining_artifacts = max(0, limit - removed_artifacts)
+        if remaining_artifacts:
+            with self.connect() as connection:
+                artifact_rows = connection.execute(
+                    """
+                    SELECT artifact_id, path
+                    FROM execution_artifacts
+                    WHERE expires_at <= ?
+                      AND artifact_id NOT IN (
+                          SELECT artifact_id FROM execution_artifact_cleanup
+                      )
+                    ORDER BY expires_at, artifact_id
+                    LIMIT ?
+                    """,
+                    (cutoff, remaining_artifacts),
+                ).fetchall()
+            validated = [
+                (str(row["artifact_id"]), self._validated_cleanup_path(Path(row["path"])))
+                for row in artifact_rows
+            ]
+            for artifact_id, path in validated:
+                quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
+                self._validated_quarantine_path(quarantine)
+                self._record_artifact_cleanup(artifact_id, path, quarantine)
+                removed_artifacts += self._resume_artifact_cleanup(limit=1)
+
+        remaining = max(0, limit - removed_artifacts)
+        if remaining == 0:
+            return ExecutionCleanupResult(artifacts=removed_artifacts)
+        with self.connect() as connection:
             jobs = connection.execute(
                 """
-                SELECT job_id FROM execution_jobs
-                WHERE status IN ('succeeded', 'failed', 'cancelled') AND updated_at <= ?
+                SELECT j.job_id,
+                       (SELECT COUNT(*) FROM execution_events e WHERE e.job_id = j.job_id) AS event_count
+                FROM execution_jobs j
+                WHERE j.status IN ('succeeded', 'failed', 'cancelled')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM execution_artifacts a WHERE a.job_id = j.job_id
+                  )
+                  AND j.updated_at <= ?
+                ORDER BY j.updated_at, j.job_id
+                LIMIT ?
                 """,
-                (cutoff,),
+                (job_cutoff, remaining),
             ).fetchall()
-            for row in jobs:
-                connection.execute("DELETE FROM execution_jobs WHERE job_id = ?", (row["job_id"],))
-        return len(artifact_paths)
+        removed_jobs = 0
+        removed_events = 0
+        for row in jobs:
+            with self.connect() as connection:
+                deleted = connection.execute(
+                    """
+                    DELETE FROM execution_jobs
+                    WHERE job_id = ?
+                      AND status IN ('succeeded', 'failed', 'cancelled')
+                      AND updated_at <= ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM execution_artifacts a WHERE a.job_id = execution_jobs.job_id
+                      )
+                    """,
+                    (row["job_id"], job_cutoff),
+                ).rowcount
+            if deleted:
+                removed_jobs += int(deleted)
+                removed_events += int(row["event_count"])
+        return ExecutionCleanupResult(
+            artifacts=removed_artifacts,
+            jobs=removed_jobs,
+            events=removed_events,
+        )
+
+    def purge_expired(
+        self,
+        *,
+        now: str | None = None,
+        terminal_job_retention_seconds: int = DEFAULT_TERMINAL_JOB_RETENTION_SECONDS,
+    ) -> int:
+        """Remove expired artifacts and terminal jobs without orphaning files."""
+        return self.cleanup_expired(
+            now=now,
+            terminal_job_retention_seconds=terminal_job_retention_seconds,
+        ).artifacts
+
+    def _validated_cleanup_path(self, path: Path) -> Path:
+        """Validate a source path without following an untrusted reparse hop."""
+
+        root = self.artifact_root.resolve()
+        quarantine_root = self.quarantine_root.resolve()
+        if _is_reparse_point(path):
+            raise ExecutionRepositoryError("Artifact path is unavailable.")
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+        if (
+            not resolved.is_relative_to(root)
+            or resolved == root
+            or resolved.is_relative_to(quarantine_root)
+            or _has_reparse_parent(path)
+        ):
+            raise ExecutionRepositoryError("Artifact path is unavailable.")
+        if path.exists():
+            try:
+                info = path.lstat()
+            except OSError:
+                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+            if not stat.S_ISREG(info.st_mode):
+                raise ExecutionRepositoryError("Artifact path is unavailable.")
+        return path
+
+    def _validated_quarantine_path(self, path: Path) -> Path:
+        root = self.quarantine_root.resolve()
+        if _is_reparse_point(path):
+            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise ExecutionRepositoryError("Artifact quarantine is unavailable.") from None
+        if not resolved.is_relative_to(root) or resolved == root or _has_reparse_parent(path):
+            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+        return path
+
+    def _record_artifact_cleanup(
+        self, artifact_id: str, path: Path, quarantine: Path
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO execution_artifact_cleanup
+                    (artifact_id, path, quarantine_path, state, created_at)
+                VALUES (?, ?, ?, 'pending', ?)
+                ON CONFLICT(artifact_id) DO NOTHING
+                """,
+                (artifact_id, str(path), str(quarantine), self._now()),
+            )
+
+    def _resume_artifact_cleanup(self, *, limit: int) -> int:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT artifact_id, path, quarantine_path, state
+                FROM execution_artifact_cleanup
+                ORDER BY created_at, artifact_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        removed = 0
+        for row in rows:
+            artifact_id = str(row["artifact_id"])
+            path = self._validated_cleanup_path(Path(row["path"]))
+            quarantine = self._validated_quarantine_path(Path(row["quarantine_path"]))
+            state = str(row["state"])
+            if state not in {"pending", "quarantined", "finalized"}:
+                raise ExecutionRepositoryError("Artifact cleanup state is invalid.")
+            if state == "pending":
+                source_exists = path.exists()
+                quarantine_exists = quarantine.exists()
+                if source_exists and quarantine_exists:
+                    raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+                if source_exists:
+                    try:
+                        path.replace(quarantine)
+                    except OSError:
+                        raise ExecutionRepositoryError("Artifact cleanup failed.") from None
+                with self.connect() as connection:
+                    connection.execute(
+                        "UPDATE execution_artifact_cleanup SET state = 'quarantined' WHERE artifact_id = ?",
+                        (artifact_id,),
+                    )
+                state = "quarantined"
+            if state == "quarantined":
+                with self.connect() as connection:
+                    deleted = connection.execute(
+                        "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                        (artifact_id,),
+                    ).rowcount
+                    connection.execute(
+                        "UPDATE execution_artifact_cleanup SET state = 'finalized' WHERE artifact_id = ?",
+                        (artifact_id,),
+                    )
+                removed += int(deleted or 0)
+                state = "finalized"
+            if state == "finalized":
+                try:
+                    quarantine.unlink(missing_ok=True)
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact cleanup failed.") from None
+                with self.connect() as connection:
+                    connection.execute(
+                        "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
+                        (artifact_id,),
+                    )
+        return removed
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:

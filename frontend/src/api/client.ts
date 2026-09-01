@@ -31,6 +31,7 @@ import type {
   JobAccepted,
   JobStatusResponse,
   HealthResponse,
+  HandoffResponse,
   MemoryResponse,
   ModelDownloadRequest,
   ModelPullRequest,
@@ -43,6 +44,7 @@ import type {
   SystemResponse,
   SSEEvent,
 } from "../../../contracts/cortex-api";
+import { normalizeApiBaseUrl } from "./baseUrl";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -58,6 +60,89 @@ export class ApiError extends Error {
 
 type FetchLike = typeof fetch;
 type SessionExpiredListener = () => void;
+type ValidationIssue = { loc?: unknown; msg?: unknown };
+type ErrorBody = {
+  detail?: string | { message?: string } | ValidationIssue[];
+};
+
+const SESSION_TOKEN_KEY = "cortex.session.token";
+const VALIDATION_ISSUE_LIMIT = 8;
+const VALIDATION_TEXT_LIMIT = 240;
+const REQUEST_LOCATION_MARKERS = new Set(["body", "query", "path", "header", "cookie"]);
+
+function cleanValidationText(value: string): string {
+  const withoutControls = Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
+  }).join("");
+  return withoutControls
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, VALIDATION_TEXT_LIMIT);
+}
+
+function formatValidationLocation(location: unknown): string | null {
+  if (!Array.isArray(location) || location.length === 0) return null;
+
+  const parts: string[] = [];
+  for (const part of location) {
+    if (typeof part === "string") {
+      const cleaned = cleanValidationText(part);
+      if (!cleaned) return null;
+      parts.push(cleaned);
+    } else if (typeof part === "number" && Number.isSafeInteger(part) && part >= 0) {
+      parts.push(String(part));
+    } else {
+      return null;
+    }
+  }
+
+  if (REQUEST_LOCATION_MARKERS.has(parts[0]?.toLowerCase() ?? "")) parts.shift();
+  if (parts.length === 0) return null;
+
+  return parts.reduce((path, part, index) => {
+    if (/^\d+$/.test(part)) return index === 0 ? `[${part}]` : `${path}[${part}]`;
+    return index === 0 ? part : `${path}.${part}`;
+  }, "");
+}
+
+function formatValidationIssues(detail: ValidationIssue[]): string | null {
+  const messages = detail.slice(0, VALIDATION_ISSUE_LIMIT).flatMap((issue) => {
+    if (!issue || typeof issue !== "object" || Array.isArray(issue)) return [];
+    const location = formatValidationLocation(issue.loc);
+    const message = typeof issue.msg === "string" ? cleanValidationText(issue.msg) : "";
+    if (!location || !message) return [];
+    return [`${location}: ${message}`];
+  });
+  return messages.length > 0 ? messages.join("; ") : null;
+}
+
+function readPersistedSessionToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    // sessionStorage is an optional resilience layer. Browsers can deny both
+    // access to the storage object and individual storage operations.
+    return null;
+  }
+}
+
+function persistSessionToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+  } catch {
+    // Keep the exchanged token in memory when persistence is unavailable.
+  }
+}
+
+function removePersistedSessionToken(): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    // Clearing the in-memory session and notifying subscribers still matters
+    // when the browser denies storage access.
+  }
+}
 
 export class CortexApi {
   private readonly baseUrl: string;
@@ -66,12 +151,12 @@ export class CortexApi {
   private readonly sessionExpiredListeners = new Set<SessionExpiredListener>();
 
   constructor(
-    baseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1",
+    baseUrl = import.meta.env.VITE_API_BASE_URL,
     fetcher: FetchLike = window.fetch.bind(window),
   ) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.baseUrl = normalizeApiBaseUrl(baseUrl, import.meta.env.PROD);
     this.fetcher = fetcher;
-    this.sessionToken = window.sessionStorage.getItem("cortex.session.token");
+    this.sessionToken = readPersistedSessionToken();
   }
 
   get hasSession(): boolean {
@@ -86,7 +171,7 @@ export class CortexApi {
   clearSession(): void {
     const hadSession = this.sessionToken !== null;
     this.sessionToken = null;
-    window.sessionStorage.removeItem("cortex.session.token");
+    removePersistedSessionToken();
     if (hadSession) {
       for (const listener of this.sessionExpiredListeners) listener();
     }
@@ -102,8 +187,17 @@ export class CortexApi {
       },
     );
     this.sessionToken = response.session_token;
-    window.sessionStorage.setItem("cortex.session.token", response.session_token);
+    persistSessionToken(response.session_token);
     return response;
+  }
+
+  async rebootstrap(handoffSecret: string): Promise<SessionExchangeResponse> {
+    const handoff = await this.request<HandoffResponse>("/session/handoff", {
+      method: "POST",
+      headers: { "X-Cortex-Handoff": handoffSecret },
+      authenticated: false,
+    });
+    return this.exchangeBootstrapToken(handoff.bootstrap_token);
   }
 
   health(): Promise<HealthResponse> {
@@ -212,15 +306,16 @@ export class CortexApi {
     onEvent: (event: GenerationEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options);
+    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
   }
 
   private async streamEvents<T>(
     path: string,
     onEvent: (event: T) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<void> {
+  ): Promise<T | null> {
     const headers = this.authHeaders();
+    const sessionAtRequest = this.sessionToken;
     if (options.afterEventId !== undefined) {
       headers.set("Last-Event-ID", String(options.afterEventId));
     }
@@ -228,20 +323,28 @@ export class CortexApi {
       headers,
       signal: options.signal,
     });
-    if (response.status === 401) {
+    if (response.status === 401 && this.sessionToken === sessionAtRequest) {
       this.clearSession();
     }
     if (!response.ok || !response.body) {
       throw new ApiError(response.status, await this.errorDetail(response));
     }
 
+    let terminalEvent: T | null = null;
     const emit = (frame: string) => {
       const data = frame
         .split("\n")
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("\n");
-      if (data) onEvent(JSON.parse(data) as T);
+      if (data) {
+        const event = JSON.parse(data) as T;
+        onEvent(event);
+        const status = (event as { status?: unknown }).status;
+        if (status === "succeeded" || status === "failed" || status === "cancelled") {
+          terminalEvent = event;
+        }
+      }
     };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -257,6 +360,7 @@ export class CortexApi {
     // The backend may close the stream without terminating the last frame with a
     // blank line, so anything left in the buffer is still a deliverable event.
     if (buffer.trim()) emit(buffer);
+    return terminalEvent;
   }
 
   async deleteChat(threadId: string): Promise<void> {
@@ -278,6 +382,10 @@ export class CortexApi {
 
   models(): Promise<ModelResponse> {
     return this.request<ModelResponse>("/models");
+  }
+
+  jobStatus(jobId: string): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(`/jobs/${encodeURIComponent(jobId)}`);
   }
 
   diagnostics(): Promise<DiagnosticsResponse> {
@@ -405,14 +513,14 @@ export class CortexApi {
     onEvent: (event: ExecutionSSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options);
+    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
   }
 
   streamJob(
     jobId: string,
     onEvent: (event: SSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<void> {
+  ): Promise<SSEEvent | null | void> {
     return this.streamEvents(`/jobs/${encodeURIComponent(jobId)}/events`, onEvent, options);
   }
 
@@ -458,11 +566,12 @@ export class CortexApi {
       headers.set("Content-Type", "application/json");
     }
 
+    const sessionAtRequest = authenticated ? this.sessionToken : null;
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
       ...requestInit,
       headers,
     });
-    if (response.status === 401 && authenticated) {
+    if (response.status === 401 && authenticated && this.sessionToken === sessionAtRequest) {
       this.clearSession();
     }
     if (!response.ok) {
@@ -487,11 +596,13 @@ export class CortexApi {
   }
 
   private async errorDetail(response: Response): Promise<string> {
-    const body = (await response.json().catch(() => null)) as
-      | { detail?: string | { message?: string } }
-      | null;
+    const body = (await response.json().catch(() => null)) as ErrorBody | null;
+    if (response.status === 422 && Array.isArray(body?.detail)) {
+      const validationDetail = formatValidationIssues(body.detail);
+      if (validationDetail) return validationDetail;
+    }
     if (typeof body?.detail === "string") return body.detail;
-    if (body?.detail && typeof body.detail.message === "string") {
+    if (body?.detail && typeof body.detail === "object" && !Array.isArray(body.detail) && typeof body.detail.message === "string") {
       return body.detail.message;
     }
     return "The local workspace did not respond.";

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 test("completes a streamed new-chat parity flow", async ({ page }) => {
   const threadId = "thread-e2e";

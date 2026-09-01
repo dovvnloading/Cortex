@@ -42,7 +42,7 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
   } as unknown as CortexApi;
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null) {
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
   return render(
     <ChatPage
       api={api}
@@ -58,6 +58,7 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onThreadCreated={vi.fn()}
       onChatChanged={vi.fn()}
       onForked={vi.fn()}
+      onClearMemory={onClearMemory}
       onSessionExpired={vi.fn()}
     />,
   );
@@ -65,6 +66,7 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
 
 describe("ChatPage composer integration", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     window.sessionStorage.clear();
     useChatStore.setState({ generationOptionsByThread: {} });
   });
@@ -76,6 +78,90 @@ describe("ChatPage composer integration", () => {
 
     expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
+  });
+
+  it("asks before clearing memories requested by a completed generation", async () => {
+    const user = userEvent.setup();
+    const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    const api = chatApi({
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-clear-ui",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-clear-ui",
+      }),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a", null, clearMemory);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Please clear memories");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-clear-ui",
+        thread_id: "thread-a",
+        data: { clear_requested: true },
+      });
+      resolveStream?.();
+    });
+
+    await waitFor(() => expect(clearMemory).toHaveBeenCalledTimes(1));
+    expect(confirm).toHaveBeenCalledWith("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.");
+  });
+
+  it("does not clear memories when the user declines a generation proposal", async () => {
+    const user = userEvent.setup();
+    const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    const api = chatApi({
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-clear-decline",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-clear-decline",
+      }),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a", null, clearMemory);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Please clear memories");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-clear-decline",
+        thread_id: "thread-a",
+        data: { clear_requested: true },
+      });
+      resolveStream?.();
+    });
+
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    expect(clearMemory).not.toHaveBeenCalled();
   });
 
   it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {
@@ -490,6 +576,36 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
   });
 
+  it("resumes the global job from its in-memory cursor when storage access is denied", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+    const streamCalls: Array<{ afterEventId?: number }> = [];
+    const api = chatApi({
+      streamGeneration: vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
+        streamCalls.push({ afterEventId: options.afterEventId });
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }),
+    });
+    useChatStore.getState().beginGeneration("job-memory", "thread-a");
+    useChatStore.getState().setGenerationCursor("job-memory", 4);
+
+    try {
+      const first = renderChat(api, "thread-a");
+      await waitFor(() => expect(streamCalls).toHaveLength(1));
+      first.unmount();
+
+      renderChat(api, "thread-a");
+      await waitFor(() => expect(streamCalls).toHaveLength(2));
+      expect(streamCalls).toEqual([{ afterEventId: 4 }, { afterEventId: 4 }]);
+      expect(useChatStore.getState().generation.jobId).toBe("job-memory");
+    } finally {
+      getItem.mockRestore();
+    }
+  });
+
   it("collapses the pending reasoning panel in step with contentReady, ahead of the swap to the real message", async () => {
     // The final MessageCard's reasoning panel defaults collapsed. If the
     // pending bubble's stayed forced-open the whole time, it would visibly
@@ -538,6 +654,126 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Local runtime is unavailable."));
     expect(composer).toHaveValue("Do not lose this message");
     await waitFor(() => expect(composer).toHaveFocus());
+  });
+
+  it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-replayed",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-replayed",
+      });
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Replay this admission");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).toBe(generate.mock.calls[0][0].request_id);
+  });
+
+  it("retries the original admission payload after chat context and options change", async () => {
+    const user = userEvent.setup();
+    let revision = 3;
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-replayed-context",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-replayed-context",
+      });
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => ({ ...emptyChat(id), revision })),
+      generate,
+    });
+    useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.2 });
+    const view = renderChat(api, "thread-a");
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Replay with its original context");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+    const originalPayload = generate.mock.calls[0][0];
+
+    revision = 9;
+    useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.8 });
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-b"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
+    view.rerender(
+      <ChatPage
+        api={api}
+        threadId="thread-a"
+        runtimeReady
+        runtimeMessage={null}
+        localModels={["local-chat:7b"]}
+        selectedModel="local-chat:7b"
+        modelBusy={false}
+        onSelectModel={async () => true}
+        onRescanModels={async () => undefined}
+        onThreadCreated={vi.fn()}
+        onChatChanged={vi.fn()}
+        onForked={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toEqual(originalPayload);
+  });
+
+  it("uses a fresh admission key for a deliberate new user turn after failure", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The connection was lost."))
+      .mockResolvedValueOnce({
+        job_id: "job-new-turn",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "message-new-turn",
+      });
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "First turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.clear(composer);
+    await user.type(composer, "Second turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+    expect(generate.mock.calls[1][0].user_input).toBe("Second turn");
   });
 
   it("clears the submitted draft only after the backend accepts it", async () => {

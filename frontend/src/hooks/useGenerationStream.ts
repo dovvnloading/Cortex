@@ -4,7 +4,9 @@ import { ApiError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useUiStore } from "../stores/useUiStore";
 
-const RECONNECT_DELAY_MS = 250;
+export const RECONNECT_BASE_DELAY_MS = 250;
+export const RECONNECT_MAX_DELAY_MS = 30_000;
+const RECONNECT_JITTER_RATIO = 0.2;
 const ACTIVE_JOB_KEY = "cortex.active.generation";
 
 export type PersistedJob = { jobId: string; threadId: string; lastEventId: number };
@@ -64,13 +66,85 @@ function clearActiveJob(): void {
   }
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+export function reconnectDelay(attempt: number, random = Math.random): number {
+  const exponential = Math.min(
+    RECONNECT_MAX_DELAY_MS,
+    RECONNECT_BASE_DELAY_MS * (2 ** Math.max(0, attempt)),
+  );
+  const jitter = 1 + ((random() * 2) - 1) * RECONNECT_JITTER_RATIO;
+  return Math.min(RECONNECT_MAX_DELAY_MS, Math.max(0, Math.round(exponential * jitter)));
 }
 
-type OnCompleted = (threadId: string) => Promise<void>;
+function delay(milliseconds: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    let timer: number | null = null;
+    let settled = false;
+    const finish = (completed: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer != null) window.clearTimeout(timer);
+      timer = null;
+      signal.removeEventListener("abort", onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => {
+      finish(false);
+    };
+    if (signal.aborted) {
+      finish(false);
+      return;
+    }
+    timer = window.setTimeout(() => finish(true), milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+function waitForReconnect(jobId: string, attempt: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (!window.navigator.onLine) {
+    useChatStore.getState().setStatusText(jobId, "Connection paused while offline. Waiting for network...");
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (completed: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("online", onOnline);
+        signal.removeEventListener("abort", onAbort);
+        resolve(completed);
+      };
+      const onOnline = () => {
+        useChatStore.getState().setStatusText(jobId, "Connection restored. Reconnecting...");
+        finish(true);
+      };
+      const onAbort = () => {
+        finish(false);
+      };
+      window.addEventListener("online", onOnline);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      else if (window.navigator.onLine) onOnline();
+    });
+  }
+  const milliseconds = reconnectDelay(attempt);
+  useChatStore.getState().setStatusText(
+    jobId,
+    `Connection interrupted. Retrying in ${Math.ceil(milliseconds / 1000)}s...`,
+  );
+  return delay(milliseconds, signal);
+}
+
+type OnCompleted = (threadId: string, clearRequested?: boolean, jobId?: string) => Promise<void>;
 type OnFailed = (threadId: string, message: string) => void;
 type OnSessionExpired = () => void;
+
+function hasClearRequest(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const result = value as { clear_requested?: unknown; memory_command?: unknown };
+  if (result.clear_requested === true) return true;
+  if (!result.memory_command || typeof result.memory_command !== "object") return false;
+  return (result.memory_command as { clear_requested?: unknown }).clear_requested === true;
+}
 
 /**
  * Coalesces many rapid push() calls into at most one flush per animation
@@ -129,6 +203,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       const controller = new AbortController();
       abortRef.current = controller;
       let cursor = job.lastEventId;
+      let reconnectAttempt = 0;
       let terminal = false;
       let sessionExpired = false;
       let rejectionNotified = false;
@@ -152,6 +227,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (event.event_id <= cursor || event.thread_id !== job.threadId) return;
                 cursor = event.event_id;
                 persistActiveJob({ ...job, lastEventId: cursor });
+                useChatStore.getState().setGenerationCursor(job.jobId, cursor);
                 const data = event.data ?? {};
                 if (typeof data.message === "string") useChatStore.getState().setStatusText(job.jobId, data.message);
                 if (event.event === "generation.cancelling") useChatStore.getState().markStopping(job.jobId);
@@ -187,7 +263,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
-                  completion = onCompleted(job.threadId);
+                  const clearRequested = hasClearRequest(data);
+                  completion = clearRequested
+                    ? onCompleted(job.threadId, true, job.jobId)
+                    : onCompleted(job.threadId);
                 }
                 if (event.event === "generation.failed" || event.event === "generation.cancelled") {
                   terminal = true;
@@ -198,8 +277,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               { signal: controller.signal, afterEventId: cursor },
             );
             if (!terminal && !controller.signal.aborted) {
-              useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
-              await delay(RECONNECT_DELAY_MS);
+              if (!(await waitForReconnect(job.jobId, reconnectAttempt, controller.signal))) return;
+              reconnectAttempt += 1;
             }
           } catch (streamError) {
             if (controller.signal.aborted) return;
@@ -214,11 +293,14 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (snapshot.status !== "succeeded") {
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 }
-                completion = onCompleted(job.threadId);
+                const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
+                completion = clearRequested
+                  ? onCompleted(job.threadId, true, job.jobId)
+                  : onCompleted(job.threadId);
               } else {
                 if (snapshot.status === "cancelling") useChatStore.getState().markStopping(job.jobId);
-                useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
-                await delay(RECONNECT_DELAY_MS);
+                if (!(await waitForReconnect(job.jobId, reconnectAttempt, controller.signal))) return;
+                reconnectAttempt += 1;
               }
             } catch (statusError) {
               // Both the live stream AND the status-check fallback just
@@ -238,8 +320,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 onFailed(job.threadId, statusError.detail || "Generation is no longer available.");
                 break;
               }
-              useChatStore.getState().setStatusText(job.jobId, "Connection interrupted. Reconnecting...");
-              await delay(RECONNECT_DELAY_MS);
+              if (!(await waitForReconnect(job.jobId, reconnectAttempt, controller.signal))) return;
+              reconnectAttempt += 1;
             }
           }
         }

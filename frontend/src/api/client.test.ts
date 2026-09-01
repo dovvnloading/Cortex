@@ -4,6 +4,90 @@ import { ApiError, CortexApi } from "./client";
 describe("CortexApi", () => {
   afterEach(() => window.sessionStorage.clear());
 
+  it("starts without throwing when sessionStorage access is denied", () => {
+    const storageGetter = vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+
+    try {
+      const api = new CortexApi("/api/v1", vi.fn<typeof fetch>());
+
+      expect(api.hasSession).toBe(false);
+    } finally {
+      storageGetter.mockRestore();
+    }
+  });
+
+  it("keeps the exchanged session in memory when sessionStorage persistence fails", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    const originalStorage = window.sessionStorage;
+    const setItem = vi.fn<Storage["setItem"]>(() => {
+      throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      value: {
+        clear: originalStorage.clear.bind(originalStorage),
+        getItem: originalStorage.getItem.bind(originalStorage),
+        key: originalStorage.key.bind(originalStorage),
+        length: originalStorage.length,
+        removeItem: originalStorage.removeItem.bind(originalStorage),
+        setItem,
+      } as Storage,
+    });
+    const api = new CortexApi("/api/v1", fetcher);
+
+    try {
+      await expect(api.exchangeBootstrapToken("bootstrap")).resolves.toMatchObject({
+        session_token: "session-1",
+      });
+      expect(setItem).toHaveBeenCalledWith("cortex.session.token", "session-1");
+      expect(api.hasSession).toBe(true);
+    } finally {
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        value: originalStorage,
+      });
+    }
+  });
+
+  it("notifies session listeners and stays safe when clearing storage fails", () => {
+    const originalStorage = window.sessionStorage;
+    originalStorage.setItem("cortex.session.token", "session-1");
+    const removeItem = vi.fn<Storage["removeItem"]>(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      value: {
+        clear: originalStorage.clear.bind(originalStorage),
+        getItem: originalStorage.getItem.bind(originalStorage),
+        key: originalStorage.key.bind(originalStorage),
+        length: originalStorage.length,
+        removeItem,
+        setItem: originalStorage.setItem.bind(originalStorage),
+      } as Storage,
+    });
+    const api = new CortexApi("/api/v1", vi.fn<typeof fetch>());
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    try {
+      expect(() => api.clearSession()).not.toThrow();
+      expect(api.hasSession).toBe(false);
+      expect(removeItem).toHaveBeenCalledWith("cortex.session.token");
+      expect(onSessionExpired).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        value: originalStorage,
+      });
+    }
+  });
+
   it("exchanges a bootstrap token and sends the session bearer on protected calls", async () => {
     const fetcher = vi.fn<typeof fetch>();
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ session_token: "session-1", expires_at: "2026-07-20T00:00:00Z" }), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -20,11 +104,67 @@ describe("CortexApi", () => {
     expect(api.hasSession).toBe(true);
   });
 
+  it("rebootstraps an expired desktop session through the launcher handoff", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-20T00:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.rebootstrap("desktop-handoff")).resolves.toMatchObject({
+      session_token: "session-2",
+    });
+
+    const handoffRequest = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(handoffRequest.headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
+    expect(new Headers(handoffRequest.headers).get("Authorization")).toBeNull();
+    expect(handoffRequest.body).toBeUndefined();
+    expect(api.hasSession).toBe(true);
+  });
+
   it("turns safe API errors into ApiError without assuming a response body", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 503 }));
     const api = new CortexApi("/api/v1", fetcher);
 
     await expect(api.health()).rejects.toEqual(new ApiError(503, "The local workspace did not respond."));
+  });
+
+  it("turns FastAPI validation details into field-specific messages without exposing inputs", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({
+        detail: [
+          { loc: ["body", "name"], msg: "Field required", input: "private-name" },
+          { loc: ["body", "items", 0, "label"], msg: "Field required", input: "private-label" },
+        ],
+      }),
+      { status: 422, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toEqual(new ApiError(
+      422,
+      "name: Field required; items[0].label: Field required",
+    ));
+  });
+
+  it("falls back when validation details are malformed", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({
+        detail: [
+          { loc: "body.name", msg: "Do not expose this" },
+          { loc: ["body", "name"], msg: { value: "Do not expose this" }, input: "private-input" },
+        ],
+      }),
+      { status: 422, headers: { "Content-Type": "application/json" } },
+    ));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toEqual(new ApiError(422, "The local workspace did not respond."));
   });
 
   it("notifies subscribers when an authenticated request expires the session", async () => {
@@ -39,6 +179,59 @@ describe("CortexApi", () => {
 
     await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
     expect(onSessionExpired).toHaveBeenCalledOnce();
+  });
+
+  it("does not clear a replacement session when an older request returns 401", async () => {
+    let releaseExpiredRequest!: (response: Response) => void;
+    const expiredRequest = new Promise<Response>((resolve) => { releaseExpiredRequest = resolve; });
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockReturnValueOnce(expiredRequest);
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    const pending = api.system();
+    await api.exchangeBootstrapToken("fresh-bootstrap");
+    releaseExpiredRequest(new Response(JSON.stringify({ detail: "Local session expired." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(api.hasSession).toBe(true);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("session-2");
+  });
+
+  it("does not clear a replacement session when an older SSE request returns 401", async () => {
+    let releaseExpiredStream!: (response: Response) => void;
+    const expiredStream = new Promise<Response>((resolve) => { releaseExpiredStream = resolve; });
+    const fetcher = vi.fn<typeof fetch>();
+    fetcher.mockReturnValueOnce(expiredStream);
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    const pending = api.streamJob("job-1", vi.fn());
+    await api.exchangeBootstrapToken("fresh-bootstrap");
+    releaseExpiredStream(new Response(JSON.stringify({ detail: "Local session expired." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(api.hasSession).toBe(true);
   });
 
   it("parses ordered authenticated generation events from an SSE response", async () => {
@@ -69,9 +262,19 @@ describe("CortexApi", () => {
     const api = new CortexApi("/api/v1", fetcher);
     const kinds: string[] = [];
 
-    await api.streamJob("job-1", (event) => kinds.push(event.kind));
+    const terminal = await api.streamJob("job-1", (event) => kinds.push(event.kind));
 
     expect(kinds).toEqual(["state", "completed"]);
+    expect(terminal).toMatchObject({ kind: "completed", status: "succeeded" });
+  });
+
+  it("returns no terminal event when a job stream closes while still active", async () => {
+    const sse = 'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"progress","status":"running"}\n\n';
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.streamJob("job-1", vi.fn())).resolves.toBeNull();
   });
 
   it("clears the session when a model job event stream returns 401", async () => {

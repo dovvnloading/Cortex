@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 test("does not replay old completions and groups repeated task notifications", async ({ page }) => {
   const task = {

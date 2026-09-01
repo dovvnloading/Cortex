@@ -16,6 +16,7 @@ type Progress = {
 
 type GGUFControls = {
   directory: string;
+  directoryDirty: boolean;
   onDirectoryChange: (value: string) => void;
   onDownload: (request: ModelDownloadRequest) => Promise<void>;
   busy: boolean;
@@ -142,12 +143,17 @@ function GGUFRuntimeSection({ llamacppStatus, gguf }: { llamacppStatus: LlamaCpp
           folder exists. Tip: point this at the <em>folder</em> a .gguf file is in, not the file itself.
         </p>
       )}
-      <GGUFDownloadForm onDownload={gguf.onDownload} busy={gguf.busy} />
+      {gguf.directoryDirty && (
+        <p className="muted-note" role="status">
+          Save the folder setting before downloading a model. Downloads use the saved folder.
+        </p>
+      )}
+      <GGUFDownloadForm onDownload={gguf.onDownload} busy={gguf.busy} directoryDirty={gguf.directoryDirty} />
     </div>
   );
 }
 
-function GGUFDownloadForm({ onDownload, busy }: { onDownload: (request: ModelDownloadRequest) => Promise<void>; busy: boolean }) {
+function GGUFDownloadForm({ onDownload, busy, directoryDirty }: { onDownload: (request: ModelDownloadRequest) => Promise<void>; busy: boolean; directoryDirty: boolean }) {
   const [source, setSource] = useState<"huggingface" | "url">("huggingface");
   const [repoId, setRepoId] = useState("");
   const [filename, setFilename] = useState("");
@@ -229,7 +235,7 @@ function GGUFDownloadForm({ onDownload, busy }: { onDownload: (request: ModelDow
         className="button button-secondary"
         type="button"
         onClick={() => void submit()}
-        disabled={!canSubmit || busy}
+        disabled={!canSubmit || busy || directoryDirty}
       >
         <Download aria-hidden="true" size={15} /> {busy ? "Downloading…" : "Download model"}
       </button>

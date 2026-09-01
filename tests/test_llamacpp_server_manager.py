@@ -16,7 +16,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cortex_backend.llamacpp.errors import LlamaCppError, ServerStartTimeoutError
+from cortex_backend.llamacpp.errors import (
+    BinaryVerificationError,
+    LlamaCppError,
+    ServerLaunchError,
+    ServerStartTimeoutError,
+)
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 
 
@@ -62,6 +67,13 @@ class _UncooperativePopen(_FakePopen):
         if not self.killed:
             raise subprocess.TimeoutExpired("llama-server", timeout)
         return 0
+
+
+class _UnstoppablePopen(_FakePopen):
+    """Models a child whose exit cannot be confirmed after escalation."""
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("llama-server", timeout)
 
 
 class _QueueLauncher:
@@ -136,15 +148,64 @@ class _FakeFetcher:
         self.ensure_binary_calls: list[str] = []
         self._cached: set[str] = set()
 
-    def ensure_binary(self, release, backend: str) -> Path:
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
         del release
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise AssertionError("test fetcher was called after cancellation")
         self.ensure_binary_calls.append(backend)
         self._cached.add(backend)
         return Path(f"/fake/{backend}/llama-server.exe")
 
-    def is_cached(self, release, backend: str) -> bool:
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
         del release
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise BinaryVerificationError("Local model runtime startup was cancelled.")
         return backend in self._cached
+
+
+class _BlockingFetcher(_FakeFetcher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
+        del release, backend
+        self.started.set()
+        assert cancellation_event is not None
+        while not cancellation_event.wait(0.01):
+            pass
+        raise BinaryVerificationError("Local model runtime startup was cancelled.")
+
+
+class _BlockingCacheFetcher(_FakeFetcher):
+    """Pause the pre-download cache check until its cancellation token fires."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
+        del release, backend
+        if cancellation_event is None:
+            return False
+        self.started.set()
+        cancellation_event.wait(5.0)
+        return False
+
+
+class _HealthWaitClient:
+    def __init__(self, manager: LlamaServerManager | None = None) -> None:
+        self.manager = manager
+        self.started = threading.Event()
+
+    def get(self, url: str, timeout=None, headers=None):
+        del timeout, headers
+        if url.endswith("/health"):
+            self.started.set()
+            assert self.manager is not None
+            self.manager._stop_event.wait(1.0)
+            raise httpx.ConnectTimeout("health probe interrupted")
+        raise AssertionError("props should not be queried after health cancellation")
 
 
 def _manager(
@@ -183,6 +244,76 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.state == "ready"
     assert manager.status.loaded_model == "gguf:model.gguf"
     assert manager.status.active_backend == "cpu"
+
+
+def test_close_stops_once_and_closes_only_an_owned_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=None,
+    )
+    stop_calls = 0
+    close_calls = 0
+
+    def stop() -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+
+    def close_http() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    monkeypatch.setattr(manager, "stop", stop)
+    monkeypatch.setattr(manager._http, "close", close_http)
+    manager.close()
+    manager.close()
+
+    assert stop_calls == 1
+    assert close_calls == 1
+
+
+def test_close_does_not_close_an_injected_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _InjectedClient(_AlwaysHealthyClient):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    injected = _InjectedClient()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=injected,
+    )
+    monkeypatch.setattr(manager, "stop", lambda: None)
+    manager.close()
+    assert injected.close_calls == 0
+
+
+def test_close_closes_owned_http_client_even_when_stop_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=None,
+    )
+    close_calls = 0
+
+    def close_http() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    monkeypatch.setattr(manager, "stop", lambda: (_ for _ in ()).throw(RuntimeError("stop failed")))
+    monkeypatch.setattr(manager._http, "close", close_http)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        manager.close()
+    assert close_calls == 1
+    with pytest.raises(LlamaCppError, match="manager is closed"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
 
 
 def test_start_uses_child_selected_port_and_authenticated_runtime_attestation(tmp_path: Path) -> None:
@@ -519,6 +650,248 @@ def test_stop_terminates_the_process_and_resets_state(tmp_path: Path) -> None:
     manager.stop()
 
 
+def test_stop_interrupts_binary_acquisition_without_waiting_for_ensure_lock(tmp_path: Path) -> None:
+    fetcher = _BlockingFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_request_cancellation_interrupts_binary_acquisition_and_resets_state(tmp_path: Path) -> None:
+    fetcher = _BlockingFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    cancellation = threading.Event()
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(
+                tmp_path / "model.gguf",
+                num_ctx=4096,
+                cancellation_event=cancellation,
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+    cancellation.set()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_stop_interrupts_the_cancellable_cache_check(tmp_path: Path) -> None:
+    fetcher = _BlockingCacheFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    deadline = time.monotonic() + 1.0
+    while manager._stop_event.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not manager._stop_event.is_set()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_request_cancellation_interrupts_waiting_for_ensure_lock(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    cancellation = threading.Event()
+    outcome: list[BaseException] = []
+    manager._ensure_lock.acquire()
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(
+                tmp_path / "model.gguf",
+                num_ctx=4096,
+                cancellation_event=cancellation,
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    time.sleep(0.08)
+    cancellation.set()
+    startup.join(timeout=1.0)
+    manager._ensure_lock.release()
+
+    assert not startup.is_alive()
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_stop_is_bounded_when_startup_holds_ensure_lock(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    manager._ensure_lock.acquire()
+    started = time.monotonic()
+    manager.stop()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5
+    assert manager._stop_event.is_set()
+    # A later stop completes the deferred reset once the startup owner has
+    # released the lock; the first timeout must not clear the event early.
+    manager._ensure_lock.release()
+    manager.stop()
+    assert not manager._stop_event.is_set()
+
+
+def test_stop_fails_closed_when_process_exit_cannot_be_confirmed(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    process = _UnstoppablePopen()
+    with manager._state_lock:
+        manager._process = process
+        manager._state = "ready"
+
+    manager.stop()
+
+    assert manager.status.state == "stopping"
+    assert manager._process is process
+    assert manager._stop_event.is_set()
+    with pytest.raises(LlamaCppError, match="cancelled"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+
+def test_launcher_failure_does_not_leave_manager_in_starting_state(tmp_path: Path) -> None:
+    def fail_launcher(argv: list[str], *, cwd: Path):
+        del argv, cwd
+        raise OSError("simulated launch failure")
+
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=fail_launcher,
+        http_client=_AlwaysHealthyClient(),
+    )
+
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.state == "failed"
+    assert manager._starting_process is None
+
+
+def test_output_reader_start_failure_terminates_unpublished_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = _FakePopen()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+    )
+
+    def fail_thread_start(_thread) -> None:
+        raise RuntimeError("simulated thread start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_thread_start)
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert process.terminated is True
+    assert manager.status.state == "failed"
+    assert manager._starting_process is None
+
+
+def test_stop_interrupts_health_polling_and_reaps_starting_process(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    process = _FakePopen()
+    launcher = _QueueLauncher([process])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=None,
+        health_timeout_seconds=30.0,
+    )
+    health = _HealthWaitClient(manager)
+    manager._http = health
+    manager._owns_http_client = False
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert health.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert process.terminated is True
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
 def test_a_smaller_num_ctx_reuses_the_running_server(tmp_path: Path) -> None:
     """llama-server can serve any request that fits its allocation, so a
     smaller context window must never force a multi-minute reload -- only a
@@ -549,7 +922,47 @@ def test_restart_reasons_are_recorded_never_anonymous(tmp_path: Path) -> None:
     assert "context window increased from 4096 to 8192" in (manager.status.last_restart_reason or "")
 
     manager.ensure_ready(tmp_path / "b.gguf", num_ctx=8192)
-    assert "model changed from a.gguf to b.gguf" in (manager.status.last_restart_reason or "")
+    assert manager.status.last_restart_reason == "the selected model changed"
+
+
+def test_restart_logging_omits_untrusted_child_output(tmp_path: Path, caplog) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "private-model-name.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager._stderr_tail = ["provider output: private prompt and C:\\Users\\Alice\\secret.txt"]
+
+    process = manager._process
+    assert process is not None
+    process.exit_code = 1
+
+    with caplog.at_level("WARNING"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert "private prompt" not in caplog.text
+    assert "secret.txt" not in caplog.text
+    assert "llama-server output" not in caplog.text
+    assert manager.status.last_restart_reason == "the runtime process exited unexpectedly (exit code 1)"
+
+
+def test_launch_failure_status_omits_raw_child_output(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    def fail_start(*args, **kwargs):
+        del args, kwargs
+        raise ServerLaunchError("provider output included private prompt and secret path")
+
+    manager._start_with_backend = fail_start
+
+    with pytest.raises(LlamaCppError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.last_error == (
+        "The local model runtime could not start. Check System settings and try again."
+    )
 
 
 def test_a_dead_process_is_restarted_with_the_exit_code_recorded(tmp_path: Path) -> None:
@@ -766,9 +1179,20 @@ class _FakeProcessWithPid:
 class _FakeWin32Job:
     """Records the kernel32 call sequence without touching real Windows APIs."""
 
-    def __init__(self, *, create_job_result: int = 1, set_info_result: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        create_job_result: int = 1,
+        set_info_result: bool = True,
+        open_process_result: int = 1,
+        assign_result: bool = True,
+        close_result: bool = True,
+    ) -> None:
         self.create_job_result = create_job_result
         self.set_info_result = set_info_result
+        self.open_process_result = open_process_result
+        self.assign_result = assign_result
+        self.close_result = close_result
         self.calls: list[tuple] = []
         self._next_handle = 100
 
@@ -794,6 +1218,9 @@ class _FakeWin32Job:
         return 1 if self.set_info_result else 0
 
     def OpenProcess(self, access, inherit_handle, pid):
+        if not self.open_process_result:
+            self.calls.append(("OpenProcess", access, inherit_handle, pid, 0))
+            return 0
         self._next_handle += 1
         handle = self._next_handle
         self.calls.append(("OpenProcess", access, inherit_handle, pid, handle))
@@ -801,11 +1228,11 @@ class _FakeWin32Job:
 
     def AssignProcessToJobObject(self, job, process):
         self.calls.append(("AssignProcessToJobObject", job, process))
-        return 1
+        return 1 if self.assign_result else 0
 
     def CloseHandle(self, handle):
         self.calls.append(("CloseHandle", handle))
-        return 1
+        return 1 if self.close_result else 0
 
 
 def test_job_object_launcher_applies_kill_on_close_policy_and_reuses_the_job():
@@ -852,34 +1279,83 @@ def test_job_object_launcher_applies_kill_on_close_policy_and_reuses_the_job():
     assert assign_calls[1][1] == job_handle
 
 
-def test_job_object_launcher_does_not_break_startup_if_job_creation_fails():
-    """A Job Object is defense in depth, not a hard requirement -- if kernel32
-    refuses (sandboxed environment, exhausted handle quota, anything), the
-    local model runtime must still start normally rather than the failure
-    propagating and blocking generation entirely."""
-    from cortex_backend.llamacpp.server_manager import _JobObjectLauncher
+def test_job_object_launcher_fails_closed_if_job_creation_fails():
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
 
     fake_win32 = _FakeWin32Job(create_job_result=0)
     launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
 
-    launcher._apply_job_policy(_FakeProcessWithPid(pid=1))  # must not raise
+    with pytest.raises(_JobObjectContainmentError, match="create"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
 
     assert launcher._job is None
     assert not any(call[0] == "SetInformationJobObject" for call in fake_win32.calls)
 
 
-def test_job_object_launcher_discards_a_misconfigured_job_instead_of_reusing_it():
-    from cortex_backend.llamacpp.server_manager import _JobObjectLauncher
+def test_job_object_launcher_closes_a_misconfigured_job_and_fails_closed():
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
 
     fake_win32 = _FakeWin32Job(set_info_result=False)
     launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
 
-    launcher._apply_job_policy(_FakeProcessWithPid(pid=1))  # must not raise
+    with pytest.raises(_JobObjectContainmentError, match="configure"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
 
     assert launcher._job is None
     close_calls = [call for call in fake_win32.calls if call[0] == "CloseHandle"]
     assert len(close_calls) == 1, "the unusable job handle must be closed, not leaked"
     assert not any(call[0] == "AssignProcessToJobObject" for call in fake_win32.calls)
+
+
+@pytest.mark.parametrize(
+    ("field", "message", "expected_closed"),
+    [
+        ("open_process_result", "open the model process", 1),
+        ("assign_result", "assign the model process", 2),
+    ],
+)
+def test_job_object_launcher_fails_closed_for_process_containment_failures(
+    field: str, message: str, expected_closed: int
+) -> None:
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    fake_win32 = _FakeWin32Job(**{field: 0})
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+
+    with pytest.raises(_JobObjectContainmentError, match=message):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
+
+    close_calls = [call for call in fake_win32.calls if call[0] == "CloseHandle"]
+    assert len(close_calls) == expected_closed
+    assert launcher._job is None
+
+
+def test_job_object_launcher_fails_closed_when_handle_close_fails() -> None:
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    fake_win32 = _FakeWin32Job(close_result=False)
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+
+    with pytest.raises(_JobObjectContainmentError, match="close"):
+        launcher._apply_job_policy(_FakeProcessWithPid(pid=1))
+
+    assert launcher._job is None
+
+
+def test_job_object_launcher_terminates_a_process_when_containment_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cortex_backend.llamacpp import server_manager
+    from cortex_backend.llamacpp.server_manager import _JobObjectContainmentError, _JobObjectLauncher
+
+    process = _FakePopen()
+    fake_win32 = _FakeWin32Job(create_job_result=0)
+    launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
+    monkeypatch.setattr(server_manager, "_spawn_process", lambda _argv, *, cwd: process)
+    monkeypatch.setattr(server_manager.sys, "platform", "win32")
+
+    with pytest.raises(_JobObjectContainmentError):
+        launcher(["llama-server"], cwd=Path("."))
+
+    assert process.terminated is True
 
 
 def test_default_launcher_is_a_job_object_launcher():

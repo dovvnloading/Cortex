@@ -1160,7 +1160,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Phase"
           },
           "sequence": {
@@ -3421,6 +3420,13 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "CortexSession": {
+        "description": "Short-lived bearer session token returned by /session/exchange. Requests remain restricted to the local API host.",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -3466,6 +3472,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Stage Chat Attachment"
       }
     },
@@ -3488,6 +3499,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "List Chat Groups"
       },
       "post": {
@@ -3524,6 +3540,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Create Chat Group"
       }
     },
@@ -3557,6 +3578,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Delete Chat Group"
       },
       "patch": {
@@ -3604,6 +3630,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Update Chat Group"
       }
     },
@@ -3626,6 +3657,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "List Chats"
       },
       "post": {
@@ -3662,6 +3698,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Create Chat"
       }
     },
@@ -3694,6 +3735,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Delete Chat"
       },
       "get": {
@@ -3731,6 +3777,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Get Chat"
       },
       "patch": {
@@ -3778,6 +3829,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Rename Chat"
       }
     },
@@ -3827,6 +3883,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Fork Chat"
       }
     },
@@ -3876,6 +3937,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Move Chat To Group"
       }
     },
@@ -3925,6 +3991,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Add Message"
       }
     },
@@ -3974,6 +4045,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Regenerate Chat"
       }
     },
@@ -3992,6 +4068,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Diagnostics"
       }
     },
@@ -4030,6 +4111,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Download Execution Artifact"
       }
     },
@@ -4069,6 +4155,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Stage Attachment"
       }
     },
@@ -4108,6 +4199,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Code Execution"
       }
     },
@@ -4146,6 +4242,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Fake Execution"
       }
     },
@@ -4185,6 +4286,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Recipe Image Transform"
       }
     },
@@ -4224,6 +4330,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Scratch Compute"
       }
     },
@@ -4274,6 +4385,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Execution Tasks"
       }
     },
@@ -4313,6 +4429,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Execution Status"
       }
     },
@@ -4362,6 +4483,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Decide Execution Approval"
       }
     },
@@ -4401,6 +4527,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Cancel Execution"
       }
     },
@@ -4416,14 +4547,53 @@
               "title": "Job Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Resume after this event sequence number.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resume after this event sequence number.",
+              "title": "Last-Event-Id"
+            }
           }
         ],
         "responses": {
           "200": {
             "content": {
-              "text/event-stream": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionSSEEvent"
+                }
+              }
             },
-            "description": "Server-sent execution events."
+            "description": "Server-sent execution events.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevent intermediary caching of the live event stream.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Accel-Buffering": {
+                "description": "Disable proxy buffering for incremental events.",
+                "schema": {
+                  "enum": [
+                    "no"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -4436,6 +4606,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Execution Events"
       }
     },
@@ -4475,6 +4650,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Execution Source"
       }
     },
@@ -4513,6 +4693,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Create Generation"
       }
     },
@@ -4552,6 +4737,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Generation Status"
       }
     },
@@ -4591,6 +4781,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Cancel Generation"
       }
     },
@@ -4605,6 +4800,24 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Resume after this event sequence number.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resume after this event sequence number.",
+              "title": "Last-Event-Id"
             }
           }
         ],
@@ -4630,6 +4843,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Generation Events"
       }
     },
@@ -4722,6 +4940,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Generation"
       }
     },
@@ -4740,6 +4963,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Check Models"
       }
     },
@@ -4779,6 +5007,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Get Job"
       }
     },
@@ -4818,6 +5051,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Cancel Job"
       }
     },
@@ -4857,6 +5095,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Job Events"
       }
     },
@@ -4875,6 +5118,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Get Memories"
       },
       "post": {
@@ -4911,6 +5159,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Add Memory"
       },
       "put": {
@@ -4947,6 +5200,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Replace Memories"
       }
     },
@@ -4985,6 +5243,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Clear Memories"
       }
     },
@@ -5003,6 +5266,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "List Models"
       }
     },
@@ -5041,6 +5309,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Start Gguf Download"
       }
     },
@@ -5080,6 +5353,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "List Huggingface Files"
       }
     },
@@ -5118,6 +5396,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Pull Model"
       }
     },
@@ -5162,6 +5445,26 @@
     "/api/v1/session/handoff": {
       "post": {
         "operationId": "handoff_api_v1_session_handoff_post",
+        "parameters": [
+          {
+            "description": "One-time local launcher handoff secret.",
+            "in": "header",
+            "name": "X-Cortex-Handoff",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One-time local launcher handoff secret.",
+              "title": "X-Cortex-Handoff"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5172,6 +5475,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Handoff"
@@ -5192,6 +5505,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Get Settings"
       },
       "put": {
@@ -5228,6 +5546,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Update Settings"
       }
     },
@@ -5246,6 +5569,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "System"
       }
     },
@@ -5264,6 +5592,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
         "summary": "Shutdown"
       }
     }

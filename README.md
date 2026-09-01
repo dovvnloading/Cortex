@@ -254,7 +254,7 @@ Use `npm.cmd` on Windows when PowerShell execution policy blocks the `npm.ps1`
 shim. API contract artifacts are generated with:
 
 ```powershell
-python tools/generate_contracts.py
+python tools/generate_contracts.py --write
 ```
 
 The README screenshots are regenerated from a fixed demo workspace, so they stay

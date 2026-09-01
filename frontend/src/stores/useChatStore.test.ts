@@ -4,6 +4,7 @@ import { useChatStore } from "./useChatStore";
 const idleGeneration = {
   jobId: null,
   threadId: null,
+  lastEventId: 0,
   phase: "idle" as const,
   partialContent: "",
   partialThoughts: "",
@@ -58,6 +59,14 @@ describe("useChatStore", () => {
     const generation = useChatStore.getState().generation;
     expect(generation.partialContent).toBe("Hello");
     expect(generation.phase).toBe("streaming");
+  });
+
+  it("keeps the latest stream cursor for storage-independent recovery", () => {
+    useChatStore.getState().beginGeneration("job-cursor", "thread-cursor");
+    useChatStore.getState().setGenerationCursor("job-cursor", 7);
+    useChatStore.getState().setGenerationCursor("job-cursor", 3);
+
+    expect(useChatStore.getState().generation.lastEventId).toBe(7);
   });
 
   it("ignores content/thinking tokens for a stale or unrelated jobId", () => {

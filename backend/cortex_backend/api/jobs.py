@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
+import json
 import logging
 from threading import Event, RLock
 from typing import Any, Literal
@@ -26,6 +27,15 @@ EventKind = Literal["state", "progress", "completed", "error"]
 TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
     {"succeeded", "failed", "cancelled"}
 )
+
+# In-memory SSE history is intentionally bounded independently of the number
+# of terminal jobs.  ``max_event_bytes`` measures the UTF-8 JSON size of each
+# retained event's ``data`` mapping; sequence/status metadata remains available
+# in the event object and the job snapshot even when an event payload is
+# compacted.
+DEFAULT_MAX_EVENT_COUNT = 256
+DEFAULT_MAX_EVENT_BYTES = 1_048_576
+_EVENT_DATA_TRUNCATED = "Event data omitted because it exceeded the retention limit."
 
 
 class JobConflict(RuntimeError):
@@ -104,6 +114,7 @@ class _JobRecord:
     error: str | None = None
     result: Mapping[str, Any] | None = None
     events: list[JobEvent] = field(default_factory=list)
+    event_bytes: int = 0
     task: asyncio.Task[Any] | None = None
 
 
@@ -203,6 +214,8 @@ class JobRegistry:
         poll_seconds: float = 0.025,
         max_terminal_jobs: int = 100,
         shutdown_grace_seconds: float = 10.0,
+        max_event_count: int = DEFAULT_MAX_EVENT_COUNT,
+        max_event_bytes: int = DEFAULT_MAX_EVENT_BYTES,
     ):
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
@@ -210,9 +223,23 @@ class JobRegistry:
             raise ValueError("max_terminal_jobs must be positive")
         if shutdown_grace_seconds <= 0:
             raise ValueError("shutdown_grace_seconds must be positive")
+        if (
+            isinstance(max_event_count, bool)
+            or not isinstance(max_event_count, int)
+            or max_event_count <= 0
+        ):
+            raise ValueError("max_event_count must be positive")
+        if (
+            isinstance(max_event_bytes, bool)
+            or not isinstance(max_event_bytes, int)
+            or max_event_bytes <= 0
+        ):
+            raise ValueError("max_event_bytes must be positive")
         self._poll_seconds = poll_seconds
         self._max_terminal_jobs = max_terminal_jobs
         self._shutdown_grace_seconds = shutdown_grace_seconds
+        self._max_event_count = max_event_count
+        self._max_event_bytes = max_event_bytes
         self._records: dict[str, _JobRecord] = {}
         self._active: dict[JobKind, str] = {}
         self._request_index: dict[tuple[JobKind, str, str], str] = {}
@@ -462,7 +489,15 @@ class JobRegistry:
         owner: str,
         after_sequence: int = 0,
     ):
-        """Yield retained and newly published events in sequence order."""
+        """Yield retained and newly published events in sequence order.
+
+        The cursor is a monotonic lower bound, not a durable replay promise:
+        old events may have been evicted by the count/byte retention limits.
+        A reconnect with a cursor older than the oldest retained event starts
+        at that oldest event, while sequence IDs continue to identify the
+        original ordering.  Terminal status and its final event are always
+        retained for a job that remains in this registry.
+        """
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
         record = self._owned_record(job_id, owner)
@@ -680,6 +715,10 @@ class JobRegistry:
     ) -> JobEvent:
         record.sequence += 1
         record.status = status
+        retained_data, retained_bytes = _retain_event_data(
+            data,
+            max_bytes=self._max_event_bytes,
+        )
         event = JobEvent(
             sequence=record.sequence,
             job_id=record.job_id,
@@ -687,9 +726,21 @@ class JobRegistry:
             kind=kind,
             status=status,
             phase=phase,
-            data=dict(data or {}),
+            data=retained_data,
         )
         record.events.append(event)
+        record.event_bytes += retained_bytes
+        while (
+            len(record.events) > self._max_event_count
+            or record.event_bytes > self._max_event_bytes
+        ):
+            # Keep at least the newest event.  Since terminal status is set
+            # before this method returns, this also guarantees that a
+            # terminal event survives aggressive retention settings.
+            if len(record.events) == 1:
+                break
+            evicted = record.events.pop(0)
+            record.event_bytes -= _event_data_bytes(evicted.data) or 0
         return event
 
     @staticmethod
@@ -712,3 +763,48 @@ def _serialize(result: Any) -> Mapping[str, Any]:
     if is_dataclass(result):
         return asdict(result)
     return {"result": result}
+
+
+def _event_data_bytes(data: Mapping[str, Any]) -> int | None:
+    """Return the bounded accounting size without exposing payloads in logs."""
+    try:
+        return len(
+            json.dumps(
+                dict(data),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return None
+
+
+def _retain_event_data(
+    data: Mapping[str, Any] | None,
+    *,
+    max_bytes: int,
+) -> tuple[dict[str, Any], int]:
+    """Copy one event payload, compacting invalid or oversized values safely."""
+    try:
+        candidate = dict(data or {})
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+        UnicodeError,
+        RecursionError,
+    ):
+        candidate = {}
+    candidate_bytes = _event_data_bytes(candidate)
+    if candidate_bytes is not None and candidate_bytes <= max_bytes:
+        return candidate, candidate_bytes
+
+    # Do not attempt to partially preserve arbitrary model/user text.  A
+    # compact marker leaves the event's sequence/kind/status usable for SSE;
+    # the job snapshot still carries terminal result/error state.
+    fallback = {"message": _EVENT_DATA_TRUNCATED, "truncated": True}
+    fallback_bytes = _event_data_bytes(fallback)
+    if fallback_bytes is not None and fallback_bytes <= max_bytes:
+        return fallback, fallback_bytes
+    return {}, 0

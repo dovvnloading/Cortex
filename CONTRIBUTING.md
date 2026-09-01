@@ -81,7 +81,7 @@ Pop-Location
 When API models change, regenerate and review both contract artifacts:
 
 ```powershell
-python tools/generate_contracts.py
+python tools/generate_contracts.py --write
 ```
 
 ## Pull requests

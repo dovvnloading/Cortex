@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+from itertools import islice
 import re
 import secrets
 from threading import RLock
@@ -42,6 +43,8 @@ class SessionPrincipal:
 
 class SessionManager:
     """Issue one-time bootstrap exchanges and short-lived bearer sessions."""
+
+    _EXPIRY_CLEANUP_BATCH = 64
 
     def __init__(
         self,
@@ -96,6 +99,7 @@ class SessionManager:
 
     def exchange(self, bootstrap_token: str) -> SessionExchange:
         with self._lock:
+            self._cleanup_expired_locked(datetime.now(timezone.utc))
             if self._bootstrap_used or self._bootstrap_expires_at <= datetime.now(timezone.utc) or not hmac.compare_digest(
                 bootstrap_token.encode("utf-8"),
                 self._bootstrap_token.encode("utf-8"),
@@ -127,14 +131,51 @@ class SessionManager:
         now = datetime.now(timezone.utc)
         digest = self._digest(token)
         with self._lock:
+            self._cleanup_expired_locked(now)
             principal = self._sessions.get(digest)
             if principal is None or principal.expires_at <= now:
+                if principal is not None:
+                    self._sessions.pop(digest, None)
                 raise SessionSecurityError("invalid or expired session")
             renewed_expiry = min(now + self._ttl, principal.issued_at + self._max_lifetime)
             if renewed_expiry > principal.expires_at:
                 principal = replace(principal, expires_at=renewed_expiry)
                 self._sessions[digest] = principal
             return principal
+
+    def cleanup_expired(self, *, limit: int | None = None) -> int:
+        """Remove a bounded batch of expired sessions without exposing tokens.
+
+        Expired entries are also cleaned opportunistically during exchange and
+        authentication.  The explicit method lets an application janitor
+        make progress during periods with no session traffic while keeping
+        each call's work bounded.
+        """
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError("cleanup limit must be positive")
+        with self._lock:
+            return self._cleanup_expired_locked(
+                datetime.now(timezone.utc),
+                limit=(
+                    self._EXPIRY_CLEANUP_BATCH
+                    if limit is None
+                    else min(limit, self._EXPIRY_CLEANUP_BATCH)
+                ),
+            )
+
+    def _cleanup_expired_locked(self, now: datetime, *, limit: int | None = None) -> int:
+        batch_size = self._EXPIRY_CLEANUP_BATCH if limit is None else limit
+        inspected = list(islice(self._sessions.items(), batch_size))
+        expired = [digest for digest, principal in inspected if principal.expires_at <= now]
+        for digest in expired:
+            self._sessions.pop(digest, None)
+        # Rotate live entries so repeated bounded passes eventually reach
+        # expired entries behind a large number of active sessions.
+        for digest, principal in inspected:
+            if digest not in expired and digest in self._sessions:
+                self._sessions.pop(digest)
+                self._sessions[digest] = principal
+        return len(expired)
 
     def validate_request_context(self, request: Request) -> None:
         raw_host = request.headers.get("host") or ""

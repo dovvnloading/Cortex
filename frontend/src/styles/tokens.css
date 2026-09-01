@@ -336,7 +336,7 @@ a { color: inherit; text-decoration: none; }
 .chat-list { display: grid; align-content: start; gap: 1px; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 5px 1px 8px; scrollbar-gutter: stable; }
 
 .chat-group { display: grid; min-width: 0; }
-.chat-group-header { display: flex; align-items: center; min-width: 0; min-height: 26px; border-radius: var(--radius-xs); }
+.chat-group-header { position: relative; display: flex; align-items: center; min-width: 0; min-height: 26px; border-radius: var(--radius-xs); }
 .chat-group-header:hover { background: var(--surface-soft); }
 .chat-group-toggle { display: flex; align-items: center; flex: 1; min-width: 0; gap: 6px; border: 0; padding: 0 4px 0 6px; background: transparent; color: var(--text-muted); font-size: var(--text-2xs); font-weight: var(--weight-semi); letter-spacing: 0.04em; text-align: left; text-transform: uppercase; }
 .chat-group-chevron { flex: 0 0 auto; color: var(--text-faint); transition: transform 140ms ease; }
@@ -354,11 +354,13 @@ a { color: inherit; text-decoration: none; }
 .chat-row-active { background: var(--surface-raised); box-shadow: inset 2px 0 0 var(--accent); }
 .chat-row-select { flex: 1; min-width: 0; overflow: hidden; border: 0; padding: 0 8px; background: transparent; color: var(--text-muted); font-size: var(--text-sm); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .chat-row-active .chat-row-select { color: var(--text); font-weight: var(--weight-medium); }
-/* Actions take no layout space until needed, so a long title uses the full
-   row width instead of being permanently truncated to make room for them. */
-.chat-row-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 1px; padding-right: 3px; opacity: 0; transition: opacity 120ms ease; }
+/* Keep the action rail out of the title's layout width on pointer/keyboard
+   desktops. It becomes interactive when the row is hovered or focused; on
+   touch layouts it is permanently visible because hover is not a reliable
+   discovery mechanism. */
+.chat-row-actions { position: absolute; z-index: 1; top: 50%; right: 3px; display: flex; align-items: center; gap: 1px; padding-left: 8px; background: linear-gradient(90deg, transparent, var(--surface-soft) 8px); opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity 120ms ease; }
 .chat-row:hover .chat-row-actions, .chat-row:focus-within .chat-row-actions,
-.chat-group-header:hover .chat-row-actions, .chat-group-header:focus-within .chat-row-actions { opacity: 1; }
+.chat-group-header:hover .chat-row-actions, .chat-group-header:focus-within .chat-row-actions { opacity: 1; pointer-events: auto; }
 .history-action { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-faint); transition: background 140ms ease, color 140ms ease; }
 .history-action:hover { background: var(--surface-hover); color: var(--text); }
 .history-action-danger:hover { color: var(--danger); }
@@ -369,6 +371,12 @@ a { color: inherit; text-decoration: none; }
 .chat-row-menu-item:hover:not(:disabled), .chat-row-menu-item:focus-visible { background: var(--surface-hover); outline: 0; }
 .chat-row-menu-item:disabled { color: var(--text-faint); cursor: default; }
 .sidebar-empty { min-width: 0; margin: 0; padding: 12px 8px; color: var(--text-faint); font-size: var(--text-sm); line-height: 1.5; }
+
+@media (hover: none), (pointer: coarse) {
+  .chat-row-actions { opacity: 1; pointer-events: auto; }
+  .chat-row-select { padding-right: 74px; }
+  .chat-group-toggle { padding-right: 52px; }
+}
 
 .main-content { flex: 1 1 auto; width: auto; min-width: 0; min-height: 0; margin: 0; }
 .chat-content { overflow: hidden; padding: 0; }
@@ -584,6 +592,7 @@ a { color: inherit; text-decoration: none; }
 .execution-task-result pre { max-height: 96px; margin: 0; overflow: auto; color: var(--text); font: 0.68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .execution-task-result-stderr { color: var(--danger) !important; }
 .execution-task-result-empty { color: var(--text-faint); font-size: 0.68rem; }
+.execution-task-artifact-download { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 29px; padding: 0 8px; font-size: 0.68rem; }
 .execution-task-failure { display: flex; align-items: flex-start; gap: 6px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line)); border-left: 2px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--danger); font-size: 0.68rem; line-height: 1.4; }
 .execution-task-failure svg { flex: 0 0 auto; margin-top: 1px; }
 .execution-task-code-details { margin-top: -2px; color: var(--text-muted); font-size: 0.67rem; }

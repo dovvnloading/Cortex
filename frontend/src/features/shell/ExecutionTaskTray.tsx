@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, Code2, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, Code2, Download, X } from "lucide-react";
 import { useState } from "react";
 import type { CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../../contracts/cortex-api";
 
@@ -9,6 +9,15 @@ type Props = {
   onCancel?: (jobId: string) => Promise<void>;
   onDecideApproval?: (jobId: string, decision: ExecutionApprovalDecision) => Promise<void>;
   onLoadCodeSource?: (jobId: string) => Promise<CodeExecutionSourceResponse>;
+  onDownloadArtifact?: (artifact: ExecutionArtifactResult) => Promise<void>;
+};
+
+export type ExecutionArtifactResult = {
+  artifact_id: string;
+  mime_type: string;
+  size: number;
+  sha256?: string;
+  expires_at?: string;
 };
 
 type TaskGroup = {
@@ -19,7 +28,7 @@ type TaskGroup = {
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
-export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCodeSource }: Props) {
+export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCodeSource, onDownloadArtifact }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(() => new Set());
   const [deciding, setDeciding] = useState<Map<string, ExecutionApprovalDecision>>(() => new Map());
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<string | null>(null);
@@ -183,6 +192,7 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
                     <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
                   </div>
                   <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
+                  {task.result && <GenericResult result={task.result} onDownloadArtifact={onDownloadArtifact} />}
                 </div>
               )}
               {!isCodeTask && approvalPending && onDecideApproval && (
@@ -377,6 +387,79 @@ function CodeResult({ result }: { result: Record<string, unknown> }) {
       {!stdout && !stderr && !value && <span className="execution-task-result-empty">No output returned.</span>}
     </div>
   );
+}
+
+function GenericResult({
+  result,
+  onDownloadArtifact,
+}: {
+  result: Record<string, unknown>;
+  onDownloadArtifact?: (artifact: ExecutionArtifactResult) => Promise<void>;
+}) {
+  const artifact = readExecutionArtifact(result);
+  if (artifact) {
+    return (
+      <div className="execution-task-result execution-task-artifact">
+        <div className="execution-task-result-heading"><span>Artifact</span><span>{formatBytes(artifact.size)}</span></div>
+        <span className="execution-task-result-empty">{artifact.mime_type}</span>
+        {onDownloadArtifact && (
+          <button
+            className="button button-secondary execution-task-artifact-download"
+            type="button"
+            onClick={() => void onDownloadArtifact(artifact)}
+            aria-label={`Download ${artifact.mime_type} artifact`}
+          >
+            <Download aria-hidden="true" size={13} />
+            Download artifact
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="execution-task-result">
+      <div className="execution-task-result-heading"><span>Result</span></div>
+      <pre aria-label="Task result">{formatGenericResult(result)}</pre>
+    </div>
+  );
+}
+
+function readExecutionArtifact(result: Record<string, unknown>): ExecutionArtifactResult | null {
+  const artifactId = result.artifact_id;
+  const mimeType = result.mime_type;
+  const size = result.size;
+  if (
+    typeof artifactId !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(artifactId)
+    || typeof mimeType !== "string"
+    || !mimeType
+    || typeof size !== "number"
+    || !Number.isFinite(size)
+    || size < 0
+  ) return null;
+
+  return {
+    artifact_id: artifactId,
+    mime_type: mimeType,
+    size,
+    ...(typeof result.sha256 === "string" ? { sha256: result.sha256 } : {}),
+    ...(typeof result.expires_at === "string" ? { expires_at: result.expires_at } : {}),
+  };
+}
+
+function formatGenericResult(result: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(result, null, 2) ?? "No output returned.";
+  } catch {
+    return "The task returned an unreadable result.";
+  }
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${Math.round(size)} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatApprovalMeta(task: ExecutionTaskSummary): string {

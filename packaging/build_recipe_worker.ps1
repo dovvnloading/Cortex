@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepositoryRoot
+$RequiredPyInstallerVersion = "6.14.2"
 
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
     throw "The recipe worker must be packaged on Windows."
@@ -90,11 +91,21 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "The dependency installation failed; refusing to package a stale worker."
         }
-        python -m pip install --disable-pip-version-check "pyinstaller>=6.14,<7"
+        python -m pip install --disable-pip-version-check "pyinstaller==$RequiredPyInstallerVersion"
         if ($LASTEXITCODE -ne 0) {
             throw "The PyInstaller installation failed; refusing to package a stale worker."
         }
     }
+
+    $PyInstallerVersion = python -c "import PyInstaller; print(PyInstaller.__version__)"
+    $PyInstallerVersionExitCode = $LASTEXITCODE
+    if ($PyInstallerVersionExitCode -ne 0) {
+        throw "PyInstaller could not be imported; refusing to package a stale worker."
+    }
+    if (($PyInstallerVersion -join "`n").Trim() -ne $RequiredPyInstallerVersion) {
+        throw "The resolved PyInstaller version is not $RequiredPyInstallerVersion; refusing to package a stale worker."
+    }
+    Write-Host "Resolved PyInstaller version for packaging: $RequiredPyInstallerVersion"
 
     python -m PyInstaller --noconfirm --clean `
         --distpath $StagingDist `

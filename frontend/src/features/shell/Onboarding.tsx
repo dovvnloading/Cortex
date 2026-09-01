@@ -6,9 +6,10 @@ type Props = {
   error: string | null;
   busy: boolean;
   onSubmit: (token: string) => Promise<void>;
+  onRetry?: () => Promise<void>;
 };
 
-export function Onboarding({ initialToken, error, busy, onSubmit }: Props) {
+export function Onboarding({ initialToken, error, busy, onSubmit, onRetry }: Props) {
   const autoSubmittedToken = useRef<string | null>(null);
   const suppliedToken = initialToken.trim();
   const canAutoConnect = Boolean(suppliedToken) && !error;
@@ -41,6 +42,11 @@ export function Onboarding({ initialToken, error, busy, onSubmit }: Props) {
             {suppliedToken && (
               <button className="button button-secondary button-wide" type="button" onClick={() => void onSubmit(suppliedToken)} disabled={busy}>
                 <RefreshCw aria-hidden="true" size={16} /> {busy ? "Retrying..." : "Retry workspace startup"}
+              </button>
+            )}
+            {!suppliedToken && error && onRetry && (
+              <button className="button button-secondary button-wide" type="button" onClick={() => void onRetry()} disabled={busy}>
+                <RefreshCw aria-hidden="true" size={16} /> {busy ? "Retrying..." : "Reconnect workspace"}
               </button>
             )}
           </div>

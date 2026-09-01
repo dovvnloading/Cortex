@@ -1,10 +1,14 @@
-"""Regenerate the checked-in OpenAPI and initial TypeScript contracts."""
+"""Generate or verify the checked-in OpenAPI and TypeScript contracts."""
 
 from __future__ import annotations
 
+import argparse
+from collections.abc import Sequence
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any
 
 
@@ -12,7 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from cortex_backend.api import create_app  # noqa: E402
-from cortex_backend.api.schemas import ExecutionSSEEvent  # noqa: E402
 
 
 CONTRACT_DIR = ROOT / "contracts"
@@ -20,74 +23,277 @@ OPENAPI_PATH = CONTRACT_DIR / "openapi.json"
 TYPESCRIPT_PATH = CONTRACT_DIR / "cortex-api.ts"
 
 
-def main() -> None:
-    CONTRACT_DIR.mkdir(parents=True, exist_ok=True)
+class ContractGenerationError(ValueError):
+    """Raised when an OpenAPI schema cannot be represented safely."""
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Generate or verify Cortex's checked-in API contracts."
+    )
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument(
+        "--check",
+        action="store_true",
+        help="render in a temporary directory and verify checked-in files without changing them",
+    )
+    modes.add_argument(
+        "--write",
+        action="store_true",
+        help="render to temporary files and atomically promote generated contracts",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     app = create_app(allowed_hosts=("127.0.0.1", "localhost", "::1"))
     specification = app.openapi()
-    # StreamingResponse does not automatically register the JSON envelope
-    # carried by text/event-stream. Keep that shared client contract generated
-    # from the Pydantic model rather than maintaining a hand-written tail.
-    schemas = specification.setdefault("components", {}).setdefault("schemas", {})
-    schemas["ExecutionSSEEvent"] = ExecutionSSEEvent.model_json_schema(
-        ref_template="#/components/schemas/{model}"
-    )
-    OPENAPI_PATH.write_text(
-        json.dumps(specification, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    TYPESCRIPT_PATH.write_text(render_typescript(specification), encoding="utf-8")
+    try:
+        if args.check:
+            stale = check_contracts(specification)
+            if stale:
+                print(
+                    "Generated API contracts are stale or missing: "
+                    + ", ".join(stale),
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
+        write_contracts(specification)
+    except (ContractGenerationError, OSError, UnicodeError) as exc:
+        print(f"Contract generation failed: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _contract_contents(specification: dict[str, Any]) -> dict[str, str]:
+    return {
+        OPENAPI_PATH.name: json.dumps(specification, indent=2, sort_keys=True) + "\n",
+        TYPESCRIPT_PATH.name: render_typescript(specification),
+    }
+
+
+def write_contracts(
+    specification: dict[str, Any], output_dir: Path | None = None
+) -> None:
+    """Generate contracts in staging, then atomically replace each output."""
+
+    output_dir = CONTRACT_DIR if output_dir is None else output_dir
+    contents = _contract_contents(specification)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".cortex-contract-write-", dir=output_dir
+    ) as staging_name:
+        staging = Path(staging_name)
+        staged_paths: dict[str, Path] = {}
+        for name, content in contents.items():
+            staged_path = staging / name
+            staged_path.write_text(content, encoding="utf-8")
+            staged_paths[name] = staged_path
+        for name, staged_path in staged_paths.items():
+            os.replace(staged_path, output_dir / name)
+
+
+def check_contracts(
+    specification: dict[str, Any], output_dir: Path | None = None
+) -> list[str]:
+    """Return missing/stale contract names without mutating the worktree."""
+
+    output_dir = CONTRACT_DIR if output_dir is None else output_dir
+    contents = _contract_contents(specification)
+    stale: list[str] = []
+    staging_parent = output_dir.parent if output_dir.parent.is_dir() else None
+    with tempfile.TemporaryDirectory(
+        prefix=".cortex-contract-check-", dir=staging_parent
+    ) as staging_name:
+        staging = Path(staging_name)
+        staged_paths: dict[str, Path] = {}
+        for name, expected in contents.items():
+            staged_path = staging / name
+            staged_path.write_text(expected, encoding="utf-8")
+            staged_paths[name] = staged_path
+        for name, staged_path in staged_paths.items():
+            path = output_dir / name
+            try:
+                actual = path.read_bytes()
+            except (FileNotFoundError, OSError):
+                stale.append(name)
+                continue
+            if actual != staged_path.read_bytes():
+                stale.append(name)
+    return stale
 
 
 def render_typescript(specification: dict[str, Any]) -> str:
-    schemas = specification.get("components", {}).get("schemas", {})
+    components = specification.get("components", {})
+    if not isinstance(components, dict):
+        raise ContractGenerationError("components must be an object")
+    schemas = components.get("schemas", {})
+    if not isinstance(schemas, dict):
+        raise ContractGenerationError("components.schemas must be an object")
     lines = [
         "// Generated by tools/generate_contracts.py. Do not edit manually.",
         "// The web client consumes this generated contract.",
         "",
     ]
     for name, schema in schemas.items():
-        lines.append(f"export interface {name} {{")
-        properties = schema.get("properties", {})
-        required = set(schema.get("required", []))
-        for property_name, property_schema in properties.items():
-            optional = "" if property_name in required else "?"
-            lines.append(
-                f"  {property_name}{optional}: {_typescript_type(property_schema)};"
+        if not isinstance(name, str) or not isinstance(schema, dict):
+            raise ContractGenerationError("schema names and definitions must be objects")
+        location = f"components.schemas.{name}"
+        _validate_schema_keys(schema, location)
+        properties = schema.get("properties")
+        if schema.get("type") == "object" or properties is not None:
+            if properties is None:
+                properties = {}
+            if not isinstance(properties, dict):
+                raise ContractGenerationError(f"{location}.properties must be an object")
+            lines.append(f"export interface {name} {{")
+            required = schema.get("required", [])
+            if not isinstance(required, list) or not all(
+                isinstance(item, str) for item in required
+            ):
+                raise ContractGenerationError(f"{location}.required must be a string array")
+            if "additionalProperties" in schema:
+                additional = schema["additionalProperties"]
+                if isinstance(additional, dict):
+                    _typescript_type(
+                        additional,
+                        location=f"{location}.additionalProperties",
+                    )
+                elif additional not in (True, False):
+                    raise ContractGenerationError(
+                        f"unsupported additionalProperties at {location}"
+                    )
+            required_names = set(required)
+            for property_name, property_schema in properties.items():
+                if not isinstance(property_name, str):
+                    raise ContractGenerationError(
+                        f"{location}.properties has a non-string name"
+                    )
+                optional = "" if property_name in required_names else "?"
+                lines.append(
+                    f"  {property_name}{optional}: "
+                    f"{_typescript_type(property_schema, location=f'{location}.properties.{property_name}')};"
+                )
+            lines.extend(["}", ""])
+        else:
+            lines.extend(
+                [
+                    f"export type {name} = {_typescript_type(schema, location=location)};",
+                    "",
+                ]
             )
-        lines.extend(["}", ""])
     return "\n".join(lines)
 
 
-def _typescript_type(schema: dict[str, Any]) -> str:
+_SUPPORTED_SCHEMA_KEYS = frozenset(
+    {
+        "$ref",
+        "additionalProperties",
+        "anyOf",
+        "const",
+        "default",
+        "description",
+        "discriminator",
+        "enum",
+        "examples",
+        "exclusiveMaximum",
+        "exclusiveMinimum",
+        "format",
+        "items",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "oneOf",
+        "pattern",
+        "properties",
+        "readOnly",
+        "required",
+        "title",
+        "type",
+        "writeOnly",
+    }
+)
+
+
+def _typescript_type(schema: dict[str, Any], *, location: str = "$") -> str:
+    if not isinstance(schema, dict):
+        raise ContractGenerationError(f"unsupported schema at {location}: expected object")
+    _validate_schema_keys(schema, location)
     if "$ref" in schema:
-        return schema["$ref"].rsplit("/", 1)[-1]
+        reference = schema["$ref"]
+        if not isinstance(reference, str) or not reference.startswith("#/components/schemas/"):
+            raise ContractGenerationError(f"unsupported schema reference at {location}")
+        return reference.rsplit("/", 1)[-1]
     if "const" in schema:
-        return json.dumps(schema["const"])
-    if "anyOf" in schema:
-        return " | ".join(_typescript_type(item) for item in schema["anyOf"])
-    if "oneOf" in schema:
-        return " | ".join(_typescript_type(item) for item in schema["oneOf"])
+        value = schema["const"]
+        if not _is_typescript_literal(value):
+            raise ContractGenerationError(f"unsupported const at {location}")
+        return json.dumps(value)
+    for union_key in ("anyOf", "oneOf"):
+        if union_key not in schema:
+            continue
+        options = schema[union_key]
+        if not isinstance(options, list) or not options:
+            raise ContractGenerationError(f"{location}.{union_key} must be non-empty")
+        return " | ".join(
+            _typescript_type(item, location=f"{location}.{union_key}[{index}]")
+            for index, item in enumerate(options)
+        )
     if "enum" in schema:
-        return " | ".join(json.dumps(value) for value in schema["enum"])
-    schema_type = schema.get("type")
-    if schema_type == "array":
-        item_type = _typescript_type(schema.get("items", {}))
-        return f"Array<{item_type}>"
-    if schema_type == "object":
-        if "additionalProperties" in schema and isinstance(
-            schema["additionalProperties"], dict
+        values = schema["enum"]
+        if not isinstance(values, list) or not values or not all(
+            _is_typescript_literal(value) for value in values
         ):
-            return f"Record<string, {_typescript_type(schema['additionalProperties'])}>"
-        return "Record<string, unknown>"
+            raise ContractGenerationError(f"unsupported enum at {location}")
+        return " | ".join(json.dumps(value) for value in values)
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        raise ContractGenerationError(f"type unions are unsupported at {location}")
+    if schema_type == "array":
+        return f"Array<{_typescript_type(schema.get('items', {}), location=f'{location}.items')}>"
+    if schema_type == "object":
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, dict):
+            return f"Record<string, {_typescript_type(additional, location=f'{location}.additionalProperties')}>"
+        if additional in (None, True):
+            return "Record<string, unknown>"
+        if additional is False:
+            return "Record<string, never>"
+        raise ContractGenerationError(f"unsupported additionalProperties at {location}")
     if schema_type == "null":
         return "null"
-    return {
-        "string": "string",
-        "integer": "number",
-        "number": "number",
-        "boolean": "boolean",
-    }.get(schema_type, "unknown")
+    if schema_type in {"string", "integer", "number", "boolean"}:
+        return {
+            "string": "string",
+            "integer": "number",
+            "number": "number",
+            "boolean": "boolean",
+        }[schema_type]
+    if schema_type is None:
+        # An empty schema is explicitly unconstrained in JSON Schema. Keep the
+        # existing safe representation for that case, but fail on recognized
+        # structural keywords above rather than silently widening them.
+        return "unknown"
+    raise ContractGenerationError(f"unsupported schema type at {location}: {schema_type!r}")
+
+
+def _is_typescript_literal(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _validate_schema_keys(schema: dict[str, Any], location: str) -> None:
+    unsupported = sorted(set(schema) - _SUPPORTED_SCHEMA_KEYS)
+    if unsupported:
+        keys = ", ".join(unsupported)
+        raise ContractGenerationError(
+            f"Unsupported JSON schema keywords at {location}: {keys}"
+        )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

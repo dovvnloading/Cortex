@@ -31,7 +31,9 @@ from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelCatalog, ModelService
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.lifecycle import ExecutionLifecycle
+from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from cortex_backend.testing.fake_ollama import (
     FakeGenerationEngine,
@@ -99,8 +101,10 @@ def create_app(
     readiness_check: Callable[[], bool] | None = None,
     execution_coordinator: DurableFakeCoordinator | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
+    cleanup_supervisor: ExecutionCleanupSupervisor | None = None,
     installation_principal_id: str | None = None,
     llamacpp_manager: LlamaServerManager | None = None,
+    llamacpp_chat_client: object | None = None,
     default_gguf_models_dir: Path | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
@@ -121,6 +125,16 @@ def create_app(
     lifecycle_repository = (
         execution_lifecycle.repository if execution_lifecycle is not None else None
     )
+    attachment_repository = getattr(
+        getattr(dependencies, "attachments", None), "repository", None
+    ) if dependencies is not None else None
+    cleanup_repository = lifecycle_repository or (
+        execution_coordinator.repository if execution_coordinator is not None else None
+    ) or attachment_repository
+    if cleanup_supervisor is not None and cleanup_repository is not None and (
+        cleanup_supervisor.repository is not cleanup_repository
+    ):
+        raise ValueError("cleanup supervisor repository does not match app repository")
     repository_principal = (
         execution_coordinator.repository.installation_principal_id
         if execution_coordinator is not None
@@ -150,15 +164,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.started_at = datetime.now(timezone.utc)
-        if app.state.execution_lifecycle is not None:
-            lifecycle_snapshot = app.state.execution_lifecycle.start()
-            app.state.execution_coordinator = (
-                app.state.execution_lifecycle.coordinator
-                if lifecycle_snapshot.available
-                else None
-            )
-        app.state.ready = True
         try:
+            if app.state.execution_lifecycle is not None:
+                lifecycle_snapshot = app.state.execution_lifecycle.start()
+                app.state.execution_coordinator = (
+                    app.state.execution_lifecycle.coordinator
+                    if lifecycle_snapshot.available
+                    else None
+                )
+            if app.state.cleanup_supervisor is not None:
+                app.state.cleanup_supervisor.start()
+            app.state.ready = True
             yield
         finally:
             app.state.ready = False
@@ -172,13 +188,41 @@ def create_app(
                 logger.exception(
                     "Cortex job registry shutdown raised; continuing with runtime teardown."
                 )
-            if app.state.execution_lifecycle is not None:
-                app.state.execution_lifecycle.stop()
-            elif app.state.execution_coordinator is not None:
-                app.state.execution_coordinator.shutdown()
-            app.state.execution_coordinator = None
-            if app.state.llamacpp_manager is not None:
-                app.state.llamacpp_manager.stop()
+            if app.state.cleanup_supervisor is not None:
+                try:
+                    app.state.cleanup_supervisor.stop()
+                except Exception:
+                    logger.exception(
+                        "Cortex retention cleanup shutdown raised; continuing with runtime teardown."
+                    )
+            try:
+                if app.state.execution_lifecycle is not None:
+                    app.state.execution_lifecycle.stop()
+                elif app.state.execution_coordinator is not None:
+                    app.state.execution_coordinator.shutdown()
+            except Exception:
+                logger.exception(
+                    "Cortex execution runtime shutdown raised; continuing with resource teardown."
+                )
+            finally:
+                app.state.execution_coordinator = None
+                if app.state.llamacpp_manager is not None:
+                    close = getattr(app.state.llamacpp_manager, "close", None)
+                    try:
+                        (close if callable(close) else app.state.llamacpp_manager.stop)()
+                    except Exception:
+                        logger.exception(
+                            "Cortex llama.cpp manager shutdown raised; continuing teardown."
+                        )
+                if app.state.llamacpp_chat_client is not None:
+                    close = getattr(app.state.llamacpp_chat_client, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.exception(
+                                "Cortex llama.cpp chat client shutdown raised; continuing teardown."
+                            )
 
     app = FastAPI(
         title="Cortex Local API",
@@ -196,6 +240,14 @@ def create_app(
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
     app.state.execution_lifecycle = execution_lifecycle
+    # The ordinary/demo API accepts protocol-compatible fakes in tests.  The
+    # janitor is deliberately narrower: it relies on the durable tombstone
+    # protocol and must never be auto-wired to an in-memory stand-in.
+    app.state.cleanup_supervisor = cleanup_supervisor or (
+        ExecutionCleanupSupervisor(cleanup_repository)
+        if isinstance(cleanup_repository, ExecutionRepository)
+        else None
+    )
     app.state.execution_coordinator = execution_coordinator
     app.state.installation_principal_id = manager.installation_principal_id
     app.state.preview = preview
@@ -214,6 +266,7 @@ def create_app(
     )
     app.state.ollama_setup_url = "https://ollama.com/download"
     app.state.llamacpp_manager = llamacpp_manager
+    app.state.llamacpp_chat_client = llamacpp_chat_client
     app.state.default_gguf_models_dir = default_gguf_models_dir or (
         Path(tempfile.gettempdir()) / "cortex-gguf-models"
     )

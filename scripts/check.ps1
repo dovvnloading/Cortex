@@ -36,6 +36,10 @@ $frontend = Join-Path $repoRoot 'frontend'
 
 $results = [System.Collections.Generic.List[object]]::new()
 
+if ($SkipBackend -and $SkipFrontend) {
+    throw 'At least one check surface must be enabled; refusing to run zero checks.'
+}
+
 function Invoke-Step {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -91,15 +95,7 @@ if (-not $SkipBackend) {
     }
 
     Invoke-Step 'API contracts are up to date' {
-        # Regenerates in place, then fails if that produced a diff -- the same
-        # check CI runs, and the usual cause of a red build after touching a
-        # Pydantic model.
-        python tools/generate_contracts.py
-        if ($LASTEXITCODE -ne 0) { return }
-        git diff --exit-code -- contracts/openapi.json contracts/cortex-api.ts
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host '   Contracts were stale and have been regenerated. Commit them.' -ForegroundColor Yellow
-        }
+        python tools/generate_contracts.py --check
     }
 
     if ($Tier -eq 'full') {

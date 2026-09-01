@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import socket
 import subprocess
 import threading
 import time
 from typing import Any
 from collections.abc import Callable
+from collections.abc import Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+
+DEV_SERVER_ID_HEADER = "X-Cortex-Dev-Server"
 
 
 def wait_for_http(
@@ -19,6 +24,7 @@ def wait_for_http(
     *,
     timeout: float = 30.0,
     is_alive: Callable[[], bool] | None = None,
+    expected_headers: Mapping[str, str] | None = None,
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -27,7 +33,11 @@ def wait_for_http(
         try:
             request = Request(url, headers={"Host": "127.0.0.1"})
             with urlopen(request, timeout=1.0) as response:
-                if 200 <= response.status < 300:
+                headers_match = all(
+                    response.headers.get(name) == value
+                    for name, value in (expected_headers or {}).items()
+                )
+                if 200 <= response.status < 300 and headers_match:
                     return True
         except (OSError, URLError):
             time.sleep(0.1)
@@ -39,6 +49,7 @@ class ServerSupervisor:
     """Run Uvicorn in an owned thread and expose bounded shutdown."""
 
     server: Any
+    sockets: list[socket.socket] | None = None
     thread: threading.Thread | None = field(default=None, init=False)
     error: BaseException | None = field(default=None, init=False)
     started: threading.Event = field(default_factory=threading.Event, init=False)
@@ -53,10 +64,15 @@ class ServerSupervisor:
         def run() -> None:
             self.started.set()
             try:
-                self.server.run()
+                if self.sockets is None:
+                    self.server.run()
+                else:
+                    self.server.run(sockets=self.sockets)
             except BaseException as exc:  # surfaced to the launcher loop
                 self.error = exc
             finally:
+                for listener in self.sockets or []:
+                    listener.close()
                 if not self.server.should_exit:
                     self.exited_unexpectedly.set()
 

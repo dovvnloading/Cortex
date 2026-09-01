@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
+import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
@@ -7,6 +7,7 @@ import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
+import { useUiStore } from "../../stores/useUiStore";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
@@ -35,6 +36,7 @@ type Props = {
   onThreadCreated: (threadId: string) => void;
   onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
+  onClearMemory?: () => Promise<void>;
   onSessionExpired: () => void;
 };
 
@@ -58,6 +60,15 @@ type AttachmentDraftTarget = {
   threadId: string | null;
 };
 
+type PendingAdmission = {
+  requestId: string;
+  operation: "generate" | "regenerate";
+  threadId: string | null;
+  baseRevision?: number;
+  options?: GenerationOptionsOverride;
+  messageId?: string;
+};
+
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENTS = 8;
@@ -76,6 +87,7 @@ export function ChatPage({
   onThreadCreated,
   onChatChanged,
   onForked,
+  onClearMemory,
   onSessionExpired,
 }: Props) {
   const generation = useChatStore((state) => state.generation);
@@ -114,6 +126,13 @@ export function ChatPage({
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
+  // A POST can be admitted before its response reaches the browser. Keep its
+  // idempotency key across that ambiguous failure so Retry can replay the
+  // admission instead of creating a second job (or a second new-chat thread).
+  // A deliberate submit does not pass this key and therefore starts a new
+  // user turn with a fresh request id.
+  const pendingAdmissionRef = useRef<PendingAdmission | null>(null);
+  const handledClearRequestsRef = useRef(new Set<string>());
 
   const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
     setGenerationError({ threadId: failedThreadId, message });
@@ -199,7 +218,7 @@ export function ChatPage({
           ? "starting"
           : "ready";
 
-  async function reconcileChat(id: string): Promise<void> {
+  const reconcileChat = useCallback(async (id: string): Promise<void> => {
     const requestVersion = (chatRequestVersionsRef.current.get(id) ?? 0) + 1;
     chatRequestVersionsRef.current.set(id, requestVersion);
     const isLatestRequest = () => chatRequestVersionsRef.current.get(id) === requestVersion;
@@ -219,7 +238,28 @@ export function ChatPage({
       if (!isLatestRequest()) return;
       setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
     }
-  }
+  }, [api, onChatChanged]);
+
+  const completeGeneration = useCallback(async (id: string, clearRequested = false, jobId?: string): Promise<void> => {
+    await reconcileChat(id);
+    if (!clearRequested) return;
+    const requestKey = jobId ?? id;
+    if (handledClearRequestsRef.current.has(requestKey)) return;
+    handledClearRequestsRef.current.add(requestKey);
+    if (!onClearMemory) {
+      useUiStore.getState().notify("Cortex requested clearing permanent memories. Review Settings to confirm.", "info");
+      return;
+    }
+    if (!window.confirm("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.")) {
+      useUiStore.getState().notify("Permanent memories were not cleared.", "info");
+      return;
+    }
+    try {
+      await onClearMemory();
+    } catch (error) {
+      useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not clear memories.", "error");
+    }
+  }, [onClearMemory, reconcileChat]);
 
   useEffect(() => {
     viewThreadIdRef.current = threadId;
@@ -236,21 +276,34 @@ export function ChatPage({
       setResolvedThreadId(threadId);
       void loadChat({ preserveCurrent });
       const stored = readActiveJob();
-      if (stored) {
+      // The global store is authoritative while the app is alive. Storage is
+      // only a best-effort cold-start side channel, so a denied/quota-full
+      // sessionStorage must not make a live job look finished on re-entry.
+      const currentGeneration = useChatStore.getState().generation;
+      const activeJob = (
+        currentGeneration.jobId && currentGeneration.threadId
+          ? {
+              jobId: currentGeneration.jobId,
+              threadId: currentGeneration.threadId,
+              lastEventId: currentGeneration.lastEventId,
+            }
+          : null
+      ) ?? stored;
+      if (activeJob) {
         // Only rewind the event cursor when the store is actually cold for
         // this job. initialMountRef is per-instance, so it is true on EVERY
         // mount -- including a return from /settings, which unmounts this
         // page but leaves the module-level generation store populated.
         // Replaying from 0 onto already-accumulated text printed the answer
         // twice; keeping the stored cursor resumes where the buffer left off.
-        const warmForThisJob = useChatStore.getState().generation.jobId === stored.jobId;
+        const warmForThisJob = currentGeneration.jobId === activeJob.jobId;
         const replayFromStart = initialMountRef.current && !warmForThisJob;
-        const job: PersistedJob = replayFromStart ? { ...stored, lastEventId: 0 } : stored;
+        const job: PersistedJob = replayFromStart ? { ...activeJob, lastEventId: 0 } : activeJob;
         initialMountRef.current = false;
         if (replayFromStart || !warmForThisJob) {
           useChatStore.getState().beginGeneration(job.jobId, job.threadId);
         }
-        void consume(job, reconcileChat, reportGenerationFailure);
+        void consume(job, completeGeneration, reportGenerationFailure);
       } else {
         initialMountRef.current = false;
         const current = useChatStore.getState().generation;
@@ -263,7 +316,13 @@ export function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, loadChat]);
 
-  const startGeneration = async (prompt: string, regenerateMessageId?: string, suppliedAttachments: readonly ChatAttachment[] = attachments): Promise<StartedGeneration | null> => {
+  const startGeneration = async (
+    prompt: string,
+    regenerateMessageId?: string,
+    suppliedAttachments: readonly ChatAttachment[] = attachments,
+    requestIdOverride?: string,
+    admissionOverride?: PendingAdmission,
+  ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
     if (!input || generation.jobId || startingRef.current) return null;
     if (!runtimeReady) {
@@ -279,17 +338,46 @@ export function ChatPage({
     setLastPrompt(input);
     setLastAttachments([...suppliedAttachments]);
     setGenerationError(null);
+    const requestId = requestIdOverride ?? createRequestId();
+    const requestThreadId = admissionOverride ? admissionOverride.threadId : threadId;
+    const options = admissionOverride ? admissionOverride.options : threadOptions ?? undefined;
+    const baseRevision = admissionOverride
+      ? admissionOverride.baseRevision
+      : currentChat?.revision ?? 0;
+    const pendingAdmission: PendingAdmission = admissionOverride ?? {
+      requestId,
+      operation: regenerateMessageId ? "regenerate" : "generate",
+      threadId: requestThreadId,
+      baseRevision: regenerateMessageId ? undefined : baseRevision,
+      options,
+      messageId: regenerateMessageId,
+    };
     try {
-      const requestId = createRequestId();
-      const options = threadOptions ?? undefined;
+      if (!requestIdOverride) pendingAdmissionRef.current = pendingAdmission;
       const accepted = regenerateMessageId
-        ? await api.regenerate(threadId ?? "", { request_id: requestId, message_id: regenerateMessageId, user_input: input, attachments: [...suppliedAttachments], options })
-        : await api.generate({ request_id: requestId, thread_id: threadId, user_input: input, attachments: [...suppliedAttachments], base_revision: currentChat?.revision ?? 0, options });
-      const jobThreadId = accepted.thread_id ?? threadId;
+        ? await api.regenerate(requestThreadId ?? "", {
+            request_id: requestId,
+            message_id: regenerateMessageId,
+            user_input: input,
+            attachments: [...suppliedAttachments],
+            options,
+          })
+        : await api.generate({
+            request_id: requestId,
+            thread_id: requestThreadId,
+            user_input: input,
+            attachments: [...suppliedAttachments],
+            base_revision: baseRevision,
+            options,
+          });
+      const jobThreadId = accepted.thread_id ?? requestThreadId;
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
       setResolvedThreadId(jobThreadId);
-      start(accepted.job_id, jobThreadId, reconcileChat, reportGenerationFailure);
+      start(accepted.job_id, jobThreadId, completeGeneration, reportGenerationFailure);
+      if (pendingAdmissionRef.current?.requestId === requestId) {
+        pendingAdmissionRef.current = null;
+      }
       if (!regenerateMessageId) {
         setChat((current) => ({
           id: jobThreadId,
@@ -320,6 +408,18 @@ export function ChatPage({
       }
       return { threadId: jobThreadId };
     } catch (requestError) {
+      // A response with a client-side rejection is authoritative: the
+      // admission did not happen and its key must not leak into a later
+      // retry. Network failures and server errors remain ambiguous because
+      // the backend may have admitted the job before the response was lost.
+      if (
+        requestError instanceof ApiError
+        && requestError.status >= 400
+        && requestError.status < 500
+        && pendingAdmissionRef.current?.requestId === requestId
+      ) {
+        pendingAdmissionRef.current = null;
+      }
       setGenerationError({
         threadId,
         message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
@@ -440,7 +540,14 @@ export function ChatPage({
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
-    const started = await startGeneration(lastPrompt, undefined, lastAttachments);
+    const pendingAdmission = pendingAdmissionRef.current;
+    const started = await startGeneration(
+      lastPrompt,
+      pendingAdmission?.operation === "regenerate" ? pendingAdmission.messageId : undefined,
+      lastAttachments,
+      pendingAdmission?.requestId,
+      pendingAdmission ?? undefined,
+    );
     if (started && !threadId) onThreadCreated(started.threadId);
     return Boolean(started);
   };

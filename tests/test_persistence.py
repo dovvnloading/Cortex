@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import cortex_backend.repositories.legacy_storage as legacy_storage
 from cortex_backend.repositories.legacy_storage import (
     DatabaseManager,
     PermanentMemoryManager,
@@ -17,6 +18,19 @@ from cortex_backend.repositories.legacy_storage import (
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_persistence_logs_omit_private_paths_and_chat_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private_db_path = Path(directory) / "Alice private records.sqlite"
+            private_title = "Alice's confidential launch plan"
+            with self.assertLogs(level="INFO") as captured:
+                manager = DatabaseManager(db_path=str(private_db_path))
+                manager.update_chat_title("private-thread-id", private_title)
+
+            rendered_logs = "\n".join(captured.output)
+            self.assertNotIn(str(private_db_path), rendered_logs)
+            self.assertNotIn(private_title, rendered_logs)
+            self.assertIn("private title omitted", rendered_logs)
+
     def test_chat_attachment_metadata_survives_sqlite_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))
@@ -114,6 +128,59 @@ class PersistenceTests(unittest.TestCase):
             self.assertIsNotNone(manager.load_chat("valid"))
             self.assertTrue((legacy / "quarantine" / "malformed.json").exists())
             self.assertTrue(list(root.glob("legacy_migrated_*/*.json")))
+
+    def test_migration_quarantines_out_of_contract_chat_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            records = {
+                "invalid-role.json": {"id": "invalid-role", "messages": [{"role": "tool", "content": "x"}]},
+                "oversized-content.json": {
+                    "id": "oversized-content",
+                    "messages": [{"role": "user", "content": "x" * (legacy_storage.MAX_LEGACY_MESSAGE_CONTENT_CHARS + 1)}],
+                },
+                "too-many-messages.json": {
+                    "id": "too-many-messages",
+                    "messages": [
+                        {"role": "user", "content": "x"}
+                    ] * (legacy_storage.MAX_LEGACY_CHAT_MESSAGES + 1),
+                },
+            }
+            for filename, record in records.items():
+                (legacy / filename).write_text(json.dumps(record), encoding="utf-8")
+
+            manager = DatabaseManager(
+                db_path=str(root / "chats.sqlite"),
+                legacy_history_dir=str(legacy),
+            )
+            result = manager.migrate_from_json_if_needed()
+
+            self.assertEqual(result, legacy_storage.MigrationResult(quarantined=3))
+            self.assertEqual(manager.get_all_chats_summary(), [])
+            self.assertEqual(
+                {path.name for path in (legacy / "quarantine").iterdir()},
+                set(records),
+            )
+
+    def test_migration_rejects_oversized_source_file_before_json_parse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            (legacy / "oversized.json").write_text("{}" + (" " * 64), encoding="utf-8")
+            (legacy / "valid.json").write_text(json.dumps({"id": "valid"}), encoding="utf-8")
+
+            manager = DatabaseManager(
+                db_path=str(root / "chats.sqlite"),
+                legacy_history_dir=str(legacy),
+            )
+            with patch.object(legacy_storage, "MAX_LEGACY_CHAT_FILE_BYTES", 32):
+                result = manager.migrate_from_json_if_needed()
+
+            self.assertEqual(result, legacy_storage.MigrationResult(migrated=1, quarantined=1))
+            self.assertTrue((legacy / "quarantine" / "oversized.json").exists())
+            self.assertIsNotNone(manager.load_chat("valid"))
 
     def test_permanent_memory_add_memo_is_safe_across_threads(self):
         with tempfile.TemporaryDirectory() as directory:

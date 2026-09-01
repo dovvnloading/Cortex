@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -13,10 +14,11 @@ import main as launcher_main
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
+from cortex_backend.launcher import supervisor as supervisor_module
 from cortex_backend.launcher import webview_runtime as runtime_module
 from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
-from cortex_backend.launcher.instance import InstanceLock
+from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
 
 
@@ -35,6 +37,135 @@ def test_explicit_backend_port_remains_strict():
     args = launcher_main.build_parser().parse_args(["--port", "8765"])
 
     assert launcher_main._requested_port(args.port) == 8765
+
+
+def test_reserved_backend_port_stays_owned_until_server_handoff():
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+    competitor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError):
+            competitor.bind(("127.0.0.1", port))
+    finally:
+        competitor.close()
+        listener.close()
+
+
+def test_occupied_explicit_backend_port_reports_a_bounded_startup_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    port = int(occupied.getsockname()[1])
+    try:
+        args = launcher_main.build_parser().parse_args(
+            ["--headless", "--port", str(port), "--data-dir", str(tmp_path)]
+        )
+        assert launcher_main._run_web(args) == 1
+    finally:
+        occupied.close()
+
+    assert "could not reserve its backend port" in capsys.readouterr().err
+    diagnostic = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=backend port reservation" in diagnostic
+
+
+def test_server_supervisor_hands_reserved_socket_to_uvicorn_and_closes_it():
+    listener = launcher_main._reserve_port(0)
+    calls: list[list[socket.socket] | None] = []
+
+    class FakeServer:
+        should_exit = True
+
+        def run(self, *, sockets):
+            calls.append(sockets)
+
+    supervisor = supervisor_module.ServerSupervisor(FakeServer(), sockets=[listener])
+    supervisor.start()
+    supervisor.thread.join(timeout=1)
+
+    assert calls == [[listener]]
+    assert listener.fileno() == -1
+
+
+def test_prebound_backend_serves_its_reserved_port_without_rebind_window():
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+
+    class App:
+        state = SimpleNamespace()
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "lifespan":
+                await receive()
+                await send({"type": "lifespan.startup.complete"})
+                await receive()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+    server = launcher_main._server_for_app(App(), port=port, log_level="error")
+    supervisor = supervisor_module.ServerSupervisor(server, sockets=[listener])
+    try:
+        supervisor.start()
+        assert supervisor_module.wait_for_http(
+            f"http://127.0.0.1:{port}",
+            timeout=5,
+            is_alive=lambda: supervisor.accepting_startup,
+        ) is True
+    finally:
+        if supervisor.running:
+            supervisor.stop()
+
+    assert supervisor.error is None
+    assert listener.fileno() == -1
+
+
+def test_dev_server_readiness_requires_the_owned_identity_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Response:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    alive = iter((True, False))
+    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert supervisor_module.wait_for_http(
+        "http://127.0.0.1:5173",
+        timeout=1,
+        is_alive=lambda: next(alive),
+        expected_headers={supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"},
+    ) is False
+
+
+def test_dev_server_readiness_accepts_matching_identity_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Response:
+        status = 200
+        headers = {supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert supervisor_module.wait_for_http(
+        "http://127.0.0.1:5173",
+        timeout=1,
+        expected_headers={supervisor_module.DEV_SERVER_ID_HEADER: "launch-nonce"},
+    ) is True
 
 
 def test_windowed_launcher_does_not_configure_uvicorn_console_logging_without_stderr(
@@ -58,6 +189,43 @@ def test_desktop_url_keeps_bootstrap_token_in_fragment():
     url = launcher_main._desktop_url(43125, "one time/token")
 
     assert url == "http://127.0.0.1:43125/#bootstrap=one%20time%2Ftoken"
+
+
+def test_desktop_url_carries_the_private_handoff_secret_in_the_fragment():
+    url = launcher_main._desktop_url(43125, "bootstrap", "handoff secret/token")
+
+    assert url == "http://127.0.0.1:43125/#bootstrap=bootstrap&handoff=handoff%20secret%2Ftoken"
+
+
+def test_startup_diagnostic_is_durable_bounded_and_redacts_credential_like_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main, "_last_startup_log_path", None)
+    path = launcher_main._write_startup_diagnostic(
+        stage="desktop startup",
+        error=RuntimeError("token=do-not-store prompt=private text"),
+        data_dir=tmp_path,
+    )
+
+    assert path == tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert launcher_main._last_startup_log_path == path
+    detail = path.read_text(encoding="utf-8")
+    assert "stage=desktop startup" in detail
+    assert "error_type=RuntimeError" in detail
+    assert "token=<redacted>" in detail
+    assert "prompt=<redacted>" in detail
+    assert "do-not-store" not in detail
+    assert "private text" not in detail
+
+    for _ in range(100):
+        launcher_main._write_startup_diagnostic(
+            stage="retry",
+            error=RuntimeError("x" * 800),
+            data_dir=tmp_path,
+        )
+    assert path.stat().st_size <= launcher_main.MAX_STARTUP_LOG_BYTES
+    assert str(path) in launcher_main._startup_dialog_message(path)
+    assert "Ctrl+C" in launcher_main._startup_dialog_message(path)
 
 
 def test_native_window_uses_private_isolated_edge_webview(
@@ -242,6 +410,7 @@ def test_webview2_bootstrap_installs_and_rechecks_runtime(
     versions = iter((None, "150.0.1.2"))
     calls: list[tuple[list[str], dict[str, object]]] = []
     monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", lambda _path: None)
     monkeypatch.setattr(runtime_module, "webview2_version", lambda: next(versions))
 
     def fake_run(command, **kwargs):
@@ -265,10 +434,65 @@ def test_webview2_bootstrap_fails_closed_when_bundle_is_missing(
         runtime_module.ensure_webview2_runtime(tmp_path)
 
 
+def test_webview2_bootstrap_rejects_an_invalid_runtime_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bootstrapper = tmp_path / "webview2" / runtime_module.WEBVIEW2_BOOTSTRAPPER
+    bootstrapper.parent.mkdir()
+    bootstrapper.write_bytes(b"tampered")
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: None)
+
+    def reject_signature(_path: Path) -> None:
+        raise WebViewRuntimeError("signature verification failed")
+
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", reject_signature)
+
+    with pytest.raises(WebViewRuntimeError, match="signature verification"):
+        runtime_module.ensure_webview2_runtime(tmp_path)
+
+
+def test_webview2_signature_check_uses_noninteractive_powershell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bootstrapper = tmp_path / "MicrosoftEdgeWebview2Setup.exe"
+    bootstrapper.write_bytes(b"signed")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
+
+    runtime_module._verify_microsoft_signature(bootstrapper)
+
+    assert calls[0][0][0] == "powershell.exe"
+    assert "-NoProfile" in calls[0][0]
+    assert "-NonInteractive" in calls[0][0]
+    assert "-Command" in calls[0][0]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["timeout"] == 30
+    signature_environment = calls[0][1]["env"]
+    assert isinstance(signature_environment, dict)
+    assert signature_environment["CORTEX_WEBVIEW_BOOTSTRAPPER"] == str(bootstrapper)
+    assert "WindowsPowerShell" in signature_environment["PSModulePath"]
+
+
 def test_default_runtime_starts_backend_then_native_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    record = SimpleNamespace(pid=1234, port=43125)
+    reserved_port: list[int] = []
+    real_reserve_port = launcher_main._reserve_port
+
+    def reserve_port(value: int) -> socket.socket:
+        listener = real_reserve_port(value)
+        reserved_port.append(int(listener.getsockname()[1]))
+        return listener
+
+    monkeypatch.setattr(launcher_main, "_reserve_port", reserve_port)
+
+    record = SimpleNamespace(pid=1234, port=0)
 
     class FakeInstance:
         def __init__(self, _profile_dir):
@@ -281,7 +505,9 @@ def test_default_runtime_starts_backend_then_native_window(
             pass
 
         def acquire(self, *, port):
-            assert port == 43125
+            assert reserved_port
+            assert port == reserved_port[0]
+            record.port = port
             return record
 
         def read_secret(self, selected):
@@ -297,8 +523,11 @@ def test_default_runtime_starts_backend_then_native_window(
     backend_instances: list[object] = []
 
     class FakeBackend:
-        def __init__(self, selected_server):
+        def __init__(self, selected_server, *, sockets):
             assert selected_server is server
+            assert len(sockets) == 1
+            assert sockets[0].getsockname()[0] == "127.0.0.1"
+            self.sockets = sockets
             self.running = False
             self.accepting_startup = True
             self.error = None
@@ -309,11 +538,12 @@ def test_default_runtime_starts_backend_then_native_window(
 
         def stop(self):
             self.running = False
+            for listener in self.sockets:
+                listener.close()
 
     calls: list[tuple[str, object]] = []
     probed_urls: list[str] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
-    monkeypatch.setattr(launcher_main, "_requested_port", lambda _port: 43125)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(launcher_main, "build_preview_app", lambda **_kwargs: app)
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
@@ -342,13 +572,17 @@ def test_default_runtime_starts_backend_then_native_window(
     assert [name for name, _value in calls] == ["runtime", "window"]
     window_config, monitor = calls[1][1]
     assert isinstance(window_config, DesktopWindowConfig)
-    assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token"
+    assert window_config.url == (
+        f"http://127.0.0.1:{reserved_port[0]}/#bootstrap=bootstrap-token&handoff=handoff-secret"
+    )
     assert window_config.storage_path == tmp_path / "webview"
     assert server.should_exit is True
     assert backend_instances[0].running is False
 
     # Startup gate used the heavier readiness probe.
-    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/ready"]
+    assert probed_urls == [
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready"
+    ]
 
     # The ongoing native-window monitor should poll the cheap liveness route
     # rather than the readiness route, since it runs for the app's lifetime.
@@ -364,7 +598,9 @@ def test_default_runtime_starts_backend_then_native_window(
     )
     monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
     monitor(fake_window)
-    assert probed_urls[-1] == "http://127.0.0.1:43125/api/v1/health/live"
+    assert probed_urls[-1] == (
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
+    )
 
 
 def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
@@ -438,8 +674,46 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert second.read_record() is None
 
 
-def test_frontend_manifest_detects_source_changes(tmp_path: Path):
+def test_instance_lock_file_stays_fixed_size_across_recovery(tmp_path: Path):
+    lock_path = tmp_path / "cortex.instance.lock"
+
+    for port in range(8765, 8770):
+        lock = InstanceLock(tmp_path)
+        assert lock.acquire(port=port) is not None
+        assert lock_path.stat().st_size == 1
+        lock.release()
+        assert lock_path.stat().st_size == 1
+
+    # Also repair a pre-existing oversized marker while preserving lock use.
+    lock_path.write_bytes(b"stale-marker")
+    lock = InstanceLock(tmp_path)
+    assert lock.acquire(port=8770) is not None
+    assert lock_path.stat().st_size == 1
+    lock.release()
+
+
+def test_instance_lock_does_not_follow_a_record_to_an_arbitrary_secret(tmp_path: Path):
+    lock = InstanceLock(tmp_path)
+    record = lock.acquire(port=8765)
+    assert record is not None
+    try:
+        decoy = tmp_path / "decoy.secret"
+        decoy.write_text("do-not-read", encoding="utf-8")
+        forged = InstanceRecord(
+            pid=record.pid,
+            port=record.port,
+            instance_id=record.instance_id,
+            created_at=record.created_at,
+            handoff_secret_path=str(decoy),
+        )
+        assert lock.read_secret(forged) is None
+    finally:
+        lock.release()
+
+
+def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _frontend_fixture(tmp_path)
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
     dist = root / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("built", encoding="utf-8")
@@ -474,6 +748,90 @@ def test_frontend_manifest_detects_source_changes(tmp_path: Path):
     (root / "public" / "cortex.svg").write_text("<svg />", encoding="utf-8")
 
     assert frontend_module.needs_build(root) is True
+
+
+def test_frontend_manifest_tracks_external_contract_and_vite_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
+    monkeypatch.setenv("VITE_API_BASE_URL", "/api/v1")
+    dist = root / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("built", encoding="utf-8")
+    manifest = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(manifest.as_dict()), encoding="utf-8"
+    )
+
+    assert frontend_module.needs_build(root) is False
+    monkeypatch.setenv("VITE_API_BASE_URL", "/api/v1/changed")
+    assert frontend_module.needs_build(root) is True
+
+    # The generated contract is outside frontend/ but is imported by the
+    # staged source tree, so it must invalidate the same bundle.
+    contract = tmp_path / "contracts" / "cortex-api.ts"
+    contract.parent.mkdir()
+    contract.write_text("export interface Changed {}\n", encoding="utf-8")
+    refreshed = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(refreshed.as_dict()), encoding="utf-8"
+    )
+    contract.write_text("export interface Changed { value: string }\n", encoding="utf-8")
+    assert frontend_module.needs_build(root) is True
+
+
+def test_frontend_manifest_tracks_node_and_npm_major_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _frontend_fixture(tmp_path)
+    versions = {"node": 24, "npm": 11}
+    monkeypatch.setattr(frontend_module, "_major_version", lambda command: versions[command])
+    dist = root / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("built", encoding="utf-8")
+    manifest = FrontendManifest(
+        lock_digest=frontend_module.lock_digest(root),
+        source_digest=frontend_module.source_digest(root),
+        node_major=24,
+        npm_major=11,
+        built_at="2026-07-20T00:00:00+00:00",
+        cortex_version="0.1.0",
+    )
+    (dist / frontend_module.MANIFEST_NAME).write_text(
+        json.dumps(manifest.as_dict()), encoding="utf-8"
+    )
+
+    assert frontend_module.needs_build(root) is False
+    versions["npm"] = 12
+    assert frontend_module.needs_build(root) is True
+
+
+def test_frontend_build_lock_serializes_reentrant_builds(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    with frontend_module._frontend_build_lock(root):
+        with pytest.raises(FrontendBuildError, match="Another frontend build"):
+            with frontend_module._frontend_build_lock(root):
+                pass
+
+    # The persistent lock file is released, not deleted, so the next build
+    # can acquire the same inode without an unlink/recreate race.
+    with frontend_module._frontend_build_lock(root):
+        assert (root / frontend_module.BUILD_LOCK_NAME).is_file()
 
 
 def test_frontend_public_icon_matches_canonical_asset():

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
+from unicodedata import category
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -42,6 +43,29 @@ from cortex_backend.execution.code_execution import (
 
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+def _trim_non_blank_text(value: object) -> object:
+    """Normalize user text before length validation and reject invisible input."""
+
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed or not any(
+        not character.isspace() and not category(character).startswith("C")
+        for character in trimmed
+    ):
+        raise ValueError("must contain visible text")
+    return trimmed
+
+
+class NonBlankTextModel(APIModel):
+    @field_validator(
+        "name", "title", "content", "user_input", mode="before", check_fields=False
+    )
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        return _trim_non_blank_text(value)
 
 
 class SessionExchangeRequest(APIModel):
@@ -173,11 +197,11 @@ class ChatGroup(APIModel):
     timestamp: str
 
 
-class CreateChatGroupRequest(APIModel):
+class CreateChatGroupRequest(NonBlankTextModel):
     name: str = Field(min_length=1, max_length=120)
 
 
-class UpdateChatGroupRequest(APIModel):
+class UpdateChatGroupRequest(NonBlankTextModel):
     """Both fields optional: renaming and collapsing use the same endpoint."""
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -198,15 +222,15 @@ class ChatResponse(APIModel):
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
-class CreateChatRequest(APIModel):
+class CreateChatRequest(NonBlankTextModel):
     title: str = Field(default="New Chat", min_length=1, max_length=200)
 
 
-class RenameChatRequest(APIModel):
+class RenameChatRequest(NonBlankTextModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-class AddMessageRequest(APIModel):
+class AddMessageRequest(NonBlankTextModel):
     role: ChatRole
     content: str = Field(min_length=1, max_length=100_000)
     base_revision: int | None = Field(default=None, ge=0)
@@ -642,7 +666,7 @@ JobStatus = Literal[
 ]
 
 
-class GenerationRequest(APIModel):
+class GenerationRequest(NonBlankTextModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_input: str = Field(min_length=1, max_length=100_000)
@@ -657,7 +681,7 @@ class ForkRequest(APIModel):
     message_id: str = Field(min_length=1, max_length=200)
 
 
-class RegenerationRequest(APIModel):
+class RegenerationRequest(NonBlankTextModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     message_id: str = Field(min_length=1, max_length=200)
     user_input: str | None = Field(default=None, max_length=100_000)

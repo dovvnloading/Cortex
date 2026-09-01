@@ -11,6 +11,8 @@ import secrets
 from typing import Any
 import uuid
 
+from cortex_backend.core.paths import AppPathError, AppPaths, secure_private_path
+
 try:
     import msvcrt
 except ImportError:  # pragma: no cover - exercised on non-Windows development hosts
@@ -52,7 +54,7 @@ class InstanceLock:
     """Hold an OS-level per-profile lock for the launcher lifetime."""
 
     def __init__(self, profile_dir: str | Path):
-        self.profile_dir = Path(profile_dir)
+        self.profile_dir = AppPaths.from_data_dir(profile_dir).data_dir
         self.lock_path = self.profile_dir / "cortex.instance.lock"
         self.record_path = self.profile_dir / "cortex.instance.json"
         self.secret_path = self.profile_dir / "cortex.instance.secret"
@@ -60,12 +62,44 @@ class InstanceLock:
         self._record: InstanceRecord | None = None
 
     def acquire(self, *, port: int) -> InstanceRecord | None:
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_path.open("a+b")
-        handle.seek(0)
-        handle.write(b"0")
-        handle.flush()
-        handle.seek(0)
+        try:
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+            secure_private_path(self.profile_dir, directory=True)
+            secret_path = AppPaths.from_data_dir(self.secret_path).data_dir
+            if secret_path != self.secret_path:
+                return None
+        except (OSError, AppPathError):
+            return None
+        try:
+            # Do not use append mode here: every marker write would advance to
+            # EOF and make this persistent lock grow once per launch.  Opening
+            # without O_TRUNC also preserves the lock file across contenders.
+            descriptor = os.open(
+                self.lock_path,
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            handle = os.fdopen(descriptor, "r+b")
+        except OSError:
+            return None
+        try:
+            # msvcrt requires a byte to exist before locking the range.  Keep
+            # normalization before locking: truncating a Windows file while a
+            # byte-range lock is held can invalidate that lock.
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            else:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() != 1:
+                    handle.truncate(1)
+                    handle.flush()
+            handle.seek(0)
+        except OSError:
+            handle.close()
+            return None
         try:
             if msvcrt is not None:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -78,10 +112,7 @@ class InstanceLock:
         try:
             secret = secrets.token_urlsafe(32)
             self.secret_path.write_text(secret, encoding="utf-8")
-            try:
-                os.chmod(self.secret_path, 0o600)
-            except OSError:
-                pass
+            secure_private_path(self.secret_path, directory=False)
             record = InstanceRecord(
                 pid=os.getpid(),
                 port=port,
@@ -94,7 +125,7 @@ class InstanceLock:
                 json.dumps(record.as_dict(), indent=2), encoding="utf-8"
             )
             os.replace(temporary, self.record_path)
-        except OSError:
+        except (OSError, AppPathError):
             handle.close()
             try:
                 self.secret_path.unlink()
@@ -108,11 +139,14 @@ class InstanceLock:
     def read_record(self) -> InstanceRecord | None:
         return InstanceRecord.from_path(self.record_path)
 
-    @staticmethod
-    def read_secret(record: InstanceRecord) -> str | None:
+    def read_secret(self, record: InstanceRecord) -> str | None:
+        if Path(record.handoff_secret_path) != self.secret_path:
+            return None
         try:
+            if AppPaths.from_data_dir(self.secret_path).data_dir != self.secret_path:
+                return None
             value = Path(record.handoff_secret_path).read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeError, AppPathError):
             return None
         return value or None
 

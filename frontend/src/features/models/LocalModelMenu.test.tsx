@@ -4,21 +4,25 @@ import { describe, expect, it, vi } from "vitest";
 import { LocalModelMenu } from "./LocalModelMenu";
 
 describe("LocalModelMenu", () => {
-  it("renders a single discovered model as a quiet label and can rescan it", async () => {
+  it("lets the composer select the only discovered model and can rescan it", async () => {
     const user = userEvent.setup();
+    const onSelect = vi.fn<(model: string) => boolean>().mockReturnValue(true);
     const onRescan = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
     const { container } = render(
       <LocalModelMenu
         models={["local-chat:7b"]}
-        selectedModel="local-chat:7b"
-        onSelect={vi.fn()}
+        selectedModel={null}
+        onSelect={onSelect}
         onRescan={onRescan}
       />,
     );
 
     expect(screen.getByLabelText("Local model: local-chat:7b")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /selected local model/i })).not.toBeInTheDocument();
+    const selectButton = screen.getByRole("button", { name: "Use local model: local-chat:7b" });
+    expect(selectButton).toBeVisible();
+    await user.click(selectButton);
+    expect(onSelect).toHaveBeenCalledWith("local-chat:7b");
     expect(container.querySelector(".lucide-cpu")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));

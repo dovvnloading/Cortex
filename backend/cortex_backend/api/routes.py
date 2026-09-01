@@ -17,8 +17,9 @@ import re
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from cortex_backend.core.generation import ConnectionResult, GenerationAttachment, GenerationSnapshot
 from cortex_backend.services.chat import (
@@ -162,6 +163,14 @@ DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
 
 def build_router() -> APIRouter:
     router = APIRouter()
+    session_bearer = HTTPBearer(
+        auto_error=False,
+        scheme_name="CortexSession",
+        description=(
+            "Short-lived bearer session token returned by /session/exchange. "
+            "Requests remain restricted to the local API host."
+        ),
+    )
 
     @router.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
@@ -200,10 +209,17 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/session/handoff", response_model=HandoffResponse)
-    def handoff(request: Request) -> HandoffResponse:
+    def handoff(
+        request: Request,
+        handoff_secret: str | None = Header(
+            default=None,
+            alias="X-Cortex-Handoff",
+            description="One-time local launcher handoff secret.",
+        ),
+    ) -> HandoffResponse:
         manager = request.app.state.session_manager
         manager.validate_request_context(request)
-        supplied = request.headers.get("X-Cortex-Handoff", "")
+        supplied = handoff_secret or ""
         expected = request.app.state.handoff_secret
         if not expected or not hmac.compare_digest(
             supplied.encode("latin-1"), expected.encode("utf-8")
@@ -212,7 +228,10 @@ def build_router() -> APIRouter:
         token, expires_at = manager.issue_bootstrap_token()
         return HandoffResponse(bootstrap_token=token, expires_at=expires_at)
 
-    def require_session(request: Request) -> SessionPrincipal:
+    def require_session(
+        request: Request,
+        _credentials: HTTPAuthorizationCredentials | None = Security(session_bearer),  # noqa: B008
+    ) -> SessionPrincipal:
         return request.app.state.session_manager.require(request)
 
     def dependencies(request: Request) -> BackendDependenciesProtocol:
@@ -1030,23 +1049,43 @@ def build_router() -> APIRouter:
 
     @router.get(
         "/execution/{job_id}/events",
+        response_model=ExecutionSSEEvent,
         response_class=StreamingResponse,
         responses={
             200: {
                 "description": "Server-sent execution events.",
-                "content": {"text/event-stream": {}},
+                "headers": {
+                    "Cache-Control": {
+                        "description": "Prevent intermediary caching of the live event stream.",
+                        "schema": {"type": "string"},
+                    },
+                    "X-Accel-Buffering": {
+                        "description": "Disable proxy buffering for incremental events.",
+                        "schema": {"type": "string", "enum": ["no"]},
+                    },
+                },
+                "content": {
+                    "text/event-stream": {
+                        "schema": {"$ref": "#/components/schemas/ExecutionSSEEvent"},
+                    }
+                },
             }
         },
     )
     async def execution_events(
         job_id: str,
         request: Request,
+        last_event_id: str | None = Header(
+            default=None,
+            alias="Last-Event-ID",
+            description="Resume after this event sequence number.",
+        ),
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
         repository = _execution_repository(request)
         if repository.get_job(job_id, owner=_execution_owner(principal)) is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
-        cursor = _last_event_cursor(request)
+        cursor = _last_event_cursor(request, last_event_id)
 
         async def stream():
             next_sequence = cursor
@@ -1346,9 +1385,14 @@ def build_router() -> APIRouter:
     async def generation_events(
         job_id: str,
         request: Request,
+        last_event_id: str | None = Header(
+            default=None,
+            alias="Last-Event-ID",
+            description="Resume after this event sequence number.",
+        ),
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
-        cursor = _event_cursor(request)
+        cursor = _event_cursor(request, last_event_id)
         try:
             request.app.state.jobs.status(job_id, owner=principal.session_id)
             event_stream = request.app.state.jobs.events(
@@ -1980,13 +2024,11 @@ async def _start_generation_job(
                     data={"code_execution_rejection": code_execution_rejection},
                 )
 
-            for memo in result.memory_command.additions:
-                try:
-                    deps.memories.add_memo(memo)
-                except Exception as exc:
-                    logging.warning(
-                        "Cortex memory update failed (%s).", type(exc).__name__
-                    )
+            # Model-produced memory additions are proposals, not an authority
+            # to write durable state.  Permanent memories can only be created
+            # through the explicit memory-management API (or a future UI
+            # confirmation flow), so an instruction-like model response cannot
+            # become a persistent prompt injection on its own.
 
             updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
             title = str(updated_chat.get("title") or "New Chat")
@@ -2268,8 +2310,8 @@ def _chunks(value: str, size: int = 80):
         yield value[start : start + size]
 
 
-def _event_cursor(request: Request) -> int:
-    cursor_header = request.headers.get("last-event-id", "0")
+def _event_cursor(request: Request, value: str | None = None) -> int:
+    cursor_header = request.headers.get("last-event-id", "0") if value is None else value
     try:
         cursor = int(cursor_header or "0")
     except ValueError as exc:
@@ -2908,6 +2950,8 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
 def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
     response = _execution_status_response(repository, job)
     code_fields = _code_job_fields(job, include_result=True)
+    if job.profile != CODE_EXECUTION_PROFILE:
+        code_fields = {"result": _generic_execution_result(job.result)}
     return ExecutionTaskSummary(
         job_id=response.job_id,
         profile=response.profile,
@@ -2924,6 +2968,50 @@ def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSumma
         updated_at=datetime.fromisoformat(job.updated_at),
         **code_fields,
     )
+
+
+MAX_GENERIC_TASK_RESULT_BYTES = 16 * 1024
+
+
+def _generic_execution_result(result: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a bounded, JSON-safe result summary for the task tray.
+
+    Non-code profiles use small, typed result envelopes (for example an
+    opaque artifact descriptor or a scratch-computation value).  Keep the
+    shared task-list response bounded even if a future profile returns a
+    larger mapping, while retaining artifact metadata so a caller can still
+    download the published output.
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    try:
+        candidate = dict(result)
+        encoded = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return {"truncated": True}
+    if len(encoded.encode("utf-8")) <= MAX_GENERIC_TASK_RESULT_BYTES:
+        return candidate
+
+    summary: dict[str, Any] = {"truncated": True}
+    for key in (
+        "schema_version",
+        "artifact_id",
+        "mime_type",
+        "size",
+        "sha256",
+        "expires_at",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            summary[key] = value
+    return summary
 
 
 def _code_job_fields(job: ExecutionJob, *, include_result: bool = False) -> dict[str, Any]:
@@ -2950,8 +3038,8 @@ def _code_job_fields(job: ExecutionJob, *, include_result: bool = False) -> dict
     return fields
 
 
-def _last_event_cursor(request: Request) -> int:
-    raw = request.headers.get("last-event-id", "0")
+def _last_event_cursor(request: Request, value: str | None = None) -> int:
+    raw = request.headers.get("last-event-id", "0") if value is None else value
     try:
         cursor = int(raw or "0")
     except ValueError as exc:

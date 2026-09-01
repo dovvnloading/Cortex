@@ -156,10 +156,13 @@ from .repository import (
     ArtifactLimitError,
     ApprovalPolicyError,
     ApprovalTransitionError,
+    DEFAULT_TERMINAL_JOB_RETENTION_SECONDS,
     ExecutionRepository,
+    ExecutionCleanupResult,
     LeaseConflict,
     ExecutionRepositoryError,
 )
+from .cleanup import CleanupMetrics, CleanupSupervisor, ExecutionCleanupSupervisor
 from .recipe_coordinator import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     DEFAULT_RECIPE_RETENTION_SECONDS,
@@ -250,7 +253,12 @@ __all__ = [
     "DEFAULT_NATIVE_CONNECT_TIMEOUT_MS",
     "DEFAULT_NATIVE_PIPE_BUFFER_BYTES",
     "ExecutionRepository",
+    "ExecutionCleanupResult",
     "ExecutionRepositoryError",
+    "DEFAULT_TERMINAL_JOB_RETENTION_SECONDS",
+    "CleanupMetrics",
+    "CleanupSupervisor",
+    "ExecutionCleanupSupervisor",
     "DEFAULT_CANCEL_GRACE_SECONDS",
     "DEFAULT_RECIPE_RETENTION_SECONDS",
     "DEFAULT_WORKER_TIMEOUT_SECONDS",

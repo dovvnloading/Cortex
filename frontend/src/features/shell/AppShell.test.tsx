@@ -57,6 +57,23 @@ describe("AppShell", () => {
     expect(window.location.pathname).toBe("/chat/new");
   });
 
+  it("removes the collapsed sidebar from the accessibility and tab trees", async () => {
+    const user = userEvent.setup();
+    renderShell();
+    const sidebar = screen.getByRole("complementary", { name: "Chat history" });
+
+    expect(sidebar).not.toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).not.toHaveAttribute("inert");
+
+    await user.click(screen.getByRole("button", { name: "Hide chat history" }));
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+
+    await user.click(screen.getByRole("button", { name: "Show chat history" }));
+    expect(sidebar).toHaveAttribute("aria-hidden", "false");
+    expect(sidebar).not.toHaveAttribute("inert");
+  });
+
   it("captures the routed thread before opening settings", async () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
@@ -92,6 +109,39 @@ describe("AppShell", () => {
 
     expect(onDeleteChat).toHaveBeenCalledWith(chat.id);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the rename dialog and edited title when renaming fails", async () => {
+    const user = userEvent.setup();
+    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
+    const onRenameChat = vi.fn<(id: string, title: string) => Promise<boolean>>().mockResolvedValue(false);
+
+    renderShell({ chats: [chat], onRenameChat, onOpenSettings: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Rename Quarterly planning" }));
+    const field = screen.getByLabelText("Chat title");
+    await user.clear(field);
+    await user.type(field, "Updated planning");
+    await user.click(screen.getByRole("button", { name: "Save title" }));
+
+    expect(onRenameChat).toHaveBeenCalledWith(chat.id, "Updated planning");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(field).toHaveValue("Updated planning");
+  });
+
+  it("keeps the delete dialog and confirmation when deletion fails", async () => {
+    const user = userEvent.setup();
+    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
+    const onDeleteChat = vi.fn<(id: string) => Promise<boolean>>().mockResolvedValue(false);
+
+    renderShell({ chats: [chat], onDeleteChat, onOpenSettings: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
+    const verifier = screen.getByRole("textbox", { name: /Quarterly planning/ });
+    await user.type(verifier, "Quarterly planning");
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    expect(onDeleteChat).toHaveBeenCalledWith(chat.id);
+    expect(screen.getByRole("alertdialog")).toBeVisible();
+    expect(verifier).toHaveValue("Quarterly planning");
   });
 
   it("filters the thread list by title as the user types a search query", async () => {

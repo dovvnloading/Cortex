@@ -5,6 +5,60 @@ import type { CortexSettings, ModelResponse } from "../../../../contracts/cortex
 import { SettingsPanel } from "./SettingsPanel";
 
 describe("SettingsPanel", () => {
+  it("merges external settings changes before saving a mounted draft", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    const initialSettings: CortexSettings = {
+      revision: 2,
+      appearance: { theme: "dark" },
+      models: { chat: null, title: null },
+    };
+    const latestSettings: CortexSettings = {
+      revision: 3,
+      appearance: { theme: "light" },
+      models: { chat: "gguf:demo.Q4_K_M.gguf", title: null },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: ["gguf:demo.Q4_K_M.gguf"],
+      models: [{ name: "gguf:demo.Q4_K_M.gguf" }],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    const props = {
+      memos: [],
+      saving: false,
+      memoryBusy: false,
+      onSave,
+      onAddMemory: vi.fn<(memo: string) => Promise<void>>().mockResolvedValue(),
+      onReplaceMemory: vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue(),
+      onClearMemory: vi.fn<() => Promise<void>>().mockResolvedValue(),
+      models,
+      modelBusy: false,
+      modelProgress: null,
+      setupUrl: "https://ollama.com/download",
+      onCheckModels: vi.fn<() => Promise<void>>().mockResolvedValue(),
+      onPullModel: vi.fn<(model: string) => Promise<void>>().mockResolvedValue(),
+      llamacppStatus: { state: "idle" as const, binary_present: false, loaded_model: null, last_error: null, models_directory: "" },
+      onDownloadGGUF: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    };
+
+    const { rerender } = render(<SettingsPanel {...props} settings={initialSettings} />);
+    // Keep a local theme edit, then simulate a model auto-selection and a
+    // concurrent theme change arriving while this dialog remains mounted.
+    await user.click(screen.getByRole("combobox", { name: "Theme" }));
+    await user.click(screen.getByRole("option", { name: "System" }));
+    rerender(<SettingsPanel {...props} settings={latestSettings} />);
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      revision: 3,
+      appearance: { theme: "system" },
+      models: expect.objectContaining({ chat: "gguf:demo.Q4_K_M.gguf", title: null }),
+    }));
+  });
+
   it("uses rounded local-model choices instead of editable model tag fields", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
@@ -250,5 +304,53 @@ describe("SettingsPanel", () => {
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       generation: expect.objectContaining({ bypass_system_prompt: true }),
     }));
+  });
+
+  it("blocks GGUF downloads until an edited folder is saved", async () => {
+    const user = userEvent.setup();
+    const onDownloadGGUF = vi.fn().mockResolvedValue(undefined);
+    const settings: CortexSettings = {
+      models: { chat: null, title: null, gguf_directory: "C:\\models\\old" },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: [],
+      models: [],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "C:\\models\\old" }}
+        onDownloadGGUF={onDownloadGGUF}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "System" }));
+    const directory = screen.getByRole("textbox", { name: "GGUF models folder" });
+    await user.clear(directory);
+    await user.type(directory, "C:\\models\\new");
+    await user.type(screen.getByLabelText("Repo id"), "owner/model");
+    await user.type(screen.getByLabelText("File name"), "model.Q4_K_M.gguf");
+
+    const download = screen.getByRole("button", { name: "Download model" });
+    expect(download).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Save the folder setting before downloading");
+    expect(onDownloadGGUF).not.toHaveBeenCalled();
   });
 });

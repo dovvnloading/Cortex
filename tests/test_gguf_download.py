@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import struct
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
+import cortex_backend.llamacpp.download as download_module
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.api.schemas import ModelDownloadRequest
 from cortex_backend.llamacpp.download import (
@@ -21,6 +24,33 @@ from cortex_backend.llamacpp.download import (
     resolve_download_url,
 )
 from support import session_headers as _session
+
+
+@pytest.fixture(autouse=True)
+def _mock_download_dns(monkeypatch) -> None:
+    """Keep MockTransport download tests independent of external DNS."""
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("93.184.216.34", port))],
+    )
+
+
+def _valid_gguf_content(tmp_path: Path) -> bytes:
+    """Build a small real GGUF fixture instead of testing magic-only bytes."""
+    import numpy as np
+    import gguf
+
+    source = tmp_path / "fixture-source.gguf"
+    writer = gguf.GGUFWriter(str(source), "llama")
+    writer.add_context_length(2048)
+    writer.add_name("fixture")
+    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    return source.read_bytes()
 
 
 
@@ -98,7 +128,7 @@ def test_model_download_request_rejects_control_characters(payload: dict[str, st
 
 
 def test_download_gguf_streams_progress_and_writes_the_file(tmp_path: Path) -> None:
-    content = b"GGUF" + b"0123456789" * 100
+    content = _valid_gguf_content(tmp_path)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=content, headers={"Content-Length": str(len(content))})
@@ -160,6 +190,245 @@ def test_download_gguf_cancellation_leaves_no_partial_file(tmp_path: Path) -> No
         )
     assert not (tmp_path / "model.gguf").exists()
     assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+def test_download_gguf_rejects_https_to_http_redirect(tmp_path: Path) -> None:
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "http://example.com/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="https"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_redirect_target(tmp_path: Path) -> None:
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "https://127.0.0.1/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_dns_redirect_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("10.0.0.7", port))],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(302, headers={"Location": "https://private.example/model.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_download_gguf_rejects_private_dns_on_initial_url(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        download_module.socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(0, 0, 0, "", ("100.64.0.7", port))],
+    )
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"GGUF"))),
+        )
+
+
+def test_download_gguf_rejects_redirect_loop(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(302, headers={"Location": f"https://example.com/redirect-{calls}.gguf"})
+
+    with pytest.raises(GGUFDownloadError, match="redirect limit"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 6
+
+
+def test_download_gguf_allows_valid_https_redirect(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example.com/model.gguf"})
+        return httpx.Response(200, content=content)
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert destination.read_bytes() == content
+
+
+def test_download_gguf_rejects_advertised_size_over_limit(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            content=b"GGUF",
+            headers={"Content-Length": "65"},
+        )
+
+    with pytest.raises(GGUFDownloadError, match="configured byte ceiling"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            max_download_bytes=64,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert calls == 1
+    assert not (tmp_path / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+def test_download_gguf_rejects_chunked_body_over_limit(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    with pytest.raises(GGUFDownloadError, match="configured byte ceiling"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            max_download_bytes=len(content) - 1,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert not (tmp_path / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+def test_download_gguf_preserves_disk_reserve(tmp_path: Path, monkeypatch) -> None:
+    content = _valid_gguf_content(tmp_path)
+    monkeypatch.setattr(
+        download_module.shutil,
+        "disk_usage",
+        lambda directory: SimpleNamespace(free=len(content)),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    with pytest.raises(GGUFDownloadError, match="free disk space"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            min_free_space_bytes=1,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert not (tmp_path / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"GGUF",
+        struct.pack("<4sIQQ", b"GGUF", 3, 1, 0) + bytes(8),
+        struct.pack("<4sIQQ", b"GGUF", 3, 0, 1) + bytes(8),
+    ],
+)
+def test_download_gguf_rejects_truncated_or_malformed_structure(
+    tmp_path: Path, content: bytes
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    with pytest.raises(GGUFDownloadError, match="(truncated|malformed|invalid|unsupported)"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert not (tmp_path / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+def test_download_gguf_refuses_to_overwrite_existing_model(tmp_path: Path) -> None:
+    destination = tmp_path / "model.gguf"
+    original = _valid_gguf_content(tmp_path)
+    destination.write_bytes(original)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("existing destination should be rejected before HTTP")
+
+    with pytest.raises(GGUFDownloadError, match="refusing to overwrite"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert destination.read_bytes() == original
+
+
+def test_download_gguf_allows_explicit_overwrite_after_validation(tmp_path: Path) -> None:
+    destination = tmp_path / "model.gguf"
+    destination.write_bytes(b"old model")
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    result = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        allow_overwrite=True,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert result == destination
+    assert destination.read_bytes() == content
 
 
 # -- route: job-kind isolation -------------------------------------------------
@@ -253,6 +522,28 @@ def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
             list_huggingface_gguf_files("owner/model", http_client=client)
+
+
+def test_huggingface_file_listing_only_advertises_resolver_safe_filenames() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "siblings": [
+                    {"rfilename": "weights/model.gguf"},
+                    {"rfilename": "../escape.gguf"},
+                    {"rfilename": "model.gguf\n"},
+                    {"rfilename": "model.gguf"},
+                    {"rfilename": "README.md"},
+                    {"rfilename": 123},
+                    {},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert list_huggingface_gguf_files("owner/model", http_client=client) == ("model.gguf",)
 
 
 @pytest.mark.parametrize("siblings", [None, 123])

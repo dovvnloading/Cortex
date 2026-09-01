@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import { CortexApi, ApiError } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
+import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
-import { ChatPage } from "../features/chat/ChatPage";
+const loadChatPage = () => import("../features/chat/ChatPage").then(({ ChatPage: component }) => ({ default: component }));
+const ChatPage = lazy(loadChatPage);
 import { Onboarding } from "../features/shell/Onboarding";
-import { SettingsPanel, type SettingsPanelProps } from "../features/settings/SettingsPanel";
+const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
+import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore, type ModelProgress } from "../stores/useModelStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import { useToast } from "./ToastProvider";
+import { resolveRuntimeAvailability } from "./runtimeAvailability";
 
 type Props = { api?: CortexApi };
 
@@ -30,21 +34,96 @@ const UNAVAILABLE_MODELS: ModelResponse = {
   },
 };
 
-function readBootstrapToken(): string {
-  const searchToken = new URLSearchParams(window.location.search).get("bootstrap");
-  if (searchToken) return searchToken;
-  return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("bootstrap") ?? "";
+const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
+  state: "idle",
+  binary_present: false,
+  models_directory: "",
+};
+
+type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
+
+function readLauncherCredentials(): LauncherCredentials {
+  const url = new URL(window.location.href);
+  const search = url.searchParams;
+  const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+  const searchToken = search.get("bootstrap");
+  const token = searchToken || hash.get("bootstrap") || "";
+  const handoffSecret = search.get("handoff") || hash.get("handoff") || "";
+
+  // Handoff credentials are valid only for this one exchange. Remove them
+  // from the visible URL before rendering either onboarding or the workspace,
+  // while preserving unrelated query/hash state for the surrounding shell.
+  let changed = false;
+  if (search.has("bootstrap")) {
+    search.delete("bootstrap");
+    changed = true;
+  }
+  if (hash.has("bootstrap")) {
+    hash.delete("bootstrap");
+    changed = true;
+  }
+  if (search.has("handoff")) {
+    search.delete("handoff");
+    changed = true;
+  }
+  if (hash.has("handoff")) {
+    hash.delete("handoff");
+    changed = true;
+  }
+  if (changed) {
+    const nextHash = hash.toString();
+    url.hash = nextHash ? `#${nextHash}` : "";
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+  return { bootstrapToken: token, handoffSecret };
 }
 
 export function App({ api: providedApi }: Props) {
   const [api] = useState(() => providedApi ?? new CortexApi());
   const [sessionReady, setSessionReady] = useState(api.hasSession);
-  const [bootstrapToken, setBootstrapToken] = useState(readBootstrapToken);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [launcherCredentials] = useState(readLauncherCredentials);
+  const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
+  const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const handleSessionExpired = useCallback(() => setSessionReady(false), []);
+  const reconnectInFlight = useRef<Promise<void> | null>(null);
+  const reconnect = useCallback(() => {
+    if (!handoffSecret || reconnectInFlight.current) return Promise.resolve();
+    const operation = (async () => {
+      setConnecting(true);
+      setOnboardingError(null);
+      try {
+        await api.rebootstrap(handoffSecret);
+        setSessionEpoch((epoch) => epoch + 1);
+        setSessionReady(true);
+      } catch (error) {
+        setOnboardingError(error instanceof ApiError ? error.detail : "Could not reopen the local workspace.");
+      } finally {
+        setConnecting(false);
+      }
+    })();
+    reconnectInFlight.current = operation;
+    return operation.finally(() => {
+      if (reconnectInFlight.current === operation) reconnectInFlight.current = null;
+    });
+  }, [api, handoffSecret]);
+  const handleSessionExpired = useCallback(() => {
+    setSessionReady(false);
+    void reconnect();
+  }, [reconnect]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
+
+  // Start fetching the chat route while the authenticated workspace is
+  // loading its initial data. This keeps an active generation's recovery
+  // stream from waiting behind the lazy route chunk, without preloading chat
+  // code for direct Settings launches.
+  useEffect(() => {
+    if (sessionReady && parseAppRoute(window.location.pathname).kind === "chat") {
+      void loadChatPage().catch(() => undefined);
+    }
+  }, [sessionReady]);
 
   if (!sessionReady) {
     return (
@@ -52,12 +131,20 @@ export function App({ api: providedApi }: Props) {
         initialToken={bootstrapToken}
         error={onboardingError}
         busy={connecting}
+        onRetry={handoffSecret ? reconnect : undefined}
         onSubmit={async (token) => {
           setConnecting(true);
           setOnboardingError(null);
           try {
             await api.exchangeBootstrapToken(token);
-            window.history.replaceState({}, "", window.location.pathname);
+            // Keep any unrelated route state, but never restore the one-time
+            // bootstrap credential after an exchange attempt.
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete("bootstrap");
+            const cleanHash = new URLSearchParams(cleanUrl.hash.replace(/^#/, ""));
+            cleanHash.delete("bootstrap");
+            cleanUrl.hash = cleanHash.toString() ? `#${cleanHash}` : "";
+            window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
             // Bootstrap credentials are one-time handoff tokens. Keep the
             // session token in the API client, but never retain a token that
             // would fail if a later 401 returns us to the onboarding screen.
@@ -73,7 +160,7 @@ export function App({ api: providedApi }: Props) {
     );
   }
 
-  return <AuthenticatedWorkspace api={api} onSessionExpired={handleSessionExpired} />;
+  return <AuthenticatedWorkspace key={sessionEpoch} api={api} onSessionExpired={handleSessionExpired} />;
 }
 
 function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onSessionExpired: () => void }) {
@@ -103,18 +190,49 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const modelBusy = useModelStore((state) => state.modelBusy);
   const setModelBusy = useModelStore((state) => state.setModelBusy);
   const modelProgress = useModelStore((state) => state.modelProgress);
+  const liveLlamacppStatus = useModelStore((state) => state.llamacppStatus);
   const setModelProgress = useModelStore((state) => state.setModelProgress);
   const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
   const chatsRef = useRef(chats);
   const executionTaskRefreshRef = useRef<Promise<void> | null>(null);
+  // These guards cover requests whose results are deliberately loaded out of
+  // band. A response can outlive both the load that started it and this
+  // authenticated workspace instance (for example when a 401 returns the
+  // app to onboarding). Keep each mutable inventory independent so a group
+  // mutation does not invalidate an unrelated model refresh and vice versa.
+  const mountedRef = useRef(false);
+  const workspaceLoadGenerationRef = useRef(0);
+  const groupLoadGenerationRef = useRef(0);
+  const modelGenerationRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      workspaceLoadGenerationRef.current += 1;
+      groupLoadGenerationRef.current += 1;
+      modelGenerationRef.current += 1;
+      // The model job itself is durable on the backend, but its UI ownership
+      // ends with this authenticated workspace. Do not strand a busy flag in
+      // the process-wide store after logout or a remount.
+      setModelBusy(false);
+      setModelProgress(null);
+    };
+  }, [setModelBusy, setModelProgress]);
 
   useEffect(() => {
     chatsRef.current = chats;
   }, [chats]);
 
   const loadWorkspace = useCallback(async () => {
+    const loadGeneration = ++workspaceLoadGenerationRef.current;
+    const groupGeneration = ++groupLoadGenerationRef.current;
+    const modelGeneration = ++modelGenerationRef.current;
+    const isCurrentLoad = () => mountedRef.current && workspaceLoadGenerationRef.current === loadGeneration;
+    const isCurrentGroupLoad = () => isCurrentLoad() && groupLoadGenerationRef.current === groupGeneration;
+    const isCurrentModelLoad = () => isCurrentLoad() && modelGenerationRef.current === modelGeneration;
     setLoading(true);
     setLoadError(null);
     try {
@@ -124,6 +242,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         api.settings(),
         api.memories(),
       ]);
+      if (!isCurrentLoad()) return;
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
@@ -132,28 +251,37 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // library still opens with every chat present, just ungrouped. Blocking
       // the whole workspace on filing metadata would be the wrong trade.
       void api.chatGroups()
-        .then(setGroups)
+        .then((nextGroups) => {
+          if (isCurrentGroupLoad()) setGroups(nextGroups);
+        })
         .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) onSessionExpired();
-          else setGroups([]);
+          if (error instanceof ApiError && error.status === 401) {
+            if (isCurrentLoad()) onSessionExpired();
+          }
+          else if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       setMemos(memoryResponse.memos);
-      setModels(UNAVAILABLE_MODELS);
+      if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
       void api.models()
-        .then(setModels)
+        .then((nextModels) => {
+          if (isCurrentModelLoad()) setModels(nextModels);
+        })
         .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) onSessionExpired();
-          else setModels(UNAVAILABLE_MODELS);
+          if (error instanceof ApiError && error.status === 401) {
+            if (isCurrentLoad()) onSessionExpired();
+          }
+          else if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
         });
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
+      if (error instanceof ApiError && error.status === 401 && isCurrentLoad()) {
         onSessionExpired();
+        return;
       }
-      setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
+      if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }, [api, onSessionExpired, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
 
@@ -163,8 +291,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   }, [loadWorkspace]);
 
   useEffect(() => {
-    const resolved = theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : theme === "system" ? "light" : theme;
-    document.documentElement.dataset.theme = resolved;
+    const mediaQuery = theme === "system" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : undefined;
+    const applyTheme = () => {
+      const resolved = theme === "system" ? (mediaQuery?.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolved;
+    };
+
+    applyTheme();
+    if (!mediaQuery) return undefined;
+
+    const handleChange = () => applyTheme();
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+    mediaQuery.addListener?.(handleChange);
+    return () => mediaQuery.removeListener?.(handleChange);
   }, [theme]);
 
   useEffect(() => {
@@ -270,15 +414,33 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const renameChat = async (id: string, title: string) => {
+  const renameChat = async (id: string, title: string): Promise<boolean> => {
     try {
       const chat = await api.renameChat(id, title);
       setChats((current) => current.map((item) => item.id === id ? { ...item, title: chat.title, timestamp: chat.timestamp } : item));
       notify("Chat renamed.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not rename chat."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not rename chat."), "error"); return false; }
   };
 
-  const deleteChat = async (id: string) => {
+  const downloadExecutionArtifact = async (artifact: ExecutionArtifactResult) => {
+    try {
+      const response = await api.downloadExecutionArtifact(artifact.artifact_id);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `cortex-result.${artifactFileExtension(artifact.mime_type)}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      else notify(apiMessage(error, "Could not download the execution artifact."), "error");
+    }
+  };
+
+  const deleteChat = async (id: string): Promise<boolean> => {
     try {
       await api.deleteChat(id);
       const fallbackChatId = chatsRef.current.find((chat) => chat.id !== id)?.id ?? null;
@@ -289,40 +451,69 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         navigate(fallbackChatId ? chatPath(fallbackChatId) : "/chat/new", { replace: true });
       }
       notify("Chat deleted.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); return false; }
   };
 
-  const createGroup = async (name: string) => {
+  const createGroup = async (name: string): Promise<boolean> => {
     try {
-      upsertGroup(await api.createChatGroup(name));
+      const group = await api.createChatGroup(name);
+      if (mountedRef.current) {
+        // Invalidate the initial snapshot only once the mutation succeeded.
+        // A failed mutation must still allow that snapshot to populate the
+        // library, while a late successful snapshot must not erase this row.
+        ++groupLoadGenerationRef.current;
+        upsertGroup(group);
+      }
       notify("Group created.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); return false; }
   };
 
-  const renameGroup = async (groupId: string, name: string) => {
+  const renameGroup = async (groupId: string, name: string): Promise<boolean> => {
     try {
-      upsertGroup(await api.updateChatGroup(groupId, { name }));
-    } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); }
+      const group = await api.updateChatGroup(groupId, { name });
+      if (mountedRef.current) {
+        ++groupLoadGenerationRef.current;
+        upsertGroup(group);
+      }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); return false; }
   };
 
-  const deleteGroup = async (groupId: string) => {
+  const deleteGroup = async (groupId: string): Promise<boolean> => {
     try {
       await api.deleteChatGroup(groupId);
       // Local mirror of the server rule: the group goes, its chats stay and
       // reappear in the ungrouped list.
-      removeGroup(groupId);
+      if (mountedRef.current) {
+        ++groupLoadGenerationRef.current;
+        removeGroup(groupId);
+      }
       notify("Group deleted. Its chats moved back to the main list.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); }
+      return true;
+    } catch (error) { notify(apiMessage(error, "Could not delete group."), "error"); return false; }
   };
 
   const toggleGroup = (groupId: string, collapsed: boolean) => {
     const previous = useChatStore.getState().groups.find((group) => group.id === groupId);
     if (!previous) return;
+    ++groupLoadGenerationRef.current;
     // Optimistic: collapsing is a high-frequency, zero-risk interaction and
     // must feel instant. The persisted value is only a preference, so a
     // failed write rolls the row back and stays quiet.
     upsertGroup({ ...previous, collapsed });
-    void api.updateChatGroup(groupId, { collapsed }).catch(() => upsertGroup(previous));
+    void api.updateChatGroup(groupId, { collapsed }).catch(() => {
+      if (!mountedRef.current) return;
+      // Roll back only the failed preference field. A later rename or toggle
+      // may have legitimately changed other fields while this request was in
+      // flight, and must not be clobbered by the old whole-row snapshot.
+      setGroups((current) => current.map((group) => (
+        group.id === groupId && group.collapsed === collapsed
+          ? { ...group, collapsed: previous.collapsed }
+          : group
+      )));
+    });
   };
 
   const moveChat = (threadId: string, groupId: string | null) => {
@@ -341,7 +532,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save settings."), "error"); }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // The server's compare-and-swap rejected a concurrent settings write.
+        // Refresh the authoritative document so a mounted SettingsPanel can
+        // merge its still-local edits against the newer revision before the
+        // user retries, instead of leaving a stale snapshot in the store.
+        try {
+          const latest = await api.settings();
+          setSettings(latest.settings);
+          setTheme(latest.settings.appearance?.theme ?? "dark");
+          notify("Settings changed elsewhere. Review the latest values and save again.", "error");
+        } catch (refreshError) {
+          notify(apiMessage(refreshError, "Could not refresh settings after the conflict."), "error");
+        }
+      } else {
+        notify(apiMessage(error, "Could not save settings."), "error");
+      }
+    }
     finally { setSaving(false); }
   };
 
@@ -351,7 +559,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response = await api.addMemory(memo);
       setMemos(response.memos);
       notify("Memory saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save memory."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not save memory."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 
@@ -361,7 +572,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response: MemoryResponse = await api.clearMemories();
       setMemos(response.memos);
       notify("Permanent memories cleared.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not clear memories."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not clear memories."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 
@@ -371,7 +585,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const response = await api.replaceMemories(next);
       setMemos(response.memos);
       notify("Memory changes saved.", "success");
-    } catch (error) { notify(apiMessage(error, "Could not save memory changes."), "error"); }
+    } catch (error) {
+      notify(apiMessage(error, "Could not save memory changes."), "error");
+      throw error;
+    }
     finally { setMemoryBusy(false); }
   };
 
@@ -388,24 +605,57 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean } = {},
   ): Promise<Record<string, unknown> | null> => {
     const { checkOllamaConnection = true, notifyOnSuccess = true } = options;
+    const generation = ++modelGenerationRef.current;
+    const isCurrentModelJob = () => mountedRef.current && modelGenerationRef.current === generation;
     setModelBusy(true);
     setModelProgress({ model, status: "Starting...", percent: null });
     let completedData: Record<string, unknown> | null = null;
     let failureMessage: string | null = null;
     try {
-      await api.streamJob(accepted.job_id, (event) => {
-        updateModelProgress(event, setModelProgress);
+      const terminalEvent = await api.streamJob(accepted.job_id, (event) => {
+        if (mountedRef.current && modelGenerationRef.current === generation) updateModelProgress(event, setModelProgress);
         if (event.kind === "completed") completedData = event.data ?? null;
         if (event.kind === "error") {
           const message = event.data?.message;
           failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
         }
       });
-      if (failureMessage) {
-        notify(failureMessage, "error");
+
+      // A clean SSE close carries the terminal event back from streamJob. If
+      // the connection ends before that event, reconcile against the durable
+      // job snapshot before treating the operation as complete.
+      let terminalStatus: JobStatusResponse["status"] | null = terminalEvent ? terminalEvent.status : null;
+      if (!terminalEvent) {
+        const snapshot = await api.jobStatus(accepted.job_id);
+        terminalStatus = snapshot.status;
+        if (snapshot.status === "succeeded") completedData = snapshot.result ?? null;
+        if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+          failureMessage = snapshot.error ?? null;
+        }
+      }
+
+      if (terminalStatus === "failed" || terminalStatus === "cancelled") {
+        if (isCurrentModelJob()) {
+          notify(
+            failureMessage
+              ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed."),
+            "error",
+          );
+        }
         return null;
       }
+      if (terminalStatus !== "succeeded") {
+        // Do not refresh inventory, announce success, or imply that a GGUF
+        // download produced a selectable file while the worker may continue.
+        if (isCurrentModelJob()) {
+          setModelProgress({ model, status: "Model operation is still running; completion was not confirmed.", percent: null });
+          notify("Model operation is still running; completion was not confirmed.", "error");
+        }
+        return null;
+      }
+
       const refreshedModels = await api.models();
+      if (!isCurrentModelJob()) return completedData;
       setModels(refreshedModels);
       if (checkOllamaConnection && !refreshedModels.connection?.success) {
         notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
@@ -416,10 +666,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Model operation failed."), "error");
+      if (error instanceof ApiError && error.status === 401) {
+        if (isCurrentModelJob()) onSessionExpired();
+      }
+      else if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
       return null;
-    } finally { setModelBusy(false); }
+    } finally {
+      if (isCurrentModelJob()) setModelBusy(false);
+    }
   };
 
   const checkModels = async () => {
@@ -491,11 +745,28 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const selectedModel = settings.models?.chat?.trim() || null;
   const selectedModelSupportsVision = models.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
   const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
-  // A GGUF-selected model runs through Cortex's own managed local runtime,
-  // not Ollama -- Ollama's connection state is irrelevant to it.
-  const runtimeConnected = isGGUFModel(selectedModel) || (models.connection?.success ?? true);
-  const llamacppStatus: LlamaCppRuntimeStatus = system.llamacpp ?? { state: "idle", binary_present: false, models_directory: "" };
+  // The initial system response seeds the store, while polling updates it as
+  // the managed runtime starts/stops. Settings must consume that live value
+  // rather than the immutable workspace snapshot.
+  const llamacppStatus = liveLlamacppStatus ?? system.llamacpp ?? DEFAULT_LLAMACPP_STATUS;
+  // Resolve readiness against the runtime selected by the user. Ollama's
+  // connection state must not affect a GGUF selection (or vice versa).
+  const runtimeAvailability = resolveRuntimeAvailability({
+    selectedModel,
+    selectedModelAvailable,
+    ollamaConnected: models.connection?.success ?? true,
+    ollamaMessage: models.connection?.message,
+    llamacppStatus,
+  });
   const routeChatId = route.kind === "chat" ? route.threadId : null;
+  const openSettings = () => {
+    // Settings can be opened from either the shell header or the command
+    // palette. Capture the route at the point of entry so Close returns to
+    // the chat that was actually visible, including a newly-created thread.
+    const currentRoute = parseAppRoute(window.location.pathname);
+    if (currentRoute.kind === "chat") setSettingsReturnChatId(currentRoute.threadId);
+    navigate("/settings");
+  };
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
     void saveSettings({ ...settings, appearance: { ...settings.appearance, theme: next } });
@@ -503,17 +774,19 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <>
-      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onOpenSettings={() => { if (route.kind === "chat") setSettingsReturnChatId(route.threadId); }} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
-        {route.kind === "settings"
-          ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
-          : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeConnected && selectedModelAvailable} runtimeMessage={models.connection?.message ?? null} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onSessionExpired={onSessionExpired} />}
+      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
+        <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
+          {route.kind === "settings"
+            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
+            : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
+        </Suspense>
       </AppShell>
       <CommandPalette
         chats={chats}
         localModels={localModels}
         selectedModel={selectedModel}
         onNewChat={() => navigate("/chat/new")}
-        onOpenSettings={() => navigate("/settings")}
+        onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}
         onSelectModel={(model) => void chooseLocalModel(model)}
         onSelectChat={(id) => navigate(chatPath(id))}
@@ -532,9 +805,9 @@ function updateModelProgress(event: SSEEvent, setProgress: (progress: ModelProgr
   setProgress({ model, status, percent });
 }
 
-function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onChatChanged, onForked, onSessionExpired }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void; onSessionExpired: () => void }) {
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onChatChanged, onForked, onClearMemory, onSessionExpired }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void; onClearMemory: () => Promise<void>; onSessionExpired: () => void }) {
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onSessionExpired={onSessionExpired} />;
+  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} onSessionExpired={onSessionExpired} />;
 }
 
 function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
@@ -562,4 +835,14 @@ function shouldShowExecutionTask(task: ExecutionTaskSummary, runtimeStartedAt: s
 
 function apiMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.detail : fallback;
+}
+
+function artifactFileExtension(mimeType: string): string {
+  return ({
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "text/plain": "txt",
+    "application/json": "json",
+  } as Record<string, string>)[mimeType] ?? "bin";
 }

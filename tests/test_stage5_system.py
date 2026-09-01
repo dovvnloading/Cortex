@@ -208,6 +208,40 @@ def test_packaged_runtime_builder_opens_existing_chat_fixture_without_qt(tmp_pat
     assert list(tmp_path.glob("chat_history_migrated_*/*.json"))
 
 
+def test_packaged_runtime_quarantines_unopenable_legacy_chat_before_api_read(tmp_path: Path):
+    legacy_dir = tmp_path / "chat_history"
+    legacy_dir.mkdir()
+    shutil.copy2(CHAT_FIXTURE, legacy_dir / CHAT_FIXTURE.name)
+    (legacy_dir / "invalid-role.json").write_text(
+        json.dumps(
+            {
+                "id": "invalid-role",
+                "messages": [{"role": "tool", "content": "must be quarantined"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    app = build_preview_app(
+        data_dir=tmp_path,
+        serve_frontend=False,
+        execution_profile="disabled",
+    )
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        token = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": app.state.session_manager.bootstrap_token},
+        ).json()["session_token"]
+        response = client.get(
+            "/api/v1/chats",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == ["fixture-chat"]
+    assert (legacy_dir / "quarantine" / "invalid-role.json").exists()
+
+
 def test_preview_app_builds_ollama_client_with_a_bounded_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

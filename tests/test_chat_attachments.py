@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import base64
+import binascii
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+import struct
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +17,13 @@ from PIL import Image
 
 from cortex_backend.api import build_demo_dependencies, create_app
 from cortex_backend.core.generation import GenerationAttachment
+import cortex_backend.services.attachments as attachments_module
 from cortex_backend.services.attachments import (
     ChatAttachmentError,
     ChatAttachmentService,
+    MAX_CHAT_IMAGE_DECODED_BYTES,
+    MAX_CHAT_IMAGE_DIMENSION,
+    MAX_CHAT_IMAGE_PIXELS,
 )
 from cortex_backend.services.llm import PromptTemplate
 from cortex_backend.testing.fake_ollama import FakeOllamaState
@@ -29,6 +38,22 @@ def _png_bytes() -> bytes:
     stream = BytesIO()
     Image.new("RGB", (2, 2), (220, 120, 40)).save(stream, format="PNG")
     return stream.getvalue()
+
+
+def _png_header_bytes(width: int, height: int) -> bytes:
+    """Build a tiny structurally valid PNG whose dimensions are test-controlled."""
+
+    row = b"\x00" + b"\x00\x00\x00" * width
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    chunks = []
+    for name, payload in ((b"IHDR", ihdr), (b"IDAT", zlib.compress(row)), (b"IEND", b"")):
+        chunks.append(
+            struct.pack(">I", len(payload))
+            + name
+            + payload
+            + struct.pack(">I", binascii.crc32(name + payload) & 0xFFFFFFFF)
+        )
+    return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
 
 
 
@@ -68,6 +93,55 @@ def test_images_are_verified_and_resolved_as_base64_without_text_expansion():
     resolved = service.resolve(owner="installation-a", descriptor=descriptor)
     assert resolved.image_base64 == base64.b64encode(_png_bytes()).decode("ascii")
     assert resolved.text_content is None
+
+
+def test_images_reject_dimensions_above_chat_pixel_and_dimension_bounds():
+    service = ChatAttachmentService()
+    oversized = _png_header_bytes(MAX_CHAT_IMAGE_DIMENSION + 1, 1)
+    over_pixels = _png_header_bytes(8_192, (MAX_CHAT_IMAGE_PIXELS // 8_192) + 1)
+
+    for request_id, content in (("oversized-dimension", oversized), ("oversized-pixels", over_pixels)):
+        with pytest.raises(ChatAttachmentError) as error:
+            service.stage(
+                owner="installation-a",
+                request_id=request_id,
+                filename="oversized.png",
+                content=content,
+            )
+        assert error.value.code == "attachment_image_invalid"
+
+
+def test_images_reject_decoded_memory_above_chat_bound(monkeypatch: pytest.MonkeyPatch):
+    # Lower the policy for a small fixture so the decoded-memory branch is
+    # exercised without allocating a resource-limit-sized image in the test.
+    monkeypatch.setattr(attachments_module, "MAX_CHAT_IMAGE_DECODED_BYTES", 11)
+    assert MAX_CHAT_IMAGE_DECODED_BYTES > 11
+    with pytest.raises(ChatAttachmentError) as error:
+        ChatAttachmentService().stage(
+            owner="installation-a",
+            request_id="decoded-memory-limit",
+            filename="photo.png",
+            content=_png_bytes(),  # 2 * 2 * 3 = 12 estimated decoded bytes
+        )
+    assert error.value.code == "attachment_image_invalid"
+
+
+@pytest.mark.parametrize("pillow_limit", [3, 1])
+def test_images_reject_pillow_decompression_bomb_warnings_and_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    pillow_limit: int,
+):
+    # Four pixels produce a warning above 3 and a DecompressionBombError above
+    # 1. Both must be treated as an unsafe image rather than a successful verify.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", pillow_limit)
+    with pytest.raises(ChatAttachmentError) as error:
+        ChatAttachmentService().stage(
+            owner="installation-a",
+            request_id=f"bomb-{pillow_limit}",
+            filename="photo.png",
+            content=_png_bytes(),
+        )
+    assert error.value.code == "attachment_image_invalid"
 
 
 def test_prompt_uses_ollama_image_field_and_marks_documents_as_untrusted_reference_data():
@@ -129,6 +203,71 @@ def test_text_encoding_and_limits_are_checked_before_persistence():
             content=utf16,
         )
     assert conflict.value.code == "attachment_request_conflict"
+
+
+def test_in_memory_staging_is_idempotent_under_concurrent_requests():
+    service = ChatAttachmentService()
+    workers = 8
+
+    def stage_one() -> object:
+        return service.stage(
+            owner="concurrent-owner",
+            request_id="concurrent-request",
+            filename="reference.txt",
+            content=b"same reference",
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        descriptors = list(executor.map(lambda _: stage_one(), range(workers)))
+
+    assert len({descriptor.attachment_id for descriptor in descriptors}) == 1
+    assert service.resolve(owner="concurrent-owner", descriptor=descriptors[0]).text_content == "same reference"
+
+
+def test_in_memory_staging_evicts_expired_records_and_bounds_capacity(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(attachments_module, "MAX_CHAT_ATTACHMENT_MEMORY_RECORDS", 1)
+    service = ChatAttachmentService()
+    first = service.stage(
+        owner="memory-owner",
+        request_id="first",
+        filename="first.txt",
+        content=b"first",
+    )
+    second = service.stage(
+        owner="memory-owner",
+        request_id="second",
+        filename="second.txt",
+        content=b"second",
+    )
+    with pytest.raises(ChatAttachmentError) as evicted:
+        service.resolve(owner="memory-owner", descriptor=first)
+    assert evicted.value.code == "attachment_unavailable"
+    assert service.resolve(owner="memory-owner", descriptor=second).text_content == "second"
+
+    expired = service.stage(
+        owner="expired-owner",
+        request_id="expired",
+        filename="expired.txt",
+        content=b"expired",
+    )
+    service._memory[("expired-owner", "expired")] = attachments_module._MemoryRecord(
+        "expired-owner",
+        expired.__class__(
+            expired.attachment_id,
+            expired.filename,
+            expired.mime_type,
+            expired.size,
+            expired.sha256,
+            expired.kind,
+            (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        ),
+        b"expired",
+    )
+    service._memory_bytes = len(b"expired")
+    with pytest.raises(ChatAttachmentError) as unavailable:
+        service.resolve(owner="expired-owner", descriptor=expired)
+    assert unavailable.value.code == "attachment_unavailable"
+    assert ("expired-owner", "expired") not in service._memory
 
 
 def test_durable_staging_is_idempotent_and_integrity_checked(tmp_path: Path):

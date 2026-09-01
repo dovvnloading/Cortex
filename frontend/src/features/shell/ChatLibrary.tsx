@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ChevronRight, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
@@ -14,9 +14,9 @@ export type ChatLibraryProps = {
   onSelectChat: (id: string) => void;
   onRenameChat: (chat: ChatSummary) => void;
   onDeleteChat: (chat: ChatSummary) => void;
-  onCreateGroup: (name: string) => Promise<void>;
-  onRenameGroup: (groupId: string, name: string) => Promise<void>;
-  onDeleteGroup: (groupId: string) => Promise<void>;
+  onCreateGroup: (name: string) => Promise<void | boolean>;
+  onRenameGroup: (groupId: string, name: string) => Promise<void | boolean>;
+  onDeleteGroup: (groupId: string) => Promise<void | boolean>;
   onToggleGroup: (groupId: string, collapsed: boolean) => void;
   onMoveChat: (threadId: string, groupId: string | null) => void;
 };
@@ -82,7 +82,9 @@ export function ChatLibrary({
     />
   );
 
-  const hasAnything = filtered.length > 0 || groups.length > 0;
+  // During a search, only matching chats produce visible rows; groups without
+  // matches are omitted above and must not suppress the empty search state.
+  const hasAnything = searching ? filtered.length > 0 : filtered.length > 0 || groups.length > 0;
 
   return (
     <div className="chat-library">
@@ -182,8 +184,9 @@ export function ChatLibrary({
           chatCount={(byGroup.buckets.get(deleteGroupTarget.id) ?? []).length}
           onClose={() => setDeleteGroupTarget(null)}
           onConfirm={async () => {
-            await onDeleteGroup(deleteGroupTarget.id);
-            setDeleteGroupTarget(null);
+            const result = await onDeleteGroup(deleteGroupTarget.id);
+            if (result !== false) setDeleteGroupTarget(null);
+            return result;
           }}
         />
       )}
@@ -261,12 +264,89 @@ function MoveToGroupMenu({
   onMove: (groupId: string | null) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
-  if (groups.length === 0) return null;
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const typeaheadRef = useRef("");
+  const typeaheadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialFocusRef = useRef<"first" | "last">("first");
+  const menuId = useId();
   const title = displayChatTitle(chat.title);
 
+  useEffect(() => {
+    if (!open) {
+      typeaheadRef.current = "";
+      if (typeaheadTimerRef.current) {
+        clearTimeout(typeaheadTimerRef.current);
+        typeaheadTimerRef.current = null;
+      }
+      return;
+    }
+    const items = getEnabledMenuItems(menuRef.current);
+    const item = initialFocusRef.current === "last" ? items.at(-1) : items[0];
+    item?.focus();
+    if (!item) menuRef.current?.focus();
+  }, [open]);
+
+  useEffect(() => () => {
+    if (typeaheadTimerRef.current) clearTimeout(typeaheadTimerRef.current);
+  }, []);
+
+  if (groups.length === 0) return null;
   const choose = (groupId: string | null) => {
     onMove(groupId);
     onOpenChange(false);
+    triggerRef.current?.focus();
+  };
+
+  const closeFromKeyboard = () => {
+    onOpenChange(false);
+    triggerRef.current?.focus();
+  };
+
+  const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const items = getEnabledMenuItems(menuRef.current);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeFromKeyboard();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const next = event.shiftKey ? triggerRef.current : getAdjacentFocusable(rootRef.current);
+      (next ?? triggerRef.current)?.focus();
+      onOpenChange(false);
+      return;
+    }
+    if (!items.length) return;
+
+    const activeIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = activeIndex < 0
+        ? direction === 1 ? 0 : items.length - 1
+        : (activeIndex + direction + items.length) % items.length;
+      items[nextIndex]?.focus();
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      (event.key === "Home" ? items[0] : items.at(-1))?.focus();
+      return;
+    }
+
+    // Menu items are group names, so a small typeahead buffer is useful when
+    // a library has enough groups that arrowing through them is cumbersome.
+    if (event.key.length === 1 && !/\s/.test(event.key) && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      typeaheadRef.current = `${typeaheadRef.current}${event.key.toLowerCase()}`;
+      if (typeaheadTimerRef.current) clearTimeout(typeaheadTimerRef.current);
+      typeaheadTimerRef.current = setTimeout(() => { typeaheadRef.current = ""; }, 500);
+      const start = activeIndex < 0 ? 0 : activeIndex + 1;
+      const ordered = [...items.slice(start), ...items.slice(0, start)];
+      const match = ordered.find((item) => item.textContent?.trim().toLowerCase().startsWith(typeaheadRef.current));
+      match?.focus();
+    }
   };
 
   return (
@@ -278,23 +358,44 @@ function MoveToGroupMenu({
       }}
     >
       <button
+        ref={triggerRef}
         className="history-action"
         type="button"
         aria-label={`Move ${title} to a group`}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => onOpenChange(!open)}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => {
+          initialFocusRef.current = "first";
+          onOpenChange(!open);
+        }}
+        onKeyDown={(event) => {
+          if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+            event.preventDefault();
+            initialFocusRef.current = event.key === "ArrowDown" ? "first" : "last";
+            onOpenChange(true);
+          }
+        }}
       >
         <MoreHorizontal aria-hidden="true" size={13} />
       </button>
       {open && (
-        <div className="chat-row-menu-list" role="menu" aria-label={`Move ${title} to a group`}>
+        <div
+          className="chat-row-menu-list"
+          id={menuId}
+          ref={menuRef}
+          role="menu"
+          tabIndex={-1}
+          aria-label={`Move ${title} to a group`}
+          onKeyDown={handleMenuKeyDown}
+        >
           {groups.map((group) => (
             <button
               key={group.id}
               className="chat-row-menu-item"
               type="button"
               role="menuitem"
+              tabIndex={-1}
               disabled={chat.group_id === group.id}
               onClick={() => choose(group.id)}
             >
@@ -302,7 +403,13 @@ function MoveToGroupMenu({
             </button>
           ))}
           {chat.group_id && (
-            <button className="chat-row-menu-item" type="button" role="menuitem" onClick={() => choose(null)}>
+            <button
+              className="chat-row-menu-item"
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => choose(null)}
+            >
               Remove from group
             </button>
           )}
@@ -310,6 +417,28 @@ function MoveToGroupMenu({
       )}
     </div>
   );
+}
+
+function getEnabledMenuItems(menu: HTMLDivElement | null): HTMLButtonElement[] {
+  return menu
+    ? Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+    : [];
+}
+
+const focusableSelector = [
+  "button:not(:disabled)",
+  "[href]",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
+  "textarea:not(:disabled)",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function getAdjacentFocusable(root: HTMLDivElement | null): HTMLElement | null {
+  const sibling = root?.nextElementSibling;
+  if (!sibling) return null;
+  if (sibling instanceof HTMLElement && sibling.matches(focusableSelector)) return sibling;
+  return sibling.querySelector<HTMLElement>(focusableSelector);
 }
 
 function GroupNameDialog({
@@ -323,7 +452,7 @@ function GroupNameDialog({
   submitLabel: string;
   initialValue?: string;
   onClose: () => void;
-  onSave: (name: string) => Promise<void>;
+  onSave: (name: string) => Promise<void | boolean>;
 }) {
   const [name, setName] = useState(initialValue);
   const [busy, setBusy] = useState(false);
@@ -333,8 +462,10 @@ function GroupNameDialog({
     if (!name.trim() || busy) return;
     setBusy(true);
     try {
-      await onSave(name.trim());
-      onClose();
+      const result = await onSave(name.trim());
+      if (result !== false) onClose();
+    } catch {
+      // A rejected mutation is a failure too: preserve the dialog and input.
     } finally {
       setBusy(false);
     }
@@ -380,7 +511,7 @@ function DeleteGroupDialog({
   group: ChatGroup;
   chatCount: number;
   onClose: () => void;
-  onConfirm: () => Promise<void>;
+  onConfirm: () => Promise<void | boolean>;
 }) {
   const [busy, setBusy] = useState(false);
   return (
@@ -398,7 +529,11 @@ function DeleteGroupDialog({
             type="button"
             className="button button-danger"
             disabled={busy}
-            onClick={async () => { setBusy(true); try { await onConfirm(); } finally { setBusy(false); } }}
+            onClick={async () => {
+              if (busy) return;
+              setBusy(true);
+              try { await onConfirm(); } catch { /* Preserve the dialog on failure. */ } finally { setBusy(false); }
+            }}
           >
             {busy ? "Deleting…" : "Delete group"}
           </button>

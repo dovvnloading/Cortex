@@ -22,6 +22,7 @@ downloaded and pinned." See the design plan for the full comparison.
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 import json
 import logging
 import re
@@ -40,7 +41,7 @@ import httpx
 
 from .binary_fetcher import BinaryFetcher
 from .binary_release import GpuBackend, PinnedRelease
-from .errors import LlamaCppError, ServerLaunchError, ServerStartTimeoutError
+from .errors import BinaryVerificationError, LlamaCppError, ServerLaunchError, ServerStartTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,12 @@ _HEALTH_RETRY_ATTEMPTS = 3
 _HEALTH_RETRY_TIMEOUT_SECONDS = 2.0
 _HEALTH_RETRY_DELAY_SECONDS = 0.6
 _SHUTDOWN_GRACE_SECONDS = 5.0
+# Lock acquisition itself must remain interruptible.  A cooperative startup
+# normally releases this quickly after observing its token; the stop timeout
+# is deliberately shorter than process teardown so shutdown cannot wait
+# forever behind a non-cooperative dependency.
+_LOCK_POLL_SECONDS = 0.05
+_STOP_LOCK_TIMEOUT_SECONDS = 0.5
 _STATUS_REPEAT_SECONDS = 5.0
 _STDERR_TAIL_LINES = 200
 # Crash-loop guard: if the same (model, num_ctx) keeps dying, stop paying a
@@ -79,6 +86,19 @@ _DEFAULT_NUM_CTX = 4096
 _KNOWN_BAD_BACKEND_TTL_SECONDS = 24.0 * 3600.0
 
 
+def _safe_restart_reason(reason: str) -> str:
+    """Classify a restart without retaining model filenames or child text."""
+    if reason.startswith("the selected model changed"):
+        return "the selected model changed"
+    if reason.startswith("the context window increased"):
+        return reason
+    if reason.startswith("the runtime process exited unexpectedly"):
+        return reason
+    if reason.startswith("the runtime stopped responding to health checks"):
+        return "the runtime stopped responding to health checks"
+    return "the local model runtime required a restart"
+
+
 @dataclass(frozen=True, slots=True)
 class ServerHandle:
     """A ready-to-use running server, scoped to one model."""
@@ -91,6 +111,31 @@ class ServerHandle:
 StatusCallback = Callable[[str], None]
 
 
+class _CancellationToken:
+    """Small cooperative token joining app shutdown and job cancellation."""
+
+    def __init__(self, *events: threading.Event | None) -> None:
+        self._events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self.is_set():
+            return True
+        if timeout is None:
+            while not self.is_set():
+                time.sleep(0.05)
+            return True
+        deadline = time.monotonic() + timeout
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+        return True
+
+
 class LlamaServerProvider(Protocol):
     """What :class:`~cortex_backend.llamacpp.chat_client.LlamaCppChatClient`
     needs from whatever manages the server process. Small on purpose: it
@@ -98,7 +143,12 @@ class LlamaServerProvider(Protocol):
     process manager exists."""
 
     def ensure_ready(
-        self, model_path: Path, *, num_ctx: int | None, on_status: StatusCallback | None = None
+        self,
+        model_path: Path,
+        *,
+        num_ctx: int | None,
+        on_status: StatusCallback | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> ServerHandle:
         ...
 
@@ -165,6 +215,10 @@ _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+
+
+class _JobObjectContainmentError(RuntimeError):
+    """Raised when a model process cannot be contained by a Job Object."""
 
 
 class _JobObjectBasicLimitInformation(ctypes.Structure):
@@ -252,17 +306,22 @@ class _JobObjectLauncher:
     def __call__(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
         process = _spawn_process(argv, cwd=cwd)
         if sys.platform == "win32":
-            self._apply_job_policy(process)
+            try:
+                self._apply_job_policy(process)
+            except Exception:
+                self._terminate_uncontained_process(process)
+                raise
         return process
 
     def _apply_job_policy(self, process: subprocess.Popen) -> None:
         try:
             win32 = self._win32 or self._win32_factory()
             job = self._job
-            if job is None:
+            new_job = job is None
+            if new_job:
                 job = win32.CreateJobObjectW(None, None)
                 if not job:
-                    return
+                    raise _JobObjectContainmentError("could not create a process containment job")
                 limits = _JobObjectExtendedLimitInformation()
                 limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 if not win32.SetInformationJobObject(
@@ -271,24 +330,82 @@ class _JobObjectLauncher:
                     ctypes.byref(limits),
                     ctypes.sizeof(limits),
                 ):
-                    win32.CloseHandle(job)
-                    return
-                self._win32 = win32
-                self._job = job
+                    self._close_handle(win32, job)
+                    raise _JobObjectContainmentError("could not configure the process containment job")
+
+            assert job is not None
             process_handle = win32.OpenProcess(
                 _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
             )
             if not process_handle:
-                return
+                if new_job:
+                    self._close_handle(win32, job)
+                raise _JobObjectContainmentError("could not open the model process for containment")
+            assigned = False
+            assignment_error: Exception | None = None
             try:
-                win32.AssignProcessToJobObject(job, process_handle)
+                try:
+                    assigned = bool(win32.AssignProcessToJobObject(job, process_handle))
+                except Exception as exc:
+                    assignment_error = exc
             finally:
-                win32.CloseHandle(process_handle)
-        except OSError:
-            logger.warning(
-                "Could not attach the local model runtime to a Job Object; "
-                "it may keep running if Cortex exits abnormally."
-            )
+                process_close_error: _JobObjectContainmentError | None = None
+                try:
+                    self._close_handle(win32, process_handle)
+                except _JobObjectContainmentError as exc:
+                    process_close_error = exc
+                if process_close_error is not None:
+                    if new_job:
+                        try:
+                            self._close_handle(win32, job)
+                        except _JobObjectContainmentError:
+                            pass
+                    raise process_close_error
+            if not assigned:
+                if new_job:
+                    self._close_handle(win32, job)
+                if assignment_error is not None:
+                    raise _JobObjectContainmentError(
+                        "could not assign the model process to containment"
+                    ) from assignment_error
+                raise _JobObjectContainmentError("could not assign the model process to containment")
+
+            if new_job:
+                self._win32 = win32
+                self._job = job
+        except _JobObjectContainmentError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise _JobObjectContainmentError(
+                "could not initialize process containment"
+            ) from exc
+
+    @staticmethod
+    def _close_handle(win32: _JobWin32, handle: int) -> None:
+        try:
+            closed = win32.CloseHandle(handle)
+        except OSError as exc:
+            raise _JobObjectContainmentError("could not close a process containment handle") from exc
+        if not closed:
+            raise _JobObjectContainmentError("could not close a process containment handle")
+
+    @staticmethod
+    def _terminate_uncontained_process(process: subprocess.Popen) -> None:
+        try:
+            process.terminate()
+            process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                logger.error("The uncontained local model runtime did not exit cleanly.")
+        except (OSError, ProcessLookupError):
+            try:
+                process.kill()
+                process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                logger.error("The uncontained local model runtime could not be stopped.")
 
 
 default_launcher: ProcessLauncher = _JobObjectLauncher()
@@ -342,15 +459,25 @@ class LlamaServerManager:
         self._models_directory = models_directory
         self._health_timeout_seconds = health_timeout_seconds
         self._launcher = launcher
-        self._http = http_client or httpx.Client(
+        self._http = http_client if http_client is not None else httpx.Client(
             timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)
         )
         self._owns_http_client = http_client is None
 
         self._ensure_lock = threading.Lock()
         self._state_lock = threading.RLock()
+        self._close_lock = threading.Lock()
+        self._stop_cleanup_lock = threading.Lock()
+        self._stop_cleanup_thread: threading.Thread | None = None
+        # This event is deliberately independent of ``_ensure_lock``.  A
+        # startup can spend minutes downloading/verifying a runtime or
+        # waiting for model health; stop/close must be able to publish
+        # cancellation immediately rather than queue behind that work.
+        self._stop_event = threading.Event()
+        self._closed = False
         self._state: ServerState = "idle"
         self._process: subprocess.Popen | None = None
+        self._starting_process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
         self._loaded_num_ctx: int | None = None
         self._base_url: str | None = None
@@ -364,10 +491,44 @@ class LlamaServerManager:
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
         self._api_key: str | None = None
 
+    def close(self) -> None:
+        """Stop the managed process and close an HTTP client owned here."""
+        with self._close_lock:
+            if self._closed:
+                return
+            # Publish the terminal state before waiting for an in-flight
+            # ensure_ready() call. New callers then fail closed instead of
+            # starting another child after teardown has begun.
+            with self._state_lock:
+                self._closed = True
+            stop_error: Exception | None = None
+            try:
+                self.stop()
+            except Exception as exc:
+                stop_error = exc
+            finally:
+                with self._state_lock:
+                    http_client = self._http if self._owns_http_client else None
+                    self._owns_http_client = False
+                try:
+                    if http_client is not None:
+                        http_client.close()
+                except Exception:
+                    if stop_error is None:
+                        raise
+                    logger.exception("Could not close the llama.cpp HTTP client after stop failed.")
+            if stop_error is not None:
+                raise stop_error
+
     # -- public API -------------------------------------------------------
 
     def ensure_ready(
-        self, model_path: Path, *, num_ctx: int | None, on_status: StatusCallback | None = None
+        self,
+        model_path: Path,
+        *,
+        num_ctx: int | None,
+        on_status: StatusCallback | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> ServerHandle:
         """Block the caller's thread until a server serving ``model_path`` is
         ready, reusing the current process whenever it can.
@@ -385,9 +546,15 @@ class LlamaServerManager:
         already-warm reused server never fires it, so no message flashes for
         the common fast path.
         """
-        with self._ensure_lock:
-            verdict = self._reuse_verdict(model_path, num_ctx)
+        token = _CancellationToken(self._stop_event, cancellation_event)
+        with self._ensure_guard(token):
+            self._raise_if_stopping(token)
+            with self._state_lock:
+                if self._closed:
+                    raise LlamaCppError("The local model runtime manager is closed.")
+            verdict = self._reuse_verdict(model_path, num_ctx, token)
             if verdict.reusable:
+                self._raise_if_stopping(token)
                 with self._state_lock:
                     assert self._base_url is not None
                     return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
@@ -408,8 +575,27 @@ class LlamaServerManager:
 
             self._guard_against_crash_loop(model_path, effective_num_ctx)
 
-            self._terminate_and_reset()
-            return self._start(model_path, effective_num_ctx, on_status)
+            if not self._terminate_and_reset():
+                raise LlamaCppError(
+                    "The previous local model runtime did not exit cleanly; restart Cortex before trying again."
+                )
+            try:
+                return self._start(model_path, effective_num_ctx, on_status, token)
+            except LlamaCppError:
+                # A caller cancellation can arrive after startup has begun.
+                # The startup finally block reaps an unpublished child, but
+                # also clear the manager's state so a cancelled request does
+                # not strand it in ``starting``. Never tear down an already
+                # ready server merely because a health recheck was cancelled.
+                if token.is_set():
+                    with self._state_lock:
+                        startup_active = (
+                            self._state in {"downloading_binary", "starting"}
+                            or self._starting_process is not None
+                        )
+                    if startup_active:
+                        self._terminate_and_reset()
+                raise
 
     @property
     def status(self) -> LlamaCppRuntimeStatus:
@@ -440,25 +626,98 @@ class LlamaServerManager:
 
     def stop(self) -> None:
         """Terminate any running process. Idempotent; safe to call from app shutdown."""
-        with self._ensure_lock:
-            self._terminate_and_reset()
-            with self._state_lock:
-                self._failure_times.clear()
-                self._failure_key = None
+        # Signal first, before taking the slow-path lock.  The startup path
+        # checks this token while acquiring the binary and between every
+        # health-probe wait, so a concurrent shutdown can unwind promptly.
+        self._stop_event.set()
+        with self._state_lock:
+            process = self._process or self._starting_process
+            if self._state != "idle":
+                self._state = "stopping"
+        if process is not None:
+            self._terminate_process(process)
+        if not self._ensure_lock.acquire(timeout=_STOP_LOCK_TIMEOUT_SECONDS):
+            # Keep the stop event set.  The in-flight startup owns the lock and
+            # will observe it (or its own cancellation) before it can publish
+            # a ready handle; clearing it here would permit a new launch while
+            # the old one is still unwinding.
+            logger.warning("The local model runtime is still stopping; cleanup will finish asynchronously.")
+            self._schedule_stop_cleanup()
+            return
+        try:
+            if self._terminate_and_reset():
+                with self._state_lock:
+                    self._failure_times.clear()
+                    self._failure_key = None
+                self._stop_event.clear()
+            else:
+                self._schedule_stop_cleanup()
+        finally:
+            self._ensure_lock.release()
+
+    def _schedule_stop_cleanup(self) -> None:
+        """Finish a timed-out stop once the in-flight startup releases its lock.
+
+        Keeping the cancellation event set until this worker has confirmed
+        that no child remains is intentional: a new request must never race a
+        still-unwinding startup and create two model runtimes.
+        """
+        with self._stop_cleanup_lock:
+            if self._stop_cleanup_thread is not None and self._stop_cleanup_thread.is_alive():
+                return
+
+            def finish() -> None:
+                acquired = False
+                try:
+                    self._ensure_lock.acquire()
+                    acquired = True
+                    if self._terminate_and_reset():
+                        with self._state_lock:
+                            self._failure_times.clear()
+                            self._failure_key = None
+                        self._stop_event.clear()
+                except Exception:
+                    # Leave the cancellation event set and the state stopping
+                    # if teardown itself cannot establish a safe idle state.
+                    logger.exception("Could not finish local model runtime shutdown safely.")
+                finally:
+                    if acquired:
+                        self._ensure_lock.release()
+
+            worker = threading.Thread(target=finish, name="llama-stop-cleanup", daemon=True)
+            self._stop_cleanup_thread = worker
+            try:
+                worker.start()
+            except Exception:
+                self._stop_cleanup_thread = None
+                # Keep the stop event set: if the host cannot create the
+                # deferred cleanup worker, fail closed rather than allowing a
+                # later request to overlap an unfinished teardown.
+                logger.exception("Could not schedule local model runtime shutdown cleanup.")
+
+    @contextmanager
+    def _ensure_guard(self, token: _CancellationToken):
+        """Acquire the slow-path lock without stranding a cancelled caller."""
+        while not self._ensure_lock.acquire(timeout=_LOCK_POLL_SECONDS):
+            self._raise_if_stopping(token)
+        try:
+            self._raise_if_stopping(token)
+            yield
+        finally:
+            self._ensure_lock.release()
 
     # -- reuse & teardown ---------------------------------------------------
 
-    def _reuse_verdict(self, model_path: Path, num_ctx: int | None) -> _ReuseVerdict:
+    def _reuse_verdict(
+        self, model_path: Path, num_ctx: int | None, cancellation_event: _CancellationToken
+    ) -> _ReuseVerdict:
         with self._state_lock:
             if self._state != "ready" or self._process is None:
                 return _ReuseVerdict(reusable=False)
             if self._loaded_model_path != model_path:
                 return _ReuseVerdict(
                     reusable=False,
-                    reason=(
-                        f"the selected model changed from {self._loaded_model_path.name} "
-                        f"to {model_path.name}"
-                    ),
+                    reason="the selected model changed",
                 )
             if (
                 num_ctx is not None
@@ -487,9 +746,12 @@ class LlamaServerManager:
             model_path = self._loaded_model_path
 
         # Probes run without the state lock; status polls stay responsive.
-        healthy, exit_code = self._probe_health_with_retries(base_url, process, api_key, model_path)
+        healthy, exit_code = self._probe_health_with_retries(
+            base_url, process, api_key, model_path, cancellation_event
+        )
         with self._state_lock:
             if healthy:
+                self._raise_if_stopping(cancellation_event)
                 self._last_health_check = time.monotonic()
                 return _ReuseVerdict(reusable=True)
             if exit_code is not None:
@@ -513,6 +775,7 @@ class LlamaServerManager:
         process: subprocess.Popen,
         api_key: str | None,
         model_path: Path | None,
+        cancellation_event: _CancellationToken,
     ) -> tuple[bool, int | None]:
         """Distinguish busy from dead. Returns (healthy, exit_code_if_dead).
 
@@ -521,6 +784,7 @@ class LlamaServerManager:
         crashed one is caught by the ``poll()`` between attempts.
         """
         for attempt in range(_HEALTH_RETRY_ATTEMPTS):
+            self._raise_if_stopping(cancellation_event)
             exit_code = process.poll()
             if exit_code is not None:
                 return False, exit_code
@@ -535,7 +799,8 @@ class LlamaServerManager:
             except (httpx.TransportError, ValueError):
                 pass
             if attempt < _HEALTH_RETRY_ATTEMPTS - 1:
-                time.sleep(_HEALTH_RETRY_DELAY_SECONDS)
+                if cancellation_event.wait(_HEALTH_RETRY_DELAY_SECONDS):
+                    raise LlamaCppError("The local model runtime startup was cancelled.")
         return False, process.poll()
 
     def _record_restart(
@@ -543,8 +808,8 @@ class LlamaServerManager:
     ) -> None:
         assert verdict.reason is not None
         with self._state_lock:
-            self._last_restart_reason = verdict.reason
-            tail = list(self._stderr_tail[-20:])
+            safe_reason = _safe_restart_reason(verdict.reason)
+            self._last_restart_reason = safe_reason
             if verdict.failure:
                 crashed_key = (
                     (self._loaded_model_path, self._loaded_num_ctx)
@@ -562,9 +827,10 @@ class LlamaServerManager:
                 self._failure_times.clear()
                 self._failure_key = None
         log = logger.warning if verdict.failure else logger.info
-        log("Restarting the local model runtime: %s.", verdict.reason)
-        if verdict.failure and tail:
-            logger.warning("llama-server output before it was lost:\n%s", "\n".join(tail))
+        log("Restarting the local model runtime (%s).", safe_reason)
+        # The child process output is untrusted and may contain prompts,
+        # paths, credentials, or provider response text.  Retain its bounded
+        # tail in memory for lifecycle bookkeeping, but never emit it.
 
     def _guard_against_crash_loop(self, model_path: Path, effective_num_ctx: int) -> None:
         with self._state_lock:
@@ -578,10 +844,12 @@ class LlamaServerManager:
             )
             if not tripped:
                 return
-            reason = self._last_restart_reason or "the runtime kept failing"
+            reason = _safe_restart_reason(
+                self._last_restart_reason or "the runtime kept failing"
+            )
             message = (
-                f"The local model runtime for {model_path.name} failed "
-                f"{len(self._failure_times)} times in the last few minutes "
+                f"The local model runtime failed {len(self._failure_times)} times "
+                f"in the last few minutes "
                 f"(most recently: {reason}). It likely does not fit in available "
                 "memory. Choose a smaller model or quantization, or lower the "
                 "context window in Settings, and Cortex will try again."
@@ -593,40 +861,83 @@ class LlamaServerManager:
         # seconds by the UI -- must stay responsive throughout, not queue
         # behind a shutdown the class documents this lock as never holding
         # for more than microseconds.
+        terminated = True
         if process is not None:
-            self._terminate_process(process)
+            terminated = self._terminate_process(process)
         with self._state_lock:
-            self._reset_fields_locked()
-            self._state = "failed"
-            self._last_error = message
+            if terminated:
+                self._reset_fields_locked()
+                self._state = "failed"
+                self._last_error = message
+            else:
+                self._state = "stopping"
+                self._last_error = "The local model runtime did not exit cleanly; restart Cortex before trying again."
         raise LlamaCppError(message)
 
-    def _terminate_and_reset(self) -> None:
+    def _terminate_and_reset(self) -> bool:
         with self._state_lock:
-            process = self._process
+            process = self._process or self._starting_process
             if process is not None:
                 self._state = "stopping"
+        terminated = True
         if process is not None:
             # Terminate outside the state lock: the grace wait can take
             # seconds and status polls must not hang behind it.
-            self._terminate_process(process)
+            terminated = self._terminate_process(process)
         with self._state_lock:
-            self._reset_fields_locked()
+            if terminated:
+                self._reset_fields_locked()
+            else:
+                self._state = "stopping"
+                self._last_error = "The local model runtime did not exit cleanly; restart Cortex before trying again."
+        return terminated
 
     @staticmethod
-    def _terminate_process(process: subprocess.Popen) -> None:
-        process.terminate()
+    def _terminate_process(process: subprocess.Popen) -> bool:
+        """Attempt bounded teardown and report whether exit was confirmed."""
+        exited = False
+        try:
+            if process.poll() is not None:
+                return True
+        except Exception:
+            # Continue with terminate/wait; a broken poll implementation must
+            # not skip cleanup or strand the process reference.
+            logger.exception("Could not inspect the local model runtime process.")
+        try:
+            process.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+        except Exception:
+            logger.exception("Could not terminate the local model runtime process.")
         try:
             process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+            exited = True
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            except Exception:
+                logger.exception("Could not kill the local model runtime process.")
             try:
                 process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+                exited = True
             except subprocess.TimeoutExpired:
                 logger.error("The local model runtime process did not exit after being killed.")
+            except Exception:
+                logger.exception("Could not confirm local model runtime process exit.")
+        except Exception:
+            logger.exception("Could not confirm local model runtime process exit.")
+        if exited:
+            return True
+        try:
+            return process.poll() is not None
+        except Exception:
+            return False
 
     def _reset_fields_locked(self) -> None:
         self._process = None
+        self._starting_process = None
         self._loaded_model_path = None
         self._loaded_num_ctx = None
         self._base_url = None
@@ -636,7 +947,11 @@ class LlamaServerManager:
     # -- launch -------------------------------------------------------------
 
     def _start(
-        self, model_path: Path, num_ctx: int, on_status: StatusCallback | None
+        self,
+        model_path: Path,
+        num_ctx: int,
+        on_status: StatusCallback | None,
+        cancellation_event: _CancellationToken,
     ) -> ServerHandle:
         if self._release is None:
             with self._state_lock:
@@ -648,7 +963,9 @@ class LlamaServerManager:
         last_exc: Exception | None = None
         for backend in self._backend_order(requested_backend, model_path, num_ctx):
             try:
-                return self._start_with_backend(model_path, num_ctx, backend, on_status)
+                return self._start_with_backend(
+                    model_path, num_ctx, backend, on_status, cancellation_event
+                )
             except ServerLaunchError as exc:
                 last_exc = exc
                 logger.warning(
@@ -657,7 +974,13 @@ class LlamaServerManager:
                     type(exc).__name__,
                 )
                 continue
-        message = str(last_exc) if last_exc else "The local model runtime could not start."
+        # ServerLaunchError may originate from the child process and include
+        # arbitrary stderr.  Keep status/API diagnostics stable and classify
+        # the failure by exception type instead of relaying that text.
+        message = (
+            "The local model runtime could not start. "
+            "Check System settings and try again."
+        )
         with self._state_lock:
             self._state = "failed"
             self._last_error = message
@@ -716,14 +1039,40 @@ class LlamaServerManager:
             logger.warning("Could not persist the known-bad GPU backend marker.")
 
     def _start_with_backend(
-        self, model_path: Path, num_ctx: int, backend: GpuBackend, on_status: StatusCallback | None
+        self,
+        model_path: Path,
+        num_ctx: int,
+        backend: GpuBackend,
+        on_status: StatusCallback | None,
+        cancellation_event: _CancellationToken,
     ) -> ServerHandle:
         with self._state_lock:
             self._state = "downloading_binary"
         assert self._release is not None
-        if not self._fetcher.is_cached(self._release, backend) and on_status is not None:
+        try:
+            cached = self._fetcher.is_cached(
+                self._release,
+                backend,
+                cancellation_event=cancellation_event,
+            )
+        except BinaryVerificationError as exc:
+            if cancellation_event.is_set():
+                raise LlamaCppError("The local model runtime startup was cancelled.") from exc
+            raise
+        if not cached and on_status is not None:
             on_status("Downloading the local model runtime (one-time setup)...")
-        executable = self._fetcher.ensure_binary(self._release, backend)
+        self._raise_if_stopping(cancellation_event)
+        try:
+            executable = self._fetcher.ensure_binary(
+                self._release,
+                backend,
+                cancellation_event=cancellation_event,
+            )
+        except BinaryVerificationError as exc:
+            if cancellation_event.is_set():
+                raise LlamaCppError("The local model runtime startup was cancelled.") from exc
+            raise
+        self._raise_if_stopping(cancellation_event)
 
         with self._state_lock:
             self._state = "starting"
@@ -743,10 +1092,19 @@ class LlamaServerManager:
             "--reasoning-format", "deepseek",
             "-ngl", "auto" if backend == "vulkan" else "0",
         ]
-        process = self._launcher(argv, cwd=executable.parent)
+        try:
+            process = self._launcher(argv, cwd=executable.parent)
+        except Exception as exc:
+            with self._state_lock:
+                self._state = "failed"
+                self._last_error = "The local model runtime could not start. Check System settings and try again."
+            raise ServerLaunchError("The local model runtime could not start.") from exc
+        with self._state_lock:
+            self._starting_process = process
         stderr_tail: list[str] = []
         listening_port: list[int] = []
         listening_event = threading.Event()
+        ready = False
 
         def on_output(line: str) -> None:
             match = _LISTENING_PORT_RE.search(line)
@@ -754,33 +1112,34 @@ class LlamaServerManager:
                 listening_port.append(int(match.group(1)))
                 listening_event.set()
 
-        if process.stdout is not None:
-            threading.Thread(
-                target=_drain_output,
-                args=(process.stdout, stderr_tail, on_output),
-                daemon=True,
-            ).start()
-
-        deadline = time.monotonic() + self._health_timeout_seconds
-        last_status_at = time.monotonic()
-        ready = False
         try:
+            if process.stdout is not None:
+                threading.Thread(
+                    target=_drain_output,
+                    args=(process.stdout, stderr_tail, on_output),
+                    daemon=True,
+                ).start()
+            deadline = time.monotonic() + self._health_timeout_seconds
+            last_status_at = time.monotonic()
             while time.monotonic() < deadline:
+                self._raise_if_stopping(cancellation_event)
                 exit_code = process.poll()
                 if exit_code is not None:
                     if backend == "vulkan":
                         self._mark_backend_bad("vulkan", model_path, num_ctx)
                     raise ServerLaunchError(
-                        "The local model runtime exited before it became ready.\n"
-                        + "\n".join(stderr_tail[-20:])
+                        "The local model runtime exited before it became ready."
                     )
                 if not listening_port:
-                    listening_event.wait(
-                        timeout=min(
+                    if cancellation_event.wait(
+                        min(
                             _HEALTH_POLL_INTERVAL_SECONDS,
                             max(0.0, deadline - time.monotonic()),
                         )
-                    )
+                    ):
+                        raise LlamaCppError("The local model runtime startup was cancelled.")
+                    # The output callback may have delivered a listening line
+                    # while the event wait was in progress.
                     now = time.monotonic()
                     if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
                         on_status(
@@ -790,9 +1149,13 @@ class LlamaServerManager:
                         last_status_at = now
                     continue
                 base_url = f"http://127.0.0.1:{listening_port[0]}"
+                self._raise_if_stopping(cancellation_event)
                 if self._probe_health(base_url, api_key=api_key, model_path=model_path):
                     with self._state_lock:
+                        if cancellation_event.is_set():
+                            raise LlamaCppError("The local model runtime startup was cancelled.")
                         self._process = process
+                        self._starting_process = None
                         self._loaded_model_path = model_path
                         self._loaded_num_ctx = num_ctx
                         self._base_url = base_url
@@ -808,15 +1171,34 @@ class LlamaServerManager:
                 if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
                     on_status(f"Still loading the model ({model_path.name})... this can take a while for large files.")
                     last_status_at = now
-                time.sleep(_HEALTH_POLL_INTERVAL_SECONDS)
+                if cancellation_event.wait(_HEALTH_POLL_INTERVAL_SECONDS):
+                    raise LlamaCppError("The local model runtime startup was cancelled.")
 
             raise ServerStartTimeoutError("The local model runtime did not become ready in time.")
+        except (LlamaCppError, ServerStartTimeoutError):
+            raise
+        except Exception as exc:
+            raise ServerLaunchError("The local model runtime could not start.") from exc
         finally:
             # The manager does not publish the process into ``self._process``
             # until health succeeds. Reap every failed startup here so a
             # timeout or callback error cannot leave an unowned model process.
-            if not ready and process.poll() is None:
-                self._terminate_process(process)
+            terminated = True
+            if not ready:
+                terminated = self._terminate_process(process)
+            with self._state_lock:
+                if self._starting_process is process:
+                    if terminated:
+                        self._starting_process = None
+                    else:
+                        self._state = "stopping"
+                        self._last_error = "The local model runtime did not exit cleanly; restart Cortex before trying again."
+
+    def _raise_if_stopping(self, cancellation_event: _CancellationToken | None = None) -> None:
+        if self._stop_event.is_set() or (
+            cancellation_event is not None and cancellation_event.is_set()
+        ):
+            raise LlamaCppError("The local model runtime startup was cancelled.")
 
     def _probe_health(self, base_url: str, *, api_key: str, model_path: Path) -> bool:
         try:

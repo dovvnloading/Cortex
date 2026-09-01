@@ -11,10 +11,12 @@ sufficient and keeps this adapter simple.
 from __future__ import annotations
 
 import json
+import logging
+import queue
 import time
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Any
 
 import httpx
@@ -22,6 +24,8 @@ import httpx
 from .errors import LlamaCppError
 from .model_directory import resolve_gguf_path
 from .server_manager import LlamaServerProvider
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
 
@@ -38,8 +42,65 @@ class LlamaCppChatClient:
     ) -> None:
         self._provider = provider
         self._models_directory = models_directory
-        self._http = http_client or httpx.Client(timeout=_DEFAULT_TIMEOUT)
+        self._http = http_client if http_client is not None else httpx.Client(timeout=_DEFAULT_TIMEOUT)
+        self._owns_http_client = http_client is None
+        self._close_lock = Lock()
+        self._closed = False
+        self._active_http_requests = 0
+        self._deferred_http_close = False
         self._status_callback: Callable[[str], None] | None = None
+
+    def close(self) -> None:
+        """Close the HTTP client created by this adapter, exactly once.
+
+        Callers that inject a client retain ownership and must close it
+        themselves.  This method is intentionally idempotent for app teardown
+        paths that can race or be invoked more than once.  An active request
+        keeps an owned transport open until its request ``finally`` runs;
+        shutdown marks this client closed immediately, so no new request can
+        start while a bounded job/runtime shutdown interrupts the old one.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if not self._owns_http_client or self._active_http_requests:
+                self._deferred_http_close = self._owns_http_client
+                return
+            self._owns_http_client = False
+            http_client = self._http
+        http_client.close()
+
+    def _begin_http_request(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                raise LlamaCppError("The local llama.cpp chat client is closed.")
+            self._active_http_requests += 1
+
+    def _ensure_open(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                raise LlamaCppError("The local llama.cpp chat client is closed.")
+
+    def _end_http_request(self) -> None:
+        with self._close_lock:
+            self._active_http_requests -= 1
+            if (
+                self._active_http_requests
+                or not self._deferred_http_close
+                or not self._owns_http_client
+            ):
+                return
+            self._deferred_http_close = False
+            self._owns_http_client = False
+            http_client = self._http
+        try:
+            http_client.close()
+        except Exception:
+            # A deferred close runs from the worker that just released its
+            # request. Never replace that worker's result/error with a client
+            # teardown exception, and never log transport details or payloads.
+            logger.exception("Could not close the llama.cpp HTTP client after its request finished.")
 
     def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
         """Optional progress hook, set by SynthesisAgent before generate().
@@ -58,6 +119,7 @@ class LlamaCppChatClient:
         options: dict,
         cancellation_event: Event | None = None,
     ) -> dict:
+        self._ensure_open()
         model_path = resolve_gguf_path(self._models_directory(), model)
         # None means "no preference" -- title/translation calls pass a
         # minimal options dict with no num_ctx at all. Since num_ctx is a
@@ -69,7 +131,30 @@ class LlamaCppChatClient:
         # LlamaServerManager.ensure_ready for how None is handled.
         raw_num_ctx = options.get("num_ctx")
         num_ctx = int(raw_num_ctx) if raw_num_ctx is not None else None
-        handle = self._provider.ensure_ready(model_path, num_ctx=num_ctx, on_status=self._status_callback)
+        if cancellation_event is not None and cancellation_event.is_set():
+            # Preserve the existing cooperative-chat contract (an already
+            # cancelled generation yields an empty response), while avoiding
+            # any binary acquisition or server startup work.
+            return _adapt_to_ollama_shape(
+                {"choices": [{"message": {"content": "", "reasoning_content": None}}]},
+                elapsed_seconds=0.0,
+            )
+        # Keep providers implemented against the original seam usable when
+        # the caller has no cancellation support. The production manager
+        # accepts the optional keyword, but test/injected providers need not.
+        if cancellation_event is None:
+            handle = self._provider.ensure_ready(
+                model_path,
+                num_ctx=num_ctx,
+                on_status=self._status_callback,
+            )
+        else:
+            handle = self._provider.ensure_ready(
+                model_path,
+                num_ctx=num_ctx,
+                on_status=self._status_callback,
+                cancellation_event=cancellation_event,
+            )
         started = time.monotonic()
         if cancellation_event is None:
             return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
@@ -83,6 +168,7 @@ class LlamaCppChatClient:
         to honor (title and translation calls, and anything else that isn't
         the main chat turn)."""
         body = _build_request_body(messages, options, stream=False)
+        self._begin_http_request()
         try:
             response = self._http.post(
                 f"{base_url}/v1/chat/completions",
@@ -99,6 +185,14 @@ class LlamaCppChatClient:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."
             ) from exc
+        except RuntimeError as exc:
+            if not _is_closed_http_error(exc):
+                raise
+            raise LlamaCppError(
+                "The local llama.cpp chat client is unavailable; restart Cortex."
+            ) from exc
+        finally:
+            self._end_http_request()
         return _adapt_to_ollama_shape(response.json(), elapsed_seconds=time.monotonic() - started)
 
     def _chat_abortable(
@@ -119,6 +213,7 @@ class LlamaCppChatClient:
         reasoning_parts: list[str] = []
         usage: dict | None = None
         timings: dict | None = None
+        self._begin_http_request()
         try:
             with self._http.stream(
                 "POST",
@@ -134,9 +229,47 @@ class LlamaCppChatClient:
                         _server_error_detail(exc.response),
                         status_code=exc.response.status_code,
                     ) from exc
-                for line in response.iter_lines():
-                    if cancellation_event.is_set():
+                lines: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+                done = object()
+
+                def read_lines() -> None:
+                    try:
+                        for line in response.iter_lines():
+                            while not cancellation_event.is_set():
+                                try:
+                                    lines.put(("line", line), timeout=0.05)
+                                    break
+                                except queue.Full:
+                                    continue
+                    except BaseException as exc:  # noqa: BLE001 - pass transport errors to caller
+                        while not cancellation_event.is_set():
+                            try:
+                                lines.put(("error", exc), timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+                    finally:
+                        while not cancellation_event.is_set():
+                            try:
+                                lines.put(("done", done), timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+
+                reader = Thread(target=read_lines, name="llama-chat-reader", daemon=True)
+                reader.start()
+                while not cancellation_event.is_set():
+                    try:
+                        kind, payload = lines.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    if kind == "error":
+                        if isinstance(payload, httpx.TransportError):
+                            raise payload
+                        raise RuntimeError("The llama.cpp response reader failed.") from payload
+                    if kind == "done":
                         break
+                    line = payload
                     if not line or not line.startswith("data:"):
                         continue
                     payload = line[len("data:"):].strip()
@@ -163,6 +296,14 @@ class LlamaCppChatClient:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."
             ) from exc
+        except RuntimeError as exc:
+            if not _is_closed_http_error(exc):
+                raise
+            raise LlamaCppError(
+                "The local llama.cpp chat client is unavailable; restart Cortex."
+            ) from exc
+        finally:
+            self._end_http_request()
         # Reuse the existing non-streamed adapter by handing it a payload
         # shaped the same way -- accumulated deltas standing in for the
         # single message a non-streamed response would have carried.
@@ -180,6 +321,12 @@ class LlamaCppChatClient:
 
 
 _MAX_SERVER_ERROR_CHARS = 400
+
+
+def _is_closed_http_error(error: RuntimeError) -> bool:
+    """Recognize httpx's closed-client failure without relaying its detail."""
+    message = str(error).lower()
+    return "client has been closed" in message or "client is closed" in message
 
 
 def _server_error_detail(response: httpx.Response) -> str:

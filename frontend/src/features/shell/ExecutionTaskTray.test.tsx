@@ -93,6 +93,34 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByText("2 × Chat attachment staged.")).toBeVisible();
   });
 
+  it("shows generic results for non-code tasks", () => {
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...task, status: "succeeded", can_cancel: false, result: { provider: "fake-v1", steps: 3, value: 42 } }]}
+      />,
+    );
+
+    expect(screen.getByRole("complementary", { name: "Task activity" })).toBeVisible();
+    expect(screen.getByLabelText("Task result")).toHaveTextContent('"provider": "fake-v1"');
+    expect(screen.getByLabelText("Task result")).toHaveTextContent('"value": 42');
+  });
+
+  it("presents opaque artifact results with a download action", async () => {
+    const user = userEvent.setup();
+    const onDownloadArtifact = vi.fn<(artifact: { artifact_id: string; mime_type: string; size: number }) => Promise<void>>().mockResolvedValue();
+    render(
+      <ExecutionTaskTray
+        tasks={[{ ...task, status: "succeeded", can_cancel: false, result: { artifact_id: "artifact-1", mime_type: "image/png", size: 2048, sha256: "a".repeat(64) } }]}
+        onDownloadArtifact={onDownloadArtifact}
+      />,
+    );
+
+    expect(screen.getByText("image/png")).toBeVisible();
+    expect(screen.getByText("2 KB")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Download image/png artifact" }));
+    expect(onDownloadArtifact).toHaveBeenCalledWith({ artifact_id: "artifact-1", mime_type: "image/png", size: 2048, sha256: "a".repeat(64) });
+  });
+
   it("renders pending approval as a non-modal action card without a spinner", async () => {
     const user = userEvent.setup();
     let finishDecision: (() => void) | undefined;

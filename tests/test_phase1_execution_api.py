@@ -128,6 +128,11 @@ def test_preview_lifecycle_is_owner_scoped_idempotent_and_replayable(tmp_path):
         assert tasks.status_code == 200
         assert tasks.json()["tasks"][0]["job_id"] == job_id
         assert tasks.json()["tasks"][0]["approval_state"] == "not_required"
+        assert tasks.json()["tasks"][0]["result"] == {
+            "provider": "fake-v1",
+            "steps": 3,
+            "value": 42,
+        }
 
 
 def test_preview_api_reuses_installation_owner_across_sessions_and_cancels_durably(tmp_path):

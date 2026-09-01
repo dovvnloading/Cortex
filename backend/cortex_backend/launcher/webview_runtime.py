@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,62 @@ WEBVIEW2_BOOTSTRAPPER = "MicrosoftEdgeWebview2Setup.exe"
 
 class WebViewRuntimeError(RuntimeError):
     """Raised when the native Chromium runtime cannot be prepared."""
+
+
+def _verify_microsoft_signature(bootstrapper: Path) -> None:
+    """Recheck the bundled installer's Authenticode signature before launch.
+
+    The package build performs the same check, but the one-folder payload is
+    mutable after extraction.  PowerShell is part of supported Windows
+    installations and gives us the platform's trust-chain result without
+    logging the path or certificate details.
+    """
+
+    script = (
+        "$signature = Get-AuthenticodeSignature -LiteralPath "
+        "$env:CORTEX_WEBVIEW_BOOTSTRAPPER; "
+        "if ($signature.Status -ne 'Valid' -or "
+        "$signature.SignerCertificate.Subject -notmatch "
+        "'(?i)(^|, )O=Microsoft Corporation(,|$)') { exit 1 }"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    environment = os.environ.copy()
+    environment["CORTEX_WEBVIEW_BOOTSTRAPPER"] = str(bootstrapper)
+    # Ignore user-provided module roots: a stale or tampered module can make
+    # the signature cmdlet unavailable or change what it executes.
+    system_root = environment.get("SystemRoot", r"C:\Windows")
+    program_files = environment.get("ProgramFiles", r"C:\Program Files")
+    environment["PSModulePath"] = os.pathsep.join(
+        (
+            os.path.join(program_files, "WindowsPowerShell", "Modules"),
+            os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "Modules"),
+        )
+    )
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=False,
+            timeout=30,
+            creationflags=creationflags,
+            capture_output=True,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WebViewRuntimeError(
+            "Cortex could not verify the bundled WebView2 Runtime bootstrapper."
+        ) from exc
+    if result.returncode != 0:
+        raise WebViewRuntimeError(
+            "The bundled WebView2 Runtime bootstrapper failed Microsoft signature verification."
+        )
 
 
 def webview2_version() -> str | None:
@@ -57,6 +114,8 @@ def ensure_webview2_runtime(resource_root: Path) -> str | None:
             "runtime bootstrapper is missing. Rebuild the package with "
             "packaging/build_windows.ps1."
         )
+
+    _verify_microsoft_signature(bootstrapper)
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
