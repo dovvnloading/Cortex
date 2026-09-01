@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -40,7 +41,18 @@ class FakeLlamaServerProvider:
         self.state = state or FakeLlamaCppState()
         self.ensure_ready_calls: list[tuple[Path, int]] = []
 
-    def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
+    def ensure_ready(
+        self,
+        model_path: Path,
+        *,
+        num_ctx: int | None,
+        on_status=None,
+        cancellation_event: Event | None = None,
+    ) -> ServerHandle:
+        if cancellation_event is not None and cancellation_event.is_set():
+            from cortex_backend.llamacpp.errors import LlamaCppError
+
+            raise LlamaCppError("The local model runtime startup was cancelled.")
         self.ensure_ready_calls.append((model_path, num_ctx))
         if on_status is not None:
             on_status("Starting the local model...")

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import time
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from typing import Any
 
 import httpx
@@ -130,7 +131,30 @@ class LlamaCppChatClient:
         # LlamaServerManager.ensure_ready for how None is handled.
         raw_num_ctx = options.get("num_ctx")
         num_ctx = int(raw_num_ctx) if raw_num_ctx is not None else None
-        handle = self._provider.ensure_ready(model_path, num_ctx=num_ctx, on_status=self._status_callback)
+        if cancellation_event is not None and cancellation_event.is_set():
+            # Preserve the existing cooperative-chat contract (an already
+            # cancelled generation yields an empty response), while avoiding
+            # any binary acquisition or server startup work.
+            return _adapt_to_ollama_shape(
+                {"choices": [{"message": {"content": "", "reasoning_content": None}}]},
+                elapsed_seconds=0.0,
+            )
+        # Keep providers implemented against the original seam usable when
+        # the caller has no cancellation support. The production manager
+        # accepts the optional keyword, but test/injected providers need not.
+        if cancellation_event is None:
+            handle = self._provider.ensure_ready(
+                model_path,
+                num_ctx=num_ctx,
+                on_status=self._status_callback,
+            )
+        else:
+            handle = self._provider.ensure_ready(
+                model_path,
+                num_ctx=num_ctx,
+                on_status=self._status_callback,
+                cancellation_event=cancellation_event,
+            )
         started = time.monotonic()
         if cancellation_event is None:
             return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
@@ -205,9 +229,47 @@ class LlamaCppChatClient:
                         _server_error_detail(exc.response),
                         status_code=exc.response.status_code,
                     ) from exc
-                for line in response.iter_lines():
-                    if cancellation_event.is_set():
+                lines: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+                done = object()
+
+                def read_lines() -> None:
+                    try:
+                        for line in response.iter_lines():
+                            while not cancellation_event.is_set():
+                                try:
+                                    lines.put(("line", line), timeout=0.05)
+                                    break
+                                except queue.Full:
+                                    continue
+                    except BaseException as exc:  # noqa: BLE001 - pass transport errors to caller
+                        while not cancellation_event.is_set():
+                            try:
+                                lines.put(("error", exc), timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+                    finally:
+                        while not cancellation_event.is_set():
+                            try:
+                                lines.put(("done", done), timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+
+                reader = Thread(target=read_lines, name="llama-chat-reader", daemon=True)
+                reader.start()
+                while not cancellation_event.is_set():
+                    try:
+                        kind, payload = lines.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    if kind == "error":
+                        if isinstance(payload, httpx.TransportError):
+                            raise payload
+                        raise RuntimeError("The llama.cpp response reader failed.") from payload
+                    if kind == "done":
                         break
+                    line = payload
                     if not line or not line.startswith("data:"):
                         continue
                     payload = line[len("data:"):].strip()

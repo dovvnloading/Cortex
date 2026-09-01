@@ -16,7 +16,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cortex_backend.llamacpp.errors import LlamaCppError, ServerLaunchError, ServerStartTimeoutError
+from cortex_backend.llamacpp.errors import (
+    BinaryVerificationError,
+    LlamaCppError,
+    ServerLaunchError,
+    ServerStartTimeoutError,
+)
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 
 
@@ -62,6 +67,13 @@ class _UncooperativePopen(_FakePopen):
         if not self.killed:
             raise subprocess.TimeoutExpired("llama-server", timeout)
         return 0
+
+
+class _UnstoppablePopen(_FakePopen):
+    """Models a child whose exit cannot be confirmed after escalation."""
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("llama-server", timeout)
 
 
 class _QueueLauncher:
@@ -136,15 +148,64 @@ class _FakeFetcher:
         self.ensure_binary_calls: list[str] = []
         self._cached: set[str] = set()
 
-    def ensure_binary(self, release, backend: str) -> Path:
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
         del release
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise AssertionError("test fetcher was called after cancellation")
         self.ensure_binary_calls.append(backend)
         self._cached.add(backend)
         return Path(f"/fake/{backend}/llama-server.exe")
 
-    def is_cached(self, release, backend: str) -> bool:
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
         del release
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise BinaryVerificationError("Local model runtime startup was cancelled.")
         return backend in self._cached
+
+
+class _BlockingFetcher(_FakeFetcher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
+        del release, backend
+        self.started.set()
+        assert cancellation_event is not None
+        while not cancellation_event.wait(0.01):
+            pass
+        raise BinaryVerificationError("Local model runtime startup was cancelled.")
+
+
+class _BlockingCacheFetcher(_FakeFetcher):
+    """Pause the pre-download cache check until its cancellation token fires."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
+        del release, backend
+        if cancellation_event is None:
+            return False
+        self.started.set()
+        cancellation_event.wait(5.0)
+        return False
+
+
+class _HealthWaitClient:
+    def __init__(self, manager: LlamaServerManager | None = None) -> None:
+        self.manager = manager
+        self.started = threading.Event()
+
+    def get(self, url: str, timeout=None, headers=None):
+        del timeout, headers
+        if url.endswith("/health"):
+            self.started.set()
+            assert self.manager is not None
+            self.manager._stop_event.wait(1.0)
+            raise httpx.ConnectTimeout("health probe interrupted")
+        raise AssertionError("props should not be queried after health cancellation")
 
 
 def _manager(
@@ -588,6 +649,248 @@ def test_stop_terminates_the_process_and_resets_state(tmp_path: Path) -> None:
     # Idempotent: a second stop() with nothing running must not raise.
     manager.stop()
 
+
+def test_stop_interrupts_binary_acquisition_without_waiting_for_ensure_lock(tmp_path: Path) -> None:
+    fetcher = _BlockingFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_request_cancellation_interrupts_binary_acquisition_and_resets_state(tmp_path: Path) -> None:
+    fetcher = _BlockingFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    cancellation = threading.Event()
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(
+                tmp_path / "model.gguf",
+                num_ctx=4096,
+                cancellation_event=cancellation,
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+    cancellation.set()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_stop_interrupts_the_cancellable_cache_check(tmp_path: Path) -> None:
+    fetcher = _BlockingCacheFetcher()
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert fetcher.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    deadline = time.monotonic() + 1.0
+    while manager._stop_event.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not manager._stop_event.is_set()
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_request_cancellation_interrupts_waiting_for_ensure_lock(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    cancellation = threading.Event()
+    outcome: list[BaseException] = []
+    manager._ensure_lock.acquire()
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(
+                tmp_path / "model.gguf",
+                num_ctx=4096,
+                cancellation_event=cancellation,
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    time.sleep(0.08)
+    cancellation.set()
+    startup.join(timeout=1.0)
+    manager._ensure_lock.release()
+
+    assert not startup.is_alive()
+    assert outcome and isinstance(outcome[0], LlamaCppError)
+
+
+def test_stop_is_bounded_when_startup_holds_ensure_lock(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    manager._ensure_lock.acquire()
+    started = time.monotonic()
+    manager.stop()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5
+    assert manager._stop_event.is_set()
+    # A later stop completes the deferred reset once the startup owner has
+    # released the lock; the first timeout must not clear the event early.
+    manager._ensure_lock.release()
+    manager.stop()
+    assert not manager._stop_event.is_set()
+
+
+def test_stop_fails_closed_when_process_exit_cannot_be_confirmed(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    process = _UnstoppablePopen()
+    with manager._state_lock:
+        manager._process = process
+        manager._state = "ready"
+
+    manager.stop()
+
+    assert manager.status.state == "stopping"
+    assert manager._process is process
+    assert manager._stop_event.is_set()
+    with pytest.raises(LlamaCppError, match="cancelled"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+
+def test_launcher_failure_does_not_leave_manager_in_starting_state(tmp_path: Path) -> None:
+    def fail_launcher(argv: list[str], *, cwd: Path):
+        del argv, cwd
+        raise OSError("simulated launch failure")
+
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=fail_launcher,
+        http_client=_AlwaysHealthyClient(),
+    )
+
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.state == "failed"
+    assert manager._starting_process is None
+
+
+def test_output_reader_start_failure_terminates_unpublished_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = _FakePopen()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+    )
+
+    def fail_thread_start(_thread) -> None:
+        raise RuntimeError("simulated thread start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_thread_start)
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert process.terminated is True
+    assert manager.status.state == "failed"
+    assert manager._starting_process is None
+
+
+def test_stop_interrupts_health_polling_and_reaps_starting_process(tmp_path: Path) -> None:
+    fetcher = _FakeFetcher()
+    process = _FakePopen()
+    launcher = _QueueLauncher([process])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=None,
+        health_timeout_seconds=30.0,
+    )
+    health = _HealthWaitClient(manager)
+    manager._http = health
+    manager._owns_http_client = False
+    outcome: list[BaseException] = []
+
+    def startup_call() -> None:
+        try:
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker unwinds
+            outcome.append(exc)
+
+    startup = threading.Thread(target=startup_call, daemon=True)
+    startup.start()
+    assert health.started.wait(1.0)
+
+    manager.stop()
+
+    startup.join(1.0)
+    assert not startup.is_alive()
+    assert process.terminated is True
+    assert manager.status.state == "idle"
+    assert outcome and isinstance(outcome[0], LlamaCppError)
 
 def test_a_smaller_num_ctx_reuses_the_running_server(tmp_path: Path) -> None:
     """llama-server can serve any request that fits its allocation, so a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from threading import Event, Thread
 
@@ -286,10 +287,56 @@ class _StaticProvider:
         self._api_key = api_key
         self.received_on_status = None
 
-    def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
-        del num_ctx
+    def ensure_ready(
+        self,
+        model_path: Path,
+        *,
+        num_ctx: int | None,
+        on_status=None,
+        cancellation_event=None,
+    ) -> ServerHandle:
+        del num_ctx, cancellation_event
         self.received_on_status = on_status
         return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+
+
+class _LegacyProvider:
+    """Pre-cancellation provider seam used to guard the optional argument."""
+
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url
+
+    def ensure_ready(self, model_path: Path, *, num_ctx: int | None, on_status=None) -> ServerHandle:
+        del num_ctx, on_status
+        return ServerHandle(base_url=self._base_url, model_path=model_path)
+
+
+def test_llamacpp_chat_client_keeps_legacy_provider_compatible_without_cancellation(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    http_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "legacy"}}]},
+            )
+        )
+    )
+    client = LlamaCppChatClient(
+        _LegacyProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=http_client,
+    )
+
+    result = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+    )
+
+    assert result["message"]["content"] == "legacy"
 
 
 def test_llamacpp_chat_client_authenticates_blocking_and_streaming_requests(tmp_path: Path) -> None:
@@ -485,6 +532,66 @@ def test_llamacpp_chat_client_stops_consuming_the_stream_once_cancelled(tmp_path
     )
 
     assert response["message"]["content"] == ""
+
+
+def test_llamacpp_chat_client_cancellation_does_not_wait_for_first_sse_line(tmp_path: Path) -> None:
+    from threading import Event, Thread
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    cancellation = Event()
+
+    class BlockingResponse:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.closed = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.closed.set()
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_lines(self):
+            # Simulate a live model that has not produced its first token.
+            self.closed.wait(2.0)
+            return
+            yield  # pragma: no cover - keep this a generator function
+
+    response = BlockingResponse()
+
+    class BlockingStreamClient:
+        def stream(self, *_args, **_kwargs):
+            return response
+
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=BlockingStreamClient(),  # type: ignore[arg-type]
+    )
+    result: list[dict] = []
+    worker = Thread(
+        target=lambda: result.append(
+            client.chat(
+                model=f"gguf:{model_path.name}",
+                messages=[{"role": "user", "content": "hi"}],
+                options={},
+                cancellation_event=cancellation,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    time.sleep(0.05)
+    cancellation.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result[0]["message"]["content"] == ""
 
 
 def test_llamacpp_chat_client_streams_the_full_response_when_not_cancelled(tmp_path: Path) -> None:
