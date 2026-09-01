@@ -55,6 +55,12 @@ def _powershell_build(
                 $global:LASTEXITCODE = 22
                 return
             }}
+        }} elseif ($arguments -contains '-c') {{
+            if ('{fail_phase_literal}' -eq 'version') {{
+                $global:LASTEXITCODE = 25
+                return
+            }}
+            Write-Output $(if ('{fail_phase_literal}' -eq 'wrong-version') {{ '6.14.1' }} else {{ '6.14.2' }})
         }} elseif ($arguments -contains 'PyInstaller') {{
             if ('{fail_phase_literal}' -eq 'build') {{
                 $global:LASTEXITCODE = 23
@@ -122,7 +128,9 @@ def test_failed_pyinstaller_does_not_replace_existing_worker(tmp_path: Path) -> 
     os.name != "nt" or shutil.which("pwsh") is None,
     reason="requires Windows PowerShell 7",
 )
-@pytest.mark.parametrize("fail_phase", ["requirements", "pyinstaller-install", "missing-output"])
+@pytest.mark.parametrize(
+    "fail_phase", ["requirements", "pyinstaller-install", "version", "wrong-version", "missing-output"]
+)
 def test_failed_native_or_incomplete_build_preserves_existing_worker(
     tmp_path: Path,
     fail_phase: str,

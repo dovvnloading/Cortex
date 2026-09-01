@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepositoryRoot
+$RequiredPyInstallerVersion = "6.14.2"
 
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
     throw "Cortex Windows packages must be built on Windows."
@@ -12,8 +13,24 @@ if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
 
 if (-not $SkipDependencyInstall) {
     python -m pip install --disable-pip-version-check -r requirements.txt
-    python -m pip install --disable-pip-version-check "pyinstaller==6.14.2"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The dependency installation failed; refusing to package a stale application."
+    }
+    python -m pip install --disable-pip-version-check "pyinstaller==$RequiredPyInstallerVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The PyInstaller installation failed; refusing to package a stale application."
+    }
 }
+
+$PyInstallerVersion = python -c "import PyInstaller; print(PyInstaller.__version__)"
+$PyInstallerVersionExitCode = $LASTEXITCODE
+if ($PyInstallerVersionExitCode -ne 0) {
+    throw "PyInstaller could not be imported; refusing to package a stale application."
+}
+if (($PyInstallerVersion -join "`n").Trim() -ne $RequiredPyInstallerVersion) {
+    throw "The resolved PyInstaller version is not $RequiredPyInstallerVersion; refusing to package a stale application."
+}
+Write-Host "Resolved PyInstaller version for packaging: $RequiredPyInstallerVersion"
 
 & (Join-Path $PSScriptRoot "prepare_webview2.ps1")
 python main.py --build-frontend
