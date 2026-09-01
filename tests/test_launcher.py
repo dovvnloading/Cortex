@@ -568,6 +568,24 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert second.read_record() is None
 
 
+def test_instance_lock_file_stays_fixed_size_across_recovery(tmp_path: Path):
+    lock_path = tmp_path / "cortex.instance.lock"
+
+    for port in range(8765, 8770):
+        lock = InstanceLock(tmp_path)
+        assert lock.acquire(port=port) is not None
+        assert lock_path.stat().st_size == 1
+        lock.release()
+        assert lock_path.stat().st_size == 1
+
+    # Also repair a pre-existing oversized marker while preserving lock use.
+    lock_path.write_bytes(b"stale-marker")
+    lock = InstanceLock(tmp_path)
+    assert lock.acquire(port=8770) is not None
+    assert lock_path.stat().st_size == 1
+    lock.release()
+
+
 def test_instance_lock_does_not_follow_a_record_to_an_arbitrary_secret(tmp_path: Path):
     lock = InstanceLock(tmp_path)
     record = lock.acquire(port=8765)

@@ -70,11 +70,36 @@ class InstanceLock:
                 return None
         except (OSError, AppPathError):
             return None
-        handle = self.lock_path.open("a+b")
-        handle.seek(0)
-        handle.write(b"0")
-        handle.flush()
-        handle.seek(0)
+        try:
+            # Do not use append mode here: every marker write would advance to
+            # EOF and make this persistent lock grow once per launch.  Opening
+            # without O_TRUNC also preserves the lock file across contenders.
+            descriptor = os.open(
+                self.lock_path,
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            handle = os.fdopen(descriptor, "r+b")
+        except OSError:
+            return None
+        try:
+            # msvcrt requires a byte to exist before locking the range.  Keep
+            # normalization before locking: truncating a Windows file while a
+            # byte-range lock is held can invalidate that lock.
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            else:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() != 1:
+                    handle.truncate(1)
+                    handle.flush()
+            handle.seek(0)
+        except OSError:
+            handle.close()
+            return None
         try:
             if msvcrt is not None:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
