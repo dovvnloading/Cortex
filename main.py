@@ -135,6 +135,20 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _reserve_port(value: int) -> socket.socket:
+    """Bind a loopback listener until the backend server takes ownership."""
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", value))
+    except OSError:
+        listener.close()
+        raise
+    return listener
+
+
 def _requested_port(value: int) -> int:
     return _free_port() if value == 0 else value
 
@@ -335,147 +349,183 @@ def _run_web(args: argparse.Namespace) -> int:
         return 0
 
     paths = _resolve_paths(args.data_dir)
-    backend_port = _requested_port(args.port)
-
-    with InstanceLock(paths.data_dir) as instance:
-        record = instance.acquire(port=backend_port)
-        if record is None:
-            existing = instance.read_record()
-            if existing is None:
-                print(
-                    "Cortex could not acquire its instance lock and no valid running-instance record exists.",
-                    file=sys.stderr,
-                )
-                return 2
-            if args.headless:
-                print(f"Cortex is already running on loopback port {existing.port}.")
-                return 0
-            if not activate_process_window(existing.pid):
-                print(
-                    "Cortex is already running, but its native window could not be activated.",
-                    file=sys.stderr,
-                )
-                return 2
-            return 0
-
-        try:
-            if args.dev:
-                dist = None
-            else:
-                dist = ensure_frontend(
-                    frontend_root,
-                    skip_check=args.skip_build_check,
-                    packaged=packaged,
-                    cortex_version=CORTEX_VERSION,
-                )
-        except FrontendBuildError as exc:
-            print(f"Frontend preparation failed: {exc}", file=sys.stderr)
-            return 2
-
-        handoff_secret = instance.read_secret(record)
-        if not handoff_secret:
-            print("Cortex could not initialize its authenticated handoff secret.", file=sys.stderr)
-            return 2
-
-        app = build_preview_app(
-            data_dir=paths.data_dir,
-            frontend_dist=dist,
-            serve_frontend=not args.dev,
-            handoff_secret=handoff_secret,
+    try:
+        backend_listener = _reserve_port(0) if args.port == 0 else None
+    except OSError as exc:
+        _write_startup_diagnostic(
+            stage="backend port reservation",
+            error=exc,
+            data_dir=args.data_dir,
         )
-        server = _server_for_app(app, port=backend_port, log_level=args.log_level)
-        _install_shutdown_signals(server)
-        backend = ServerSupervisor(server)
-        frontend: ChildProcessSupervisor | None = None
-        frontend_port = FRONTEND_PORT
-        try:
-            backend.start()
-            if not wait_for_http(
-                f"http://127.0.0.1:{backend_port}/api/v1/health/ready",
-                timeout=30,
-                is_alive=lambda: backend.accepting_startup,
-            ):
-                if backend.error is not None:
-                    raise RuntimeError("Cortex backend failed during startup.") from backend.error
-                raise RuntimeError("Cortex backend did not become ready within 30 seconds.")
+        print(f"Cortex could not reserve its backend port: {exc}", file=sys.stderr)
+        return 1
+    backend_port = (
+        int(backend_listener.getsockname()[1])
+        if backend_listener is not None
+        else args.port
+    )
 
-            browser_port = backend_port
-            if args.dev:
-                frontend_port = _free_port()
-                dev_server_nonce = secrets.token_urlsafe(32)
-                environment = os.environ.copy()
-                environment["CORTEX_BACKEND_PORT"] = str(backend_port)
-                environment["CORTEX_FRONTEND_PORT"] = str(frontend_port)
-                environment["CORTEX_DEV_SERVER_NONCE"] = dev_server_nonce
-                npm = "npm.cmd" if os.name == "nt" else "npm"
-                frontend = ChildProcessSupervisor(
-                    [npm, "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
-                    cwd=frontend_root,
-                    env=environment,
+    try:
+        with InstanceLock(paths.data_dir) as instance:
+            record = instance.acquire(port=backend_port)
+            if record is None:
+                existing = instance.read_record()
+                if existing is None:
+                    print(
+                        "Cortex could not acquire its instance lock and no valid running-instance record exists.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if args.headless:
+                    print(f"Cortex is already running on loopback port {existing.port}.")
+                    return 0
+                if not activate_process_window(existing.pid):
+                    print(
+                        "Cortex is already running, but its native window could not be activated.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                return 0
+
+            if backend_listener is None:
+                try:
+                    backend_listener = _reserve_port(backend_port)
+                except OSError as exc:
+                    _write_startup_diagnostic(
+                        stage="backend port reservation",
+                        error=exc,
+                        data_dir=args.data_dir,
+                    )
+                    print(
+                        f"Cortex could not reserve its backend port: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+            try:
+                if args.dev:
+                    dist = None
+                else:
+                    dist = ensure_frontend(
+                        frontend_root,
+                        skip_check=args.skip_build_check,
+                        packaged=packaged,
+                        cortex_version=CORTEX_VERSION,
+                    )
+            except FrontendBuildError as exc:
+                print(f"Frontend preparation failed: {exc}", file=sys.stderr)
+                return 2
+
+            handoff_secret = instance.read_secret(record)
+            if not handoff_secret:
+                print(
+                    "Cortex could not initialize its authenticated handoff secret.",
+                    file=sys.stderr,
                 )
-                frontend.start()
+                return 2
+
+            app = build_preview_app(
+                data_dir=paths.data_dir,
+                frontend_dist=dist,
+                serve_frontend=not args.dev,
+                handoff_secret=handoff_secret,
+            )
+            server = _server_for_app(app, port=backend_port, log_level=args.log_level)
+            _install_shutdown_signals(server)
+            backend = ServerSupervisor(server, sockets=[backend_listener])
+            frontend: ChildProcessSupervisor | None = None
+            frontend_port = FRONTEND_PORT
+            try:
+                backend.start()
                 if not wait_for_http(
-                    f"http://127.0.0.1:{frontend_port}",
+                    f"http://127.0.0.1:{backend_port}/api/v1/health/ready",
                     timeout=30,
-                    is_alive=lambda: frontend.running,
-                    expected_headers={DEV_SERVER_ID_HEADER: dev_server_nonce},
+                    is_alive=lambda: backend.accepting_startup,
                 ):
-                    raise RuntimeError("Vite did not become ready within 30 seconds.")
-                browser_port = frontend_port
+                    if backend.error is not None:
+                        raise RuntimeError("Cortex backend failed during startup.") from backend.error
+                    raise RuntimeError("Cortex backend did not become ready within 30 seconds.")
 
-            if args.headless:
-                return _run_headless(backend=backend, frontend=frontend, server=server)
+                browser_port = backend_port
+                if args.dev:
+                    frontend_port = _free_port()
+                    dev_server_nonce = secrets.token_urlsafe(32)
+                    environment = os.environ.copy()
+                    environment["CORTEX_BACKEND_PORT"] = str(backend_port)
+                    environment["CORTEX_FRONTEND_PORT"] = str(frontend_port)
+                    environment["CORTEX_DEV_SERVER_NONCE"] = dev_server_nonce
+                    npm = "npm.cmd" if os.name == "nt" else "npm"
+                    frontend = ChildProcessSupervisor(
+                        [npm, "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
+                        cwd=frontend_root,
+                        env=environment,
+                    )
+                    frontend.start()
+                    if not wait_for_http(
+                        f"http://127.0.0.1:{frontend_port}",
+                        timeout=30,
+                        is_alive=lambda: frontend.running,
+                        expected_headers={DEV_SERVER_ID_HEADER: dev_server_nonce},
+                    ):
+                        raise RuntimeError("Vite did not become ready within 30 seconds.")
+                    browser_port = frontend_port
 
-            ensure_webview2_runtime(_resource_root())
-            token = app.state.session_manager.bootstrap_token
-            print("Cortex is ready in its native desktop window.")
-            run_desktop_window(
-                DesktopWindowConfig(
-                    url=_desktop_url(browser_port, token, handoff_secret),
-                    storage_path=paths.webview_profile,
-                    icon_path=_app_asset_root() / "assets" / "cortex.ico",
-                    debug=args.dev,
-                ),
-                monitor=lambda window: _monitor_native_window(
-                    window,
-                    backend=backend,
-                    frontend=frontend,
-                    server=server,
-                    readiness_url=(
-                        f"http://127.0.0.1:{backend_port}/api/v1/health/live"
+                if args.headless:
+                    return _run_headless(backend=backend, frontend=frontend, server=server)
+
+                ensure_webview2_runtime(_resource_root())
+                token = app.state.session_manager.bootstrap_token
+                print("Cortex is ready in its native desktop window.")
+                run_desktop_window(
+                    DesktopWindowConfig(
+                        url=_desktop_url(browser_port, token, handoff_secret),
+                        storage_path=paths.webview_profile,
+                        icon_path=_app_asset_root() / "assets" / "cortex.ico",
+                        debug=args.dev,
                     ),
-                ),
-            )
-            server.should_exit = True
-            return 0
-        except KeyboardInterrupt:
-            print("Stopping Cortex…")
-            return 0
-        except (
-            DesktopWindowError,
-            OSError,
-            RuntimeError,
-            TimeoutError,
-            WebViewRuntimeError,
-        ) as exc:
-            _write_startup_diagnostic(
-                stage="desktop startup/runtime",
-                error=exc,
-                data_dir=args.data_dir,
-            )
-            print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
-            return 1
-        finally:
-            if frontend is not None:
-                try:
-                    frontend.stop()
-                except TimeoutError as exc:
-                    print(str(exc), file=sys.stderr)
-            if backend.running:
-                try:
-                    backend.stop()
-                except (RuntimeError, TimeoutError) as exc:
-                    print(str(exc), file=sys.stderr)
+                    monitor=lambda window: _monitor_native_window(
+                        window,
+                        backend=backend,
+                        frontend=frontend,
+                        server=server,
+                        readiness_url=(
+                            f"http://127.0.0.1:{backend_port}/api/v1/health/live"
+                        ),
+                    ),
+                )
+                server.should_exit = True
+                return 0
+            except KeyboardInterrupt:
+                print("Stopping Cortex…")
+                return 0
+            except (
+                DesktopWindowError,
+                OSError,
+                RuntimeError,
+                TimeoutError,
+                WebViewRuntimeError,
+            ) as exc:
+                _write_startup_diagnostic(
+                    stage="desktop startup/runtime",
+                    error=exc,
+                    data_dir=args.data_dir,
+                )
+                print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                if frontend is not None:
+                    try:
+                        frontend.stop()
+                    except TimeoutError as exc:
+                        print(str(exc), file=sys.stderr)
+                if backend.running:
+                    try:
+                        backend.stop()
+                    except (RuntimeError, TimeoutError) as exc:
+                        print(str(exc), file=sys.stderr)
+    finally:
+        if backend_listener is not None:
+            backend_listener.close()
 
 
 def main(argv: list[str] | None = None) -> int:

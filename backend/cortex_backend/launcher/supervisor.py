@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import socket
 import subprocess
 import threading
 import time
@@ -48,6 +49,7 @@ class ServerSupervisor:
     """Run Uvicorn in an owned thread and expose bounded shutdown."""
 
     server: Any
+    sockets: list[socket.socket] | None = None
     thread: threading.Thread | None = field(default=None, init=False)
     error: BaseException | None = field(default=None, init=False)
     started: threading.Event = field(default_factory=threading.Event, init=False)
@@ -62,10 +64,15 @@ class ServerSupervisor:
         def run() -> None:
             self.started.set()
             try:
-                self.server.run()
+                if self.sockets is None:
+                    self.server.run()
+                else:
+                    self.server.run(sockets=self.sockets)
             except BaseException as exc:  # surfaced to the launcher loop
                 self.error = exc
             finally:
+                for listener in self.sockets or []:
+                    listener.close()
                 if not self.server.should_exit:
                     self.exited_unexpectedly.set()
 

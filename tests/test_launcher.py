@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,89 @@ def test_explicit_backend_port_remains_strict():
     args = launcher_main.build_parser().parse_args(["--port", "8765"])
 
     assert launcher_main._requested_port(args.port) == 8765
+
+
+def test_reserved_backend_port_stays_owned_until_server_handoff():
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+    competitor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError):
+            competitor.bind(("127.0.0.1", port))
+    finally:
+        competitor.close()
+        listener.close()
+
+
+def test_occupied_explicit_backend_port_reports_a_bounded_startup_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    port = int(occupied.getsockname()[1])
+    try:
+        args = launcher_main.build_parser().parse_args(
+            ["--headless", "--port", str(port), "--data-dir", str(tmp_path)]
+        )
+        assert launcher_main._run_web(args) == 1
+    finally:
+        occupied.close()
+
+    assert "could not reserve its backend port" in capsys.readouterr().err
+    diagnostic = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=backend port reservation" in diagnostic
+
+
+def test_server_supervisor_hands_reserved_socket_to_uvicorn_and_closes_it():
+    listener = launcher_main._reserve_port(0)
+    calls: list[list[socket.socket] | None] = []
+
+    class FakeServer:
+        should_exit = True
+
+        def run(self, *, sockets):
+            calls.append(sockets)
+
+    supervisor = supervisor_module.ServerSupervisor(FakeServer(), sockets=[listener])
+    supervisor.start()
+    supervisor.thread.join(timeout=1)
+
+    assert calls == [[listener]]
+    assert listener.fileno() == -1
+
+
+def test_prebound_backend_serves_its_reserved_port_without_rebind_window():
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+
+    class App:
+        state = SimpleNamespace()
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "lifespan":
+                await receive()
+                await send({"type": "lifespan.startup.complete"})
+                await receive()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+    server = launcher_main._server_for_app(App(), port=port, log_level="error")
+    supervisor = supervisor_module.ServerSupervisor(server, sockets=[listener])
+    try:
+        supervisor.start()
+        assert supervisor_module.wait_for_http(
+            f"http://127.0.0.1:{port}",
+            timeout=5,
+            is_alive=lambda: supervisor.accepting_startup,
+        ) is True
+    finally:
+        if supervisor.running:
+            supervisor.stop()
+
+    assert supervisor.error is None
+    assert listener.fileno() == -1
 
 
 def test_dev_server_readiness_requires_the_owned_identity_header(
@@ -398,7 +482,17 @@ def test_webview2_signature_check_uses_noninteractive_powershell(
 def test_default_runtime_starts_backend_then_native_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    record = SimpleNamespace(pid=1234, port=43125)
+    reserved_port: list[int] = []
+    real_reserve_port = launcher_main._reserve_port
+
+    def reserve_port(value: int) -> socket.socket:
+        listener = real_reserve_port(value)
+        reserved_port.append(int(listener.getsockname()[1]))
+        return listener
+
+    monkeypatch.setattr(launcher_main, "_reserve_port", reserve_port)
+
+    record = SimpleNamespace(pid=1234, port=0)
 
     class FakeInstance:
         def __init__(self, _profile_dir):
@@ -411,7 +505,9 @@ def test_default_runtime_starts_backend_then_native_window(
             pass
 
         def acquire(self, *, port):
-            assert port == 43125
+            assert reserved_port
+            assert port == reserved_port[0]
+            record.port = port
             return record
 
         def read_secret(self, selected):
@@ -427,8 +523,11 @@ def test_default_runtime_starts_backend_then_native_window(
     backend_instances: list[object] = []
 
     class FakeBackend:
-        def __init__(self, selected_server):
+        def __init__(self, selected_server, *, sockets):
             assert selected_server is server
+            assert len(sockets) == 1
+            assert sockets[0].getsockname()[0] == "127.0.0.1"
+            self.sockets = sockets
             self.running = False
             self.accepting_startup = True
             self.error = None
@@ -439,11 +538,12 @@ def test_default_runtime_starts_backend_then_native_window(
 
         def stop(self):
             self.running = False
+            for listener in self.sockets:
+                listener.close()
 
     calls: list[tuple[str, object]] = []
     probed_urls: list[str] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
-    monkeypatch.setattr(launcher_main, "_requested_port", lambda _port: 43125)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(launcher_main, "build_preview_app", lambda **_kwargs: app)
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
@@ -472,13 +572,17 @@ def test_default_runtime_starts_backend_then_native_window(
     assert [name for name, _value in calls] == ["runtime", "window"]
     window_config, monitor = calls[1][1]
     assert isinstance(window_config, DesktopWindowConfig)
-    assert window_config.url == "http://127.0.0.1:43125/#bootstrap=bootstrap-token&handoff=handoff-secret"
+    assert window_config.url == (
+        f"http://127.0.0.1:{reserved_port[0]}/#bootstrap=bootstrap-token&handoff=handoff-secret"
+    )
     assert window_config.storage_path == tmp_path / "webview"
     assert server.should_exit is True
     assert backend_instances[0].running is False
 
     # Startup gate used the heavier readiness probe.
-    assert probed_urls == ["http://127.0.0.1:43125/api/v1/health/ready"]
+    assert probed_urls == [
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready"
+    ]
 
     # The ongoing native-window monitor should poll the cheap liveness route
     # rather than the readiness route, since it runs for the app's lifetime.
@@ -494,7 +598,9 @@ def test_default_runtime_starts_backend_then_native_window(
     )
     monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
     monitor(fake_window)
-    assert probed_urls[-1] == "http://127.0.0.1:43125/api/v1/health/live"
+    assert probed_urls[-1] == (
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
+    )
 
 
 def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
