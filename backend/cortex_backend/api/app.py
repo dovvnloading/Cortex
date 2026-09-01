@@ -104,6 +104,7 @@ def create_app(
     cleanup_supervisor: ExecutionCleanupSupervisor | None = None,
     installation_principal_id: str | None = None,
     llamacpp_manager: LlamaServerManager | None = None,
+    llamacpp_chat_client: object | None = None,
     default_gguf_models_dir: Path | None = None,
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
@@ -163,17 +164,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.started_at = datetime.now(timezone.utc)
-        if app.state.execution_lifecycle is not None:
-            lifecycle_snapshot = app.state.execution_lifecycle.start()
-            app.state.execution_coordinator = (
-                app.state.execution_lifecycle.coordinator
-                if lifecycle_snapshot.available
-                else None
-            )
-        if app.state.cleanup_supervisor is not None:
-            app.state.cleanup_supervisor.start()
-        app.state.ready = True
         try:
+            if app.state.execution_lifecycle is not None:
+                lifecycle_snapshot = app.state.execution_lifecycle.start()
+                app.state.execution_coordinator = (
+                    app.state.execution_lifecycle.coordinator
+                    if lifecycle_snapshot.available
+                    else None
+                )
+            if app.state.cleanup_supervisor is not None:
+                app.state.cleanup_supervisor.start()
+            app.state.ready = True
             yield
         finally:
             app.state.ready = False
@@ -194,13 +195,34 @@ def create_app(
                     logger.exception(
                         "Cortex retention cleanup shutdown raised; continuing with runtime teardown."
                     )
-            if app.state.execution_lifecycle is not None:
-                app.state.execution_lifecycle.stop()
-            elif app.state.execution_coordinator is not None:
-                app.state.execution_coordinator.shutdown()
-            app.state.execution_coordinator = None
-            if app.state.llamacpp_manager is not None:
-                app.state.llamacpp_manager.stop()
+            try:
+                if app.state.execution_lifecycle is not None:
+                    app.state.execution_lifecycle.stop()
+                elif app.state.execution_coordinator is not None:
+                    app.state.execution_coordinator.shutdown()
+            except Exception:
+                logger.exception(
+                    "Cortex execution runtime shutdown raised; continuing with resource teardown."
+                )
+            finally:
+                app.state.execution_coordinator = None
+                if app.state.llamacpp_manager is not None:
+                    close = getattr(app.state.llamacpp_manager, "close", None)
+                    try:
+                        (close if callable(close) else app.state.llamacpp_manager.stop)()
+                    except Exception:
+                        logger.exception(
+                            "Cortex llama.cpp manager shutdown raised; continuing teardown."
+                        )
+                if app.state.llamacpp_chat_client is not None:
+                    close = getattr(app.state.llamacpp_chat_client, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.exception(
+                                "Cortex llama.cpp chat client shutdown raised; continuing teardown."
+                            )
 
     app = FastAPI(
         title="Cortex Local API",
@@ -244,6 +266,7 @@ def create_app(
     )
     app.state.ollama_setup_url = "https://ollama.com/download"
     app.state.llamacpp_manager = llamacpp_manager
+    app.state.llamacpp_chat_client = llamacpp_chat_client
     app.state.default_gguf_models_dir = default_gguf_models_dir or (
         Path(tempfile.gettempdir()) / "cortex-gguf-models"
     )

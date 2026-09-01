@@ -422,13 +422,15 @@ class LlamaServerManager:
         self._models_directory = models_directory
         self._health_timeout_seconds = health_timeout_seconds
         self._launcher = launcher
-        self._http = http_client or httpx.Client(
+        self._http = http_client if http_client is not None else httpx.Client(
             timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)
         )
         self._owns_http_client = http_client is None
 
         self._ensure_lock = threading.Lock()
         self._state_lock = threading.RLock()
+        self._close_lock = threading.Lock()
+        self._closed = False
         self._state: ServerState = "idle"
         self._process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
@@ -443,6 +445,35 @@ class LlamaServerManager:
         self._failure_key: tuple[Path, int] | None = None
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
         self._api_key: str | None = None
+
+    def close(self) -> None:
+        """Stop the managed process and close an HTTP client owned here."""
+        with self._close_lock:
+            if self._closed:
+                return
+            # Publish the terminal state before waiting for an in-flight
+            # ensure_ready() call. New callers then fail closed instead of
+            # starting another child after teardown has begun.
+            with self._state_lock:
+                self._closed = True
+            stop_error: Exception | None = None
+            try:
+                self.stop()
+            except Exception as exc:
+                stop_error = exc
+            finally:
+                with self._state_lock:
+                    http_client = self._http if self._owns_http_client else None
+                    self._owns_http_client = False
+                try:
+                    if http_client is not None:
+                        http_client.close()
+                except Exception:
+                    if stop_error is None:
+                        raise
+                    logger.exception("Could not close the llama.cpp HTTP client after stop failed.")
+            if stop_error is not None:
+                raise stop_error
 
     # -- public API -------------------------------------------------------
 
@@ -466,6 +497,9 @@ class LlamaServerManager:
         the common fast path.
         """
         with self._ensure_lock:
+            with self._state_lock:
+                if self._closed:
+                    raise LlamaCppError("The local model runtime manager is closed.")
             verdict = self._reuse_verdict(model_path, num_ctx)
             if verdict.reusable:
                 with self._state_lock:

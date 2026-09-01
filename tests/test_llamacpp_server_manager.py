@@ -185,6 +185,76 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.active_backend == "cpu"
 
 
+def test_close_stops_once_and_closes_only_an_owned_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=None,
+    )
+    stop_calls = 0
+    close_calls = 0
+
+    def stop() -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+
+    def close_http() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    monkeypatch.setattr(manager, "stop", stop)
+    monkeypatch.setattr(manager._http, "close", close_http)
+    manager.close()
+    manager.close()
+
+    assert stop_calls == 1
+    assert close_calls == 1
+
+
+def test_close_does_not_close_an_injected_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _InjectedClient(_AlwaysHealthyClient):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    injected = _InjectedClient()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=injected,
+    )
+    monkeypatch.setattr(manager, "stop", lambda: None)
+    manager.close()
+    assert injected.close_calls == 0
+
+
+def test_close_closes_owned_http_client_even_when_stop_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=None,
+    )
+    close_calls = 0
+
+    def close_http() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    monkeypatch.setattr(manager, "stop", lambda: (_ for _ in ()).throw(RuntimeError("stop failed")))
+    monkeypatch.setattr(manager._http, "close", close_http)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        manager.close()
+    assert close_calls == 1
+    with pytest.raises(LlamaCppError, match="manager is closed"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+
 def test_start_uses_child_selected_port_and_authenticated_runtime_attestation(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     launcher = _QueueLauncher([_FakePopen()])

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event, Thread
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +56,114 @@ def test_routing_chat_client_dispatches_by_prefix() -> None:
     assert result["message"]["content"] == "gguf:gguf:tiny.gguf"
     assert llamacpp.calls == ["gguf:tiny.gguf"]
     assert ollama.calls == ["qwen3:8b"]
+
+
+def test_llamacpp_chat_client_closes_only_an_owned_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider = _StaticProvider("http://fakellama")
+    owned = LlamaCppChatClient(provider, models_directory=lambda: tmp_path)
+    owned_close_calls = 0
+
+    def close_owned() -> None:
+        nonlocal owned_close_calls
+        owned_close_calls += 1
+
+    monkeypatch.setattr(owned._http, "close", close_owned)
+    owned.close()
+    owned.close()
+    assert owned_close_calls == 1
+
+    injected_http = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200)))
+    injected = LlamaCppChatClient(
+        provider,
+        models_directory=lambda: tmp_path,
+        http_client=injected_http,
+    )
+    injected_close_calls = 0
+
+    def close_injected() -> None:
+        nonlocal injected_close_calls
+        injected_close_calls += 1
+
+    monkeypatch.setattr(injected_http, "close", close_injected)
+    injected.close()
+    injected.close()
+    assert injected_close_calls == 0
+    injected_http.close()
+
+
+def test_llamacpp_chat_client_defers_owned_http_close_until_inflight_request_finishes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+
+    class _BlockingHttp:
+        def __init__(self) -> None:
+            self.entered = Event()
+            self.release = Event()
+            self.close_calls = 0
+
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            self.entered.set()
+            assert self.release.wait(timeout=5)
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}]},
+                request=httpx.Request("POST", "http://fakellama/v1/chat/completions"),
+            )
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    http_client = _BlockingHttp()
+    provider = _StaticProvider("http://fakellama")
+    # Substitute the constructor's owned client while retaining the actual
+    # production ownership path; the double only controls request completion.
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: http_client)
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path)
+    result: list[dict] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(client.chat(model=f"gguf:{model_path.name}", messages=[], options={}))
+        except BaseException as exc:  # pragma: no cover - assertion below reports failures
+            errors.append(exc)
+
+    worker = Thread(target=run)
+    worker.start()
+    assert http_client.entered.wait(timeout=5)
+    client.close()
+    assert http_client.close_calls == 0
+    http_client.release.set()
+    worker.join(timeout=5)
+
+    assert not errors
+    assert result[0]["message"]["content"] == "ok"
+    assert http_client.close_calls == 1
+
+
+def test_llamacpp_chat_client_fails_closed_after_close_and_translates_closed_http_errors(tmp_path: Path) -> None:
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+
+    class _ClosedHttp:
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+        def close(self) -> None:
+            pass
+
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=_ClosedHttp())
+    with pytest.raises(LlamaCppError, match="unavailable"):
+        client.chat(model=f"gguf:{model_path.name}", messages=[], options={})
+
+    client.close()
+    with pytest.raises(LlamaCppError, match="closed"):
+        client.chat(model=f"gguf:{model_path.name}", messages=[], options={})
 
 
 def test_routing_chat_client_forwards_status_callback_only_where_supported() -> None:

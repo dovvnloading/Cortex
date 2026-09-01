@@ -144,9 +144,10 @@ def build_preview_app(
     )
     gguf_model_directory = GGUFModelDirectory(gguf_directory)
     model_catalog = CombinedModelCatalog(ModelService(client), gguf_model_directory)
+    llamacpp_chat_client = LlamaCppChatClient(llamacpp_manager, models_directory=gguf_directory)
     routing_chat_client = RoutingChatClient(
         OllamaChatClient(client),
-        LlamaCppChatClient(llamacpp_manager, models_directory=gguf_directory),
+        llamacpp_chat_client,
     )
     generation_service = GenerationService(
         history_loader=lambda thread_id: (database.load_chat(thread_id) or {}).get(
@@ -212,6 +213,7 @@ def build_preview_app(
         execution_lifecycle=execution_lifecycle,
         installation_principal_id=execution_repository.installation_principal_id,
         llamacpp_manager=llamacpp_manager,
+        llamacpp_chat_client=llamacpp_chat_client,
         default_gguf_models_dir=paths.default_gguf_models_dir,
     )
     app.state.execution_repository = execution_repository

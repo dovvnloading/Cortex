@@ -200,6 +200,52 @@ def test_expired_session_is_rejected_without_exposing_token_details():
         raise AssertionError("expired session was accepted")
 
 
+def test_expired_sessions_are_removed_in_bounded_cleanup_batches():
+    manager = SessionManager(
+        bootstrap_token="bootstrap",
+        ttl_seconds=60,
+        allowed_hosts=("testserver",),
+    )
+    exchanged = manager.exchange("bootstrap")
+    digest = manager._digest(exchanged.token)
+    manager._sessions[digest] = replace(
+        exchanged.principal,
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    assert manager.cleanup_expired(limit=1) == 1
+    assert digest not in manager._sessions
+    assert manager.cleanup_expired(limit=1) == 0
+
+    with pytest.raises(ValueError, match="cleanup limit"):
+        manager.cleanup_expired(limit=0)
+
+
+def test_session_cleanup_caps_large_caller_limits_and_rotates_live_entries():
+    manager = SessionManager(
+        bootstrap_token="bootstrap",
+        ttl_seconds=60,
+        allowed_hosts=("testserver",),
+    )
+    exchanged = manager.exchange("bootstrap")
+    live = replace(exchanged.principal, expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+    for index in range(manager._EXPIRY_CLEANUP_BATCH):
+        manager._sessions[f"live-{index}"] = live
+    expired_digest = "expired-after-live"
+    manager._sessions[expired_digest] = replace(
+        live,
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    assert manager.cleanup_expired(limit=10_000) == 0
+    assert expired_digest in manager._sessions
+    assert manager.cleanup_expired(limit=10_000) == 1
+    assert expired_digest not in manager._sessions
+
+    with pytest.raises(ValueError, match="cleanup limit"):
+        manager.cleanup_expired(limit=True)
+
+
 def test_authenticate_slides_the_session_expiry_forward():
     """Regression guard: a session's expiry used to be fixed at issuance, so
     the desktop app hard-locked after exactly one hour of continuous use --
@@ -804,18 +850,121 @@ def test_lifespan_runtime_teardown_runs_even_if_job_shutdown_raises():
     class _FakeLlamaManager:
         def __init__(self):
             self.stopped = False
+            self.closed = False
 
         def stop(self):
             self.stopped = True
 
+        def close(self):
+            self.closed = True
+
+    class _FakeLlamaChatClient:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
     fake_manager = _FakeLlamaManager()
-    app = create_app(allowed_hosts=ALLOWED_HOSTS, llamacpp_manager=fake_manager)
+    fake_chat_client = _FakeLlamaChatClient()
+    app = create_app(
+        allowed_hosts=ALLOWED_HOSTS,
+        llamacpp_manager=fake_manager,
+        llamacpp_chat_client=fake_chat_client,
+    )
     app.state.jobs = _RaisingJobs()
 
     with TestClient(app):
         pass
 
-    assert fake_manager.stopped is True
+    assert fake_manager.closed is True
+    assert fake_manager.stopped is False
+    assert fake_chat_client.closed is True
+
+
+def test_lifespan_closes_llama_resources_when_execution_shutdown_raises():
+    class _RaisingCoordinator:
+        class _Repository:
+            installation_principal_id = None
+
+        repository = _Repository()
+
+        def shutdown(self):
+            raise RuntimeError("synthetic coordinator failure")
+
+    class _FakeLlamaManager:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _FakeLlamaChatClient:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    fake_manager = _FakeLlamaManager()
+    fake_chat_client = _FakeLlamaChatClient()
+    app = create_app(
+        allowed_hosts=ALLOWED_HOSTS,
+        execution_coordinator=_RaisingCoordinator(),
+        llamacpp_manager=fake_manager,
+        llamacpp_chat_client=fake_chat_client,
+    )
+
+    with TestClient(app):
+        pass
+
+    assert fake_manager.closed is True
+    assert fake_chat_client.closed is True
+
+
+def test_lifespan_closes_llama_resources_when_execution_start_raises():
+    class _RaisingLifecycle:
+        class _Repository:
+            installation_principal_id = None
+
+        repository = _Repository()
+        coordinator = None
+
+        def start(self):
+            raise RuntimeError("synthetic startup failure")
+
+        def stop(self):
+            self.stop_called = True
+
+    class _FakeLlamaManager:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _FakeLlamaChatClient:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    fake_manager = _FakeLlamaManager()
+    fake_chat_client = _FakeLlamaChatClient()
+    app = create_app(
+        allowed_hosts=ALLOWED_HOSTS,
+        execution_lifecycle=_RaisingLifecycle(),
+        llamacpp_manager=fake_manager,
+        llamacpp_chat_client=fake_chat_client,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic startup failure"):
+        with TestClient(app):
+            pass
+
+    assert fake_manager.closed is True
+    assert fake_chat_client.closed is True
 
 
 def test_concurrent_settings_updates_have_one_winner_and_no_lost_overwrite():
