@@ -62,8 +62,7 @@ jobs:
 
       - name: Verify generated API contracts
         run: |
-          python tools/generate_contracts.py
-          git diff --exit-code -- contracts/openapi.json contracts/cortex-api.ts
+          python tools/generate_contracts.py --check
 
       - name: Install frontend dependencies
         working-directory: frontend
