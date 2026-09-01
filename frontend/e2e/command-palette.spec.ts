@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 test("opens the command palette with Ctrl+K, filters, and navigates to settings", async ({ page }) => {
   const chats = [{ id: "thread-a", title: "Weekend plans", timestamp: "2026-01-01T00:00:00Z" }];

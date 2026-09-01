@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 // Real Chromium layout is required to prove react-virtuoso actually windows
 // and renders content once a transcript crosses the virtualization
