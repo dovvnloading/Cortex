@@ -30,7 +30,9 @@ class AppPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths = AppPaths.for_windows({"APPDATA": directory})
 
-            expected = Path(directory) / "ChatLLM" / "ChatLLM-Assistant"
+            expected = (
+                Path(directory) / "ChatLLM" / "ChatLLM-Assistant"
+            ).resolve(strict=False)
             self.assertEqual(paths.data_dir, expected)
             self.assertEqual(paths.database, expected / "cortex_db.sqlite")
             self.assertEqual(paths.legacy_chat_history, expected / "chat_history")
@@ -42,11 +44,12 @@ class AppPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "not-created"
             paths = AppPaths.from_data_dir(data_dir)
+            expected = data_dir.resolve(strict=False)
 
             self.assertFalse(data_dir.exists())
-            self.assertEqual(paths.ensure_data_dir(), data_dir)
+            self.assertEqual(paths.ensure_data_dir(), expected)
             self.assertTrue(data_dir.is_dir())
-            self.assertEqual(paths.webview_profile, data_dir / "webview")
+            self.assertEqual(paths.webview_profile, expected / "webview")
 
     def test_missing_windows_appdata_fails_with_a_safe_error(self):
         with self.assertRaisesRegex(AppPathError, "APPDATA"):

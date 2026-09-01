@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import time
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -251,32 +252,38 @@ def test_app_does_not_auto_wire_cleanup_for_protocol_compatible_fake_repository(
 def test_cleanup_renews_lease_during_slow_pass(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     supervisor = ExecutionCleanupSupervisor(
-        repository, lease_seconds=0.06, interval_seconds=60
+        repository, lease_seconds=1.5, interval_seconds=60
     )
     renewals = []
+    cleanup_started = Event()
+    renewal_observed_during_pass = Event()
     original_renew = repository.renew_cleanup_lease
 
     def observed_renewal(**kwargs):
-        renewals.append(True)
-        return original_renew(**kwargs)
+        renewed = original_renew(**kwargs)
+        if renewed:
+            renewals.append(True)
+            if cleanup_started.is_set():
+                renewal_observed_during_pass.set()
+        return renewed
 
     monkeypatch.setattr(repository, "renew_cleanup_lease", observed_renewal)
-    release = __import__("threading").Event()
+    release = Event()
     original_cleanup = repository.cleanup_expired
 
     def slow_cleanup(**kwargs):
-        assert release.wait(timeout=0.3)
+        cleanup_started.set()
+        assert release.wait(timeout=2.5)
         return original_cleanup(**kwargs)
 
     monkeypatch.setattr(repository, "cleanup_expired", slow_cleanup)
     outcome = []
-    runner = __import__("threading").Thread(
-        target=lambda: outcome.append(supervisor.run_once())
-    )
+    runner = Thread(target=lambda: outcome.append(supervisor.run_once()))
     runner.start()
-    time.sleep(0.1)
+    assert cleanup_started.wait(timeout=1)
+    assert renewal_observed_during_pass.wait(timeout=2.5)
     release.set()
-    runner.join(timeout=1)
+    runner.join(timeout=3)
     assert not runner.is_alive()
     assert outcome == [True]
     assert renewals
