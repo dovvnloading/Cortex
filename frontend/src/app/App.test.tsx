@@ -135,10 +135,13 @@ describe("App", () => {
       return json({ detail: "Unexpected test route." }, 404);
     });
 
+    // This test targets recovery from an expired stream session, not the
+    // scheduler-dependent time needed to transform the lazy chat route.
+    await import("../features/chat/ChatPage");
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
-    // The chat route is intentionally code-split; allow the lazy module and
-    // its recovery stream to settle when the full suite is under load.
+    // Wait for the recovery stream's 401 to notify the session listener and
+    // return the app to its unauthenticated boundary.
     expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 5_000 })).toBeVisible();
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/generations/job-expired/events"))).toHaveLength(1);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
