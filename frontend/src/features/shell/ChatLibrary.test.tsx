@@ -125,6 +125,87 @@ describe("ChatLibrary", () => {
     expect(props.onMoveChat).toHaveBeenCalledWith("c1", "g1");
   });
 
+  it("provides composite-menu keyboard navigation and restores focus on escape", async () => {
+    const user = userEvent.setup();
+    renderLibrary({
+      groups: [group("g1", "Research"), group("g2", "Work")],
+      chats: [chat("c1", "Loose thread")],
+    });
+
+    const trigger = screen.getByRole("button", { name: "Move Loose thread to a group" });
+    await user.click(trigger);
+    const research = screen.getByRole("menuitem", { name: "Research" });
+    const work = screen.getByRole("menuitem", { name: "Work" });
+    expect(research).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(work).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(research).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(work).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(research).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(work).toHaveFocus();
+
+    await user.keyboard("r");
+    expect(research).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("opens at the correct edge when using arrow keys on the trigger", async () => {
+    const user = userEvent.setup();
+    renderLibrary({
+      groups: [group("g1", "Research"), group("g2", "Work")],
+      chats: [chat("c1", "Loose thread")],
+    });
+
+    const trigger = screen.getByRole("button", { name: "Move Loose thread to a group" });
+    trigger.focus();
+    await user.keyboard("{ArrowUp}");
+    expect(screen.getByRole("menuitem", { name: "Work" })).toHaveFocus();
+  });
+
+  it("skips the current disabled group and exits the menu with Tab", async () => {
+    const user = userEvent.setup();
+    renderLibrary({
+      groups: [group("g1", "Research"), group("g2", "Work"), group("g3", "Writing")],
+      chats: [chat("c1", "Vector stores", "g1")],
+    });
+
+    const trigger = screen.getByRole("button", { name: "Move Vector stores to a group" });
+    await user.click(trigger);
+    const research = screen.getByRole("menuitem", { name: "Research" });
+    const work = screen.getByRole("menuitem", { name: "Work" });
+    const writing = screen.getByRole("menuitem", { name: "Writing" });
+    const remove = screen.getByRole("menuitem", { name: "Remove from group" });
+    expect(research).toBeDisabled();
+    expect(work).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(writing).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(remove).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(work).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(remove).toHaveFocus();
+
+    await user.keyboard("{Tab}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rename Vector stores" })).toHaveFocus();
+
+    await user.click(trigger);
+    const reopenedWork = screen.getByRole("menuitem", { name: "Work" });
+    expect(reopenedWork).toHaveFocus();
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("offers removal only for a chat that is actually in a group", async () => {
     const user = userEvent.setup();
     const { props } = renderLibrary({
