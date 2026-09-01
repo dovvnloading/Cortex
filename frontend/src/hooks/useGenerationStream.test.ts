@@ -4,7 +4,7 @@ import type { CortexApi } from "../api/client";
 import { ApiError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useUiStore } from "../stores/useUiStore";
-import { readActiveJob, useGenerationStream } from "./useGenerationStream";
+import { readActiveJob, reconnectDelay, useGenerationStream } from "./useGenerationStream";
 
 type FakeGenerationEvent = { event: string; [key: string]: unknown };
 
@@ -441,6 +441,65 @@ describe("useGenerationStream", () => {
     expect(streamGeneration.mock.calls[1][2]).toMatchObject({ afterEventId: 5 });
 
     act(() => result.current.stop());
+  });
+
+  it("uses jittered exponential reconnect delays with a hard ceiling", () => {
+    expect(reconnectDelay(0, () => 0)).toBe(200);
+    expect(reconnectDelay(0, () => 0.5)).toBe(250);
+    expect(reconnectDelay(1, () => 1)).toBe(600);
+    expect(reconnectDelay(100, () => 1)).toBe(30_000);
+  });
+
+  it("pauses reconnects while offline and resumes when the browser comes online", async () => {
+    const hadOwnOnlineProperty = Object.prototype.hasOwnProperty.call(window.navigator, "onLine");
+    const onlineDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "onLine");
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, value: false });
+    try {
+      const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+      const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-offline", kind: "generation", status: "running", sequence: 1 });
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+      useChatStore.getState().beginGeneration("job-offline", "thread-offline");
+
+      act(() => {
+        void result.current.consume({ jobId: "job-offline", threadId: "thread-offline", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await waitFor(() => expect(useChatStore.getState().generation.statusText).toContain("paused while offline"));
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+
+      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
+      act(() => window.dispatchEvent(new Event("online")));
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2));
+      act(() => result.current.stop());
+    } finally {
+      if (onlineDescriptor) Object.defineProperty(window.navigator, "onLine", onlineDescriptor);
+      else if (!hadOwnOnlineProperty) delete (window.navigator as { onLine?: boolean }).onLine;
+    }
+  });
+
+  it("cancels a pending reconnect timer when stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+      const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-cleanup", kind: "generation", status: "running", sequence: 1 });
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        void result.current.consume({ jobId: "job-cleanup", threadId: "thread-cleanup", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await act(async () => {
+        for (let index = 0; index < 4; index += 1) await Promise.resolve();
+      });
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+      expect(generationStatus).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+
+      act(() => result.current.stop());
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps retrying, and does not orphan the job, when the status-check fallback also fails", async () => {
