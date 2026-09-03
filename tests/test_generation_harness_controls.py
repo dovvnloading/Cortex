@@ -201,6 +201,102 @@ class GenerationStatsPersistenceTests(unittest.TestCase):
             assert database.load_chat("thread-1")["messages"][0]["stats"] is None
 
 
+class ReplaceMessageAttachmentsParityTests(unittest.TestCase):
+    """Both repository implementations must treat `attachments` identically:
+
+    an unspecified `attachments=None` on replace_message() must leave the
+    existing attachments untouched, an explicit `[]` must be stored as an
+    actual empty list (not None/NULL), and an explicit non-empty list must
+    still overwrite the previous value.
+    """
+
+    def test_in_memory_repository_leaves_attachments_untouched_when_not_given(self):
+        repository = InMemoryChatRepository()
+        repository.create_chat("thread-1", "Topic")
+        attachments = [{"some": "attachment"}]
+        message_id = repository.add_message(
+            "thread-1", "assistant", "hello", attachments=attachments
+        )
+
+        repository.replace_message("thread-1", message_id, "hello again")
+
+        loaded = repository.get_chat("thread-1")
+        assert loaded["messages"][-1]["attachments"] == attachments
+
+    def test_in_memory_repository_stores_an_explicit_empty_list(self):
+        repository = InMemoryChatRepository()
+        repository.create_chat("thread-1", "Topic")
+        message_id = repository.add_message(
+            "thread-1", "assistant", "hello", attachments=[{"some": "attachment"}]
+        )
+
+        repository.replace_message("thread-1", message_id, "hello again", attachments=[])
+
+        loaded = repository.get_chat("thread-1")
+        assert loaded["messages"][-1]["attachments"] == []
+
+    def test_in_memory_repository_overwrites_with_new_attachments(self):
+        repository = InMemoryChatRepository()
+        repository.create_chat("thread-1", "Topic")
+        message_id = repository.add_message(
+            "thread-1", "assistant", "hello", attachments=[{"old": "attachment"}]
+        )
+
+        new_attachments = [{"some": "attachment"}]
+        repository.replace_message(
+            "thread-1", message_id, "hello again", attachments=new_attachments
+        )
+
+        loaded = repository.get_chat("thread-1")
+        assert loaded["messages"][-1]["attachments"] == new_attachments
+
+    def test_sqlite_repository_leaves_attachments_untouched_when_not_given(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))
+            repository = LegacyDatabaseChatRepository(database)
+            repository.create_chat("thread-1", "Topic")
+            attachments = [{"some": "attachment"}]
+            message_id = repository.add_message(
+                "thread-1", "assistant", "hello", attachments=attachments
+            )
+
+            repository.replace_message("thread-1", message_id, "hello again")
+
+            loaded = repository.get_chat("thread-1")
+            assert loaded["messages"][-1]["attachments"] == attachments
+
+    def test_sqlite_repository_stores_an_explicit_empty_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))
+            repository = LegacyDatabaseChatRepository(database)
+            repository.create_chat("thread-1", "Topic")
+            message_id = repository.add_message(
+                "thread-1", "assistant", "hello", attachments=[{"some": "attachment"}]
+            )
+
+            repository.replace_message("thread-1", message_id, "hello again", attachments=[])
+
+            loaded = repository.get_chat("thread-1")
+            assert loaded["messages"][-1]["attachments"] == []
+
+    def test_sqlite_repository_overwrites_with_new_attachments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(db_path=str(Path(directory) / "chats.sqlite"))
+            repository = LegacyDatabaseChatRepository(database)
+            repository.create_chat("thread-1", "Topic")
+            message_id = repository.add_message(
+                "thread-1", "assistant", "hello", attachments=[{"old": "attachment"}]
+            )
+
+            new_attachments = [{"some": "attachment"}]
+            repository.replace_message(
+                "thread-1", message_id, "hello again", attachments=new_attachments
+            )
+
+            loaded = repository.get_chat("thread-1")
+            assert loaded["messages"][-1]["attachments"] == new_attachments
+
+
 def test_generation_stats_flow_from_engine_through_sse_and_persistence():
     dependencies = build_demo_dependencies()
     app = create_app(dependencies, allowed_hosts=("testserver",))

@@ -806,22 +806,37 @@ class DatabaseManager:
             with self.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 self._check_chat_revision(conn, thread_id, expected_revision)
+                # `attachments` only joins the SET clause when the caller actually
+                # passed a value (including an explicit `[]`). Leaving it out of
+                # both the clause and the params otherwise means an unspecified
+                # `attachments=None` call leaves the existing column untouched,
+                # matching InMemoryChatRepository.replace_message instead of
+                # unconditionally wiping it to NULL.
+                set_clauses = [
+                    "content = ?",
+                    "sources = ?",
+                    "thoughts = ?",
+                    "generation_stats_json = ?",
+                    "timestamp = ?",
+                ]
+                params: list = [
+                    content,
+                    json.dumps(sources) if sources else None,
+                    thoughts,
+                    json.dumps(stats) if stats else None,
+                    _utc_now().isoformat(),
+                ]
+                if attachments is not None:
+                    set_clauses.append("attachments = ?")
+                    params.append(json.dumps(attachments))
+                params.extend([message_id, thread_id])
                 cursor = conn.execute(
-                    """
+                    f"""
                     UPDATE messages
-                    SET content = ?, sources = ?, thoughts = ?, attachments = ?, generation_stats_json = ?, timestamp = ?
+                    SET {", ".join(set_clauses)}
                     WHERE id = ? AND thread_id = ? AND role = 'assistant'
                     """,
-                    (
-                        content,
-                        json.dumps(sources) if sources else None,
-                        thoughts,
-                        json.dumps(attachments) if attachments else None,
-                        json.dumps(stats) if stats else None,
-                        _utc_now().isoformat(),
-                        message_id,
-                        thread_id,
-                    ),
+                    params,
                 )
                 if cursor.rowcount != 1:
                     raise PersistenceError(
