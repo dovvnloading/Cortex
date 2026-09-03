@@ -737,7 +737,7 @@ def build_router() -> APIRouter:
         coordinator = _fake_execution_coordinator(request)
         try:
             job = coordinator.start(
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 request_id=payload.request_id,
                 plan=FakeExecutionPlan(
                     outcome=payload.outcome,
@@ -771,7 +771,7 @@ def build_router() -> APIRouter:
         try:
             job = coordinator.start_scratch(
                 ScratchExecutionRequest(
-                    owner=_execution_owner(principal),
+                    owner=_durable_owner(principal),
                     request_id=payload.request_id,
                     expression=payload.expression,
                 )
@@ -813,7 +813,7 @@ def build_router() -> APIRouter:
         try:
             job = coordinator.start_code(
                 CodeExecutionTaskRequest(
-                    owner=_execution_owner(principal),
+                    owner=_durable_owner(principal),
                     request_id=payload.request_id,
                     source=payload.source,
                     intent_summary=payload.intent_summary,
@@ -869,7 +869,7 @@ def build_router() -> APIRouter:
         try:
             job = coordinator.start_image_transform(
                 RecipeImageRequest(
-                    owner=_execution_owner(principal),
+                    owner=_durable_owner(principal),
                     request_id=payload.request_id,
                     source_artifact_id=payload.source_artifact_id,
                     plan=payload.plan,
@@ -921,7 +921,7 @@ def build_router() -> APIRouter:
                 coordinator.repository,
                 coordinator.artifact_boundary,
             ).stage(
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 request_id=payload.request_id,
                 content=content,
                 retention_seconds=payload.retention_seconds,
@@ -995,7 +995,7 @@ def build_router() -> APIRouter:
         repository = _execution_repository(request)
         artifact = repository.get_artifact(
             artifact_id,
-            owner=_execution_owner(principal),
+            owner=_durable_owner(principal),
         )
         if artifact is None:
             raise HTTPException(status_code=404, detail="Execution artifact is unavailable.")
@@ -1027,7 +1027,7 @@ def build_router() -> APIRouter:
         repository = _execution_repository(request)
         try:
             jobs = repository.list_jobs(
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 include_terminal=include_terminal,
                 limit=limit,
             )
@@ -1044,7 +1044,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> ExecutionStatusResponse:
         repository = _execution_repository(request)
-        job = repository.get_job(job_id, owner=_execution_owner(principal))
+        job = repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(repository, job)
@@ -1059,7 +1059,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> CodeExecutionSourceResponse:
         repository = _execution_repository(request)
-        job = repository.get_job(job_id, owner=_execution_owner(principal))
+        job = repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None or job.profile != CODE_EXECUTION_PROFILE:
             raise HTTPException(status_code=404, detail="Code execution job not found.")
         payload = job.payload
@@ -1092,7 +1092,7 @@ def build_router() -> APIRouter:
         try:
             repository.decide_approval(
                 job_id,
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 decision=payload.decision,
             )
         except (ApprovalPolicyError, ApprovalTransitionError) as exc:
@@ -1105,7 +1105,7 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Execution job not found.",
             ) from exc
-        job = repository.get_job(job_id, owner=_execution_owner(principal))
+        job = repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(repository, job)
@@ -1120,10 +1120,10 @@ def build_router() -> APIRouter:
     ) -> ExecutionStatusResponse:
         coordinator = _execution_runtime(request)
         try:
-            coordinator.cancel(job_id, owner=_execution_owner(principal))
+            coordinator.cancel(job_id, owner=_durable_owner(principal))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Execution job not found.") from exc
-        job = coordinator.repository.get_job(job_id, owner=_execution_owner(principal))
+        job = coordinator.repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         return _execution_status_response(coordinator.repository, job)
@@ -1164,7 +1164,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
         repository = _execution_repository(request)
-        if repository.get_job(job_id, owner=_execution_owner(principal)) is None:
+        if repository.get_job(job_id, owner=_durable_owner(principal)) is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         cursor = _last_event_cursor(request, last_event_id)
 
@@ -1178,12 +1178,12 @@ def build_router() -> APIRouter:
                     for event in events:
                         next_sequence = event.sequence
                         yield _execution_sse_line(event)
-                    current = repository.get_job(job_id, owner=_execution_owner(principal))
+                    current = repository.get_job(job_id, owner=_durable_owner(principal))
                     if current is not None and current.status in TerminalExecutionStatus:
                         return
                 else:
                     idle_rounds += 1
-                    current = repository.get_job(job_id, owner=_execution_owner(principal))
+                    current = repository.get_job(job_id, owner=_durable_owner(principal))
                     if current is None:
                         return
                     if current.status in TerminalExecutionStatus:
@@ -1245,7 +1245,7 @@ def build_router() -> APIRouter:
         try:
             snapshot = await request.app.state.jobs.start(
                 kind="models",
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 thread_id=None,
                 runner=runner,
             )
@@ -1294,7 +1294,7 @@ def build_router() -> APIRouter:
         try:
             snapshot = await request.app.state.jobs.start(
                 kind="models",
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 thread_id=None,
                 runner=runner,
             )
@@ -1377,7 +1377,7 @@ def build_router() -> APIRouter:
         try:
             snapshot = await request.app.state.jobs.start(
                 kind="gguf_download",
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 thread_id=None,
                 runner=runner,
             )
@@ -1447,7 +1447,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobStatusResponse:
         try:
-            snapshot = request.app.state.jobs.cancel(job_id, owner=principal.session_id)
+            snapshot = request.app.state.jobs.cancel(job_id, owner=_durable_owner(principal))
         except (JobNotFound, JobOwnershipError) as exc:
             _raise_job_error(exc)
         return _job_response(snapshot)
@@ -1479,10 +1479,10 @@ def build_router() -> APIRouter:
     ) -> StreamingResponse:
         cursor = _event_cursor(request, last_event_id)
         try:
-            request.app.state.jobs.status(job_id, owner=principal.session_id)
+            request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
             event_stream = request.app.state.jobs.events(
                 job_id,
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 after_sequence=cursor,
             )
         except (JobNotFound, JobOwnershipError) as exc:
@@ -1560,7 +1560,7 @@ def build_router() -> APIRouter:
         try:
             reservation = request.app.state.jobs.reserve(
                 kind="generation",
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 thread_id=thread_id,
                 request_id=payload.request_id,
                 request_fingerprint=request_fingerprint,
@@ -1568,7 +1568,7 @@ def build_router() -> APIRouter:
             if not reservation.created:
                 snapshot, _ = await request.app.state.jobs.wait_until_prepared(
                     reservation.snapshot.job_id,
-                    owner=principal.session_id,
+                    owner=_durable_owner(principal),
                 )
             else:
                 try:
@@ -1635,7 +1635,7 @@ def build_router() -> APIRouter:
                 finally:
                     request.app.state.jobs.abort_reservation(
                         reservation,
-                        owner=principal.session_id,
+                        owner=_durable_owner(principal),
                     )
         except HTTPException:
             raise
@@ -1667,7 +1667,7 @@ def build_router() -> APIRouter:
         try:
             reservation = jobs.reserve(
                 kind="generation",
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 thread_id=payload.thread_id,
                 request_id=payload.request_id,
                 request_fingerprint=_request_fingerprint("legacy", payload),
@@ -1675,7 +1675,7 @@ def build_router() -> APIRouter:
             if not reservation.created:
                 snapshot, _ = await jobs.wait_until_prepared(
                     reservation.snapshot.job_id,
-                    owner=principal.session_id,
+                    owner=_durable_owner(principal),
                 )
             else:
                 try:
@@ -1715,13 +1715,13 @@ def build_router() -> APIRouter:
 
                     snapshot, _ = jobs.start_reserved(
                         reservation,
-                        owner=principal.session_id,
+                        owner=_durable_owner(principal),
                         runner=runner,
                     )
                 finally:
                     jobs.abort_reservation(
                         reservation,
-                        owner=principal.session_id,
+                        owner=_durable_owner(principal),
                     )
         except JobRegistryClosed as exc:
             raise HTTPException(
@@ -1752,7 +1752,7 @@ def build_router() -> APIRouter:
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobStatusResponse:
         try:
-            snapshot = request.app.state.jobs.cancel(job_id, owner=principal.session_id)
+            snapshot = request.app.state.jobs.cancel(job_id, owner=_durable_owner(principal))
         except (JobNotFound, JobOwnershipError) as exc:
             _raise_job_error(exc)
         return _job_response(snapshot)
@@ -1789,10 +1789,10 @@ def build_router() -> APIRouter:
                 status_code=400, detail="Last-Event-ID must be non-negative."
             )
         try:
-            request.app.state.jobs.status(job_id, owner=principal.session_id)
+            request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
             event_stream = request.app.state.jobs.events(
                 job_id,
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
                 after_sequence=cursor,
             )
         except (JobNotFound, JobOwnershipError) as exc:
@@ -1888,7 +1888,7 @@ async def _start_generation_job(
     if reservation is None:
         reservation = jobs.reserve(
             kind="generation",
-            owner=principal.session_id,
+            owner=_durable_owner(principal),
             thread_id=candidate_thread_id,
             request_id=payload.request_id,
             request_fingerprint=request_fingerprint,
@@ -1896,7 +1896,7 @@ async def _start_generation_job(
     if not reservation.created:
         snapshot, acceptance = await jobs.wait_until_prepared(
             reservation.snapshot.job_id,
-            owner=principal.session_id,
+            owner=_durable_owner(principal),
         )
         replayed_message_id = acceptance.get("user_message_id")
         return snapshot, (
@@ -2197,7 +2197,7 @@ async def _start_generation_job(
 
         snapshot, acceptance = jobs.start_reserved(
             reservation,
-            owner=principal.session_id,
+            owner=_durable_owner(principal),
             runner=runner,
             prepare=prepare,
         )
@@ -2210,7 +2210,7 @@ async def _start_generation_job(
         if not started:
             jobs.abort_reservation(
                 reservation,
-                owner=principal.session_id,
+                owner=_durable_owner(principal),
             )
 
 
@@ -2245,7 +2245,7 @@ async def _automatic_compute_observation(
         job = await asyncio.to_thread(
             coordinator.start_scratch,
             ScratchExecutionRequest(
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 request_id=f"auto-{generation_job_id}",
                 expression=expression,
             ),
@@ -2299,7 +2299,7 @@ def _queue_code_proposal(
     try:
         job = coordinator.start_code(
             CodeExecutionTaskRequest(
-                owner=_execution_owner(principal),
+                owner=_durable_owner(principal),
                 request_id=f"model-{generation_job_id}",
                 source=str(proposal.source),
                 intent_summary=str(proposal.intent_summary),
@@ -2351,7 +2351,7 @@ def _code_execution_observations(
         return None
     try:
         jobs = repository.list_jobs(
-            owner=_execution_owner(principal), include_terminal=True, limit=25
+            owner=_durable_owner(principal), include_terminal=True, limit=25
         )
     except Exception as exc:  # optional context must never fail a turn
         logging.getLogger("cortex.execution").warning(
@@ -2729,7 +2729,7 @@ def _job_status(
     request: Request, job_id: str, principal: SessionPrincipal
 ) -> JobSnapshot:
     try:
-        return request.app.state.jobs.status(job_id, owner=principal.session_id)
+        return request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
 
@@ -2752,8 +2752,17 @@ def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     ) from exc
 
 
-def _execution_owner(principal: SessionPrincipal) -> str:
-    """Use the durable installation owner for execution, not the expiring session."""
+def _durable_owner(principal: SessionPrincipal) -> str:
+    """Own long-lived work by the installation, not by the expiring session.
+
+    A session id changes every time the bearer session is re-exchanged (an
+    app restart, a token refresh). Anything that outlives a single session --
+    an in-flight generation, a model pull, a GGUF download, a queued
+    execution job -- must be owned by the installation principal instead, or
+    the re-exchanged session is refused access to work it started itself
+    while the registry's one-active-job-per-kind rule still counts that work
+    against it.
+    """
     return principal.installation_principal_id
 
 
