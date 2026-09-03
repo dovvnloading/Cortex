@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import threading
 import time
@@ -82,9 +83,11 @@ class _QueueLauncher:
     def __init__(self, processes: list[_FakePopen]) -> None:
         self._processes = list(processes)
         self.launch_args: list[list[str]] = []
+        self.launch_envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv: list[str], *, cwd: Path):
+    def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
         self.launch_args.append(argv)
+        self.launch_envs.append(env)
         if not self._processes:
             raise AssertionError("Launcher called more times than expected.")
         return self._processes.pop(0)
@@ -330,7 +333,9 @@ def test_start_uses_child_selected_port_and_authenticated_runtime_attestation(tm
 
     args = launcher.launch_args[0]
     assert args[args.index("--port") + 1] == "0"
-    api_key = args[args.index("--api-key") + 1]
+    env = launcher.launch_envs[0]
+    assert env is not None
+    api_key = env["LLAMA_API_KEY"]
     assert handle.api_key == api_key
     assert api_key not in repr(handle)
     assert client.calls[0] == ("http://127.0.0.1:43125/health", None)
@@ -338,6 +343,34 @@ def test_start_uses_child_selected_port_and_authenticated_runtime_attestation(tm
         "http://127.0.0.1:43125/props",
         {"Authorization": f"Bearer {api_key}"},
     )
+
+
+def test_start_never_puts_the_api_key_on_the_command_line(tmp_path: Path) -> None:
+    """Regression test for the vulnerability this fixes: process command-line
+    arguments are visible to any other process on the machine (Task Manager,
+    Process Explorer, `wmic process get commandline`, and equivalents), so
+    the API key must be handed to the child only via its environment, never
+    as a `--api-key` argument or embedded in any other argument."""
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    model_path = tmp_path / "model.gguf"
+    client = _RecordingAttestationClient({
+        "model_path": str(model_path),
+        "build_info": "b10311-test",
+    })
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=client)
+
+    handle = manager.ensure_ready(model_path, num_ctx=4096)
+
+    args = launcher.launch_args[0]
+    assert "--api-key" not in args
+    env = launcher.launch_envs[0]
+    assert env is not None
+    assert handle.api_key == env["LLAMA_API_KEY"]
+    assert all(handle.api_key not in arg for arg in args)
+    # The child must still inherit the parent's environment (PATH, etc.),
+    # not just the injected key.
+    assert env.get("PATH") == os.environ.get("PATH")
 
 
 def test_start_rejects_a_generic_200_service_as_not_llamacpp(tmp_path: Path) -> None:
@@ -817,8 +850,8 @@ def test_stop_fails_closed_when_process_exit_cannot_be_confirmed(tmp_path: Path)
 
 
 def test_launcher_failure_does_not_leave_manager_in_starting_state(tmp_path: Path) -> None:
-    def fail_launcher(argv: list[str], *, cwd: Path):
-        del argv, cwd
+    def fail_launcher(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
+        del argv, cwd, env
         raise OSError("simulated launch failure")
 
     manager = _manager(
@@ -1192,7 +1225,7 @@ def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.launch_args: list[list[str]] = []
 
-        def __call__(self, argv: list[str], *, cwd: Path):
+        def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
             self.launch_args.append(argv)
             assert release_launch.wait(timeout=5.0), "test deadlock: launch never released"
             return _FakePopen()
@@ -1400,7 +1433,7 @@ def test_job_object_launcher_terminates_a_process_when_containment_fails(monkeyp
     process = _FakePopen()
     fake_win32 = _FakeWin32Job(create_job_result=0)
     launcher = _JobObjectLauncher(win32_factory=lambda: fake_win32)
-    monkeypatch.setattr(server_manager, "_spawn_process", lambda _argv, *, cwd: process)
+    monkeypatch.setattr(server_manager, "_spawn_process", lambda _argv, *, cwd, env=None: process)
     monkeypatch.setattr(server_manager.sys, "platform", "win32")
 
     with pytest.raises(_JobObjectContainmentError):
