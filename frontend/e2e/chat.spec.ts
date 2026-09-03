@@ -53,6 +53,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
 test("supports retry, regenerate, and fork without losing the persisted thread", async ({ page }) => {
   const threadId = "thread-controls";
   let generationAttempt = 0;
+  let regenerationAttempt = 0;
   let chatState: "user" | "assistant" | "regenerated" = "user";
 
   await page.route("**/api/v1/session/exchange", async (route) => {
@@ -74,7 +75,13 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ json: { id: "fork-e2e", title: "Fork of fail", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "fm-1", role: "user", content: "fail" }, { id: "fm-2", role: "assistant", content: "Echo: fail" }] } });
   });
   await page.route("**/api/v1/chats/thread-controls/regenerations", async (route) => {
-    await route.fulfill({ status: 202, json: { job_id: "job-regen", kind: "generation", status: "queued", thread_id: threadId } });
+    // "Retry last message" and "Regenerate response" now both call this
+    // endpoint (retrying a turn that failed with no reply yet is itself a
+    // regeneration -- see the "dangling user turn" support this route
+    // exercises), so distinguish them by call order: the first is the retry
+    // that fills in the missing reply, the second is the explicit regenerate.
+    regenerationAttempt += 1;
+    await route.fulfill({ status: 202, json: { job_id: `job-regen-${regenerationAttempt}`, kind: "generation", status: "queued", thread_id: threadId } });
   });
   await page.route("**/api/v1/chats/thread-controls/forks", async (route) => {
     await route.fulfill({ status: 201, json: { id: "fork-e2e", title: "Fork of fail", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "fm-1", role: "user", content: "fail" }, { id: "fm-2", role: "assistant", content: "Echo: fail" }] } });
@@ -95,10 +102,13 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
   await page.route("**/api/v1/generations/*/events", async (route) => {
     const jobId = route.request().url().split("/").at(-2);
     const failed = jobId === "job-1";
-    const regenerated = jobId === "job-regen";
+    // job-regen-1: the retry that fills in "fail"'s missing reply.
+    // job-regen-2: the explicit "Regenerate response" click afterward.
+    const regenerated = jobId === "job-regen-2";
+    const content = failed ? "" : regenerated ? "Echo: regenerated" : "Echo: fail";
     const event = failed
       ? `id: 1\nevent: generation.failed\ndata: {"event_id":1,"event":"generation.failed","job_id":"job-1","thread_id":"thread-controls","data":{"message":"Generation failed. Please try again."}}\n\n`
-      : `id: 1\nevent: generation.content_delta\ndata: {"event_id":1,"event":"generation.content_delta","job_id":"${jobId}","thread_id":"thread-controls","data":{"delta":"${regenerated ? "Echo: regenerated" : "Echo: fail"}"}}\n\nid: 2\nevent: generation.completed\ndata: {"event_id":2,"event":"generation.completed","job_id":"${jobId}","thread_id":"thread-controls","data":{}}\n\n`;
+      : `id: 1\nevent: generation.content_delta\ndata: {"event_id":1,"event":"generation.content_delta","job_id":"${jobId}","thread_id":"thread-controls","data":{"delta":"${content}"}}\n\nid: 2\nevent: generation.completed\ndata: {"event_id":2,"event":"generation.completed","job_id":"${jobId}","thread_id":"thread-controls","data":{}}\n\n`;
     if (!failed) chatState = regenerated ? "regenerated" : "assistant";
     await route.fulfill({ status: 200, contentType: "text/event-stream", body: event });
   });
