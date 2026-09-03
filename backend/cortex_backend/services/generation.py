@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import inspect
 import logging
 from threading import Event
 from typing import Any, Protocol
@@ -20,6 +21,44 @@ from cortex_backend.core.generation import (
 )
 
 from .progress import NullProgressSink, ProgressEvent, ProgressPhase, ProgressSink
+
+
+def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call ``func(*args, **kwargs)``, dropping ``kwargs`` if its signature
+    does not accept them.
+
+    This is how the generation use case probes an engine's real interface
+    (e.g. whether ``translate_text`` accepts the newer ``options`` keyword)
+    without depending on a version flag. The naive way to write that probe
+    is ``try: func(*args, **kwargs) except TypeError: func(*args)`` -- but
+    ``TypeError`` is also what Python raises from *inside* a function body
+    for an ordinary bug (a bad response shape, an unpacking mismatch, and
+    so on). If the callable had already done real, possibly non-idempotent
+    work (a real network call to a model) before hitting that bug, the
+    naive version would silently call it a *second* time, masking the bug
+    as a benign "wrong overload" and duplicating a call that was never
+    meant to run twice.
+
+    To tell the two apart, the candidate call is validated ahead of time
+    with :meth:`inspect.Signature.bind`, which raises ``TypeError`` only
+    for the argument-binding failure itself -- before ``func`` has run at
+    all. Once binding is known to succeed, ``func`` is invoked unguarded,
+    so any ``TypeError`` it raises while doing real work propagates
+    normally instead of being mistaken for a signature mismatch and
+    retried.
+    """
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        # func can't be introspected (e.g. some C-implemented callables).
+        # There is no safe way to probe its signature ahead of the call, so
+        # make the call directly rather than risk swallowing a real error.
+        return func(*args, **kwargs)
+    try:
+        signature.bind(*args, **kwargs)
+    except TypeError:
+        return func(*args)
+    return func(*args, **kwargs)
 
 
 class GenerationEngine(Protocol):
@@ -288,17 +327,12 @@ class GenerationService:
                 "translation",
                 f"Translating to {snapshot.target_language}...",
             )
-            try:
-                translation_result = engine.translate_text(
-                    response,
-                    snapshot.target_language,
-                    options=dict(snapshot.model_options),
-                )
-            except TypeError:
-                translation_result = engine.translate_text(
-                    response,
-                    snapshot.target_language,
-                )
+            translation_result = _call_with_optional_kwargs(
+                engine.translate_text,
+                response,
+                snapshot.target_language,
+                options=dict(snapshot.model_options),
+            )
             if not isinstance(translation_result, TranslationResult):
                 raise ModelOperationError(
                     "Translation returned an invalid result.",
@@ -339,18 +373,17 @@ class GenerationService:
         if not callable(title_generator):
             return None
         try:
-            return title_generator(
+            return _call_with_optional_kwargs(
+                title_generator,
                 self._title_history(snapshot.user_input, response),
                 # The title reuses the chat model, so it must also reuse the
                 # chat's context sizing -- otherwise the runtime is asked for
                 # a differently-configured copy of a model it already has
-                # loaded, and reloads it.
+                # loaded, and reloads it. An engine predating the options
+                # parameter (older adapters, and the narrower fakes in the
+                # test suite) still titles correctly, without it.
                 options=dict(snapshot.model_options),
             )
-        except TypeError:
-            # An engine predating the options parameter (older adapters, and
-            # the narrower fakes in the test suite) still titles correctly.
-            return title_generator(self._title_history(snapshot.user_input, response))
         except Exception as exc:  # defensive boundary for optional work
             logging.warning(
                 "Cortex chat title generation failed (%s).",
