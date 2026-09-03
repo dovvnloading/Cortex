@@ -281,6 +281,62 @@ def test_transition_on_an_already_terminal_job_reports_real_approval_state(tmp_p
     assert late.approval_state == "approved"
 
 
+def test_transition_to_terminal_status_reports_real_approval_state_on_first_call(tmp_path):
+    """The FIRST transition() call that moves an approved job into a
+    terminal status must report the real approval_state, not silently fall
+    back to "not_required".
+
+    transition()'s normal (non-terminal-branch) success path used to re-read
+    the just-updated row with a bare `SELECT * FROM execution_jobs`, which
+    has no execution_approvals join and therefore no approval_state column
+    -- so _job_from_row() defaulted to "not_required" even when the job had
+    just been approved. This hits every job's first terminal transition, not
+    only a retried/duplicate one. Same pattern as the fixes for
+    create_job()'s duplicate-request fallback and transition()'s
+    already-terminal race guard.
+    """
+    repository = _repository(tmp_path)
+    job, created = repository.create_job(
+        job_id="job-first-terminal-approval",
+        owner="session-a",
+        request_id="request-first-terminal-approval",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert created is True
+    assert (
+        repository.request_approval(
+            job.job_id,
+            owner="session-a",
+            scope_digest="scope",
+            reason="test",
+            ttl_seconds=10,
+        )
+        == "pending"
+    )
+    assert (
+        repository.decide_approval(
+            job.job_id,
+            owner="session-a",
+            decision="approved",
+        )
+        == "approved"
+    )
+
+    # This is the job's FIRST transition into a terminal status -- it takes
+    # the normal success path, not the already-terminal race guard.
+    finished = repository.transition(
+        job.job_id,
+        status="succeeded",
+        event="completed",
+        phase="completed",
+        data={"value": 42},
+        result={"value": 42},
+    )
+    assert finished.status == "succeeded"
+    assert finished.approval_state == "approved"
+
+
 def test_fake_coordinator_success_failure_and_replay(tmp_path):
     repository = _repository(tmp_path)
     coordinator = DurableFakeCoordinator(repository)

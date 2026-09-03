@@ -504,6 +504,7 @@ class ExecutionRepository:
         now = self._now()
         terminal_owner: str | None = None
         updated: sqlite3.Row | None = None
+        updated_owner: str | None = None
         with self.connect() as connection:
             # Serialize lifecycle transitions before reading the current
             # sequence. Workers and cancellation requests may transition the
@@ -566,6 +567,17 @@ class ExecutionRepository:
                     "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
                 ).fetchone()
                 assert updated is not None
+                # Defer approval-state computation until this connection
+                # closes, for the same reason as the terminal race guard
+                # above: this row comes from a bare
+                # `SELECT * FROM execution_jobs` with no execution_approvals
+                # join, so it has no approval_state column, and
+                # _job_from_row() would silently default it to
+                # "not_required" even when the job was actually approved or
+                # denied on its way to this (possibly terminal) status.
+                # self.get_job() below re-derives the real value via the
+                # join once the transaction has committed.
+                updated_owner = row["owner"]
         if terminal_owner is not None:
             # Delegate to the already-correct get_job() instead of
             # maintaining a second copy of the approval-join query (the same
@@ -580,6 +592,13 @@ class ExecutionRepository:
             # the race guard still returns a job rather than raising.
             return self._job_from_row(row)
         assert updated is not None
+        job = self.get_job(job_id, owner=updated_owner)
+        if job is not None:
+            return job
+        # The job vanished between the update above and this re-read (e.g. a
+        # concurrent purge) -- fall back to the freshly updated row so the
+        # caller still gets the status/result it just wrote, rather than
+        # raising.
         return self._job_from_row(updated)
 
     def request_cancel(self, job_id: str) -> ExecutionJob:
