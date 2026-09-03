@@ -385,8 +385,12 @@ def test_runtime_watchdog_captures_stalled_transform_and_closes():
         job_id=JOB_ID,
         provider_factory=lambda: provider,
         # Leave enough room for Windows runner thread scheduling and broker
-        # setup before the intentionally stalled transform is active.
-        watchdog_timeout_ms=100,
+        # setup before the intentionally stalled transform is active: too
+        # tight a margin here lets the watchdog trip during broker setup
+        # itself (observed under concurrent-CI-run load), which takes the
+        # runtime's hard-raise path instead of the graceful cancel-and-report
+        # path this test means to exercise.
+        watchdog_timeout_ms=750,
     ).run()
 
     assert report.terminal_state == "failed"
