@@ -1,0 +1,88 @@
+# ADR-0001 Phase 2 typed recipe and primitive contract
+
+- **Status:** Typed contract, signed-manifest verification, native broker transport, signed bundle installation, trusted artifact boundary, qualification-only provider core, explicit qualification-profile lifecycle composition, durable recipe coordination, and qualification-only API exposure implemented and verified; application remains default-off
+- **Parent:** [Capability-tiered agentic execution harness](0001-capability-tiered-agentic-execution-harness.md)
+- **Depends on:** [Phase 1 production lifecycle gate](0001-phase1-production-lifecycle.md)
+- **Scope:** Typed fixed-function image plans, calculator/check primitives, canonical
+  plan identity, and safe validation errors
+
+## Decision
+
+Phase 2 begins with a provider-independent contract layer. Model or UI proposals are
+accepted only as bounded, versioned JSON plans; they are never interpreted as source,
+commands, expressions, paths, or plugin names. The contract layer is deliberately
+usable without a runtime provider so malformed proposals can be rejected before any
+future staging, sandbox, or artifact operation is considered.
+
+The current allowlists are:
+
+- image steps: `grayscale`, `contrast`, `brightness`, `crop`, `resize`, and `rotate`;
+- output formats: `png`, `jpeg`, and `webp`; and
+- calculator operations: `add`, `subtract`, `multiply`, `divide`, `min`, and `max`.
+
+Comparisons use a separate `check.v1` plan with explicit relational operators and an
+`is_close` tolerance. Calculator operands are finite decimal values with bounded
+precision; evaluation uses deterministic decimal arithmetic and a fixed result
+precision ceiling. Image plans permit at most eight steps, 16,384-pixel dimensions,
+opaque artifact identifiers, and metadata stripping by default. Output names and
+filesystem locations are not part of the model-facing contract.
+
+Every accepted plan has canonical JSON and a SHA-256 digest for future idempotency and
+signature binding. The digest is an identity of the validated plan, not an authority
+grant and not a substitute for a signed recipe bundle.
+
+## Safety and failure contract
+
+The parser rejects unknown fields, unknown operations, paths, non-opaque artifact IDs,
+unsupported formats, oversized payloads, unsafe numeric bounds, non-finite numbers,
+floating-point calculator input, division by zero, and invalid comparison tolerances.
+Errors expose only stable categories such as `invalid_image_recipe`,
+`invalid_calculation`, `invalid_check`, `payload_too_large`, or
+`result_out_of_bounds`; raw payloads, paths, source text, and parser details do not
+cross the API boundary.
+
+`evaluate_calculator` and `evaluate_check` are pure trusted arithmetic helpers. They do
+not read or write files, access the network, import generated code, decode images, or
+publish artifacts. A future coordinator may call them only after policy, staging, and
+sandbox gates have succeeded.
+
+## Explicitly out of scope
+
+This ADR does not authorize:
+
+- production loading of a signed recipe/runtime bundle; manifest signature and byte
+  verification plus storage installation are implemented separately in
+  [the signed-manifest ADR](0001-phase2-signed-manifest.md) and
+  [the bundle installation ADR](0001-phase2-bundle-installation.md);
+- production image decoding, sandbox execution, thumbnails, archive extraction, or
+  provider-produced content handling beyond the qualification-only
+  [recipe provider core](0001-phase2-recipe-provider.md) and trusted
+  [artifact boundary](0001-phase2-artifact-boundary.md);
+- production execution beyond the transport-only
+  [native broker adapter](0001-phase2-native-broker.md);
+- Wasmtime/WASI, AppContainer/LPAC, Job Object, host process, or any other provider;
+- model prompt/tool exposure, automatic execution, or application lifecycle enablement.
+
+Those gates require their own implementation evidence. The packaged application
+remains on the explicitly disabled lifecycle from Phase 1; the local qualification
+profile is now deliberately composable through an explicit injected lifecycle
+builder. Outside review and production trust are optional official-release
+hardening, not open-source prerequisites.
+
+## Required next gate
+
+The trusted attachment boundary, signed/native attempt factory, and durable
+packaged-worker coordinator qualification are implemented behind the passing
+lifecycle health check. Merged PR #64 passed hosted Quality run
+[30467455657](https://github.com/dovvnloading/Cortex/actions/runs/30467455657),
+including `recipe_coordinator_e2e_qualification.py`. The lifecycle builder still
+intentionally does not create processes or discover artifacts. The next product
+work is wiring a normal user-facing recipe flow; official prebuilt releases may
+add external review and production trust as optional hardening.
+
+## Verification
+
+`tests/test_phase2_recipe_contract.py` covers canonical identity, malformed and
+oversized plans, path/operation rejection, decimal determinism, division and result
+limits, explicit comparisons, and redacted failures. The full repository and
+frontend matrix passed for this stage.

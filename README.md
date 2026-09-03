@@ -110,11 +110,16 @@ transcript.](.github/images/workspace-light.png)
 - **Bounded local tools.** Explicit arithmetic can use the deterministic scratch
   calculator. User-selected PNG/JPEG/WebP transforms run as fixed recipes in a
   short-lived worker.
-- **Approval-gated Python.** A local model may propose a structured Python task,
-  but the backend validates it, records the source digest and requested
-  capabilities, and waits for one-time user approval. The task tray shows
-  pending approval, progress, output, errors, cancellation, and revoke state.
-  Ordinary assistant text and fenced code are never executed.
+- **Approval-gated Python.** A local model may propose a task in a small,
+  restricted subset of Python (no imports, no `def`/`class`/`while`, no method
+  or attribute calls -- assignment, bounded loops, comprehensions, and a fixed
+  builtin list), and the backend validates it, records the source digest and
+  requested capabilities, and waits for one-time user approval. The task tray
+  shows pending approval, progress, output, errors, cancellation, and revoke
+  state. Ordinary assistant text and fenced code are never executed.
+- **Optional response translation.** A configured local model can translate
+  each response into a target language, off by default and set independently
+  of the chat model.
 - **Native local runtime.** The API binds to loopback, the native handoff uses
   an expiring session token, and the embedded WebView uses a private Cortex-owned
   profile.
@@ -132,6 +137,14 @@ writes, no process access, no network. The task activity tray on the right reads
 "Review before running" with Allow once and Deny
 controls.](.github/images/execution-approval.png)
 
+The tray names the requested host access, flags broad access as a high-risk
+choice for that run, and lets the generated source be inspected before anything
+executes. A finished task keeps its captured output alongside it:
+
+![The Cortex task activity tray: a pending task requesting Files access with a
+broad-local-access warning, an "Inspect generated source" disclosure, and Allow
+once and Deny buttons; below it a completed task showing its captured output and
+return value.](.github/images/execution-tray.png)
 
 Code execution is a separate capability from scratch computation:
 
@@ -259,7 +272,7 @@ python tools/generate_contracts.py --write
 
 The README screenshots are regenerated from a fixed demo workspace, so they stay
 in step with the UI without hand-editing images. `showcase.ps1` writes the full
-26-shot set (to the Desktop by default, or `-OutDir`); the images used above are
+showcase set (to the Desktop by default, or `-OutDir`); the images used above are
 a curated subset copied into `.github/images/`:
 
 ```powershell
@@ -296,9 +309,11 @@ before approving a run. See [SECURITY.md](SECURITY.md) for reporting guidance.
 
 - [Agent operating contract](AGENTS.md)
 - [Local coding-agent harness standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md)
-- [Open-source execution plan](docs/OPEN_SOURCE_EXECUTION_PLAN.md)
+  (background research and target design, not policy -- see `AGENTS.md`)
+- [What's next](docs/NEXT.md)
 - [Attachment boundary](docs/CHAT_ATTACHMENTS.md)
 - [Execution architecture records](docs/adr/)
+- [Archived planning documents](docs/archive/)
 - [Contributing guide](CONTRIBUTING.md)
 - [Change log](Change_Log.md)
 - [Security policy](SECURITY.md)
