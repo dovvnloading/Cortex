@@ -1492,23 +1492,30 @@ def build_router() -> APIRouter:
                         raise HTTPException(status_code=404, detail="Chat not found.")
                     position = message_position(chat, payload.message_id)
                     messages = list(chat.get("messages", ()))
-                    if (
-                        position != len(messages) - 1
-                        or messages[position].get("role") != "assistant"
-                    ):
+                    if position != len(messages) - 1:
                         raise ChatDomainError(
-                            "Only the final assistant response can be regenerated."
+                            "Only the final message can be regenerated."
                         )
-                    if (
-                        position == 0
-                        or messages[position - 1].get("role") != "user"
-                    ):
+                    target_role = messages[position].get("role")
+                    if target_role == "assistant":
+                        if (
+                            position == 0
+                            or messages[position - 1].get("role") != "user"
+                        ):
+                            raise ChatDomainError(
+                                "The selected response has no user turn to regenerate."
+                            )
+                    elif target_role != "user":
                         raise ChatDomainError(
-                            "The selected response has no user turn to regenerate."
+                            "Only an assistant response or an unanswered message can be regenerated."
                         )
+                    # A dangling user turn (a prior attempt admitted this
+                    # message, then failed before any reply was persisted) is
+                    # itself the current turn to answer, so its own content
+                    # -- not the message before it -- is the model's input.
                     user_input = (
                         payload.user_input
-                        or messages[position - 1].get("content", "")
+                        or messages[position - (1 if target_role == "assistant" else 0)].get("content", "")
                     ).strip()
                     if not user_input:
                         raise ChatDomainError(
@@ -1833,12 +1840,18 @@ async def _start_generation_job(
                 target_position = message_position(chat, target_message_id)
             except ChatDomainError:
                 target_position = -1
-            if target_position > 0:
-                prior_user = messages[target_position - 1]
-                attachment_refs = [
-                    ChatAttachment.model_validate(item)
-                    for item in (prior_user.get("attachments") or [])
-                ]
+            if 0 <= target_position < len(messages):
+                # A dangling user turn's own attachments are the ones to
+                # resend; an assistant reply being regenerated has none of
+                # its own, so fall back to the user turn before it instead.
+                target_is_user = messages[target_position].get("role") == "user"
+                source_position = target_position if target_is_user else target_position - 1
+                if source_position >= 0:
+                    source_message = messages[source_position]
+                    attachment_refs = [
+                        ChatAttachment.model_validate(item)
+                        for item in (source_message.get("attachments") or [])
+                    ]
         generation_payload = payload.model_copy(
             update={"thread_id": thread_id, "attachments": attachment_refs}
         )
@@ -1886,9 +1899,15 @@ async def _start_generation_job(
         user_message_id: str | None = None
         prepared_revision: int | None = None
         prepared_history = history_messages
+        # True when target_message_id names the thread's last message and it
+        # is a user turn with no reply yet -- a prior generation attempt
+        # admitted this message, then failed before persisting an assistant
+        # reply. Retrying that turn must add a new assistant message, not
+        # replace one that was never created (see runner() below).
+        target_is_dangling_user_turn = False
 
         def prepare() -> Mapping[str, Any]:
-            nonlocal prepared_history, prepared_revision, user_message_id
+            nonlocal prepared_history, prepared_revision, user_message_id, target_is_dangling_user_turn
             current_chat = deps.chats.get_chat(thread_id)
             current_revision = (
                 chat_revision(current_chat) if current_chat is not None else 0
@@ -1902,20 +1921,24 @@ async def _start_generation_job(
                     raise ChatDomainError("Chat not found.")
                 current_messages = list(current_chat.get("messages", ()))
                 target_position = message_position(current_chat, target_message_id)
-                if (
-                    target_position != len(current_messages) - 1
-                    or current_messages[target_position].get("role") != "assistant"
-                ):
+                if target_position != len(current_messages) - 1:
                     raise ChatDomainError(
-                        "Only the final assistant response can be regenerated."
+                        "Only the final message can be regenerated."
                     )
-                if (
-                    target_position == 0
-                    or current_messages[target_position - 1].get("role") != "user"
-                ):
+                current_target_role = current_messages[target_position].get("role")
+                if current_target_role == "assistant":
+                    if (
+                        target_position == 0
+                        or current_messages[target_position - 1].get("role") != "user"
+                    ):
+                        raise ChatDomainError(
+                            "The selected response has no user turn to regenerate."
+                        )
+                elif current_target_role != "user":
                     raise ChatDomainError(
-                        "The selected response has no user turn to regenerate."
+                        "Only an assistant response or an unanswered message can be regenerated."
                     )
+                target_is_dangling_user_turn = current_target_role == "user"
                 prepared_history = current_messages[:target_position]
                 prepared_revision = current_revision
             else:
@@ -1969,7 +1992,7 @@ async def _start_generation_job(
             if not sink.begin_commit("persisting", "Saving the response."):
                 return {"cancelled": True}
             stats_payload = asdict(result.stats) if result.stats else None
-            if target_message_id is None:
+            if target_message_id is None or target_is_dangling_user_turn:
                 assistant_message_id = deps.chats.add_message(
                     thread_id,
                     "assistant",

@@ -372,6 +372,87 @@ def test_cancellation_after_commit_does_not_downgrade_the_persisted_response():
         ]
 
 
+def test_regeneration_fills_in_a_reply_for_a_dangling_user_turn_without_duplicating_it():
+    """A generation that fails after its user message was already admitted
+    (the model call itself errors, before any assistant reply is persisted)
+    leaves the thread with a user turn and no reply. Regression guard: the
+    only way to retry used to be posting the same text as a brand new
+    message, duplicating the user's turn. Regenerating against that
+    message's own id must add the missing reply instead."""
+    state = FakeOllamaState(fail_generation=True)
+    app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "dangling-1", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{accepted['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        assert events[-1]["event"] == "generation.failed"
+
+        thread_id = accepted["thread_id"]
+        chat = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+        assert [m["role"] for m in chat["messages"]] == ["user"]
+        user_message_id = chat["messages"][0]["id"]
+        assert user_message_id == accepted["user_message_id"]
+
+        state.fail_generation = False
+        regeneration = client.post(
+            f"/api/v1/chats/{thread_id}/regenerations",
+            json={"request_id": "dangling-1-retry", "message_id": user_message_id},
+            headers=headers,
+        )
+        assert regeneration.status_code == 202
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{regeneration.json()['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        assert events[-1]["event"] == "generation.completed"
+
+        after = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+        assert [m["role"] for m in after["messages"]] == ["user", "assistant"]
+        assert after["messages"][0]["id"] == user_message_id
+        assert after["messages"][0]["content"] == "hello"
+        assert after["messages"][1]["content"] == "Echo: hello"
+
+
+def test_regeneration_rejects_a_dangling_turn_that_is_not_the_last_message():
+    """Only the thread's current, unanswered turn may be filled in this way
+    -- an older user message earlier in the thread must not be retried."""
+    state = FakeOllamaState()
+    app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "first-1", "user_input": "first"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET", f"/api/v1/generations/{accepted['job_id']}/events", headers=headers
+        ) as response:
+            _events("".join(response.iter_text()))
+        thread_id = accepted["thread_id"]
+        chat = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+        first_user_message_id = chat["messages"][0]["id"]
+
+        regeneration = client.post(
+            f"/api/v1/chats/{thread_id}/regenerations",
+            json={"request_id": "stale-retry", "message_id": first_user_message_id},
+            headers=headers,
+        )
+        assert regeneration.status_code == 409
+        assert "final message" in regeneration.json()["detail"]
+
+
 def test_fork_and_regeneration_use_message_ids_and_preserve_original_until_success():
     app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
     with TestClient(app) as client:
