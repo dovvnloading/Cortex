@@ -181,6 +181,25 @@ def test_security_rejects_non_loopback_host_and_origin():
         )
 
 
+def test_trusted_host_middleware_accepts_ipv6_loopback_like_the_session_guard():
+    """Starlette's TrustedHostMiddleware strips a port with a naive
+    ``host.split(":")[0]``.  For the wire form of the IPv6 loopback address
+    ("[::1]" or "[::1]:PORT") that reduces to the literal "[", not "::1", so
+    the middleware used to reject every IPv6-loopback request with a 400 --
+    even though SessionManager.validate_request_context (security.py)
+    parses the same header correctly with urlsplit and accepts "::1" as
+    configured. Both guards must agree on what counts as valid loopback.
+    """
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        for host_header in ("[::1]:51173", "[::1]"):
+            response = client.get(
+                "/api/v1/system", headers={**headers, "Host": host_header}
+            )
+            assert response.status_code == 200, host_header
+
+
 def test_expired_session_is_rejected_without_exposing_token_details():
     manager = SessionManager(
         bootstrap_token="bootstrap",

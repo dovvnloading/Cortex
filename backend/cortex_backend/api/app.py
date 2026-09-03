@@ -270,9 +270,21 @@ def create_app(
     app.state.default_gguf_models_dir = default_gguf_models_dir or (
         Path(tempfile.gettempdir()) / "cortex-gguf-models"
     )
+    # Starlette's TrustedHostMiddleware strips a port with a naive
+    # ``headers.get("host", "").split(":")[0]`` -- for the well-formed wire
+    # form of the IPv6 loopback address ("[::1]" or "[::1]:PORT") that
+    # reduces to the literal string "[", not "::1", so the middleware would
+    # otherwise reject every IPv6-loopback request outright even though
+    # ``SessionManager.validate_request_context`` (security.py) parses the
+    # same header correctly via ``urlsplit`` and accepts "::1" as
+    # configured. Mirror Starlette's own parsing here so the two guards
+    # agree instead of disagreeing about what counts as valid loopback.
+    middleware_allowed_hosts = list(allowed)
+    if "::1" in allowed and "[" not in middleware_allowed_hosts:
+        middleware_allowed_hosts.append("[")
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=list(allowed),
+        allowed_hosts=middleware_allowed_hosts,
     )
     app.add_middleware(
         CORSMiddleware,
