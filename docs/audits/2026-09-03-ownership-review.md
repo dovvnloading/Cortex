@@ -501,7 +501,7 @@ What not to build now:
 
 Each milestone is independently mergeable and leaves the gates green.
 
-### M1: Merge and stabilise (days)
+### M1: Merge and stabilise
 
 - Merge `codex/qa-reliability-pass-2` into `main`. It is 210 commits of
   verified fixes and nothing is behind it.
@@ -512,7 +512,7 @@ Each milestone is independently mergeable and leaves the gates green.
   revert the `docs/` ignore; move `findings.md`.
 - Add CI `concurrency` and `paths:` gating.
 
-### M2: Core durability (one to two weeks)
+### M2: Core durability
 
 - WAL, validated backup, and corruption recovery for the chat store (defect 3).
 - Typed runtime errors and `user_message` on download and llama.cpp errors
@@ -522,7 +522,7 @@ Each milestone is independently mergeable and leaves the gates green.
 - Visibility-gated polling (defect 20).
 - `conftest.py`, markers, `pytest-timeout`, sleep-to-event replacement.
 
-### M3: Execution consolidation (two to three weeks)
+### M3: Execution consolidation
 
 - Delete the dormant half (section 6.3, steps 1, 3, 4).
 - One `_ChildProcessAttempt` with create-suspended, attach, resume (defects 4,
@@ -531,14 +531,14 @@ Each milestone is independently mergeable and leaves the gates green.
 - Write the honest boundary paragraph and correct the README.
 - Archive the phase ADRs and spike probes with the code they describe.
 
-### M4: API and service decomposition (two to three weeks)
+### M4: API and service decomposition
 
 - Router split and orchestrator extraction (section 6.1).
 - `llm.py` split by purity and `legacy_storage.py` rename (section 6.2).
 - Global exception handler and single error table (defect 25).
 - Fix defects 14, 16, 18, 19, 24, 26, 27.
 
-### M5: Frontend decomposition (one to two weeks)
+### M5: Frontend decomposition
 
 - Hook extraction per section 6.5; `App.tsx` to about 120 lines,
   `ChatPage.tsx` to about 200.
@@ -546,13 +546,13 @@ Each milestone is independently mergeable and leaves the gates green.
 - Type-checked ESLint and stricter tsconfig.
 - Replace `FRONTEND_HARNESS_REFACTOR_PLAN.md` with `docs/NEXT.md`.
 
-### M6: Release (days)
+### M6: Release
 
 - Single version source, VERSIONINFO, tag-triggered workflow with artifact
   upload and a windowed smoke test.
 - First tagged release from `main`.
 
-### M7: Expansion (ongoing, one item at a time)
+### M7: Expansion
 
 Items 2 through 7 of section 8, in that order, each behind the gates.
 
