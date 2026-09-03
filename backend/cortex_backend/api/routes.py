@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event as ThreadEvent, Thread
 import asyncio
 import base64
 import binascii
@@ -159,6 +160,49 @@ from .security import SessionPrincipal, SessionSecurityError
 
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
+
+# Chat-title generation (see the runner() closure in _start_generation_job)
+# runs after JobProgressSink.begin_commit seals the turn as durably
+# persisted -- past that point the job carries no cancel_event and
+# JobRegistry.shutdown (api/jobs.py) awaits it unboundedly. Left unbounded,
+# a hung or very slow local model would block app shutdown for as long as
+# the model runtime's own HTTP read timeout (600s -- see the
+# ``httpx.Timeout`` construction in Cortex_Preview.py and
+# llamacpp/chat_client.py). Bound the call ourselves, well short of that,
+# so a hung title model degrades to the existing best-effort fallback
+# instead of stalling shutdown.
+CHAT_TITLE_TIMEOUT_SECONDS = 20.0
+
+
+def _call_with_timeout(func, *args, timeout: float, **kwargs):
+    """Run ``func`` in a daemon thread and wait at most ``timeout`` seconds.
+
+    For optional, best-effort work that must not block its caller -- or
+    process shutdown -- if the underlying call hangs. A plain daemon thread
+    is used rather than ``concurrent.futures.ThreadPoolExecutor``: that
+    module registers an ``atexit`` hook which joins every worker thread it
+    has ever created, which would defeat the point of this helper. A call
+    that times out keeps running in the background and is simply abandoned
+    (and dropped) at process exit.
+    """
+    outcome: list[Any] = []
+    failure: list[BaseException] = []
+    done = ThreadEvent()
+
+    def _run() -> None:
+        try:
+            outcome.append(func(*args, **kwargs))
+        except BaseException as exc:  # re-raised on the caller's thread below
+            failure.append(exc)
+        finally:
+            done.set()
+
+    Thread(target=_run, name="cortex-bounded-call", daemon=True).start()
+    if not done.wait(timeout):
+        raise TimeoutError(f"call exceeded {timeout}s and was abandoned")
+    if failure:
+        raise failure[0]
+    return outcome[0] if outcome else None
 
 
 def build_router() -> APIRouter:
@@ -2062,8 +2106,14 @@ async def _start_generation_job(
                 )
                 if callable(title_generator):
                     try:
-                        raw_title = title_generator(
-                            generation_snapshot, result.response
+                        # Bounded: this call runs past begin_commit, with no
+                        # cancel_event and no unbounded wait from
+                        # JobRegistry.shutdown to save it from a hung model.
+                        raw_title = _call_with_timeout(
+                            title_generator,
+                            generation_snapshot,
+                            result.response,
+                            timeout=CHAT_TITLE_TIMEOUT_SECONDS,
                         )
                     except Exception as exc:  # optional title work must not fail a chat
                         logging.warning(
