@@ -30,11 +30,53 @@ _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.
 # A cancellable startup must not sit in one socket read for the full ordinary
 # download timeout. This is an inactivity timeout, not a total-download cap.
 _CANCELLABLE_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=1.0, write=30.0, pool=10.0)
+# Real llama.cpp Windows release archives (a tiny stub exe plus bundled
+# ggml-*.dll backend libraries) have run well under 200MB. 2 GiB is a
+# generous-but-bounded ceiling: it will not reject any real release, but it
+# stops a misbehaving CDN, a corporate MITM proxy, or a redirect to
+# something unrelated from writing unbounded data to disk before the
+# post-download SHA-256 check (see ``_download`` below) ever gets a chance
+# to reject it and clean up -- mirrors download.py's ``MAX_DOWNLOAD_BYTES``
+# for the same failure mode.
+_MAX_BINARY_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# Mirrors download.py's ``MIN_FREE_SPACE_BYTES`` safety reserve.
+_MIN_FREE_SPACE_BYTES = 128 * 1024 * 1024
 
 
 def _raise_if_cancelled(cancellation_event: Event | None) -> None:
     if cancellation_event is not None and cancellation_event.is_set():
         raise BinaryVerificationError("Local model runtime startup was cancelled.")
+
+
+def _content_length(response: httpx.Response) -> int | None:
+    """Best-effort advertised size; ``None`` if absent or unparsable.
+
+    An untrustworthy or missing header must not by itself fail the
+    download -- the running-total check performed during streaming is the
+    backstop for exactly that case.
+    """
+    try:
+        return int(response.headers["Content-Length"])
+    except (KeyError, ValueError):
+        return None
+
+
+def _require_free_space(directory: Path, bytes_needed: int, *, reserve: int = _MIN_FREE_SPACE_BYTES) -> None:
+    """Require room for ``bytes_needed`` more while retaining a safety reserve.
+
+    Mirrors download.py's ``_require_free_space`` for the GGUF downloader:
+    same failure mode (a download that fills the disk before the
+    post-download checksum ever gets a chance to reject and clean it up),
+    same fix.
+    """
+    try:
+        free = shutil.disk_usage(directory).free
+    except OSError as exc:
+        raise BinaryVerificationError("Could not determine available disk space.") from exc
+    if free < bytes_needed + reserve:
+        raise BinaryVerificationError(
+            "There is not enough free disk space to download the local model runtime."
+        )
 
 
 def _stream_sha256(path: Path, cancellation_event: Event | None = None) -> str:
@@ -227,6 +269,7 @@ class BinaryFetcher:
         cancellation_event: Event | None = None,
     ) -> None:
         digest = hashlib.sha256()
+        completed = 0
         client = self._http or httpx
         try:
             if cancellation_event is not None and cancellation_event.is_set():
@@ -238,17 +281,51 @@ class BinaryFetcher:
             )
             with client.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
                 response.raise_for_status()
+                # Reject an oversized transfer -- and check free space against
+                # the full advertised size -- before a single byte is written,
+                # whenever the server tells the truth about Content-Length.
+                total = _content_length(response)
+                if total is not None:
+                    if total > _MAX_BINARY_DOWNLOAD_BYTES:
+                        raise BinaryVerificationError(
+                            "The local model runtime download exceeds the configured byte ceiling."
+                        )
+                    _require_free_space(destination.parent, total)
+                # These raises must not unlink `destination` themselves: the
+                # file handle below is still open on Windows at this point,
+                # and unlinking an open file raises PermissionError there.
+                # The `except BinaryVerificationError` clause further down
+                # only runs once this `with` block has closed the handle, so
+                # cleanup is deferred to there for every failure raised
+                # inside this loop -- same treatment as the pre-existing
+                # cancellation check right below.
                 with destination.open("wb") as handle:
                     for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
                         if cancellation_event is not None and cancellation_event.is_set():
                             raise BinaryVerificationError("Local model runtime startup was cancelled.")
+                        # Backstop for a missing or untruthful Content-Length:
+                        # enforce the same ceiling and free-space reserve
+                        # against the running total as bytes actually arrive.
+                        if completed + len(chunk) > _MAX_BINARY_DOWNLOAD_BYTES:
+                            raise BinaryVerificationError(
+                                "The local model runtime download exceeds the configured byte ceiling."
+                            )
+                        _require_free_space(destination.parent, len(chunk))
                         handle.write(chunk)
                         digest.update(chunk)
+                        completed += len(chunk)
         except httpx.HTTPError as exc:
             destination.unlink(missing_ok=True)
             raise BinaryVerificationError(
                 "Could not download the local model runtime. Check your network connection and try again."
             ) from exc
+        except BinaryVerificationError:
+            # Covers both the pre-existing cancellation checks above and the
+            # new byte-ceiling/free-space checks: same cleanup-on-failure
+            # treatment as the httpx.HTTPError and checksum-mismatch cases,
+            # applied once here so it can't race a still-open file handle.
+            destination.unlink(missing_ok=True)
+            raise
         if digest.hexdigest() != expected_sha256:
             destination.unlink(missing_ok=True)
             raise BinaryVerificationError(
