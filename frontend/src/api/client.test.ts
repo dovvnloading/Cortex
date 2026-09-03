@@ -252,6 +252,29 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Last-Event-ID")).toBe("0");
   });
 
+  it("skips a malformed SSE frame instead of failing the whole stream", async () => {
+    const sse = [
+      'id: 1\nevent: generation.queued\ndata: {"event_id":1,"event":"generation.queued","job_id":"job-1","thread_id":"thread-1","data":{}}\n\n',
+      // Truncated JSON -- a real-world symptom of a proxy or backend chunking
+      // bug. Must not fail the connection or block later, valid frames.
+      'id: 2\nevent: generation.content_delta\ndata: {"event_id":2,"event":"generation.content_delta","thread_id":"thread-1","data":{"delta":\n\n',
+      'id: 3\nevent: generation.content_delta\ndata: {"event_id":3,"event":"generation.content_delta","job_id":"job-1","thread_id":"thread-1","data":{"delta":"hello"}}\n\n',
+    ].join("");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const events: string[] = [];
+
+    await expect(
+      api.streamGeneration("job-1", (event) => events.push(event.event), { afterEventId: 0 }),
+    ).resolves.toBeUndefined();
+
+    expect(events).toEqual(["generation.queued", "generation.content_delta"]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("delivers a final SSE frame the stream closed without terminating", async () => {
     const sse = [
       'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"state","status":"running"}\n\n',

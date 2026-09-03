@@ -337,13 +337,22 @@ export class CortexApi {
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("\n");
-      if (data) {
-        const event = JSON.parse(data) as T;
-        onEvent(event);
-        const status = (event as { status?: unknown }).status;
-        if (status === "succeeded" || status === "failed" || status === "cancelled") {
-          terminalEvent = event;
-        }
+      if (!data) return;
+      // A malformed frame must not take down an otherwise-live connection: if
+      // Last-Event-ID resume then replays the same bad frame on reconnect,
+      // throwing here turns one bad event into an infinite reconnect loop
+      // with growing backoff instead of losing a single event.
+      let event: T;
+      try {
+        event = JSON.parse(data) as T;
+      } catch {
+        console.warn("Cortex: skipping a malformed SSE frame", data.slice(0, 200));
+        return;
+      }
+      onEvent(event);
+      const status = (event as { status?: unknown }).status;
+      if (status === "succeeded" || status === "failed" || status === "cancelled") {
+        terminalEvent = event;
       }
     };
     const reader = response.body.getReader();

@@ -224,6 +224,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
             await api.streamGeneration(
               job.jobId,
               (event) => {
+                // Any event at all means this connection attempt succeeded;
+                // without this a generation that reconnects a few times
+                // over a long run keeps compounding the same backoff delay
+                // even though every intervening connection worked fine.
+                reconnectAttempt = 0;
                 if (event.event_id <= cursor || event.thread_id !== job.threadId) return;
                 cursor = event.event_id;
                 persistActiveJob({ ...job, lastEventId: cursor });
