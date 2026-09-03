@@ -26,6 +26,7 @@ class FakeLlamaCppState:
     fail_ensure_ready: bool = False
     fail_health: bool = False
     fail_chat: bool = False
+    fail_chat_mid_stream: bool = False
     generation_response: str | None = None
     generation_thoughts: str | None = None
     installed_files: set[str] = field(
@@ -109,6 +110,15 @@ def create_fake_llamacpp_app(state: FakeLlamaCppState | None = None) -> FastAPI:
             def sse_chunks():
                 if fake_state.generation_thoughts:
                     yield _sse({"choices": [{"delta": {"reasoning_content": fake_state.generation_thoughts}}]})
+                if fake_state.fail_chat_mid_stream:
+                    # A real llama-server failure after headers are already
+                    # sent (context overflow, slot error): an error chunk,
+                    # then the connection closes without a [DONE] marker.
+                    first, _, _rest = content.partition(" ")
+                    if first:
+                        yield _sse({"choices": [{"delta": {"content": first}}]})
+                    yield _sse({"error": {"message": "context shift is disabled", "type": "server_error"}})
+                    return
                 for piece in _fake_llamacpp_chunks(content):
                     yield _sse({"choices": [{"delta": {"content": piece}}]})
                 yield _sse({

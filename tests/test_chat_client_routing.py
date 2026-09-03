@@ -623,6 +623,61 @@ def test_llamacpp_chat_client_streams_the_full_response_when_not_cancelled(tmp_p
     assert response["eval_count"] == 48
 
 
+def test_llamacpp_chat_client_does_not_leak_its_reader_thread_after_completion(tmp_path: Path) -> None:
+    """Regression guard: the streamed path's reader thread used to retry
+    pushing a "done" sentinel into an undrained queue forever once a normal
+    completion had already returned, because its only exit condition was the
+    per-turn cancellation_event -- which a successful turn never sets."""
+    import threading
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    state = FakeLlamaCppState(generation_response="short reply")
+    app = create_fake_llamacpp_app(state)
+    http_client = TestClient(app, base_url="http://fakellama")
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    before = {t.ident for t in threading.enumerate()}
+
+    response = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=Event(),
+    )
+
+    assert response["message"]["content"] == "short reply"
+    leaked = [
+        t for t in threading.enumerate()
+        if t.ident not in before and t.name == "llama-chat-reader"
+    ]
+    assert leaked == [], "reader thread(s) still alive after chat() returned"
+
+
+def test_llamacpp_chat_client_raises_on_a_mid_stream_error_chunk(tmp_path: Path) -> None:
+    """A failure surfaced after headers are sent (context overflow, a slot
+    error) must not be silently dropped into an empty "successful" answer
+    that then gets persisted as the assistant's turn."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    state = FakeLlamaCppState(generation_response="partial content", fail_chat_mid_stream=True)
+    app = create_fake_llamacpp_app(state)
+    http_client = TestClient(app, base_url="http://fakellama")
+    provider = _StaticProvider("http://fakellama")
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+
+    with pytest.raises(LlamaCppError) as excinfo:
+        client.chat(
+            model=f"gguf:{model_path.name}",
+            messages=[{"role": "user", "content": "hi"}],
+            options={},
+            cancellation_event=Event(),
+        )
+
+    assert "context shift is disabled" in str(excinfo.value)
+
+
 def test_adapt_falls_back_to_wall_clock_when_timings_absent() -> None:
     payload = {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
     adapted = _adapt_to_ollama_shape(payload, elapsed_seconds=1.5)
