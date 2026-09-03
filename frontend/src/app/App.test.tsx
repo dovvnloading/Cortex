@@ -598,6 +598,58 @@ describe("App", () => {
     intervalSpy.mockRestore();
   });
 
+  it("pauses execution-task polling while the page is hidden and refreshes immediately on return", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    let executionTaskCalls = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) {
+        executionTaskCalls += 1;
+        return json({ tasks: [] });
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+    let intervalHandler: (() => void) | undefined;
+    const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation((handler) => {
+      intervalHandler = handler as () => void;
+      return 1;
+    });
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+
+    try {
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+      await waitFor(() => expect(executionTaskCalls).toBe(1));
+      expect(intervalHandler).toBeDefined();
+
+      // Hidden: a poll tick must not fetch at all.
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      act(() => intervalHandler?.());
+      expect(executionTaskCalls).toBe(1);
+      act(() => intervalHandler?.());
+      expect(executionTaskCalls).toBe(1);
+
+      // Visible again: the visibilitychange listener refreshes immediately,
+      // it doesn't wait for the next 1s tick.
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(executionTaskCalls).toBe(2));
+    } finally {
+      if (visibilityDescriptor) Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      intervalSpy.mockRestore();
+    }
+  });
+
   it("does not replay terminal tasks from before the current backend session", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
