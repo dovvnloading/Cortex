@@ -81,6 +81,7 @@ class _FakeAttempt:
         self.started = Event()
         self.cancelled = Event()
         self.closed = False
+        self.close_event = Event()
 
     def transform(self, _request_id: str, _job_id: str, _plan: Any, _content: bytes, cancel_event: Event) -> RecipeWorkerOutput:
         self.started.set()
@@ -98,6 +99,7 @@ class _FakeAttempt:
 
     def close(self) -> None:
         self.closed = True
+        self.close_event.set()
 
 
 def _request(source_artifact_id: str, *, request_id: str = "recipe-request") -> RecipeImageRequest:
@@ -164,7 +166,11 @@ def test_coordinator_publishes_owner_scoped_result_once(tmp_path: Path):
     artifact = repository.get_artifact(result_artifact_id, owner=OWNER)
     assert artifact is not None
     assert repository.read_artifact(result_artifact_id) == _image_bytes()
-    assert attempt.closed
+    # The worker thread's `finally: attempt.close()` runs just after the
+    # repository transition wait() observed, not atomically with it -- give
+    # it a bounded window to actually execute under load rather than
+    # asserting it has already happened.
+    assert attempt.close_event.wait(2)
 
     duplicate = coordinator.start_image_transform(request)
     assert duplicate.job_id == accepted.job_id
@@ -222,7 +228,10 @@ def test_coordinator_cancellation_is_terminal_and_cleans_staging(tmp_path: Path)
     assert completed.status == "cancelled"
     assert completed.error == "cancelled"
     assert completed.result is None
-    assert attempt.closed
+    # Same reasoning as the success-path test above: attempt.close() runs in
+    # the worker thread's finally block, just after (not atomically with)
+    # the repository transition that wait() observed.
+    assert attempt.close_event.wait(2)
 
 
 def test_recovery_rejects_tampered_payload_and_never_interprets_a_path(tmp_path: Path):
