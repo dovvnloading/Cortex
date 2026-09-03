@@ -346,9 +346,20 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       return undefined;
     }
     void refreshExecutionTasks();
-    const timer = window.setInterval(() => void refreshExecutionTasks(), 1000);
+    // Skip ticks while the window/tab is hidden -- this is a desktop app that
+    // also runs a local model, and there's no reason to keep polling every
+    // second when it's minimized or backgrounded. A visibilitychange listener
+    // fires an immediate refresh on return so the tray doesn't sit stale.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshExecutionTasks();
+    }, 1000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshExecutionTasks();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [refreshExecutionTasks, system?.execution_preview_available]);
 
@@ -370,10 +381,19 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 2000);
+    // Same visibility gate as the execution-task poll above: don't spend
+    // cycles asking about llama.cpp state while the window is backgrounded.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 2000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [api, onSessionExpired, selectedModelIsGGUF, setLlamacppStatus]);
 
