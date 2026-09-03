@@ -214,6 +214,14 @@ class LlamaCppChatClient:
         usage: dict | None = None
         timings: dict | None = None
         self._begin_http_request()
+        reader: Thread | None = None
+        # Set once the consumer below is finished reading, by any exit path
+        # ([DONE], a raised error, or cancellation). Without this, a producer
+        # that finishes after the consumer has already returned retries
+        # `lines.put(...)` against a queue nobody drains until
+        # cancellation_event -- a shared, per-turn flag that a normal
+        # successful completion never sets -- forever.
+        reader_done = Event()
         try:
             with self._http.stream(
                 "POST",
@@ -232,24 +240,29 @@ class LlamaCppChatClient:
                 lines: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
                 done = object()
 
+                def stopped() -> bool:
+                    return cancellation_event.is_set() or reader_done.is_set()
+
                 def read_lines() -> None:
                     try:
                         for line in response.iter_lines():
-                            while not cancellation_event.is_set():
+                            if stopped():
+                                return
+                            while not stopped():
                                 try:
                                     lines.put(("line", line), timeout=0.05)
                                     break
                                 except queue.Full:
                                     continue
                     except BaseException as exc:  # noqa: BLE001 - pass transport errors to caller
-                        while not cancellation_event.is_set():
+                        while not stopped():
                             try:
                                 lines.put(("error", exc), timeout=0.05)
                                 break
                             except queue.Full:
                                 continue
                     finally:
-                        while not cancellation_event.is_set():
+                        while not stopped():
                             try:
                                 lines.put(("done", done), timeout=0.05)
                                 break
@@ -258,40 +271,51 @@ class LlamaCppChatClient:
 
                 reader = Thread(target=read_lines, name="llama-chat-reader", daemon=True)
                 reader.start()
-                while not cancellation_event.is_set():
-                    try:
-                        kind, payload = lines.get(timeout=0.05)
-                    except queue.Empty:
-                        continue
-                    if kind == "error":
-                        if isinstance(payload, httpx.TransportError):
-                            raise payload
-                        raise RuntimeError("The llama.cpp response reader failed.") from payload
-                    if kind == "done":
-                        break
-                    line = payload
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload = line[len("data:"):].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(payload)
-                    except ValueError:
-                        continue
-                    choices = chunk.get("choices") or []
-                    if choices:
-                        delta = choices[0].get("delta") or {}
-                        content_piece = delta.get("content")
-                        if content_piece:
-                            content_parts.append(content_piece)
-                        reasoning_piece = delta.get("reasoning_content")
-                        if reasoning_piece:
-                            reasoning_parts.append(reasoning_piece)
-                    if chunk.get("usage"):
-                        usage = chunk["usage"]
-                    if chunk.get("timings"):
-                        timings = chunk["timings"]
+                try:
+                    while not cancellation_event.is_set():
+                        try:
+                            kind, payload = lines.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        if kind == "error":
+                            if isinstance(payload, httpx.TransportError):
+                                raise payload
+                            raise RuntimeError("The llama.cpp response reader failed.") from payload
+                        if kind == "done":
+                            break
+                        line = payload
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:"):].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                        except ValueError:
+                            continue
+                        stream_error = chunk.get("error")
+                        if stream_error:
+                            raise LlamaCppError(_stream_error_detail(stream_error))
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            content_piece = delta.get("content")
+                            if content_piece:
+                                content_parts.append(content_piece)
+                            reasoning_piece = delta.get("reasoning_content")
+                            if reasoning_piece:
+                                reasoning_parts.append(reasoning_piece)
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+                        if chunk.get("timings"):
+                            timings = chunk["timings"]
+                finally:
+                    # Tell the producer to stop retrying now, before this
+                    # `with` block's __exit__ closes the response below --
+                    # closing is what actually unblocks a read in flight, so
+                    # the reader is joined only after that has happened (see
+                    # the outer `finally`), never here.
+                    reader_done.set()
         except httpx.TransportError as exc:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."
@@ -303,6 +327,8 @@ class LlamaCppChatClient:
                 "The local llama.cpp chat client is unavailable; restart Cortex."
             ) from exc
         finally:
+            if reader is not None:
+                reader.join(timeout=2.0)
             self._end_http_request()
         # Reuse the existing non-streamed adapter by handing it a payload
         # shaped the same way -- accumulated deltas standing in for the
@@ -351,6 +377,25 @@ def _server_error_detail(response: httpx.Response) -> str:
             detail = payload.get("message")
     if not isinstance(detail, str) or not detail.strip():
         return f"The local model runtime failed with HTTP {response.status_code}."
+    return detail.strip()[:_MAX_SERVER_ERROR_CHARS]
+
+
+def _stream_error_detail(error: object) -> str:
+    """llama-server's reason for failing mid-stream, or a neutral fallback.
+
+    A streamed response can carry an ``{"error": ...}`` chunk instead of (or
+    in addition to, with no further content) a terminal ``[DONE]`` marker --
+    the wire-level equivalent of the HTTP-level error ``_server_error_detail``
+    handles. Left unchecked, the chunk was silently skipped and the turn
+    completed as an empty "success".
+    """
+    detail: Any = None
+    if isinstance(error, dict):
+        detail = error.get("message") or error.get("type")
+    elif isinstance(error, str):
+        detail = error
+    if not isinstance(detail, str) or not detail.strip():
+        return "The local model runtime reported an error while streaming its response."
     return detail.strip()[:_MAX_SERVER_ERROR_CHARS]
 
 
