@@ -389,7 +389,7 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         )
         assert (
             client.post("/api/v1/memories/clear", json={}, headers=headers).status_code
-            == 409
+            == 422
         )
         assert client.post(
             "/api/v1/memories/clear", json={"confirm": True}, headers=headers
@@ -398,6 +398,27 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         models = client.get("/api/v1/models", headers=headers)
         assert models.status_code == 200
         assert "qwen3:8b" in models.json()["installed_models"]
+
+
+def test_memory_clear_without_confirmation_is_a_client_validation_error():
+    """A missing `confirm` flag is an invalid request body, not a state conflict."""
+
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        client.post("/api/v1/memories", json={"memo": "Alice"}, headers=headers)
+
+        missing = client.post("/api/v1/memories/clear", json={}, headers=headers)
+        assert missing.status_code == 422
+        assert missing.json()["detail"] == (
+            "Clearing permanent memories requires explicit confirmation."
+        )
+
+        unconfirmed = client.post(
+            "/api/v1/memories/clear", json={"confirm": False}, headers=headers
+        )
+        assert unconfirmed.status_code == 422
+        assert isinstance(unconfirmed.json()["detail"], str)
 
 
 def test_generation_input_is_trimmed_and_rejects_invisible_text():

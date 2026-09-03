@@ -656,12 +656,12 @@ def build_router() -> APIRouter:
     ) -> MemoryResponse:
         if not payload.confirm:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Clearing permanent memories requires explicit confirmation.",
             )
         if payload.confirmation_intent not in (None, "clear_permanent_memory"):
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="A clear-memory confirmation intent is required.",
             )
         try:
