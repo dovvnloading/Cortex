@@ -83,7 +83,10 @@ describe("ChatPage composer integration", () => {
   it("asks before clearing memories requested by a completed generation", async () => {
     const user = userEvent.setup();
     const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    // Regression guard for the blocking-dialog bug: window.confirm() must
+    // never be invoked -- the confirmation now runs through the app's own
+    // async dialog instead of the synchronous, main-thread-freezing native one.
+    const confirm = vi.spyOn(window, "confirm");
     let emit: ((event: unknown) => void) | null = null;
     let resolveStream: (() => void) | null = null;
     const api = chatApi({
@@ -118,14 +121,19 @@ describe("ChatPage composer integration", () => {
       resolveStream?.();
     });
 
+    expect(await screen.findByRole("heading", { name: "Clear permanent memories?" })).toBeVisible();
+    expect(screen.getByText("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Clear memories" }));
+
     await waitFor(() => expect(clearMemory).toHaveBeenCalledTimes(1));
-    expect(confirm).toHaveBeenCalledWith("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.");
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("does not clear memories when the user declines a generation proposal", async () => {
     const user = userEvent.setup();
     const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();
-    vi.spyOn(window, "confirm").mockReturnValue(false);
+    // Same regression guard as the confirm-path test above.
+    const confirm = vi.spyOn(window, "confirm");
     let emit: ((event: unknown) => void) | null = null;
     let resolveStream: (() => void) | null = null;
     const api = chatApi({
@@ -161,7 +169,11 @@ describe("ChatPage composer integration", () => {
     });
 
     await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+
     expect(clearMemory).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Clear permanent memories?" })).not.toBeInTheDocument());
   });
 
   it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {

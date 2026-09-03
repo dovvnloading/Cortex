@@ -8,6 +8,7 @@ import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hoo
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { useUiStore } from "../../stores/useUiStore";
+import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
@@ -116,6 +117,7 @@ export function ChatPage({
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [memoryClearPromptOpen, setMemoryClearPromptOpen] = useState(false);
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
   const messageListRef = useRef<MessageListHandle>(null);
@@ -250,16 +252,26 @@ export function ChatPage({
       useUiStore.getState().notify("Cortex requested clearing permanent memories. Review Settings to confirm.", "info");
       return;
     }
-    if (!window.confirm("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.")) {
-      useUiStore.getState().notify("Permanent memories were not cleared.", "info");
-      return;
-    }
+    // Ask via the app's own dialog rather than window.confirm(): that native
+    // call is synchronous and blocks the whole JS thread -- including the
+    // pending message bubble's teardown -- until the OS dialog is dismissed.
+    setMemoryClearPromptOpen(true);
+  }, [onClearMemory, reconcileChat]);
+
+  const cancelMemoryClear = useCallback(() => {
+    setMemoryClearPromptOpen(false);
+    useUiStore.getState().notify("Permanent memories were not cleared.", "info");
+  }, []);
+
+  const confirmMemoryClear = useCallback(async () => {
     try {
-      await onClearMemory();
+      await onClearMemory?.();
     } catch (error) {
       useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not clear memories.", "error");
+    } finally {
+      setMemoryClearPromptOpen(false);
     }
-  }, [onClearMemory, reconcileChat]);
+  }, [onClearMemory]);
 
   useEffect(() => {
     viewThreadIdRef.current = threadId;
@@ -738,7 +750,49 @@ export function ChatPage({
           onGenerationOptionsChange={(next) => setThreadOptions(threadOptionsKey, next)}
         />
       </div>
+      {memoryClearPromptOpen && (
+        <MemoryClearConfirmDialog onCancel={cancelMemoryClear} onConfirm={confirmMemoryClear} />
+      )}
     </section>
+  );
+}
+
+/**
+ * Confirms Cortex's in-band request to clear permanent memories. A plain
+ * yes/no dialog (mirroring DeleteGroupDialog in ChatLibrary) rather than
+ * window.confirm(), which blocks the whole JS thread -- including the
+ * pending message bubble's teardown -- until the native dialog is dismissed.
+ */
+function MemoryClearConfirmDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Dialog.Root open onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
+      <DialogContent>
+        <Dialog.Title>Clear permanent memories?</Dialog.Title>
+        <p className="delete-dialog-description">Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.</p>
+        <div className="dialog-actions">
+          <button type="button" className="button button-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button
+            type="button"
+            className="button button-danger"
+            disabled={busy}
+            onClick={async () => {
+              if (busy) return;
+              setBusy(true);
+              try { await onConfirm(); } finally { setBusy(false); }
+            }}
+          >
+            {busy ? "Clearing…" : "Clear memories"}
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog.Root>
   );
 }
 
