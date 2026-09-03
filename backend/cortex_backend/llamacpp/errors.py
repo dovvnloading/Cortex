@@ -21,6 +21,17 @@ class LlamaCppError(RuntimeError):
         self.error = error
         self.status_code = status_code
 
+    @property
+    def user_message(self) -> str:
+        """Safe-to-show text for any generic job-failure handler.
+
+        ``services/llm.py``'s ``_generation_failure_message`` already reads
+        ``.error``/``.backend``/``.status_code`` directly for the chat-turn
+        path; this covers any other job runner (``api/jobs.py``) that only
+        knows the generic ``getattr(exc, "user_message", None)`` convention.
+        """
+        return self.error
+
 
 class BinaryVerificationError(LlamaCppError):
     """Raised when a downloaded/cached llama-server binary fails verification."""

@@ -65,7 +65,18 @@ _GGUF_SCALAR_BYTES = {
 
 
 class GGUFDownloadError(ValueError):
-    """Raised for an invalid download request (bad URL, unsafe filename, network failure)."""
+    """Raised for an invalid download request (bad URL, unsafe filename, network failure).
+
+    Every call site already writes a specific, safe-to-show message (refusing
+    to overwrite, out of disk space, not a GGUF file, ...); exposing it as
+    ``user_message`` lets the job registry (``api/jobs.py``) relay it instead
+    of its generic "Job failed. Please try again." fallback for any exception
+    that doesn't carry one.
+    """
+
+    @property
+    def user_message(self) -> str:
+        return str(self)
 
 
 @dataclass(frozen=True, slots=True)
