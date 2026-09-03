@@ -6,7 +6,7 @@ import asyncio
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 import json
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 from typing import Any
 
@@ -468,6 +468,126 @@ def test_pruning_aborted_reservation_preserves_newer_retry_index():
     registry.abort_reservation(pruning_trigger, owner="owner")
 
 
+def test_preparation_neither_blocks_the_event_loop_nor_holds_the_registry_lock():
+    """Admission preparation writes to disk, so it must run off the loop.
+
+    ``start_reserved``'s preparation callback is the step that persists a
+    generation's user turn.  Running it on the event loop while holding the
+    registry lock froze the entire API for the length of that write: no other
+    coroutine could run (an SSE poll, another request), and every other
+    registry caller queued behind the lock (a worker thread publishing
+    progress, a cancel).  Both must stay live while preparation is in flight.
+    """
+
+    async def scenario() -> None:
+        registry = JobRegistry()
+        reservation = registry.reserve(
+            kind="generation",
+            owner="owner",
+            thread_id=THREAD_ID,
+        )
+        loop_ran = Event()
+        observed: dict[str, Any] = {}
+
+        async def other_loop_work() -> None:
+            loop_ran.set()
+
+        def prepare() -> dict[str, Any]:
+            # Another thread -- a worker publishing progress, a cancel --
+            # must not queue behind this preparation's disk work.
+            probe = Thread(
+                target=lambda: observed.__setitem__(
+                    "probed_status",
+                    registry.status(
+                        reservation.snapshot.job_id, owner="owner"
+                    ).status,
+                )
+            )
+            probe.start()
+            probe.join(timeout=5.0)
+            observed["registry_lock_free"] = not probe.is_alive()
+            # And the event loop must still be running other coroutines.
+            observed["event_loop_live"] = loop_ran.wait(timeout=5.0)
+            return {"user_message_id": "m-1"}
+
+        heartbeat = asyncio.create_task(other_loop_work())
+        snapshot, acceptance = await registry.start_reserved(
+            reservation,
+            owner="owner",
+            runner=lambda sink, cancel_event: {"ok": not cancel_event.is_set()},
+            prepare=prepare,
+        )
+        await heartbeat
+
+        assert observed["registry_lock_free"] is True
+        assert observed["event_loop_live"] is True
+        assert observed["probed_status"] == "queued"
+        assert acceptance == {"user_message_id": "m-1"}
+
+        # The worker still starts and completes normally afterwards.
+        for _ in range(500):
+            status = registry.status(snapshot.job_id, owner="owner").status
+            if status in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+        assert registry.status(snapshot.job_id, owner="owner").status == "succeeded"
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_during_preparation_still_reaches_a_terminal_job():
+    """A cancel that lands mid-preparation is honoured, not dropped.
+
+    While preparation runs there is no worker task yet, so cancel() cannot
+    finalize the record itself without racing the start that is about to
+    create one.  It defers instead: it marks the job cancelling, and the
+    worker that the in-flight start goes on to create finalizes it on
+    ``_run``'s first lock acquisition -- the same path a cancel arriving a
+    moment later already takes.
+    """
+
+    async def scenario() -> None:
+        registry = JobRegistry()
+        reservation = registry.reserve(
+            kind="generation",
+            owner="owner",
+            thread_id=THREAD_ID,
+        )
+        preparing = Event()
+        release = Event()
+
+        def prepare() -> dict[str, Any]:
+            preparing.set()
+            release.wait(timeout=5.0)
+            return {"user_message_id": "m-1"}
+
+        started = asyncio.create_task(
+            registry.start_reserved(
+                reservation,
+                owner="owner",
+                runner=lambda sink, cancel_event: {"ran": not cancel_event.is_set()},
+                prepare=prepare,
+            )
+        )
+        while not preparing.is_set():
+            await asyncio.sleep(0.005)
+
+        cancelled = registry.cancel(reservation.snapshot.job_id, owner="owner")
+        assert cancelled.status == "cancelling"
+
+        release.set()
+        snapshot, _acceptance = await started
+
+        for _ in range(500):
+            status = registry.status(snapshot.job_id, owner="owner").status
+            if status in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+        assert registry.status(snapshot.job_id, owner="owner").status == "cancelled"
+
+    asyncio.run(scenario())
+
+
 def test_shutdown_closes_admission_and_prevents_starting_reserved_work():
     async def scenario() -> None:
         registry = JobRegistry()
@@ -482,7 +602,7 @@ def test_shutdown_closes_admission_and_prevents_starting_reserved_work():
         await registry.shutdown()
 
         with pytest.raises(JobConflict):
-            registry.start_reserved(
+            await registry.start_reserved(
                 reservation,
                 owner="owner",
                 runner=lambda sink, cancel_event: {

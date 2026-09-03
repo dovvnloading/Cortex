@@ -1713,7 +1713,7 @@ def build_router() -> APIRouter:
                             },
                         }
 
-                    snapshot, _ = jobs.start_reserved(
+                    snapshot, _ = await jobs.start_reserved(
                         reservation,
                         owner=principal.session_id,
                         runner=runner,
@@ -2195,7 +2195,7 @@ async def _start_generation_job(
                 "stats": stats_payload,
             }
 
-        snapshot, acceptance = jobs.start_reserved(
+        snapshot, acceptance = await jobs.start_reserved(
             reservation,
             owner=principal.session_id,
             runner=runner,

@@ -105,6 +105,11 @@ class _JobRecord:
     request_fingerprint: str | None = None
     reservation_token: str | None = None
     acceptance: Mapping[str, Any] = field(default_factory=dict)
+    # A start_reserved call has claimed this reservation and is running its
+    # preparation off the event loop.  No worker task exists yet, but one is
+    # coming: cancellation must defer finalization to that call instead of
+    # treating the record as work that never began.
+    starting: bool = False
     prepared: bool = False
     preparation_error: str | None = None
     cancel_event: Event = field(default_factory=Event)
@@ -271,7 +276,7 @@ class JobRegistry:
                 owner=owner,
             )
             return snapshot
-        snapshot, _ = self.start_reserved(
+        snapshot, _ = await self.start_reserved(
             reservation,
             owner=owner,
             runner=runner,
@@ -344,7 +349,7 @@ class JobRegistry:
                 token=reservation_token,
             )
 
-    def start_reserved(
+    async def start_reserved(
         self,
         reservation: JobReservation,
         *,
@@ -355,23 +360,73 @@ class JobRegistry:
     ) -> tuple[JobSnapshot, Mapping[str, Any]]:
         """Prepare side effects and start one previously reserved worker.
 
-        The optional preparation callback runs while admission remains locked.
-        This keeps request cancellation and shutdown from interleaving with the
-        final chat mutation that makes an accepted generation visible.
+        Preparation is the last step before an accepted job becomes visible,
+        and for a generation it writes the user's turn to the chat database.
+        That write must not run on the event loop, and must not run while the
+        registry lock is held: everything else in this registry -- a worker
+        thread publishing progress, a cancel, an SSE poll -- takes the same
+        lock, and the API is served by a single event loop that a synchronous
+        disk write freezes outright.
+
+        So preparation runs in three phases.  Phase one claims the
+        reservation under the lock (in-memory only, microseconds).  Phase two
+        runs the callback in a worker thread with no lock held.  Phase three
+        re-checks the state the callback could not see and starts the worker.
+
+        Between phases two and three the record carries ``starting``, which is
+        the contract that replaces "the lock was held the whole time":
+        :meth:`cancel` and :meth:`shutdown` see a record with no task yet, and
+        must not finalize it themselves, because this call is going to start
+        one.  Cancellation is still honoured -- phase three creates the task
+        anyway and ``_run`` finalizes it on its first lock acquisition,
+        exactly as it does for a cancel that arrives moments later.
         """
         if not reservation.created or not reservation.token:
             raise JobConflict("Only the reservation owner can start this job.")
         record = self._owned_record(reservation.snapshot.job_id, owner)
+
+        # Phase one: claim the reservation.  Nothing here touches disk, so the
+        # lock is held only for as long as a few dict lookups take.
         with self._lock:
             if not self._accepting:
                 raise JobRegistryClosed("Cortex is shutting down.")
             if reservation.token != record.reservation_token:
                 raise JobConflict("Job reservation is no longer valid.")
+            if record.starting:
+                raise JobConflict("Job preparation is already in progress.")
             if record.prepared or record.task is not None:
                 raise JobConflict("Job preparation has already completed.")
             if record.status in TERMINAL_STATUSES or record.cancel_event.is_set():
                 raise JobConflict("Job preparation was cancelled.")
-            acceptance = dict(prepare() if prepare is not None else {})
+            record.starting = True
+
+        # Phase two: the callback may block on disk.  Off the loop, no lock.
+        # The reservation token is deliberately still valid here, so a caller
+        # whose preparation raises can still abort the reservation it holds.
+        try:
+            acceptance = dict(
+                await asyncio.to_thread(prepare) if prepare is not None else {}
+            )
+        except BaseException:
+            with self._lock:
+                record.starting = False
+            raise
+
+        # Phase three: publish what preparation produced and start the worker.
+        with self._lock:
+            record.starting = False
+            if record.status in TERMINAL_STATUSES:
+                raise JobConflict("Job preparation was cancelled.")
+            if not self._accepting:
+                # Shutdown began while preparation was in flight.  It has
+                # already collected the tasks it will await, so starting one
+                # now would leave a worker running behind a closed registry.
+                record.prepared = True
+                record.reservation_token = None
+                self._finalize_cancellation(record)
+                if self._active.get(record.kind) == record.job_id:
+                    self._active.pop(record.kind, None)
+                raise JobRegistryClosed("Cortex is shutting down.")
             record.acceptance = acceptance
             record.prepared = True
             record.reservation_token = None
@@ -474,7 +529,10 @@ class JobRegistry:
                     status="cancelling",
                     data={"message": "Stopping response..."},
                 )
-                if record.task is None:
+                # ``starting`` means start_reserved is mid-preparation and
+                # will create the worker task; it owns finalization from
+                # here, and ``_run`` will observe the cancel_event set above.
+                if record.task is None and not record.starting:
                     record.prepared = True
                     record.reservation_token = None
                     self._finalize_cancellation(record)
@@ -551,7 +609,10 @@ class JobRegistry:
                         status="cancelling",
                         data={"message": "Stopping response during shutdown..."},
                     )
-                if record.task is None:
+                # See cancel(): a record still preparing has no task yet, but
+                # start_reserved's phase three will close it out once it sees
+                # that admission has stopped accepting work.
+                if record.task is None and not record.starting:
                     record.prepared = True
                     record.reservation_token = None
                     self._finalize_cancellation(record)
