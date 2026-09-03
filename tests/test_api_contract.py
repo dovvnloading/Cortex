@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 import pytest
@@ -398,6 +399,78 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         models = client.get("/api/v1/models", headers=headers)
         assert models.status_code == 200
         assert "qwen3:8b" in models.json()["installed_models"]
+
+
+def test_add_message_rejects_malformed_new_chat_thread_id():
+    """A client-chosen thread_id only becomes a new chat's id if it is safe.
+
+    ``POST /chats/{thread_id}/messages`` creates a brand new chat using the
+    literal path segment as its permanent id whenever no chat with that id
+    exists yet. A pathological id (whitespace, a slash-like sequence, a
+    control character, ...) must be rejected with 422 before that happens.
+    """
+
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        for bad_thread_id in ("has space", "control\x07char", "semi;colon"):
+            encoded = quote(bad_thread_id, safe="")
+            response = client.post(
+                f"/api/v1/chats/{encoded}/messages",
+                json={"role": "user", "content": "hello"},
+                headers=headers,
+            )
+            assert response.status_code == 422, bad_thread_id
+            assert "thread_id" in response.json()["detail"]
+            assert dependencies.chats.get_chat(bad_thread_id) is None
+
+
+def test_add_message_with_valid_new_thread_id_creates_chat():
+    """A well-formed client-chosen thread_id may still create a brand new chat."""
+
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        new_thread_id = "Client-Chosen_Thread-123"
+        response = client.post(
+            f"/api/v1/chats/{new_thread_id}/messages",
+            json={"role": "user", "content": "hello"},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["id"] == new_thread_id
+        chat = dependencies.chats.get_chat(new_thread_id)
+        assert chat is not None
+        assert chat["messages"][0]["content"] == "hello"
+
+
+def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
+    """A chat id that predates this check keeps working unconditionally.
+
+    The new format check only ever gates chat *creation*. Looking up or
+    appending to an already-existing chat -- however it got its id -- must
+    keep succeeding for backward compatibility with any local database
+    populated before this validation existed.
+    """
+
+    dependencies = build_demo_dependencies()
+    legacy_thread_id = "legacy chat id!"
+    dependencies.chats.create_chat(legacy_thread_id, "Legacy Chat")
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        encoded = quote(legacy_thread_id, safe="")
+        response = client.post(
+            f"/api/v1/chats/{encoded}/messages",
+            json={"role": "user", "content": "hello"},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["id"] == legacy_thread_id
+        chat = dependencies.chats.get_chat(legacy_thread_id)
+        assert chat["messages"][0]["content"] == "hello"
 
 
 def test_memory_clear_without_confirmation_is_a_client_validation_error():

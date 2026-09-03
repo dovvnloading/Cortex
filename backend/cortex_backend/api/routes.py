@@ -205,6 +205,41 @@ def _call_with_timeout(func, *args, timeout: float, **kwargs):
     return outcome[0] if outcome else None
 
 
+# A client may supply the id of a chat that does not exist yet -- both
+# add_message() and _start_generation_job() then create that chat using the
+# client's literal string as its permanent primary key. A server-generated id
+# is always uuid4().hex (32 lowercase hex characters), which trivially
+# satisfies this pattern, so the cap below never bites a legitimate id; it
+# exists only to keep a client from turning the primary key into something
+# pathological (unbounded length, whitespace, control characters, path
+# separators, ...) that downstream code -- logs, URLs, filesystem-adjacent
+# storage -- silently assumes will not appear. This is intentionally a
+# distinct constant from routes._SAFE_EXECUTION_THREAD_ID even though the
+# character class matches today: that one mirrors the execution store's own
+# request-id charset for an unrelated telemetry correlation label, and the
+# two should be free to diverge independently. This check only ever gates
+# chat *creation*; looking up or appending to an already-existing chat (by
+# any id, including one created before this check existed) is unaffected.
+_NEW_CHAT_THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _reject_invalid_new_chat_thread_id(thread_id: str) -> None:
+    """Raise 422 if ``thread_id`` is unfit to become a new chat's primary key.
+
+    Call this only once it is known that no chat with this id exists yet --
+    never for a reference to an already-existing chat, which must keep
+    working regardless of how its id looks.
+    """
+    if not _NEW_CHAT_THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "thread_id must be an alphanumeric identifier (dashes and "
+                "underscores allowed) up to 128 characters."
+            ),
+        )
+
+
 def build_router() -> APIRouter:
     router = APIRouter()
     session_bearer = HTTPBearer(
@@ -542,6 +577,8 @@ def build_router() -> APIRouter:
     ) -> ChatResponse:
         try:
             existing = deps.chats.get_chat(thread_id)
+            if existing is None:
+                _reject_invalid_new_chat_thread_id(thread_id)
             attachment_refs = _validate_chat_attachment_refs(
                 request,
                 deps,
@@ -1870,6 +1907,11 @@ async def _start_generation_job(
     started = False
     try:
         chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
+        if chat is None:
+            # No chat exists yet, so `thread_id` (a client-supplied
+            # payload.thread_id, or else uuid4().hex from above -- which
+            # always matches) is about to become a new chat's primary key.
+            _reject_invalid_new_chat_thread_id(thread_id)
         current_revision = chat_revision(chat) if chat is not None else 0
         admission_revision = current_revision
         if (
