@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -116,7 +117,7 @@ def test_api_factory_is_headless_and_session_exchange_is_one_time():
     with client:
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-c",
                 "import sys; from cortex_backend.api import create_app; assert 'PySide6' not in sys.modules",
             ],
