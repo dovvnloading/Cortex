@@ -139,3 +139,57 @@ def test_generation_does_not_append_an_assistant_after_a_concurrent_chat_mutatio
         assert events[-1]["event"] == "generation.failed"
         chat = client.get("/api/v1/chats/cas-thread", headers=headers).json()
         assert [message["role"] for message in chat["messages"]] == ["user", "user"]
+
+
+class _RaceInjectingChatRepository:
+    """Land a genuinely concurrent chat write mid ``add_message``.
+
+    Mimics an independent ``/chats/{id}/messages`` request that lands between
+    the coarse admission-revision check in ``prepare()`` and the actual
+    compare-and-append it performs, so the real ``add_message`` call's own
+    CAS observes a stale ``expected_revision`` and raises
+    ``ChatRevisionConflict`` -- even though the earlier check inside
+    ``prepare()`` already passed.
+    """
+
+    def __init__(self, inner, *, thread_id: str):
+        self._inner = inner
+        self._thread_id = thread_id
+        self._injected = False
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def add_message(self, thread_id, role, content, **kwargs):
+        if not self._injected and thread_id == self._thread_id and role == "user":
+            self._injected = True
+            self._inner.add_message(
+                thread_id,
+                "user",
+                "a genuinely concurrent message",
+                thread_title="New Chat",
+            )
+        return self._inner.add_message(thread_id, role, content, **kwargs)
+
+
+def test_generation_route_maps_a_concurrent_chat_write_race_to_409():
+    thread_id = "revision-race-thread"
+    dependencies = build_demo_dependencies()
+    dependencies.chats = _RaceInjectingChatRepository(
+        dependencies.chats, thread_id=thread_id
+    )
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        response = client.post(
+            "/api/v1/generations",
+            json={
+                "request_id": "revision-race-generation",
+                "thread_id": thread_id,
+                "user_input": "hello",
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 409
+    assert "revision changed" in response.json()["detail"].lower()
