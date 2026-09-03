@@ -202,6 +202,54 @@ def test_trusted_host_middleware_accepts_ipv6_loopback_like_the_session_guard():
             assert response.status_code == 200, host_header
 
 
+def test_a_re_exchanged_session_still_owns_the_jobs_it_started():
+    """A job outlives the bearer session that started it.
+
+    ``SessionManager.exchange`` mints a fresh random ``session_id`` every
+    time a session is re-exchanged -- an app restart, a token refresh, the
+    ``/session/handoff`` flow -- while the installation principal stays
+    fixed. Registry jobs (generation, models, gguf_download) are therefore
+    owned by the installation principal, not the session: owning them by
+    session id left a re-exchanged session unable to inspect or cancel work
+    it had started itself, even though the registry's
+    one-active-job-per-kind rule still counted that work against it.
+    """
+    app, client = _client()
+    with client:
+        first = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "durable-owner-generation", "user_input": "hello"},
+            headers=first,
+        )
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["job_id"]
+        with client.stream(
+            "GET", f"/api/v1/generations/{job_id}/events", headers=first
+        ) as response:
+            assert _events("".join(response.iter_text()))
+
+        # Re-exchange: a brand new bearer session for the same installation.
+        bootstrap_token, _expires_at = app.state.session_manager.issue_bootstrap_token()
+        exchanged = client.post(
+            "/api/v1/session/exchange", json={"bootstrap_token": bootstrap_token}
+        )
+        assert exchanged.status_code == 200, exchanged.text
+        second = {"Authorization": f"Bearer {exchanged.json()['session_token']}"}
+        assert second != first
+
+        status_response = client.get(f"/api/v1/generations/{job_id}", headers=second)
+        assert status_response.status_code == 200, status_response.text
+        assert status_response.json()["job_id"] == job_id
+        assert status_response.json()["status"] == "succeeded"
+
+        # The event stream performs the same ownership check before it opens.
+        with client.stream(
+            "GET", f"/api/v1/generations/{job_id}/events", headers=second
+        ) as replay:
+            assert replay.status_code == 200, replay.text
+
+
 def test_expired_session_is_rejected_without_exposing_token_details():
     manager = SessionManager(
         bootstrap_token="bootstrap",
