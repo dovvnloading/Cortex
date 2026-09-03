@@ -1411,6 +1411,19 @@ def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, An
         # frozen desktop launches, where importing the worker can be slower
         # than running a small approved script.
         connection.send({"ok": True, "event": "ready"})
+        # Hold here until the parent confirms the resource-limiting Job
+        # Object is attached (or that this platform has none to attach).
+        # Without this wait, the source below -- untrusted, only bounded by
+        # the AST allow-list at this point -- could run during the window
+        # between process creation and job assignment, unconstrained by the
+        # memory/CPU/process-count limits that window exists to apply before
+        # anything else does.
+        try:
+            go = connection.recv()
+        except (EOFError, OSError):
+            return
+        if not isinstance(go, Mapping) or go.get("go") is not True:
+            return
         result = run_code_in_worker(source, capabilities, workspace)
         connection.send({"ok": True, "result": result.as_payload()})
     except CodeExecutionError as exc:
