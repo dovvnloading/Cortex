@@ -716,6 +716,17 @@ class LocalExecutionCoordinator:
             workspace = root / job_id
             if workspace.exists() and (workspace.is_symlink() or getattr(workspace, "is_junction", lambda: False)()):
                 raise CodeExecutionError("workspace_invalid")
+            if workspace.exists():
+                # A prior attempt for this job_id can leave stale contents
+                # behind: a hard process crash skips _run_code's finally
+                # block (which normally calls _cleanup_code_workspace), and
+                # startup_recover() re-launches the same job_id afterward.
+                # exist_ok=True below would then silently reuse whatever
+                # files that crashed attempt left, letting them leak into
+                # what is supposed to be a fresh, isolated run. Clear it
+                # first so every attempt -- first launch or crash-recovery
+                # relaunch -- starts from a genuinely empty directory.
+                shutil.rmtree(workspace)
             workspace.mkdir(parents=True, exist_ok=True)
             resolved = workspace.resolve(strict=True)
             artifact_root = self.repository.artifact_root.resolve(strict=True)

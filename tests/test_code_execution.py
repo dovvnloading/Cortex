@@ -707,6 +707,58 @@ def test_code_workspace_cleanup_happens_before_lease_release(
     coordinator.shutdown()
 
 
+def test_code_workspace_clears_a_stale_directory_left_by_a_crashed_attempt(
+    tmp_path,
+) -> None:
+    """A hard crash mid-run skips _run_code's finally-block cleanup, so a
+    crash-recovery relaunch of the same job_id must not silently reuse
+    whatever files the crashed attempt left behind."""
+
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    job_id = "code-crash-recovery"
+    stale_workspace = repository.artifact_root / ".code_workspaces" / job_id
+    stale_workspace.mkdir(parents=True)
+    (stale_workspace / "output.txt").write_text("leftover from a crashed attempt")
+    (stale_workspace / "nested").mkdir()
+    (stale_workspace / "nested" / "more.txt").write_text("also stale")
+
+    workspace = coordinator._code_workspace(job_id)
+
+    resolved = Path(workspace)
+    assert resolved == stale_workspace.resolve()
+    assert resolved.is_dir()
+    assert list(resolved.iterdir()) == []
+    coordinator.shutdown()
+
+
+def test_code_workspace_rejects_a_symlinked_workspace_directory(tmp_path) -> None:
+    """The stale-directory clearing added above must not weaken the existing
+    symlink/junction guard: a workspace path that is itself a symlink is
+    still rejected outright rather than being rmtree'd."""
+
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    job_id = "code-symlink-guard"
+    workspaces_root = repository.artifact_root / ".code_workspaces"
+    workspaces_root.mkdir(parents=True)
+    outside_target = tmp_path / "outside-target"
+    outside_target.mkdir()
+    workspace_path = workspaces_root / job_id
+    try:
+        workspace_path.symlink_to(outside_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with pytest.raises(CodeExecutionError) as excinfo:
+        coordinator._code_workspace(job_id)
+    assert excinfo.value.code == "workspace_invalid"
+    # The symlink itself must be left untouched, not rmtree'd.
+    assert workspace_path.is_symlink()
+    assert outside_target.exists()
+    coordinator.shutdown()
+
+
 def test_model_only_proposes_code_from_the_structured_envelope() -> None:
     agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
     visible, _, _ = agent._parse_and_clean_response(
