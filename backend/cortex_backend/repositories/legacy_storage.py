@@ -25,6 +25,9 @@ import struct
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from threading import Lock, RLock
+from uuid import uuid4
 
 from cortex_backend.core.paths import AppPaths
 
@@ -41,6 +44,20 @@ class PersistenceError(RuntimeError):
         self.operation = operation
         self.cause = cause
         super().__init__(message)
+
+
+# One lock per resolved chat-database path, shared by every DatabaseManager
+# instance that opens it. Backup rotation and corrupt-primary recovery are
+# file-copy operations, not SQLite transactions, so SQLite's own locking
+# cannot serialize them against a concurrent instance in this process.
+_CHAT_DB_LOCKS_GUARD = Lock()
+_CHAT_DB_LOCKS: dict[str, RLock] = {}
+
+
+def _chat_db_lock_for(path: str) -> RLock:
+    key = os.path.normcase(os.path.abspath(path))
+    with _CHAT_DB_LOCKS_GUARD:
+        return _CHAT_DB_LOCKS.setdefault(key, RLock())
 
 
 @dataclass(frozen=True)
@@ -82,11 +99,20 @@ class DatabaseManager:
             )
         self.db_path = db_path
         self.legacy_history_dir = legacy_history_dir
+        self.backup_path = f"{self.db_path}.bak"
+        # Keep one older verified snapshot so an interrupted backup rotation
+        # cannot discard the only recovery copy (mirrors sqlite_settings.py).
+        self.previous_backup_path = f"{self.backup_path}.1"
+        self.last_corrupt_path: str | None = None
+        self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
         # diagnostics useful without copying them into process logs.
         logging.info("Database storage configured (private path omitted).")
         self._ensure_parent_directory()
-        self._create_tables()
+        with self._write_lock:
+            self._prepare_primary()
+            self._create_tables()
+            self._create_backup()
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -125,9 +151,147 @@ class DatabaseManager:
         """Retained for compatibility; operation connections close automatically."""
         return None
 
+    @staticmethod
+    def _database_is_valid(path: str) -> bool:
+        """Return whether an existing SQLite file can be opened and checked."""
+        if not os.path.exists(path):
+            return False
+        connection: sqlite3.Connection | None = None
+        try:
+            # Read-only mode: validation must not create or mutate a file
+            # before deciding whether it is safe to back up or recover from.
+            uri = Path(path).resolve().as_uri()
+            connection = sqlite3.connect(f"{uri}?mode=ro", timeout=10.0, uri=True)
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            return result is not None and str(result[0]).lower() == "ok"
+        except (OSError, sqlite3.Error, ValueError):
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @classmethod
+    def _atomic_copy_database(cls, source: str, destination: str) -> None:
+        """Copy a verified SQLite file without exposing a partial destination."""
+        temporary_path: str | None = None
+        try:
+            fd, temporary_path = tempfile.mkstemp(
+                prefix=f".{os.path.basename(destination)}.",
+                suffix=".tmp",
+                dir=os.path.dirname(destination) or ".",
+            )
+            os.close(fd)
+            shutil.copy2(source, temporary_path)
+            if not cls._database_is_valid(temporary_path):
+                raise OSError("database copy failed integrity validation")
+            os.replace(temporary_path, destination)
+            temporary_path = None
+        except (OSError, shutil.Error) as exc:
+            raise PersistenceError(
+                "Could not copy the chat database safely.", operation="backup", cause=exc
+            ) from exc
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except OSError as exc:
+                    raise PersistenceError(
+                        "Could not remove a temporary chat database copy.",
+                        operation="backup",
+                        cause=exc,
+                    ) from exc
+
+    def _prepare_primary(self) -> None:
+        """Validate the primary before backup rotation, recovering if needed.
+
+        Runs once at startup rather than on every write: WAL mode already
+        gives the primary strong crash safety for the continuous case (see
+        _create_tables), so this defends against the rarer catastrophic case
+        -- a corrupt or unreadable primary -- using the same validated,
+        two-generation backup rotation already proven in sqlite_settings.py.
+        """
+        if not os.path.exists(self.db_path) or self._database_is_valid(self.db_path):
+            return
+
+        for candidate in (self.backup_path, self.previous_backup_path):
+            if not self._database_is_valid(candidate):
+                continue
+            corrupt_path = f"{self.db_path}.corrupt-{uuid4().hex}"
+            try:
+                os.replace(self.db_path, corrupt_path)
+            except OSError as exc:
+                raise PersistenceError(
+                    "Could not preserve the corrupt chat database before recovery.",
+                    operation="recovery",
+                    cause=exc,
+                ) from exc
+            try:
+                self._atomic_copy_database(candidate, self.db_path)
+            except PersistenceError:
+                try:
+                    os.replace(corrupt_path, self.db_path)
+                except OSError as rollback_exc:
+                    raise PersistenceError(
+                        "Chat database recovery failed and the corrupt primary could not be "
+                        f"restored; it remains at {corrupt_path}.",
+                        operation="recovery",
+                        cause=rollback_exc,
+                    ) from rollback_exc
+                raise
+            logging.error(
+                "Chat database was corrupt; recovered from a verified backup. "
+                "The corrupt file was preserved for inspection (path omitted from logs)."
+            )
+            self.last_corrupt_path = corrupt_path
+            return
+
+        raise PersistenceError(
+            "Chat database is corrupt and no valid backup is available.",
+            operation="recovery",
+        )
+
+    def _create_backup(self) -> None:
+        """Refresh the validated backup from the current primary.
+
+        Called once at startup (after _prepare_primary and schema init), not
+        on every message write -- unlike settings, chat writes happen on
+        every turn, and a full-file copy on each one would not scale.
+        """
+        with self._write_lock:
+            if not os.path.exists(self.db_path) or not self._database_is_valid(self.db_path):
+                return
+            try:
+                # In WAL mode, recent commits can still live only in the
+                # sidecar -wal file; copying just the main file without
+                # checkpointing first could back up a database that is
+                # missing them. TRUNCATE folds the WAL back into the main
+                # file and removes the sidecar, so a plain file copy is a
+                # complete, self-contained snapshot.
+                with self.connect() as connection:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                # Preserve the prior verified backup before replacing the
+                # current generation. If the new copy fails, .bak stays intact.
+                if self._database_is_valid(self.backup_path):
+                    self._atomic_copy_database(self.backup_path, self.previous_backup_path)
+                self._atomic_copy_database(self.db_path, self.backup_path)
+            except PersistenceError:
+                raise
+            except OSError as exc:
+                raise PersistenceError(
+                    "Could not create a chat database backup.", operation="backup", cause=exc
+                ) from exc
+
     def _create_tables(self):
         """Creates the necessary tables in the database if they don't exist."""
         with self.connect() as conn:
+            # WAL is persisted in the database file itself, so this only needs
+            # to run once to take effect for every later connection. Unlike
+            # the previous rollback-journal mode, WAL + synchronous=NORMAL
+            # (already set in connect()) is SQLite's documented safe-and-fast
+            # combination: an application or OS crash can lose at most the
+            # last transaction, but cannot corrupt the database file, which
+            # rollback-journal mode does not guarantee under the same pragma.
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS threads (
                     id TEXT PRIMARY KEY,
