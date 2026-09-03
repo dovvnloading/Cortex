@@ -141,8 +141,12 @@ describe("App", () => {
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
     // Wait for the recovery stream's 401 to notify the session listener and
-    // return the app to its unauthenticated boundary.
-    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 5_000 })).toBeVisible();
+    // return the app to its unauthenticated boundary. This explicit timeout
+    // is independent of (and was previously shorter than headroom under) the
+    // global testTimeout in vitest.config.ts -- under full-suite load the two
+    // could elapse at effectively the same moment, failing the test even
+    // though the app was still working correctly.
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 12_000 })).toBeVisible();
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/generations/job-expired/events"))).toHaveLength(1);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
     expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();

@@ -443,6 +443,77 @@ describe("useGenerationStream", () => {
     act(() => result.current.stop());
   });
 
+  it("resets the reconnect backoff once a reconnect delivers an event", async () => {
+    // Regression test: reconnectAttempt used to only ever increment, so a
+    // long generation that reconnects a few times -- each one succeeding --
+    // still compounded the same exponential delay as a connection that never
+    // recovers. Mocking Math.random to 0.5 makes reconnectDelay's jitter
+    // factor exactly 1, so attempt 0 is always 250ms and attempt 1 is always
+    // 500ms with no flake risk.
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      let call = 0;
+      const streamGeneration = vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        call += 1;
+        if (call === 1) {
+          return Promise.reject(new Error("connection dropped"));
+        }
+        if (call === 2) {
+          // Recovers and delivers one event -- this must reset the backoff --
+          // before dropping again.
+          (onEvent as (event: unknown) => void)({
+            event_id: 1,
+            event: "generation.content_delta",
+            job_id: "job-reset",
+            thread_id: "thread-reset",
+            data: { delta: "x" },
+          });
+          return Promise.reject(new Error("connection dropped again"));
+        }
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      });
+      const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-reset", kind: "generation", status: "running", sequence: 1 });
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        void result.current.consume({ jobId: "job-reset", threadId: "thread-reset", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await act(async () => {
+        for (let index = 0; index < 4; index += 1) await Promise.resolve();
+      });
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+
+      // First backoff (attempt 0) is 250ms.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      await act(async () => {
+        for (let index = 0; index < 6; index += 1) await Promise.resolve();
+      });
+      expect(streamGeneration).toHaveBeenCalledTimes(2);
+
+      // If the event above reset the backoff, the next delay is 250ms again
+      // (attempt 0), not 500ms (attempt 1) -- 300ms is enough for the former
+      // but not the latter.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+      await act(async () => {
+        for (let index = 0; index < 6; index += 1) await Promise.resolve();
+      });
+      expect(streamGeneration).toHaveBeenCalledTimes(3);
+
+      act(() => result.current.stop());
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses jittered exponential reconnect delays with a hard ceiling", () => {
     expect(reconnectDelay(0, () => 0)).toBe(200);
     expect(reconnectDelay(0, () => 0.5)).toBe(250);
