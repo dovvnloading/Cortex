@@ -432,6 +432,72 @@ def test_download_gguf_allows_explicit_overwrite_after_validation(tmp_path: Path
     assert destination.read_bytes() == content
 
 
+def test_download_gguf_falls_back_to_a_plain_move_when_hard_links_are_unsupported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """exFAT, FAT32, and many SMB/network shares raise a plain OSError from
+    os.link (not FileExistsError) because they don't support hard links at
+    all. The promote step must fall back to a plain move instead of losing
+    the multi-gigabyte staging file to an unhandled OSError."""
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    def fake_link(source, dest) -> None:
+        del source, dest
+        raise OSError("hard links are not supported on this filesystem")
+
+    monkeypatch.setattr(download_module.os, "link", fake_link)
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert destination.read_bytes() == content
+    assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+def test_download_gguf_hard_link_fallback_still_refuses_a_racing_overwrite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The hard-link fallback must not silently clobber a model that another
+    writer created between the initial existence check and the fallback
+    move -- only the reason ("filesystem doesn't support hard links" vs.
+    "destination already exists") should change, not the refuse-to-overwrite
+    guarantee."""
+    content = _valid_gguf_content(tmp_path)
+    destination = tmp_path / "model.gguf"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=content)
+
+    def fake_link(source, dest) -> None:
+        del source
+        # Simulate a writer racing in and creating the destination the
+        # instant before the (unsupported) hard link would have.
+        Path(dest).write_bytes(b"a racing writer's model")
+        raise OSError("hard links are not supported on this filesystem")
+
+    monkeypatch.setattr(download_module.os, "link", fake_link)
+
+    with pytest.raises(GGUFDownloadError, match="refusing to overwrite"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert destination.read_bytes() == b"a racing writer's model"
+    assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
 # -- route: job-kind isolation -------------------------------------------------
 
 
