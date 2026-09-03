@@ -296,6 +296,24 @@ def download_gguf(
                 raise GGUFDownloadError(
                     "A model with this filename already exists; refusing to overwrite it."
                 ) from exc
+            except OSError as exc:
+                # Hard links aren't supported on every destination filesystem
+                # (exFAT, FAT32, and many SMB/network shares raise a plain
+                # ``OSError`` here, not ``FileExistsError``). Fall back to a
+                # plain move, which works for same-volume moves everywhere.
+                # Re-check for a racing writer first -- this narrows, but
+                # cannot fully close, the race window ``os.link`` closed on
+                # filesystems that support it.
+                if destination.exists():
+                    raise GGUFDownloadError(
+                        "A model with this filename already exists; refusing to overwrite it."
+                    ) from exc
+                try:
+                    os.replace(temp_path, destination)
+                except OSError as replace_exc:
+                    raise GGUFDownloadError(
+                        "Could not save the downloaded model to its destination folder."
+                    ) from replace_exc
             temp_path.unlink(missing_ok=True)
     except httpx.HTTPError as exc:
         raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
