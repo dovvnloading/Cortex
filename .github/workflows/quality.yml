@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -42,8 +42,34 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # requirements*.lock.txt pin exact versions and hashes for every
+      # dependency (direct and transitive) resolved for this job's Python
+      # 3.11 target. A stale lock -- committed after editing pyproject.toml
+      # without regenerating it -- would silently let this job install
+      # something different from what it claims to verify, so check first.
+      #
+      # `uv pip compile` reads its own prior output file as a starting point
+      # and only re-resolves what pyproject.toml's constraints actually force
+      # -- regenerating in place (the same path already committed) and then
+      # diffing against git reuses every already-locked version for an
+      # unrelated transitive dependency, rather than re-resolving it to
+      # whatever happens to be newest on the index right now. Compiling to a
+      # fresh path instead would make this check flaky: an unconstrained
+      # transitive dependency (e.g. numpy) can pick up a new upstream release
+      # between two independent resolves with no repository change at all.
+      - name: Verify dependency lockfiles are up to date
+        shell: pwsh
+        run: |
+          python -m pip install uv
+          uv pip compile pyproject.toml --python-version 3.11 --generate-hashes -o requirements.lock.txt
+          uv pip compile pyproject.toml --extra dev --python-version 3.11 --generate-hashes -o requirements-dev.lock.txt
+          git diff --exit-code -- requirements.lock.txt requirements-dev.lock.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "requirements*.lock.txt does not match pyproject.toml. Regenerate with 'uv pip compile pyproject.toml --python-version 3.11 --generate-hashes -o requirements.lock.txt' (add --extra dev for the dev lock) and commit the result."
+          }
+
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.lock.txt
 
       - name: Lint Python
         run: python -m ruff check backend tests tools main.py Cortex_Preview.py
@@ -112,6 +138,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
+      # Deliberately loose, unlocked pins here: this job's purpose is to
+      # catch a dependency that only breaks on one specific Python version,
+      # which a lock resolved for a single interpreter (see the `fast` and
+      # `heavy` jobs) cannot exercise. Do not switch this to
+      # requirements-dev.lock.txt.
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
@@ -139,6 +170,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements.lock.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -148,7 +180,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.lock.txt
 
       - name: Install frontend dependencies
         working-directory: frontend

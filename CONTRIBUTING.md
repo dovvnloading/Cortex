@@ -28,6 +28,21 @@ Install a small local model for smoke checks, for example
 `nemotron-3-nano:4b`. Do not use real prompts, responses, memories, or user
 data in tests or logs.
 
+`requirements.txt` and `requirements-dev.txt` intentionally carry loose
+version ranges so your local environment isn't forced onto one exact set of
+versions. CI installs from `requirements.lock.txt` /
+`requirements-dev.lock.txt` instead -- hash-pinned, fully resolved lock files
+for the same Python 3.11 target CI actually runs -- so a change is verified
+against the same dependency versions every time. If you edit
+`pyproject.toml`'s `dependencies` or `dev` extra, regenerate both locks and
+commit the result, or CI's `fast` job will fail on a staleness check:
+
+```powershell
+python -m pip install uv
+uv pip compile pyproject.toml --python-version 3.11 --generate-hashes -o requirements.lock.txt
+uv pip compile pyproject.toml --extra dev --python-version 3.11 --generate-hashes -o requirements-dev.lock.txt
+```
+
 ## Quality checks
 
 The development requirements pin the same Ruff version used by CI. One script
