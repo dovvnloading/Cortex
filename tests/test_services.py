@@ -109,6 +109,45 @@ class _StatusReportingEngine(_FakeEngine):
         return super().generate(**kwargs)
 
 
+class _CrashingDuringTranslationEngine(_FakeEngine):
+    """An engine whose translate_text accepts the modern ``options`` kwarg
+    (so the call is never a signature mismatch) but hits a genuine bug --
+    e.g. an unexpected response shape -- after it has already started real
+    work. Used to prove such a TypeError is not mistaken for a "this engine
+    doesn't take options" probe failure and silently retried."""
+
+    def __init__(self):
+        super().__init__()
+        self.translate_calls = 0
+        self.started_real_work = False
+
+    def translate_text(
+        self, text: str, target_language: str, options: dict | None = None
+    ) -> TranslationResult:
+        del text, target_language, options
+        self.translate_calls += 1
+        self.started_real_work = True
+        raise TypeError("boom: bad response shape mid-translation")
+
+
+class _CrashingDuringTitleEngine(_FakeEngine):
+    """Same hazard as _CrashingDuringTranslationEngine, for the chat-title
+    retry site."""
+
+    def __init__(self):
+        super().__init__()
+        self.title_calls = 0
+        self.started_real_work = False
+
+    def generate_chat_title(
+        self, chat_history: str, options: dict | None = None
+    ) -> str | None:
+        del chat_history, options
+        self.title_calls += 1
+        self.started_real_work = True
+        raise TypeError("boom: bad response shape mid-title-generation")
+
+
 class _FakeGateway:
     def __init__(self, listings: list[dict]):
         self.listings = iter(listings)
@@ -340,6 +379,47 @@ class GenerationServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.operation, "translation")
         self.assertEqual(raised.exception.error_details, None)
+
+    def test_translation_type_error_from_inside_the_call_is_not_retried(self):
+        """Regression guard: a TypeError raised by translate_text() itself,
+        once it has already started real work, must propagate rather than
+        being mistaken for a "this engine doesn't accept options" signature
+        probe and silently retried -- a retry here would call a real model
+        a second, unwanted time.
+        """
+        engine = _CrashingDuringTranslationEngine()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        with self.assertRaises(TypeError):
+            service.generate(_snapshot())
+
+        self.assertTrue(engine.started_real_work)
+        self.assertEqual(engine.translate_calls, 1)
+
+    def test_title_type_error_from_inside_the_call_is_not_retried(self):
+        """Same hazard as above for the chat-title retry site: a TypeError
+        raised once generate_chat_title() has already started real work
+        must not trigger a second call. generate_chat_title()'s outer
+        ``except Exception`` still treats the (single) failure as
+        non-fatal -- titling is optional -- but the callable itself may run
+        at most once.
+        """
+        engine = _CrashingDuringTitleEngine()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        title = service.generate_chat_title(_snapshot(), "some response")
+
+        self.assertIsNone(title)
+        self.assertTrue(engine.started_real_work)
+        self.assertEqual(engine.title_calls, 1)
 
     def test_backend_service_import_does_not_load_qt(self):
         repository_root = Path(__file__).parents[1]
