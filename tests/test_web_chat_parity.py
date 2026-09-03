@@ -94,6 +94,51 @@ def test_new_generation_persists_both_turns_and_replays_parity_events():
         assert replay_events and all(event["event_id"] > 5 for event in replay_events)
 
 
+def test_generation_rejects_malformed_new_chat_thread_id():
+    """A client-supplied body ``thread_id`` gates chat creation the same way
+    the ``/messages`` path parameter does.
+
+    When no chat with the given id exists yet, ``_start_generation_job``
+    creates one using that literal string as its permanent id. A
+    pathological id must be rejected with 422 before that happens, and no
+    chat may be created as a side effect of the rejected request.
+    """
+
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        for bad_thread_id in ("has space", "slash/like", "control\x07char"):
+            response = client.post(
+                "/api/v1/generations",
+                json={"thread_id": bad_thread_id, "user_input": "hello"},
+                headers=headers,
+            )
+            assert response.status_code == 422, bad_thread_id
+            assert "thread_id" in response.json()["detail"]
+            assert dependencies.chats.get_chat(bad_thread_id) is None
+
+
+def test_generation_with_valid_new_thread_id_creates_chat():
+    """A well-formed client-chosen thread_id may still start a brand new chat."""
+
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        new_thread_id = "Client-Chosen_Thread-456"
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"thread_id": new_thread_id, "user_input": "hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        assert accepted.json()["thread_id"] == new_thread_id
+        chat = dependencies.chats.get_chat(new_thread_id)
+        assert chat is not None
+        assert chat["messages"][0]["content"] == "hello"
+
+
 def test_new_generation_persists_model_title_and_returns_it_in_completion_event():
     state = FakeOllamaState(title_response="Cortex launch planning")
     app = create_app(build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",))
