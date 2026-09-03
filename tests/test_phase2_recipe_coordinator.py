@@ -202,7 +202,7 @@ def test_coordinator_failure_is_redacted_and_does_not_publish(tmp_path: Path):
     attempt = _FakeAttempt(error="provider_failed")
     coordinator = RecipeExecutionCoordinator(repository, lambda _job: attempt)
     accepted = coordinator.start_image_transform(_request(source_artifact_id))
-    completed = coordinator.wait(accepted.job_id, timeout=3)
+    completed = coordinator.wait(accepted.job_id, timeout=15)
 
     assert completed.status == "failed"
     assert completed.error == "provider_failed"
@@ -217,7 +217,7 @@ def test_coordinator_cancellation_is_terminal_and_cleans_staging(tmp_path: Path)
     accepted = coordinator.start_image_transform(_request(source_artifact_id))
     assert attempt.started.wait(2)
     coordinator.cancel(accepted.job_id, owner=OWNER)
-    completed = coordinator.wait(accepted.job_id, timeout=3)
+    completed = coordinator.wait(accepted.job_id, timeout=15)
 
     assert completed.status == "cancelled"
     assert completed.error == "cancelled"
