@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -491,6 +492,7 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
             status = client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()
             if status["status"] in ("succeeded", "failed", "cancelled"):
                 break
+            time.sleep(0.01)
         assert status["status"] == "succeeded"
         assert (tmp_path / "model.gguf").is_file()
 
