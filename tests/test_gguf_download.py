@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -444,6 +445,43 @@ def test_gguf_download_rejects_invalid_payload() -> None:
             headers=headers,
         )
         assert response.status_code == 400
+
+
+def test_gguf_download_job_failure_reports_the_specific_reason(monkeypatch, tmp_path: Path) -> None:
+    """Regression guard: GGUFDownloadError carried no user_message, so the
+    job registry's generic exception handler replaced every specific,
+    already-safe-to-show reason (refusing to overwrite, out of disk space,
+    not a GGUF file) with "Job failed. Please try again."."""
+
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+        del url, filename, directory, progress_callback, cancellation_event
+        raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
+
+    monkeypatch.setattr("cortex_backend.api.routes.download_gguf", fake_download_gguf)
+
+    app = create_app(
+        build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path
+    )
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/models/gguf/downloads",
+            json={"source": "url", "url": "https://example.com/model.gguf"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+
+        body = None
+        for _ in range(500):
+            status_response = client.get(f"/api/v1/jobs/{job_id}", headers=headers)
+            assert status_response.status_code == 200
+            body = status_response.json()
+            if body["status"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.01)
+        assert body is not None and body["status"] == "failed"
+        assert body["error"] == "A model with this filename already exists; refusing to overwrite it."
 
 
 def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tmp_path: Path) -> None:
