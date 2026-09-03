@@ -157,6 +157,39 @@ class BackendBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(process.returncode, 0, process.stderr)
 
+    def test_code_execution_worker_import_stays_lean(self):
+        """A code-execution worker subprocess must not pay for its siblings.
+
+        cortex_backend.execution's __init__ resolves every re-exported
+        symbol lazily (see __getattr__ there), so importing one submodule
+        must not force-load unrelated heavy dependencies that only other
+        submodules need: cryptography (native_broker's identity handshake),
+        pydantic (broker/worker_protocol's message schemas), and Pillow
+        (recipe_provider's image transforms) are all irrelevant to plain
+        Python code execution.
+        """
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(BACKEND_ROOT)
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "from cortex_backend.execution.code_execution import code_worker_main; "
+                    "assert 'cryptography' not in sys.modules; "
+                    "assert 'pydantic' not in sys.modules; "
+                    "assert 'PIL' not in sys.modules"
+                ),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+
     def test_root_launcher_is_web_only(self):
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
