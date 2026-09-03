@@ -25,6 +25,7 @@ import ctypes
 from contextlib import contextmanager
 import json
 import logging
+import os
 import re
 import secrets
 import subprocess
@@ -192,11 +193,15 @@ class _ReuseVerdict:
 class ProcessLauncher(Protocol):
     """Injectable seam over ``subprocess.Popen`` so tests never spawn a real process."""
 
-    def __call__(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
+    def __call__(
+        self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
+    ) -> subprocess.Popen:
         ...
 
 
-def _spawn_process(argv: list[str], *, cwd: Path) -> subprocess.Popen:
+def _spawn_process(
+    argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.Popen:
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     return subprocess.Popen(
         argv,
@@ -204,6 +209,7 @@ def _spawn_process(argv: list[str], *, cwd: Path) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         creationflags=creationflags,
+        env=env,
     )
 
 
@@ -307,8 +313,10 @@ class _JobObjectLauncher:
         self._win32: _JobWin32 | None = None
         self._job: int | None = None
 
-    def __call__(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
-        process = _spawn_process(argv, cwd=cwd)
+    def __call__(
+        self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
+    ) -> subprocess.Popen:
+        process = _spawn_process(argv, cwd=cwd, env=env)
         if sys.platform == "win32":
             try:
                 self._apply_job_policy(process)
@@ -1144,6 +1152,17 @@ class LlamaServerManager:
         # Let llama-server bind an ephemeral port itself. Selecting a port by
         # binding and then closing a probe socket leaves a window in which an
         # unrelated loopback service can win the port before the child starts.
+        # The API key authenticates every request this manager makes to the
+        # server (see _probe_health / chat_client's Authorization header),
+        # but it must never appear on the child's command line: any other
+        # process on the machine can read another process's argv (Task
+        # Manager, Process Explorer, `wmic process get commandline`, and
+        # equivalents), which would hand out the secret to anything with
+        # process-list access. The pinned llama-server build accepts the
+        # same value via the LLAMA_API_KEY environment variable instead,
+        # which is not visible through a plain process listing. Merge with
+        # the parent's environment rather than replacing it -- llama-server
+        # needs inherited variables such as PATH to run at all.
         api_key = secrets.token_urlsafe(32)
         argv = [
             str(executable),
@@ -1151,12 +1170,12 @@ class LlamaServerManager:
             "-c", str(num_ctx),
             "--host", "127.0.0.1",
             "--port", "0",
-            "--api-key", api_key,
             "--reasoning-format", "deepseek",
             "-ngl", "auto" if backend == "vulkan" else "0",
         ]
+        env = {**os.environ, "LLAMA_API_KEY": api_key}
         try:
-            process = self._launcher(argv, cwd=executable.parent)
+            process = self._launcher(argv, cwd=executable.parent, env=env)
         except Exception as exc:
             with self._state_lock:
                 self._state = "failed"
