@@ -48,7 +48,10 @@ describe("SettingsPanel", () => {
     // Keep a local theme edit, then simulate a model auto-selection and a
     // concurrent theme change arriving while this dialog remains mounted.
     await user.click(screen.getByRole("combobox", { name: "Theme" }));
-    await user.click(screen.getByRole("option", { name: "System" }));
+    // The listbox portal mounts asynchronously; a synchronous getByRole here
+    // raced it under CI load elsewhere in this file already accounts for the
+    // same delay with waitFor (lines below) -- this lookup did not.
+    await user.click(await screen.findByRole("option", { name: "System" }));
     rerender(<SettingsPanel {...props} settings={latestSettings} />);
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
