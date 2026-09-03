@@ -1058,6 +1058,57 @@ def test_a_crash_loop_stops_with_an_honest_error_instead_of_thrashing(tmp_path: 
     assert manager.status.state == "ready"
 
 
+def test_repeated_launch_failures_are_tracked_and_trip_the_crash_loop_guard(tmp_path: Path) -> None:
+    """A launch that never reaches "ready" -- e.g. a corrupt model file or a
+    bad -c argument that makes the child exit during startup -- must feed
+    the same crash-loop bookkeeping a post-health-check crash does.
+
+    Before this fix, ``_record_restart`` was only reached when tearing down
+    an existing, previously-ready server; a launch failure never touched
+    it, so this exact case paid the full launch cost (backend probing,
+    binary fetch, process spawn) again on every single subsequent chat
+    message with no backoff.
+    """
+    fetcher = _FakeFetcher()
+    processes = [_FakePopen(exit_immediately=True) for _ in range(3)]
+    launcher = _QueueLauncher(list(processes))
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=4096)
+
+    with pytest.raises(LlamaCppError) as raised:
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 3  # the guard fired before a fourth doomed attempt
+    assert "does not fit in available memory" in str(raised.value)
+    assert manager.status.state == "failed"
+
+
+def test_vulkan_launch_failure_is_not_blamed_when_cpu_fails_the_same_way(tmp_path: Path) -> None:
+    """A corrupt model file or a bad launch argument crashes the child on
+    EVERY backend, not just vulkan. Marking vulkan "known bad" from that
+    evidence alone would strand the user on slow cpu inference for 24h for
+    a problem that has nothing to do with the GPU backend, and hide the
+    real cause. Vulkan may only be blamed once a later backend attempt with
+    the identical model/args actually succeeds -- real evidence the GPU
+    backend itself is what can't run here.
+    """
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(exit_immediately=True), _FakePopen(exit_immediately=True)])
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient(), gpu_backend="auto"
+    )
+
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert fetcher.ensure_binary_calls == ["vulkan", "cpu"]
+    assert not (tmp_path / "preferred_gpu_backend.json").exists()
+
+
 class _SlowTerminatePopen:
     """Takes real wall-clock time to exit after terminate(), so a test can
     observe whether something else was blocked meanwhile."""
