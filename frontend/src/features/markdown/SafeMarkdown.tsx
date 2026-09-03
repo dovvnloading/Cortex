@@ -1,5 +1,5 @@
 import { isValidElement, useState, type ComponentProps, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -14,7 +14,13 @@ function safeHref(value: string | undefined): string | null {
   }
 }
 
-function Link({ href, children, ...props }: ComponentProps<"a">) {
+// react-markdown calls every custom renderer with an extra `node` prop (the
+// hast AST node) alongside the normal DOM props, described by `ExtraProps`.
+// It must be destructured out here -- left inside `...props`, it would be
+// spread onto the real DOM element below and show up as a stray
+// node="[object Object]" DOM attribute on every rendered link.
+function Link({ href, children, node: _node, ...props }: ComponentProps<"a"> & ExtraProps) {
+  void _node;
   const safe = safeHref(href);
   if (!safe) return <span>{children}</span>;
   return <a {...props} href={safe} target="_blank" rel="noopener noreferrer">{children}</a>;
@@ -72,7 +78,9 @@ function CodeCopyButton({ value, language }: { value: string; language: string }
   return <button className="code-copy" type="button" aria-label={`Copy ${language} code`} onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>;
 }
 
-function Table({ children, ...props }: ComponentProps<"table">) {
+// See the comment on `Link` above: `node` must not reach the rest spread.
+function Table({ children, node: _node, ...props }: ComponentProps<"table"> & ExtraProps) {
+  void _node;
   return (
     <div className="markdown-table-wrap">
       <table {...props}>{children}</table>

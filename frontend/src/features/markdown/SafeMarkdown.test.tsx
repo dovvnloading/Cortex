@@ -81,4 +81,31 @@ describe("SafeMarkdown", () => {
     expect(code?.className ?? "").toBe("");
     expect(code?.textContent).toBe("answer");
   });
+
+  it("does not leak react-markdown's `node` prop onto the rendered link or table elements", () => {
+    // Regression guard: Link and Table used to be typed as plain
+    // ComponentProps<"a">/ComponentProps<"table">, so react-markdown's extra
+    // `node` prop (the hast AST element every custom renderer receives) fell
+    // into their `...props` rest spread and landed on the real DOM element
+    // as a stray `node="[object Object]"` attribute. Note this does *not*
+    // surface as a console warning here: React only warns about unknown DOM
+    // props that look like a mis-cased custom attribute (e.g. `someProp`),
+    // and silently passes through already-lowercase unknown props like
+    // `node` -- so the attribute itself, not console.error, is the
+    // observable symptom to assert on.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <SafeMarkdown
+        content={"[good](https://example.com)\n\n| A | B |\n| --- | --- |\n| 1 | 2 |"}
+      />,
+    );
+
+    const link = screen.getByRole("link", { name: "good" });
+    const table = document.querySelector("table");
+    expect(link).not.toHaveAttribute("node");
+    expect(table).not.toBeNull();
+    expect(table).not.toHaveAttribute("node");
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 });
