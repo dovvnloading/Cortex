@@ -656,6 +656,68 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(composer).toHaveFocus());
   });
 
+  it("regenerates the dangling user turn instead of duplicating it after a stream-level failure", async () => {
+    // Regression guard: unlike an ambiguous admission failure (the request
+    // above), this failure happens *after* the backend already accepted the
+    // message and returned user_message_id -- the user's turn is durably
+    // persisted with no reply. Retrying it used to call generate() again,
+    // posting the same text as a second, duplicate user message.
+    const user = userEvent.setup();
+    let emit: ((event: unknown) => void) | null = null;
+    const generate = vi.fn().mockResolvedValue({
+      job_id: "job-fail-1",
+      kind: "generation" as const,
+      status: "queued" as const,
+      thread_id: "thread-a",
+      user_message_id: "message-user-1",
+    });
+    const regenerate = vi.fn().mockResolvedValue({
+      job_id: "job-retry-1",
+      kind: "generation" as const,
+      status: "queued" as const,
+      thread_id: "thread-a",
+      user_message_id: "message-user-1",
+    });
+    const api = chatApi({
+      generate,
+      regenerate,
+      // The failure path reconciles the chat from the server even though
+      // the generation failed -- the user's turn is durably persisted
+      // there regardless of what happened afterward.
+      chat: vi.fn(async (id: string) => ({
+        ...emptyChat(id),
+        messages: [{ id: "message-user-1", role: "user" as const, content: "Will this work" }],
+      })),
+      // Mimics the real client: the stream resolves once a terminal event
+      // has been delivered, matching how a real SSE connection closes.
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => new Promise<void>((resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        emit = (event) => {
+          (onEvent as (event: unknown) => void)(event);
+          if ((event as { event: string }).event === "generation.failed") resolve();
+        };
+      })),
+    });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Will this work");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    act(() => {
+      emit!({ event_id: 1, event: "generation.failed", job_id: "job-fail-1", thread_id: "thread-a", data: { message: "The model failed." } });
+    });
+
+    await screen.findByRole("button", { name: "Retry last message" });
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(1));
+    expect(regenerate.mock.calls[0][0]).toBe("thread-a");
+    expect(regenerate.mock.calls[0][1].message_id).toBe("message-user-1");
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()

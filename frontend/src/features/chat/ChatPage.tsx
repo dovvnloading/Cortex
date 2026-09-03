@@ -540,6 +540,23 @@ export function ChatPage({
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
+    // A stream-level failure after the user's message was already durably
+    // admitted leaves that message as the thread's last one with no reply.
+    // Retrying must regenerate a reply for it, not resubmit the same text
+    // as a brand new message -- which used to duplicate the user's turn.
+    // The backend's dangling-user-turn regenerate support exists exactly
+    // for this case.
+    const messages = chat?.messages;
+    const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
+    const danglingUserMessageId = lastMessage?.role === "user" ? lastMessage.id ?? undefined : undefined;
+    if (danglingUserMessageId) {
+      const started = await startGeneration(lastPrompt, danglingUserMessageId, lastAttachments);
+      if (started && !threadId) onThreadCreated(started.threadId);
+      return Boolean(started);
+    }
+    // Otherwise the failure was ambiguous -- the admission POST itself may
+    // or may not have reached the backend -- so replay the same request id
+    // instead, which the backend treats idempotently if it already landed.
     const pendingAdmission = pendingAdmissionRef.current;
     const started = await startGeneration(
       lastPrompt,
