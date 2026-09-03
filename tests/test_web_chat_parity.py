@@ -372,6 +372,59 @@ def test_cancellation_after_commit_does_not_downgrade_the_persisted_response():
         ]
 
 
+def test_hung_title_generation_times_out_and_falls_back_without_blocking_completion(
+    monkeypatch,
+):
+    """Regression guard: chat-title generation runs after begin_commit, with
+    no cancel_event and no bound from JobRegistry.shutdown (see
+    CHAT_TITLE_TIMEOUT_SECONDS in api/routes.py). A hung title model must not
+    stall the job -- it should time out quickly and fall back to the same
+    default title an outright title-generation failure already produces."""
+    monkeypatch.setattr(api_routes, "CHAT_TITLE_TIMEOUT_SECONDS", 0.2)
+    dependencies = build_demo_dependencies()
+    title_started = Event()
+    never_release = Event()
+
+    def hanging_title(snapshot, response):
+        del snapshot, response
+        title_started.set()
+        never_release.wait()  # simulates a hung local model; never returns
+        return "This title must never be used"
+
+    dependencies.generation.generate_chat_title = hanging_title
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            started_at = time.monotonic()
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "title-timeout-1", "user_input": "hello there"},
+                headers=headers,
+            ).json()
+            with client.stream(
+                "GET",
+                f"/api/v1/generations/{accepted['job_id']}/events",
+                headers=headers,
+            ) as response:
+                events = _events("".join(response.iter_text()))
+            elapsed = time.monotonic() - started_at
+            assert title_started.wait(timeout=1), "title generator did not start"
+            assert elapsed < 5, "a hung title call must not block job completion"
+            assert events[-1]["event"] == "generation.completed"
+
+            chat = client.get(
+                f"/api/v1/chats/{accepted['thread_id']}", headers=headers
+            ).json()
+            assert chat["title"] not in {"New Chat", "This title must never be used"}
+            assert [message["role"] for message in chat["messages"]] == [
+                "user",
+                "assistant",
+            ]
+    finally:
+        never_release.set()  # let the abandoned daemon thread unblock and exit
+
+
 def test_regeneration_fills_in_a_reply_for_a_dangling_user_turn_without_duplicating_it():
     """A generation that fails after its user message was already admitted
     (the model call itself errors, before any assistant reply is persisted)
