@@ -96,6 +96,10 @@ def _safe_restart_reason(reason: str) -> str:
         return reason
     if reason.startswith("the runtime stopped responding to health checks"):
         return "the runtime stopped responding to health checks"
+    if reason.startswith("the runtime exited before it became ready"):
+        return "the runtime exited before it became ready"
+    if reason.startswith("the runtime did not become ready in time"):
+        return "the runtime did not become ready in time"
     return "the local model runtime required a restart"
 
 
@@ -581,7 +585,25 @@ class LlamaServerManager:
                 )
             try:
                 return self._start(model_path, effective_num_ctx, on_status, token)
-            except LlamaCppError:
+            except LlamaCppError as exc:
+                # A launch that never reaches "ready" -- the child exited
+                # early (ServerLaunchError) or never answered its health
+                # check in time (ServerStartTimeoutError) -- must feed the
+                # same crash-loop bookkeeping a post-health-check crash
+                # does via _record_restart. Without this, a doomed launch
+                # (corrupt model file, bad -c argument, anything that keeps
+                # the child from ever becoming healthy) pays the full
+                # backend-probing launch cost again on every subsequent
+                # message, with no backoff. A caller-initiated cancellation
+                # is not evidence of a broken configuration, so it is
+                # excluded.
+                if not token.is_set() and isinstance(exc, (ServerLaunchError, ServerStartTimeoutError)):
+                    reason = (
+                        "the runtime exited before it became ready"
+                        if isinstance(exc, ServerLaunchError)
+                        else "the runtime did not become ready in time"
+                    )
+                    self._record_launch_failure(reason, model_path, effective_num_ctx)
                 # A caller cancellation can arrive after startup has begun.
                 # The startup finally block reaps an unpublished child, but
                 # also clear the manager's state so a cancelled request does
@@ -832,6 +854,33 @@ class LlamaServerManager:
         # paths, credentials, or provider response text.  Retain its bounded
         # tail in memory for lifecycle bookkeeping, but never emit it.
 
+    def _record_launch_failure(
+        self, reason: str, model_path: Path, effective_num_ctx: int
+    ) -> None:
+        """Feed a launch that never reached ``ready`` into the same
+        crash-loop bookkeeping ``_record_restart`` uses for a post-health
+        -check crash.
+
+        ``_record_restart`` only runs when an existing, previously-ready
+        server is being torn down for the next ``ensure_ready`` call; a
+        launch that fails before ever reaching ``ready`` -- a corrupt model
+        file, a bad ``-c`` argument, anything that exits the child early or
+        times out waiting for health -- never goes through that path. Left
+        unrecorded, ``_guard_against_crash_loop`` never sees these failures
+        accumulate, so the identical, doomed launch (backend probing,
+        binary fetch, process spawn) is retried at full cost on every
+        subsequent message instead of backing off.
+        """
+        with self._state_lock:
+            safe_reason = _safe_restart_reason(reason)
+            self._last_restart_reason = safe_reason
+            crashed_key = (model_path, effective_num_ctx)
+            if self._failure_key != crashed_key:
+                self._failure_key = crashed_key
+                self._failure_times.clear()
+            self._failure_times.append(time.monotonic())
+        logger.warning("The local model runtime failed to launch (%s).", safe_reason)
+
     def _guard_against_crash_loop(self, model_path: Path, effective_num_ctx: int) -> None:
         with self._state_lock:
             now = time.monotonic()
@@ -961,19 +1010,33 @@ class LlamaServerManager:
 
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
+        vulkan_launch_failed = False
         for backend in self._backend_order(requested_backend, model_path, num_ctx):
             try:
-                return self._start_with_backend(
+                handle = self._start_with_backend(
                     model_path, num_ctx, backend, on_status, cancellation_event
                 )
             except ServerLaunchError as exc:
                 last_exc = exc
+                if backend == "vulkan":
+                    vulkan_launch_failed = True
                 logger.warning(
                     "llama-server failed to launch with backend '%s' (%s); trying the next option.",
                     backend,
                     type(exc).__name__,
                 )
                 continue
+            if vulkan_launch_failed and backend != "vulkan":
+                # Vulkan exited before becoming healthy, but the identical
+                # model/context/args just succeeded on another backend --
+                # that is real evidence the GPU backend itself is what
+                # can't run here. Without this comparison a failure common
+                # to every backend alike (a corrupt model file, a bad
+                # argument) would wrongly blame vulkan and strand the user
+                # on cpu for 24h for a problem that has nothing to do with
+                # the GPU backend.
+                self._mark_backend_bad("vulkan", model_path, num_ctx)
+            return handle
         # ServerLaunchError may originate from the child process and include
         # arbitrary stderr.  Keep status/API diagnostics stable and classify
         # the failure by exception type instead of relaying that text.
@@ -1125,8 +1188,11 @@ class LlamaServerManager:
                 self._raise_if_stopping(cancellation_event)
                 exit_code = process.poll()
                 if exit_code is not None:
-                    if backend == "vulkan":
-                        self._mark_backend_bad("vulkan", model_path, num_ctx)
+                    # Whether this backend gets blamed for the exit -- as
+                    # opposed to something common to every backend, like a
+                    # corrupt model file -- is decided by the caller, which
+                    # can see whether a subsequent backend attempt with the
+                    # same model/args goes on to succeed.
                     raise ServerLaunchError(
                         "The local model runtime exited before it became ready."
                     )
