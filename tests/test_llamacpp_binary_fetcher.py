@@ -13,11 +13,13 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 import pytest
 
+import cortex_backend.llamacpp.binary_fetcher as binary_fetcher_module
 from cortex_backend.llamacpp.binary_fetcher import BinaryFetcher, hash_directory
 from cortex_backend.llamacpp.binary_release import AssetSpec, PinnedRelease
 from cortex_backend.llamacpp.errors import BinaryVerificationError
@@ -231,3 +233,85 @@ def test_zip_slip_entries_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(BinaryVerificationError):
         fetcher.ensure_binary(release, "cpu")
+
+
+def test_download_rejects_advertised_content_length_over_ceiling(tmp_path: Path, monkeypatch) -> None:
+    """A ``Content-Length`` beyond the byte ceiling must be rejected before a
+    single byte of the body is read -- a misbehaving CDN, a corporate MITM
+    proxy, or a redirect to something unrelated must not be able to fill the
+    disk before the post-download SHA-256 check ever gets a chance to run.
+    Mirrors download.py's equivalent "reject on the advertised size" test.
+    """
+    monkeypatch.setattr(binary_fetcher_module, "_MAX_BINARY_DOWNLOAD_BYTES", 1024)
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    body_was_read = {"value": False}
+
+    def body():
+        body_was_read["value"] = True
+        yield archive_bytes
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        # Advertise far more than the (patched) ceiling while keeping the
+        # actual body small, so the assertion below proves the rejection
+        # happened purely off the header, without ever reading the body.
+        return httpx.Response(200, content=body(), headers={"Content-Length": str(10 * 1024 * 1024 * 1024)})
+
+    fetcher = BinaryFetcher(tmp_path, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    with pytest.raises(BinaryVerificationError, match="byte ceiling"):
+        fetcher.ensure_binary(release, "cpu")
+
+    assert body_was_read["value"] is False
+    assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+def test_download_rejects_unbounded_body_over_ceiling_mid_stream(tmp_path: Path, monkeypatch) -> None:
+    """No (or an untruthful) ``Content-Length`` must not bypass the ceiling:
+    the running total accumulated during streaming is the backstop, and a
+    download that blows past it mid-stream must be rejected with no partial
+    archive left on disk."""
+    monkeypatch.setattr(binary_fetcher_module, "_MAX_BINARY_DOWNLOAD_BYTES", 1024)
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    oversized_body = b"x" * (2 * 1024)
+
+    def body():
+        # A generator body carries no Content-Length header (chunked
+        # transfer), matching a server that never advertises a size.
+        yield oversized_body
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=body())
+
+    fetcher = BinaryFetcher(tmp_path, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    with pytest.raises(BinaryVerificationError, match="byte ceiling"):
+        fetcher.ensure_binary(release, "cpu")
+
+    assert not any(tmp_path.rglob("llama-server.exe"))
+    assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+def test_download_rejects_insufficient_free_disk_space(tmp_path: Path, monkeypatch) -> None:
+    """A disk that cannot fit the download (plus the safety reserve) must be
+    rejected before it is filled, leaving no partial archive behind --
+    mirrors download.py's ``test_download_gguf_preserves_disk_reserve``."""
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+    # Free space just barely covers the archive itself, with nothing left
+    # over for the (default, 128MiB) safety reserve.
+    monkeypatch.setattr(
+        binary_fetcher_module.shutil,
+        "disk_usage",
+        lambda directory: SimpleNamespace(free=len(archive_bytes)),
+    )
+    fetcher = BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes))
+
+    with pytest.raises(BinaryVerificationError, match="free disk space"):
+        fetcher.ensure_binary(release, "cpu")
+
+    assert not any(tmp_path.rglob("llama-server.exe"))
+    assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
