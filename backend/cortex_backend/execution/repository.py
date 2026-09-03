@@ -502,6 +502,8 @@ class ExecutionRepository:
         expected_status: ExecutionStatus | None = None,
     ) -> ExecutionJob:
         now = self._now()
+        terminal_owner: str | None = None
+        updated: sqlite3.Row | None = None
         with self.connect() as connection:
             # Serialize lifecycle transitions before reading the current
             # sequence. Workers and cancellation requests may transition the
@@ -517,46 +519,68 @@ class ExecutionRepository:
             if row["status"] in TerminalExecutionStatus:
                 # A worker can race with cancellation or recovery. Terminal
                 # state is immutable; late callbacks must not append a second
-                # terminal event or overwrite the validated result.
-                return self._job_from_row(row)
-            if expected_status is not None and row["status"] != expected_status:
-                raise ExecutionTransitionConflict(
-                    f"Execution job is {row['status']}, not {expected_status}."
+                # terminal event or overwrite the validated result. Record the
+                # owner and re-derive the job via get_job() below, once this
+                # connection is closed: this row comes from a bare
+                # `SELECT * FROM execution_jobs` with no execution_approvals
+                # join, so it has no approval_state column, and
+                # _job_from_row() would silently default it to
+                # "not_required" even when the job was actually approved or
+                # denied before it reached its terminal status.
+                terminal_owner = row["owner"]
+            else:
+                if expected_status is not None and row["status"] != expected_status:
+                    raise ExecutionTransitionConflict(
+                        f"Execution job is {row['status']}, not {expected_status}."
+                    )
+                approval = connection.execute(
+                    "SELECT state FROM execution_approvals WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                if status in TerminalExecutionStatus and approval is not None and approval["state"] == "pending":
+                    raise ApprovalTransitionError("Pending approval cannot reach a terminal state.")
+                encoded_result = (
+                    json.dumps(dict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    if result is not None
+                    else row["result_json"]
                 )
-            approval = connection.execute(
-                "SELECT state FROM execution_approvals WHERE job_id = ?",
-                (job_id,),
-            ).fetchone()
-            if status in TerminalExecutionStatus and approval is not None and approval["state"] == "pending":
-                raise ApprovalTransitionError("Pending approval cannot reach a terminal state.")
-            encoded_result = (
-                json.dumps(dict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if result is not None
-                else row["result_json"]
-            )
-            connection.execute(
-                """
-                UPDATE execution_jobs
-                SET status = ?, result_json = ?, error = ?, updated_at = ?, sequence = sequence + 1
-                WHERE job_id = ?
-                """,
-                (status, encoded_result, error, now, job_id),
-            )
-            sequence = int(row["sequence"]) + 1
-            encoded_data = self._encode_event(data or {})
-            connection.execute(
-                """
-                INSERT INTO execution_events
-                (job_id, sequence, event, status, phase, data_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (job_id, sequence, event, status, phase, encoded_data, now),
-            )
-            updated = connection.execute(
-                "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            assert updated is not None
-            return self._job_from_row(updated)
+                connection.execute(
+                    """
+                    UPDATE execution_jobs
+                    SET status = ?, result_json = ?, error = ?, updated_at = ?, sequence = sequence + 1
+                    WHERE job_id = ?
+                    """,
+                    (status, encoded_result, error, now, job_id),
+                )
+                sequence = int(row["sequence"]) + 1
+                encoded_data = self._encode_event(data or {})
+                connection.execute(
+                    """
+                    INSERT INTO execution_events
+                    (job_id, sequence, event, status, phase, data_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job_id, sequence, event, status, phase, encoded_data, now),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                assert updated is not None
+        if terminal_owner is not None:
+            # Delegate to the already-correct get_job() instead of
+            # maintaining a second copy of the approval-join query (the same
+            # pattern used for create_job()'s duplicate-request fallback).
+            # The connection above is already closed, so this cannot collide
+            # with the transaction we just held.
+            job = self.get_job(job_id, owner=terminal_owner)
+            if job is not None:
+                return job
+            # The job vanished between the terminal check and this re-read
+            # (e.g. a concurrent purge) -- fall back to the original row so
+            # the race guard still returns a job rather than raising.
+            return self._job_from_row(row)
+        assert updated is not None
+        return self._job_from_row(updated)
 
     def request_cancel(self, job_id: str) -> ExecutionJob:
         job = self.get_job(job_id)

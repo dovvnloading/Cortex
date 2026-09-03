@@ -214,6 +214,73 @@ def test_terminal_state_is_immutable_and_wait_has_a_real_timeout(tmp_path):
         coordinator.shutdown()
 
 
+def test_transition_on_an_already_terminal_job_reports_real_approval_state(tmp_path):
+    """A second transition() call on an already-terminal job must report the
+    real approval_state, not silently fall back to "not_required".
+
+    transition()'s terminal-state early return (the race guard against a
+    late or duplicate transition call on a job that already reached a
+    terminal status) used to re-read the row with a bare
+    `SELECT * FROM execution_jobs`, which has no execution_approvals join
+    and therefore no approval_state column -- so _job_from_row() defaulted
+    to "not_required" even for a job that had actually been approved before
+    it finished. Same pattern as the fix for create_job()'s
+    duplicate-request fallback.
+    """
+    repository = _repository(tmp_path)
+    job, created = repository.create_job(
+        job_id="job-terminal-approval-retry",
+        owner="session-a",
+        request_id="request-terminal-approval-retry",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert created is True
+    assert (
+        repository.request_approval(
+            job.job_id,
+            owner="session-a",
+            scope_digest="scope",
+            reason="test",
+            ttl_seconds=10,
+        )
+        == "pending"
+    )
+    assert (
+        repository.decide_approval(
+            job.job_id,
+            owner="session-a",
+            decision="approved",
+        )
+        == "approved"
+    )
+
+    finished = repository.transition(
+        job.job_id,
+        status="succeeded",
+        event="completed",
+        phase="completed",
+        data={"value": 42},
+        result={"value": 42},
+    )
+    assert finished.status == "succeeded"
+
+    # A second, late transition call on the now-terminal job hits the
+    # race-guard early return -- it must not lose the real, already-decided
+    # approval state.
+    late = repository.transition(
+        job.job_id,
+        status="failed",
+        event="failed",
+        phase="failed",
+        data={"message": "late"},
+        error="late",
+    )
+    assert late.job_id == finished.job_id
+    assert late.status == finished.status
+    assert late.approval_state == "approved"
+
+
 def test_fake_coordinator_success_failure_and_replay(tmp_path):
     repository = _repository(tmp_path)
     coordinator = DurableFakeCoordinator(repository)
