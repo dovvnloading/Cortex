@@ -350,13 +350,20 @@ class ExecutionRepository:
                 return self._job_from_row(row), True
         except ExecutionRepositoryError as exc:
             with self.connect() as connection:
-                row = connection.execute(
-                    "SELECT * FROM execution_jobs WHERE owner = ? AND request_id = ?",
+                existing = connection.execute(
+                    "SELECT job_id FROM execution_jobs WHERE owner = ? AND request_id = ?",
                     (owner, request_id),
                 ).fetchone()
-                if row is None:
-                    raise exc
-                return self._job_from_row(row), False
+            if existing is None:
+                raise exc
+            # Delegate to get_job() instead of a bare SELECT * so a retried
+            # request reports the real approval_state (including a pending
+            # approval that has since expired) rather than defaulting to
+            # "not_required" for lack of the execution_approvals join.
+            job = self.get_job(existing["job_id"], owner=owner)
+            if job is None:
+                raise exc
+            return job, False
 
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
         now = self._now()

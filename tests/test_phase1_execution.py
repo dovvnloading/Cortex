@@ -375,6 +375,81 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
     assert repository.events(cleanup.job_id)[-1].event == "cancelled"
 
 
+def test_create_job_duplicate_request_reports_real_approval_state(tmp_path):
+    """A retried POST for a job that requires approval must report the real
+    approval_state, not silently fall back to "not_required".
+
+    create_job()'s duplicate-request fallback (triggered by the UNIQUE
+    (owner, request_id) constraint) used to re-read the existing row with a
+    bare `SELECT * FROM execution_jobs`, which has no execution_approvals
+    join and therefore no approval_state column -- so _job_from_row()
+    defaulted to "not_required" even for a job sitting in "pending" or
+    "expired" approval. See docs/audits/2026-09-03-ownership-review.md #17.
+    """
+    repository = _repository(tmp_path)
+    job, created = repository.create_job(
+        job_id="job-approval-retry",
+        owner="session-a",
+        request_id="request-approval-retry",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert created is True
+    assert (
+        repository.request_approval(
+            job.job_id,
+            owner="session-a",
+            scope_digest="scope",
+            reason="test",
+            ttl_seconds=10,
+        )
+        == "pending"
+    )
+
+    retried, retried_created = repository.create_job(
+        job_id="job-approval-retry-duplicate",
+        owner="session-a",
+        request_id="request-approval-retry",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert retried_created is False
+    assert retried.job_id == job.job_id
+    assert retried.approval_state == "pending"
+
+    # A pending approval that has since expired must also survive the retry
+    # path -- not just plain "pending".
+    expiring, _ = repository.create_job(
+        job_id="job-approval-retry-expiring",
+        owner="session-a",
+        request_id="request-approval-retry-expiring",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert (
+        repository.request_approval(
+            expiring.job_id,
+            owner="session-a",
+            scope_digest="scope",
+            reason="test",
+            ttl_seconds=0.01,
+        )
+        == "pending"
+    )
+    time.sleep(0.03)
+
+    retried_expired, retried_expired_created = repository.create_job(
+        job_id="job-approval-retry-expiring-duplicate",
+        owner="session-a",
+        request_id="request-approval-retry-expiring",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    assert retried_expired_created is False
+    assert retried_expired.job_id == expiring.job_id
+    assert retried_expired.approval_state == "expired"
+
+
 def test_concurrent_approval_decisions_commit_exactly_once(tmp_path):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
