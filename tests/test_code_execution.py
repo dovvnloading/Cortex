@@ -109,6 +109,12 @@ def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_
         def send(self, message: dict[str, object]) -> None:
             self.messages.append(message)
 
+        def recv(self) -> dict[str, object]:
+            # Stands in for the parent's go-ahead once the resource-limiting
+            # Job Object is attached (see test_code_worker_waits_for_the_go_
+            # ahead_before_running_source for the wait itself).
+            return {"go": True}
+
         def close(self) -> None:
             self.closed = True
 
@@ -125,6 +131,51 @@ def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_
     assert connection.messages[0] == {"ok": True, "event": "ready"}
     assert connection.messages[1]["ok"] is True
     assert connection.closed is True
+
+
+def test_code_worker_waits_for_the_go_ahead_before_running_source(monkeypatch, tmp_path: Path) -> None:
+    """Regression guard: the source must not run until the parent confirms
+    the resource-limiting Job Object is attached (or that this platform has
+    none to attach) -- see local_runtime.py's _LocalCodeAttempt.evaluate()."""
+
+    class _Connection:
+        def __init__(self, go: object) -> None:
+            self._go = go
+            self.messages: list[dict[str, object]] = []
+            self.closed = False
+
+        def send(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+        def recv(self) -> object:
+            return self._go
+
+        def close(self) -> None:
+            self.closed = True
+
+    ran = False
+
+    def fake_run(*_args: object) -> CodeExecutionResult:
+        nonlocal ran
+        ran = True
+        return CodeExecutionResult(stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(code_execution, "_scrub_worker_environment", lambda: None)
+    monkeypatch.setattr(code_execution, "run_code_in_worker", fake_run)
+
+    for denied_go in ({"go": False}, {}, None):
+        ran = False
+        connection = _Connection(denied_go)
+        code_worker_main(connection, "print('ok')", {}, str(tmp_path))
+        assert ran is False
+        assert connection.messages == [{"ok": True, "event": "ready"}]
+        assert connection.closed is True
+
+    ran = False
+    connection = _Connection({"go": True})
+    code_worker_main(connection, "print('ok')", {}, str(tmp_path))
+    assert ran is True
+    assert connection.messages[1]["ok"] is True
 
 
 def test_brokered_filesystem_is_scoped_and_budgeted(tmp_path: Path) -> None:
@@ -315,6 +366,38 @@ def test_cancelling_pending_code_revokes_approval_and_finishes(tmp_path) -> None
     cancelled = coordinator.cancel(job.job_id, owner=owner)
     assert cancelled.status == "cancelled"
     assert cancelled.approval_state == "denied"
+    coordinator.shutdown()
+
+
+def test_cancelling_an_approved_but_unleased_code_job_reaches_a_terminal_status(tmp_path) -> None:
+    """Regression guard: cancelling between approval and lease claim used to
+    leave the job stuck in "cancelling" forever. request_cancel() alone only
+    reaches that non-terminal status; _run_code()'s own early returns for an
+    already-cancelling job did not finish it, and no lease was ever claimed
+    for recover_expired_leases() to later find and retry."""
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    coordinator = LocalExecutionCoordinator(repository)
+    owner = repository.installation_principal_id
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-cancel-approved",
+            source="print('must not run')",
+            intent_summary="Test approved-but-unleased cancellation.",
+        )
+    )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    cancelled = coordinator.cancel(job.job_id, owner=owner)
+    assert cancelled.status in {"cancelling", "cancelled"}
+
+    current = None
+    for _ in range(200):
+        current = repository.get_job(job.job_id)
+        if current is not None and current.status == "cancelled":
+            break
+        time.sleep(0.01)
+    assert current is not None
+    assert current.status == "cancelled"
     coordinator.shutdown()
 
 

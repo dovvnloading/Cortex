@@ -428,7 +428,11 @@ class _LocalCodeAttempt:
         receiver = sender = process = None
         worker_job: _WindowsProcessJob | None = None
         try:
-            receiver, sender = self._context.Pipe(duplex=False)
+            # Duplex, unlike the scratch/recipe workers: the child must be
+            # held at its "ready" checkpoint (after environment scrubbing,
+            # before running any of the source) until this end confirms the
+            # Job Object is attached, so job_sent below can tell it to go.
+            receiver, sender = self._context.Pipe()
             process = self._context.Process(
                 target=code_worker_main,
                 args=(sender, source, capabilities.as_dict(), workspace),
@@ -440,18 +444,12 @@ class _LocalCodeAttempt:
                     raise CodeExecutionError("worker_closed")
                 self._process = process
             process.start()
-            if os.name == "nt":
-                worker_job = _WindowsProcessJob(
-                    process,
-                    memory_limit=MAX_CODE_MEMORY_BYTES,
-                    active_process_limit=4,
-                    cpu_seconds=self._timeout_seconds + 1.0,
-                )
             sender.close()
             sender = None
             startup_deadline = time.monotonic() + self._startup_timeout_seconds
             deadline: float | None = None
             cancelled_at: float | None = None
+            job_sent = False
             while True:
                 if cancel_event.is_set() or self._cancel_event.is_set():
                     self._cancel_event.set()
@@ -466,6 +464,16 @@ class _LocalCodeAttempt:
                         and message.get("ok") is True
                         and message.get("event") == "ready"
                     ):
+                        if not job_sent:
+                            job_sent = True
+                            if os.name == "nt":
+                                worker_job = _WindowsProcessJob(
+                                    process,
+                                    memory_limit=MAX_CODE_MEMORY_BYTES,
+                                    active_process_limit=4,
+                                    cpu_seconds=self._timeout_seconds + 1.0,
+                                )
+                            receiver.send({"go": True})
                         deadline = time.monotonic() + self._timeout_seconds
                         continue
                     return self._result_from_message(message)
@@ -976,6 +984,13 @@ class LocalExecutionCoordinator:
                 self.repository.expire_approvals()
                 return
             if cancel_event.is_set() or current.status in {"cancelled", "cancelling"} or current.approval_state in {"denied", "expired"}:
+                # A denial/expiry already reaches a terminal status through
+                # decide_approval()/expire_approvals(); this call is then a
+                # safe no-op. A cancellation requested while still pending or
+                # approved-but-unleased is not yet terminal anywhere else --
+                # without finishing it here, the job is left in "cancelling"
+                # forever, since nothing else will ever revisit it.
+                self._finish_code_failure(job_id, cancel_event, "cancelled")
                 return
             if current.approval_state != "approved":
                 self._finish_code_failure(job_id, cancel_event, "approval_required")
@@ -988,6 +1003,11 @@ class LocalExecutionCoordinator:
             lease_claimed = True
             current = self.repository.get_job(job_id)
             if current is None or current.status in {"cancelled", "cancelling"}:
+                # Same reasoning as above: the lease was already claimed (and
+                # is released in the finally block below), but the job's
+                # status is not yet terminal on its own.
+                if current is not None:
+                    self._finish_code_failure(job_id, cancel_event, "cancelled")
                 return
             request = self._code_request_from_job(current)
             workspace = self._code_workspace(job_id)
