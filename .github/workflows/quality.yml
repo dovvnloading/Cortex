@@ -63,8 +63,16 @@ jobs:
           python -m pip install uv
           uv pip compile pyproject.toml --python-version 3.11 --generate-hashes -o requirements.lock.txt
           uv pip compile pyproject.toml --extra dev --python-version 3.11 --generate-hashes -o requirements-dev.lock.txt
-          git diff --exit-code -- requirements.lock.txt requirements-dev.lock.txt
-          if ($LASTEXITCODE -ne 0) {
+          # `git diff --name-only` rather than `git diff --exit-code`: a
+          # non-zero native exit is a terminating error under this shell's
+          # $ErrorActionPreference, so the throw below never ran and the
+          # regeneration instructions never reached the log. Without
+          # --exit-code, diff exits 0 either way and reports drift as output.
+          # Content comparison also matters: uv writes LF, so `git status`
+          # would flag a line-ending-only difference that is not real drift.
+          $drift = git --no-pager diff --name-only -- requirements.lock.txt requirements-dev.lock.txt
+          if ($drift) {
+            git --no-pager diff -- requirements.lock.txt requirements-dev.lock.txt
             throw "requirements*.lock.txt does not match pyproject.toml. Regenerate with 'uv pip compile pyproject.toml --python-version 3.11 --generate-hashes -o requirements.lock.txt' (add --extra dev for the dev lock) and commit the result."
           }
 

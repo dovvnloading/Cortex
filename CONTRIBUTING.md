@@ -45,17 +45,28 @@ uv pip compile pyproject.toml --extra dev --python-version 3.11 --generate-hashe
 
 ## Quality checks
 
-The development requirements pin the same Ruff version used by CI. One script
-runs the repository's fast quality gates on your machine:
+The development requirements pin the same Ruff version used by CI, and the
+first thing `check.ps1` does is verify your environment actually has it --
+linting with a different Ruff means a green run here and a red one in CI for
+no reason the diff explains. If it reports drift, reinstall:
+
+```powershell
+python -m pip install -r requirements-dev.lock.txt
+```
+
+One script runs the repository's fast quality gates on your machine:
 
 ```powershell
 ./scripts/check.ps1
 ```
 
-That is the `quick` tier -- lint, backend tests, contract drift,
-security/watchdog qualification, and frontend types/lint/unit tests. Before
-opening a pull request, run the `full` tier, which adds `compileall`, the
-Playwright browser installation and tests, and the bundle build:
+That is the `quick` tier -- environment and lockfile checks, lint, backend
+tests, contract drift, security/watchdog qualification, and frontend
+types/lint/unit tests. The lockfile check needs `uv` (`python -m pip install
+uv`); without it that one step reports `skip` rather than failing, and CI still
+enforces it. Before opening a pull request, run the `full` tier, which adds
+`compileall`, the Playwright browser installation and tests, and the bundle
+build:
 
 ```powershell
 ./scripts/check.ps1 -Tier full
