@@ -35,7 +35,6 @@ test("does not replay old completions and groups repeated task notifications", a
         generation: { temperature: 0.7, num_ctx: 4096, seed: -1 },
         memory: { enabled: true },
         translation: { enabled: false },
-        suggestions: { enabled: true, model: null },
       },
     } });
   });

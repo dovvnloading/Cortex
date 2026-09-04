@@ -157,7 +157,6 @@ export interface CortexSettings {
   execution?: ExecutionSettings;
   memory?: MemorySettings;
   translation?: TranslationSettings;
-  suggestions?: SuggestionSettings;
 }
 
 export interface CreateChatGroupRequest {
@@ -538,11 +537,6 @@ export interface SettingsUpdateRequest {
 
 export interface ShutdownResponse {
   status?: "accepted";
-}
-
-export interface SuggestionSettings {
-  enabled?: boolean;
-  model?: string | null;
 }
 
 export interface SystemResponse {

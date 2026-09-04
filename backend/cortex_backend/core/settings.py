@@ -124,14 +124,6 @@ class TranslationSettings(_SettingsModel):
     target_language: LanguageName = "Spanish"
 
 
-class SuggestionSettings(_SettingsModel):
-    """Legacy-compatible settings retained for reading existing workspaces."""
-
-    enabled: bool = True
-    # Cortex no longer generates or renders follow-up suggestion prompts.
-    model: ModelTag | None = None
-
-
 class CortexSettings(_SettingsModel):
     """Complete validated settings snapshot with legacy-compatible defaults."""
 
@@ -145,4 +137,3 @@ class CortexSettings(_SettingsModel):
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     translation: TranslationSettings = Field(default_factory=TranslationSettings)
-    suggestions: SuggestionSettings = Field(default_factory=SuggestionSettings)

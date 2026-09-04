@@ -19,7 +19,6 @@ from .settings import (
     MemorySettings,
     ModelSettings,
     OnboardingSettings,
-    SuggestionSettings,
     TranslationSettings,
 )
 
@@ -40,7 +39,6 @@ __all__ = [
     "ModelOperationError",
     "ModelSettings",
     "OnboardingSettings",
-    "SuggestionSettings",
     "TranslationSettings",
     "TranslationResult",
 ]

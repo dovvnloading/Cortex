@@ -40,15 +40,12 @@ _LEGACY_FIELDS = (
     _LegacyField("memories_enabled", "memory", "enabled"),
     _LegacyField("translation_enabled", "translation", "enabled"),
     _LegacyField("target_language", "translation", "target_language"),
-    _LegacyField("suggestions_enabled", "suggestions", "enabled"),
-    _LegacyField("suggestions_model", "suggestions", "model"),
 )
 
 _LEGACY_BOOLEAN_KEYS = {
     "agreement_accepted",
     "memories_enabled",
     "translation_enabled",
-    "suggestions_enabled",
 }
 
 

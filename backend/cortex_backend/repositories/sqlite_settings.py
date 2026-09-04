@@ -28,10 +28,25 @@ from .settings import (
 
 SETTINGS_SCHEMA_VERSION = 1
 MIGRATION_KEY = "qsettings-to-sqlite-v1"
+
+# Top-level sections that CortexSettings used to carry and no longer does.
+# The model is extra="forbid", so a payload written by an older build would
+# otherwise fail validation outright and read as "Stored Cortex settings are
+# invalid" -- losing a real workspace's settings over a field nothing uses.
+# Dropping the key on read is enough: the next save writes the current shape.
+RETIRED_SETTINGS_KEYS = frozenset({"suggestions"})
 COLOCATED_MIGRATION_KEY = "chatdb-colocated-settings-to-own-file-v1"
 
 _WRITE_LOCKS_GUARD = Lock()
 _WRITE_LOCKS: dict[str, RLock] = {}
+
+
+def _without_retired_keys(payload: str) -> dict:
+    """Decode a stored settings payload, dropping sections since removed."""
+    decoded = json.loads(payload)
+    if not isinstance(decoded, dict):
+        raise ValueError("stored settings payload must be a JSON object")
+    return {key: value for key, value in decoded.items() if key not in RETIRED_SETTINGS_KEYS}
 
 
 def _write_lock_for(path: Path) -> RLock:
@@ -402,7 +417,7 @@ class SQLiteSettingsRepository:
         if int(row["schema_version"]) > SETTINGS_SCHEMA_VERSION:
             raise SettingsRepositoryError("Cortex settings schema is newer than this release.")
         try:
-            return CortexSettings.model_validate_json(row["payload"]), "sqlite"
+            return CortexSettings.model_validate(_without_retired_keys(row["payload"])), "sqlite"
         except (TypeError, ValueError) as exc:
             raise SettingsRepositoryError("Stored Cortex settings are invalid.") from exc
 
