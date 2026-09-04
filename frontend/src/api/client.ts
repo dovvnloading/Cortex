@@ -70,12 +70,20 @@ const VALIDATION_ISSUE_LIMIT = 8;
 const VALIDATION_TEXT_LIMIT = 240;
 const REQUEST_LOCATION_MARKERS = new Set(["body", "query", "path", "header", "cookie"]);
 
+// C0 and C1 control characters. A validation message is rendered as text, so
+// these are replaced rather than stripped: a control character between two
+// words should leave a word boundary behind, and the whitespace collapse
+// below then folds it away.
+//
+// no-control-regex exists to catch control characters that reached a pattern
+// by accident. Matching them is the entire purpose of this one, and the rule
+// cannot tell the difference.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+
 function cleanValidationText(value: string): string {
-  const withoutControls = Array.from(value, (character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
-  }).join("");
-  return withoutControls
+  return value
+    .replace(CONTROL_CHARACTERS, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, VALIDATION_TEXT_LIMIT);

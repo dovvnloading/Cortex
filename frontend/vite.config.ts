@@ -1,5 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolve } from "node:path";
+
 import { normalizeApiBaseUrl } from "./src/api/baseUrl";
 
 function cortexDevIdentityPlugin(nonce: string | undefined): Plugin {
@@ -30,7 +32,12 @@ export default defineConfig(({ mode }) => {
           target: `http://127.0.0.1:${process.env.CORTEX_BACKEND_PORT ?? 8765}`,
         },
       },
-      fs: { allow: [".."] },
+      // The frontend imports the generated API types from contracts/, which
+      // lives outside this root. Allow that one directory rather than the
+      // entire repository -- everything else up there (local databases, the
+      // packaging runtime, .env files) has no business being served, even on
+      // loopback.
+      fs: { allow: [resolve(__dirname, "..", "contracts")] },
     },
     build: {
       outDir: "dist",
