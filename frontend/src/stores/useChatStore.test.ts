@@ -4,7 +4,6 @@ import { useChatStore } from "./useChatStore";
 const idleGeneration = {
   jobId: null,
   threadId: null,
-  lastEventId: 0,
   phase: "idle" as const,
   partialContent: "",
   partialThoughts: "",
@@ -14,7 +13,7 @@ const idleGeneration = {
 
 describe("useChatStore", () => {
   beforeEach(() => {
-    useChatStore.setState({ chats: [], generation: idleGeneration, generationOptionsByThread: {} });
+    useChatStore.setState({ chats: [], generation: idleGeneration, generationCursor: 0, generationOptionsByThread: {} });
   });
 
   it("setChats accepts a plain array, mirroring useState", () => {
@@ -66,7 +65,7 @@ describe("useChatStore", () => {
     useChatStore.getState().setGenerationCursor("job-cursor", 7);
     useChatStore.getState().setGenerationCursor("job-cursor", 3);
 
-    expect(useChatStore.getState().generation.lastEventId).toBe(7);
+    expect(useChatStore.getState().generationCursor).toBe(7);
   });
 
   it("ignores content/thinking tokens for a stale or unrelated jobId", () => {
@@ -129,6 +128,61 @@ describe("useChatStore", () => {
     expect(useChatStore.getState().generationOptionsByThread).toEqual({
       "thread-b": { top_p: 0.5 },
     });
+  });
+
+  // ChatPage subscribes to the whole `generation` object by reference, and the
+  // writes below run on every SSE frame. Rebuilding that object when nothing
+  // it renders has changed re-rendered the transcript per frame and cancelled
+  // out the rAF batching in useGenerationStream. Identity is the assertion --
+  // deep equality would pass either way.
+  it("does not touch the generation slice when the event cursor advances", () => {
+    useChatStore.getState().beginGeneration("job-cursor-identity", "thread-cursor-identity");
+    const before = useChatStore.getState().generation;
+
+    for (let eventId = 1; eventId <= 25; eventId += 1) {
+      useChatStore.getState().setGenerationCursor("job-cursor-identity", eventId);
+    }
+
+    expect(useChatStore.getState().generationCursor).toBe(25);
+    expect(useChatStore.getState().generation).toBe(before);
+  });
+
+  it("leaves the generation slice untouched when a per-frame write changes nothing", () => {
+    useChatStore.getState().beginGeneration("job-identity", "thread-identity");
+    useChatStore.getState().setStatusText("job-identity", "Response content available.");
+    useChatStore.getState().markContentReady("job-identity");
+    const before = useChatStore.getState().generation;
+
+    // The same status message rides every content_delta frame.
+    useChatStore.getState().setStatusText("job-identity", "Response content available.");
+    expect(useChatStore.getState().generation).toBe(before);
+
+    // Already ready, and already stopping.
+    useChatStore.getState().markContentReady("job-identity");
+    expect(useChatStore.getState().generation).toBe(before);
+    useChatStore.getState().markStopping("job-identity");
+    const stopping = useChatStore.getState().generation;
+    expect(stopping).not.toBe(before);
+    useChatStore.getState().markStopping("job-identity");
+    expect(useChatStore.getState().generation).toBe(stopping);
+  });
+
+  it("still applies a per-frame write that does change something", () => {
+    useChatStore.getState().beginGeneration("job-advance", "thread-advance");
+    const initial = useChatStore.getState().generation;
+
+    useChatStore.getState().setStatusText("job-advance", "Saving the response.");
+    expect(useChatStore.getState().generation).not.toBe(initial);
+    expect(useChatStore.getState().generation.statusText).toBe("Saving the response.");
+  });
+
+  it("resets the event cursor with the generation it belongs to", () => {
+    useChatStore.getState().beginGeneration("job-reset-cursor", "thread-reset-cursor");
+    useChatStore.getState().setGenerationCursor("job-reset-cursor", 9);
+    expect(useChatStore.getState().generationCursor).toBe(9);
+
+    useChatStore.getState().endGeneration("job-reset-cursor");
+    expect(useChatStore.getState().generationCursor).toBe(0);
   });
 
   it("setThreadOptions replaces (not merges) an existing entry for the same key", () => {
