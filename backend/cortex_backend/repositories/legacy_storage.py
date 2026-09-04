@@ -704,6 +704,37 @@ class DatabaseManager:
                 operation="chat_revision_conflict",
             )
 
+    def load_chat_overview(self, thread_id: str) -> dict | None:
+        """Thread metadata and message count, without loading the messages.
+
+        chat_revision() is the message count, and a caller that needs only the
+        revision or the title should not pay for every row of a long thread
+        being read and JSON-decoded. Returns the same keys load_chat does,
+        minus "messages", plus "revision".
+        """
+        try:
+            with self.connect() as conn:
+                row = conn.execute(
+                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    (thread_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                overview = dict(row)
+                overview["revision"] = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
+                        (thread_id,),
+                    ).fetchone()[0]
+                )
+                return overview
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to load chat overview {thread_id}.",
+                operation="load_chat_overview",
+                cause=exc,
+            ) from exc
+
     def load_chat(self, thread_id: str) -> dict | None:
         """Loads a full chat thread (metadata and messages) from the database."""
         try:

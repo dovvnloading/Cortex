@@ -2067,10 +2067,12 @@ async def _start_generation_job(
                     thread_title="New Chat" if current_chat is None else None,
                     expected_revision=admission_revision,
                 )
-                updated_chat = deps.chats.get_chat(thread_id)
-                if updated_chat is None:
+                # Only the revision is needed here, so read the overview
+                # rather than every message of what may be a long thread.
+                overview = deps.chats.get_chat_overview(thread_id)
+                if overview is None:
                     raise ChatRepositoryError("Chat did not persist the user message.")
-                prepared_revision = chat_revision(updated_chat)
+                prepared_revision = int(overview["revision"])
             return {"user_message_id": user_message_id}
 
         def runner(sink, cancel_event):
@@ -2167,8 +2169,8 @@ async def _start_generation_job(
             # confirmation flow), so an instruction-like model response cannot
             # become a persistent prompt injection on its own.
 
-            updated_chat = deps.chats.get_chat(thread_id) or {"messages": []}
-            title = str(updated_chat.get("title") or "New Chat")
+            overview = deps.chats.get_chat_overview(thread_id) or {}
+            title = str(overview.get("title") or "New Chat")
             if target_message_id is None and title == "New Chat":
                 raw_title = None
                 title_generator = getattr(
@@ -2204,13 +2206,15 @@ async def _start_generation_job(
                         logging.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
                         )
-            updated_chat = deps.chats.get_chat(thread_id) or updated_chat
+            # rename_chat above may have moved the title, and the assistant
+            # message moved the revision. Neither needs the transcript.
+            overview = deps.chats.get_chat_overview(thread_id) or overview
             return {
                 "thread_id": thread_id,
                 "user_message_id": user_message_id,
                 "assistant_message_id": assistant_message_id,
-                "chat_revision": chat_revision(updated_chat),
-                "title": str(updated_chat.get("title") or title),
+                "chat_revision": int(overview.get("revision", 0)),
+                "title": str(overview.get("title") or title),
                 "response": result.response,
                 "thoughts": result.thoughts,
                 "clear_requested": result.memory_command.clear_requested,
