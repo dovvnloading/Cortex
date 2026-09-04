@@ -85,6 +85,7 @@ _RUNTIME_CODES = frozenset(
         "runtime_error",
         "runtime_limit",
         "memory_limit",
+        "result_duration_invalid",
         "filesystem_limit",
         "filesystem_changed",
         "filesystem_read_failed",
@@ -169,6 +170,7 @@ REJECTION_MESSAGES: Mapping[str, str] = {
     "network_request_failed": "A web request made by the run did not succeed.",
     "runtime_limit": "The run took too long and was stopped.",
     "memory_limit": "The run needed more memory than Cortex allows.",
+    "result_duration_invalid": "The run finished but reported an unusable timing value.",
     "runtime_error": "The program stopped with an error while it was running.",
 }
 

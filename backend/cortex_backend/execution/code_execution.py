@@ -239,6 +239,14 @@ class CodeExecutionResult:
     truncated: bool = False
     duration_ms: int = 0
 
+    def __post_init__(self) -> None:
+        # The clamp ceiling upstream is built from a float constant, so a
+        # clamped duration used to reach the payload as 10000.0 where the
+        # contract declares an integer. Refuse the wrong type at the boundary
+        # rather than trusting every caller to round.
+        if type(self.duration_ms) is not int:
+            raise CodeExecutionError("result_duration_invalid")
+
     def as_payload(self) -> dict[str, Any]:
         return {
             "schema_version": CODE_EXECUTION_RESULT_SCHEMA,
@@ -1378,7 +1386,7 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
         stderr=err,
         value=safe_value,
         truncated=stdout.truncated or stderr.truncated or out_truncated or err_truncated or value_truncated,
-        duration_ms=min(MAX_CODE_TIMEOUT_SECONDS * 1_000, int((time.monotonic() - started) * 1000)),
+        duration_ms=min(int(MAX_CODE_TIMEOUT_SECONDS * 1_000), int((time.monotonic() - started) * 1000)),
     )
 
 
