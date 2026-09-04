@@ -43,7 +43,7 @@ from cortex_backend.testing.fake_ollama import (
 )
 
 from .jobs import JobRegistry
-from .routes import build_router
+from .routers import build_router
 from .security import SessionManager
 
 logger = logging.getLogger(__name__)

@@ -415,20 +415,22 @@ def test_event_stream_survives_an_idle_approval_wait_and_stays_off_the_event_loo
     the event loop, or the stream stalls every other request while it polls.
     """
 
-    from cortex_backend.api import routes
+    # The route body lives here, so this is where its module-level names are
+    # looked up -- patching cortex_backend.api.routes would have no effect.
+    from cortex_backend.api.routers import execution as execution_routes
 
-    monkeypatch.setattr(routes, "EXECUTION_STREAM_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(routes, "EXECUTION_STREAM_HEARTBEAT_SECONDS", 0.0)
-    monkeypatch.setattr(routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_HEARTBEAT_SECONDS", 0.0)
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
 
     reader_threads: set[int] = set()
-    real_poll = routes._poll_execution_stream
+    real_poll = execution_routes._poll_execution_stream
 
     def recording_poll(*args, **kwargs):
         reader_threads.add(threading.get_ident())
         return real_poll(*args, **kwargs)
 
-    monkeypatch.setattr(routes, "_poll_execution_stream", recording_poll)
+    monkeypatch.setattr(execution_routes, "_poll_execution_stream", recording_poll)
 
     app = _app(tmp_path)
     with TestClient(app) as client:
