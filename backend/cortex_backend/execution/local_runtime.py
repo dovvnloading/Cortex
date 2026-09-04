@@ -328,12 +328,12 @@ class LocalExecutionCoordinator:
                     pass
                 return self.repository.get_job(job_id, owner=owner) or job
             with self._code_lock:
-                event = self._code_cancel_events.get(job_id)
-                attempt = self._code_attempts.get(job_id)
-            if event is not None:
-                event.set()
-            if attempt is not None:
-                attempt.cancel()
+                code_event = self._code_cancel_events.get(job_id)
+                code_attempt = self._code_attempts.get(job_id)
+            if code_event is not None:
+                code_event.set()
+            if code_attempt is not None:
+                code_attempt.cancel()
             return self.repository.request_cancel(job_id)
         return self.repository.request_cancel(job_id)
 
@@ -410,8 +410,8 @@ class LocalExecutionCoordinator:
             code_threads = list(self._code_threads.values())
         for event in code_events:
             event.set()
-        for attempt in code_attempts:
-            attempt.cancel()
+        for code_attempt in code_attempts:
+            code_attempt.cancel()
         for thread in code_threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._recipe.shutdown(timeout=max(0.0, deadline - time.monotonic()))

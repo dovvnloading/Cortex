@@ -54,7 +54,7 @@ class FakeLlamaServerProvider:
             from cortex_backend.llamacpp.errors import LlamaCppError
 
             raise LlamaCppError("The local model runtime startup was cancelled.")
-        self.ensure_ready_calls.append((model_path, num_ctx))
+        self.ensure_ready_calls.append((model_path, num_ctx if num_ctx is not None else 0))
         if on_status is not None:
             on_status("Starting the local model...")
         if self.state.fail_ensure_ready:

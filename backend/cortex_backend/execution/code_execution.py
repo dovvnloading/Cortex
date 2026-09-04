@@ -28,7 +28,7 @@ import sys
 import signal
 from threading import Event as ThreadEvent, Lock as ThreadLock, Thread
 import time
-from typing import Any
+from typing import Final, Any
 from collections.abc import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
@@ -41,7 +41,7 @@ from urllib.request import (
 )
 
 
-CODE_EXECUTION_PROFILE = "code.exec.v1"
+CODE_EXECUTION_PROFILE: Final = "code.exec.v1"
 CODE_EXECUTION_PAYLOAD_SCHEMA = "code.execution.v1"
 CODE_EXECUTION_RESULT_SCHEMA = "code.result.v1"
 MAX_CODE_SOURCE_BYTES = 64 * 1024
@@ -1028,7 +1028,8 @@ def _terminate_brokered_process(process: subprocess.Popen[bytes], job: _WindowsP
         job.close()
     elif os.name != "nt":
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            # POSIX-only; guarded by the os.name check above.
+            os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except (OSError, ProcessLookupError):
             pass
     try:
@@ -1098,8 +1099,9 @@ def _validate_network_url(url: str) -> tuple[str, str]:
         ):
             raise PermissionError("network host is not public")
     # Every address in this answer passed, so any of them is safe to use.
-    # Pin the first so the connection cannot resolve a different one.
-    return url, addresses[0][4][0]
+    # Pin the first so the connection cannot resolve a different one. The
+    # first sockaddr slot is the host string for both AF_INET and AF_INET6.
+    return url, str(addresses[0][4][0])
 
 
 def _pinned_connection_classes(pinned_ip: str) -> tuple[type, type]:
@@ -1114,8 +1116,10 @@ def _pinned_connection_classes(pinned_ip: str) -> tuple[type, type]:
 
     class _PinnedHTTPConnection(http.client.HTTPConnection):
         def connect(self) -> None:
-            self.sock = self._create_connection(
-                (pinned_ip, self.port), self.timeout, self.source_address
+            # _create_connection and source_address are set by http.client
+            # itself; typeshed does not expose them on the class.
+            self.sock = self._create_connection(  # type: ignore[attr-defined]
+                (pinned_ip, self.port), self.timeout, self.source_address  # type: ignore[attr-defined]
             )
             try:
                 self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1124,8 +1128,8 @@ def _pinned_connection_classes(pinned_ip: str) -> tuple[type, type]:
 
     class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         def connect(self) -> None:
-            self.sock = self._create_connection(
-                (pinned_ip, self.port), self.timeout, self.source_address
+            self.sock = self._create_connection(  # type: ignore[attr-defined]
+                (pinned_ip, self.port), self.timeout, self.source_address  # type: ignore[attr-defined]
             )
             try:
                 self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1133,7 +1137,9 @@ def _pinned_connection_classes(pinned_ip: str) -> tuple[type, type]:
                 pass
             # server_hostname stays the real hostname: certificate validation
             # must not be weakened just because we dialed an address.
-            self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+            self.sock = self._context.wrap_socket(  # type: ignore[attr-defined]
+                self.sock, server_hostname=self.host
+            )
 
     return _PinnedHTTPConnection, _PinnedHTTPSConnection
 
@@ -1260,12 +1266,12 @@ def _json_safe(value: Any, *, depth: int = 0) -> Any:
             result[str(key)[:100]] = _json_safe(item, depth=depth + 1)
         return result
     if isinstance(value, (list, tuple, set)):
-        result = []
+        items: list[Any] = []
         for index, item in enumerate(value):
             if index >= 100:
                 break
-            result.append(_json_safe(item, depth=depth + 1))
-        return result
+            items.append(_json_safe(item, depth=depth + 1))
+        return items
     return str(value)[:1000]
 
 
@@ -1396,8 +1402,15 @@ def _apply_resource_limits() -> None:
     try:
         import resource  # Unix only; unavailable on the Windows desktop build.
 
-        resource.setrlimit(resource.RLIMIT_AS, (MAX_CODE_MEMORY_BYTES, MAX_CODE_MEMORY_BYTES))
-        resource.setrlimit(resource.RLIMIT_CPU, (int(MAX_CODE_TIMEOUT_SECONDS) + 1, int(MAX_CODE_TIMEOUT_SECONDS) + 2))
+        # POSIX-only; the ImportError below is the Windows path.
+        resource.setrlimit(  # type: ignore[attr-defined]
+            resource.RLIMIT_AS,  # type: ignore[attr-defined]
+            (MAX_CODE_MEMORY_BYTES, MAX_CODE_MEMORY_BYTES),
+        )
+        resource.setrlimit(  # type: ignore[attr-defined]
+            resource.RLIMIT_CPU,  # type: ignore[attr-defined]
+            (int(MAX_CODE_TIMEOUT_SECONDS) + 1, int(MAX_CODE_TIMEOUT_SECONDS) + 2),
+        )
     except (ImportError, OSError, ValueError):
         # Windows is bounded by the parent wall-clock watchdog and process
         # termination. The platform-specific job object can be added without

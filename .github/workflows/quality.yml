@@ -82,6 +82,9 @@ jobs:
       - name: Lint Python
         run: python -m ruff check backend tests tools main.py app_factory.py
 
+      - name: Type-check Python
+        run: python -m mypy
+
       - name: Run headless tests
         run: python -m pytest
 

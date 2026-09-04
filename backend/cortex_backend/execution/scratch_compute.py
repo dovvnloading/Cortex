@@ -14,10 +14,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Context, Decimal, DivisionByZero, InvalidOperation, Overflow, ROUND_HALF_EVEN, localcontext
 import re
-from typing import Any
+from typing import Final, Any
 
 
-SCRATCH_COMPUTE_PROFILE = "scratch.auto.v1"
+SCRATCH_COMPUTE_PROFILE: Final = "scratch.auto.v1"
 SCRATCH_PAYLOAD_SCHEMA = "scratch.compute.v1"
 SCRATCH_RESULT_SCHEMA = "scratch.result.v1"
 MAX_EXPRESSION_CHARS = 512
@@ -263,8 +263,13 @@ def _decimal_context() -> Context:
 def _bounded(value: Decimal) -> Decimal:
     if not value.is_finite() or abs(value) > MAX_RESULT_ABS:
         raise ScratchComputeError("result_out_of_bounds")
+    exponent = value.as_tuple().exponent
+    # is_finite() above rules out the 'n'/'N'/'F' exponents Decimal uses
+    # for NaN and Infinity, so this is an int by construction.
+    if not isinstance(exponent, int):
+        raise ScratchComputeError("result_out_of_bounds")
     try:
-        if value.as_tuple().exponent < -MAX_DECIMAL_SCALE:
+        if exponent < -MAX_DECIMAL_SCALE:
             value = value.quantize(
                 Decimal("1").scaleb(-MAX_DECIMAL_SCALE),
                 rounding=ROUND_HALF_EVEN,

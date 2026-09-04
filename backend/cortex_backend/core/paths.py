@@ -42,7 +42,7 @@ def _canonical_data_root(data_dir: str | os.PathLike[str]) -> Path:
 
     # Check existing components before resolving so a junction/symlink cannot
     # silently redirect a custom root to another user's data.
-    current = Path(value.anchor) if value.anchor else Path.cwd().anchor
+    current = Path(value.anchor) if value.anchor else Path(Path.cwd().anchor)
     for component in value.parts[1:] if value.anchor else value.parts:
         current /= component
         try:

@@ -29,7 +29,6 @@ from cortex_backend.execution.recipes import (
     parse_image_transform,
 )
 from cortex_backend.execution.scratch_compute import (
-    SCRATCH_COMPUTE_PROFILE,
     ScratchComputeError,
     validate_scratch_expression,
 )
@@ -537,7 +536,7 @@ class AttachmentStageRequest(APIModel):
 class ScratchComputeAccepted(APIModel):
     job_id: str
     request_id: str
-    profile: Literal[SCRATCH_COMPUTE_PROFILE]
+    profile: Literal["scratch.auto.v1"]
     status: ExecutionStatus
     sequence: int
 

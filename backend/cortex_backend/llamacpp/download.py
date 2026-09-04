@@ -496,8 +496,9 @@ def _validate_download_url(url: str) -> str:
         literal_address = ipaddress.ip_address(normalized_host)
     except ValueError:
         literal_address = None
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address]
     if literal_address is not None:
-        addresses = (literal_address,)
+        addresses = [literal_address]
     else:
         try:
             resolved = socket.getaddrinfo(
