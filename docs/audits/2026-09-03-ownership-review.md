@@ -199,8 +199,38 @@ kind)` so `llm.py:100-103` stops sniffing attributes. Add `user_message` to
 
 Generate a lockfile (`uv lock` or `pip-compile --generate-hashes`) and install
 from it in CI and in `scripts/check.ps1`. Widen the pins to what is actually
-tested, or narrow the local environment to match. Add `dependabot.yml` for pip,
-npm, and GitHub Actions. Frontend has 21 minor updates pending, none urgent.
+tested, or narrow the local environment to match. Frontend has 21 minor
+updates pending, none urgent.
+
+**Correction (this recommendation originally also said to add a
+`dependabot.yml` for pip, npm, and GitHub Actions; that half was wrong and
+has been withdrawn).** The lockfiles landed and are worth keeping. The
+`dependabot.yml` landed too, and was reverted a few hours later after it
+produced ten pull requests in one batch. What that batch actually showed:
+
+- One update was uninstallable. It bumped `pydantic-core` on its own, but
+  `pydantic` pins `pydantic-core` to an exact version, so the proposed lock
+  described an environment pip could never install. The lockfile-freshness
+  check caught it; Dependabot did not.
+- Three frontend updates each rewrote `package-lock.json` independently, so
+  they conflicted with each other by construction. Merging one broke the
+  other two.
+- Every one of the ten ran the full pipeline, including the twelve-minute
+  packaging job, for dev-dependency patch bumps.
+
+The distinction the original recommendation missed is that Dependabot's
+*security alerts* and its *version updates* are separate features. Alerts
+fire only on a real advisory, cost nothing, and are configured on the
+repository rather than in this file. `dependabot.yml` is the version-update
+stream, which bumps on a schedule whether or not anything is wrong.
+
+For a loopback-only, single-user desktop application with effectively one
+maintainer, the version-update stream is churn. The dependencies here that
+genuinely warrant watching are `Pillow`, which decodes user-supplied chat
+attachments, and `cryptography`, which backs the native broker handshake --
+and security alerts cover both. GitHub already annotates deprecated action
+runtimes on every workflow run, which is the other signal the batch
+provided.
 
 ### 5.4 Test suite structure
 
@@ -448,7 +478,7 @@ plus `rehype-highlight` into their own chunk for WebView2 cold start.
 | `docs/adr/` | 25 ADRs all numbered `0001` | Renumber, or archive with the dormant code they describe |
 | README | Says "26-shot set" (6 captures exist); says chat model "doubles as the title model" (separate `title` field exists); never mentions translation, which is a live settings section; describes the sandbox as Python | Correct all four |
 | Branches | 63 unmerged local branches; this branch is 210 commits ahead of `main` | Merge this branch. Delete merged and abandoned branches. |
-| `.github` | No `dependabot.yml`, `CODEOWNERS`, release workflow; issue templates ask for "Smartphone / iPhone6" | Add the first three; rewrite templates for a Windows desktop app |
+| `.github` | No `CODEOWNERS`, release workflow; issue templates ask for "Smartphone / iPhone6" | Add both; rewrite templates for a Windows desktop app. (A `dependabot.yml` was also recommended here, then tried and withdrawn -- see the correction in 5.3.) |
 | `tools/screenshots/showcase_server.py` | Second `create_app` composition that duplicates `Cortex_Preview.py` wiring; `capture.ps1` writes to an empty `docs/images/` while README images live in `.github/images/` | Build from the shared bootstrap; point capture at `.github/images/` |
 | `tools/generate_contracts.py` | Sound, but only for the default app; routes under non-default flags would be silently missing. Tests never diff the live spec against the checked-in file (CI does). | Add that assertion to `test_contract_generation.py` |
 
