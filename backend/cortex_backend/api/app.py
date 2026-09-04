@@ -25,9 +25,8 @@ from cortex_backend.repositories.settings import SettingsRepository
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelCatalog
-from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
-from cortex_backend.execution.lifecycle import ExecutionLifecycle
+from cortex_backend.execution.lifecycle import ExecutionLifecycle, LifecycleCoordinator
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from .jobs import JobRegistry
@@ -60,7 +59,7 @@ def create_app(
     ollama_host: str | None = None,
     handoff_secret: str | None = None,
     readiness_check: Callable[[], bool] | None = None,
-    execution_coordinator: DurableFakeCoordinator | None = None,
+    execution_coordinator: LifecycleCoordinator | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
     cleanup_supervisor: ExecutionCleanupSupervisor | None = None,
     installation_principal_id: str | None = None,

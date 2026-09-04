@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.security import SessionManager
-from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.testing import DurableFakeCoordinator
 from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
 from support import session_headers as _session
 
