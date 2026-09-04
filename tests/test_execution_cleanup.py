@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 from datetime import datetime, timedelta, timezone
 import time
 from pathlib import Path
@@ -287,3 +288,56 @@ def test_cleanup_renews_lease_during_slow_pass(tmp_path, monkeypatch):
     assert not runner.is_alive()
     assert outcome == [True]
     assert renewals
+
+
+def test_a_worker_that_survives_the_kill_ladder_is_reported(caplog):
+    """A leaked sandboxed child must not look like a worker that said nothing.
+
+    Every teardown step is best-effort, so failures used to be swallowed
+    entirely. A path that always fails leaks a child holding its sandbox
+    resources on every run, and with nothing recorded that is
+    indistinguishable from a worker which simply never produced a result.
+    """
+    from cortex_backend.execution import local_runtime
+
+    class _Unkillable:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            del timeout
+
+        def terminate(self):
+            raise OSError("terminate refused")
+
+        def kill(self):
+            raise OSError("kill refused")
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_runtime"):
+        local_runtime._stop_process(_Unkillable(), grace_seconds=0.0)
+
+    assert any("could not be killed" in record.message for record in caplog.records)
+
+
+def test_ordinary_teardown_stays_quiet(caplog):
+    """A worker that stops on request must not log anything at warning level."""
+    from cortex_backend.execution import local_runtime
+
+    class _Cooperative:
+        def __init__(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            del timeout
+            self.alive = False
+
+        def terminate(self):  # pragma: no cover - never reached
+            raise AssertionError("terminate should not be needed")
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_runtime"):
+        local_runtime._stop_process(_Cooperative(), grace_seconds=0.0)
+
+    assert caplog.records == []
