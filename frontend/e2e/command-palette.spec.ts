@@ -17,7 +17,7 @@ test("opens the command palette with Ctrl+K, filters, and navigates to settings"
     await route.fulfill({ json: { id: "thread-a", title: "Weekend plans", timestamp: "2026-01-01T00:00:00Z", revision: 1, messages: [{ id: "m-1", role: "user", content: "hi" }] } });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: false, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });
@@ -55,7 +55,7 @@ test("the shortcuts help dialog opens on '?' and closes on Escape", async ({ pag
     await route.fulfill({ json: [] });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: false, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });

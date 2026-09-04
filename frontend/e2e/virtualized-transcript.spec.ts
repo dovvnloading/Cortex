@@ -29,7 +29,7 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
     await route.fulfill({ json: chat });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: false, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });

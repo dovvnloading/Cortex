@@ -7,7 +7,6 @@ const settings = {
   generation: { temperature: 0.7, num_ctx: 4096, seed: -1 },
   memory: { enabled: true },
   translation: { enabled: false },
-  suggestions: { enabled: false, model: null },
 };
 
 async function stubWorkspace(page: Page, groups: unknown) {

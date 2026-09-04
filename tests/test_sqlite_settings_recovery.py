@@ -1,5 +1,6 @@
 """Recovery tests for the settings database and its verified backups."""
 
+import json
 from pathlib import Path
 import shutil
 import sqlite3
@@ -238,3 +239,39 @@ def test_restore_discards_the_replaced_databases_write_ahead_log(tmp_path: Path)
     assert not stale_wal.exists()
     assert not stale_shm.exists()
     assert repository.load().settings.revision == 1
+
+
+def test_a_workspace_written_before_suggestions_was_removed_still_loads(tmp_path: Path):
+    """CortexSettings is extra="forbid", so a retired key is a hard failure.
+
+    Every existing install has "suggestions" in its stored payload. Without
+    dropping retired keys on read, upgrading would surface as "Stored Cortex
+    settings are invalid" and lose a real workspace's settings over a field
+    nothing has used for a long time.
+    """
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    original = repository.load().settings
+    repository.save(original.model_copy(update={"revision": 1}), expected_revision=0)
+
+    # Write back exactly what an older build would have stored.
+    stored = json.loads(json.dumps(original.model_dump(mode="json")))
+    stored["revision"] = 1
+    stored["suggestions"] = {"enabled": False, "model": "qwen3:4b"}
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE cortex_settings SET payload = ? WHERE id = 1",
+            (json.dumps(stored),),
+        )
+
+    reopened = SQLiteSettingsRepository(repository.db_path)
+    loaded = reopened.load().settings
+
+    assert loaded.revision == 1
+    assert not hasattr(loaded, "suggestions")
+    # The next save writes the current shape, so the key does not come back.
+    reopened.save(loaded.model_copy(update={"revision": 2}), expected_revision=1)
+    with reopened.connect() as connection:
+        payload = connection.execute(
+            "SELECT payload FROM cortex_settings WHERE id = 1"
+        ).fetchone()[0]
+    assert "suggestions" not in json.loads(payload)

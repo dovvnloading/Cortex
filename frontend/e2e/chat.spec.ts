@@ -20,7 +20,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
     await route.fulfill({ json: { id: threadId, title: "hello", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "m-1", role: "user", content: "hello" }, { id: "m-2", role: "assistant", content: "Echo: hello" }] } });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });
@@ -87,7 +87,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ status: 201, json: { id: "fork-e2e", title: "Fork of fail", timestamp: "2026-01-01T00:00:00Z", revision: 2, messages: [{ id: "fm-1", role: "user", content: "fail" }, { id: "fm-2", role: "assistant", content: "Echo: fail" }] } });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: true, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });
@@ -128,7 +128,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
 
 test("manages settings, permanent memory, and model pull progress", async ({ page }) => {
   let memos = ["Remember tea"];
-  let settings = { appearance: { theme: "dark" }, models: { chat: null, title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" }, memory: { enabled: true }, translation: { enabled: false, target_language: "Spanish" }, suggestions: { enabled: true, model: null } };
+  let settings = { appearance: { theme: "dark" }, models: { chat: null, title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" }, memory: { enabled: true }, translation: { enabled: false, target_language: "Spanish" } };
 
   await page.route("**/api/v1/session/exchange", async (route) => {
     await route.fulfill({ json: { session_token: "session-system", expires_at: "2099-01-01T00:00:00Z" } });
@@ -242,7 +242,7 @@ test("renders a structured workbench transcript with markdown and code blocks", 
     await route.fulfill({ json: chat });
   });
   await page.route("**/api/v1/settings", async (route) => {
-    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false }, suggestions: { enabled: false, model: null } } } });
+    await route.fulfill({ json: { source: "defaults", settings: { appearance: { theme: "dark" }, models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation: { temperature: 0.7, num_ctx: 4096, seed: -1 }, memory: { enabled: true }, translation: { enabled: false } } } });
   });
   await page.route("**/api/v1/memories", async (route) => {
     await route.fulfill({ json: { memos: [] } });

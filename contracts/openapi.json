@@ -846,9 +846,6 @@
             "title": "Schema Version",
             "type": "integer"
           },
-          "suggestions": {
-            "$ref": "#/components/schemas/SuggestionSettings"
-          },
           "translation": {
             "$ref": "#/components/schemas/TranslationSettings"
           }
@@ -3231,32 +3228,6 @@
           }
         },
         "title": "ShutdownResponse",
-        "type": "object"
-      },
-      "SuggestionSettings": {
-        "additionalProperties": false,
-        "description": "Legacy-compatible settings retained for reading existing workspaces.",
-        "properties": {
-          "enabled": {
-            "default": true,
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "model": {
-            "anyOf": [
-              {
-                "maxLength": 200,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model"
-          }
-        },
-        "title": "SuggestionSettings",
         "type": "object"
       },
       "SystemResponse": {

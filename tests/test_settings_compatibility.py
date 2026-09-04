@@ -37,8 +37,6 @@ class TypedSettingsTests(unittest.TestCase):
         self.assertTrue(settings.memory.enabled)
         self.assertFalse(settings.translation.enabled)
         self.assertEqual(settings.translation.target_language, "Spanish")
-        self.assertTrue(settings.suggestions.enabled)
-        self.assertIsNone(settings.suggestions.model)
 
     def test_generation_limits_remain_validated(self):
         with self.assertRaises(ValidationError):
@@ -81,7 +79,14 @@ class LegacySettingsReaderTests(unittest.TestCase):
 
             self.assertEqual(result.source, "legacy_ini")
             self.assertEqual(result.invalid_keys, ())
-            self.assertEqual(set(result.present_keys), set(values))
+            # suggestions_enabled/suggestions_model are still in the fixture
+            # because a real legacy workspace still has them. They map to
+            # nothing now, so they are simply not read -- and, importantly,
+            # they are not reported as invalid either.
+            self.assertEqual(
+                set(result.present_keys),
+                set(values) - {"suggestions_enabled", "suggestions_model"},
+            )
             self.assertEqual(result.settings.appearance.theme, "dark")
             self.assertTrue(result.settings.onboarding.agreement_accepted)
             self.assertEqual(result.settings.models.chat, "gemma3:4b")
@@ -91,8 +96,6 @@ class LegacySettingsReaderTests(unittest.TestCase):
             self.assertFalse(result.settings.memory.enabled)
             self.assertTrue(result.settings.translation.enabled)
             self.assertEqual(result.settings.translation.target_language, "French")
-            self.assertFalse(result.settings.suggestions.enabled)
-            self.assertEqual(result.settings.suggestions.model, "qwen3:4b")
 
     def test_invalid_fields_fall_back_individually_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -121,16 +124,6 @@ class LegacySettingsReaderTests(unittest.TestCase):
             )
             self.assertEqual(result.settings.models.chat, "gemma3:4b")
             self.assertEqual(result.settings.translation.target_language, "German")
-
-    def test_missing_suggestion_model_remains_unconfigured(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "legacy.ini"
-            _write_ini(path, {"chat_model": "gemma3:12b"})
-
-            result = LegacySettingsReader(path).load()
-
-            self.assertEqual(result.settings.models.chat, "gemma3:12b")
-            self.assertIsNone(result.settings.suggestions.model)
 
     def test_legacy_reader_is_read_only(self):
         with tempfile.TemporaryDirectory() as directory:

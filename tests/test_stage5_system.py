@@ -50,8 +50,6 @@ def test_qsettings_fixture_maps_every_legacy_key_without_mutating_source(tmp_pat
         "memories_enabled",
         "num_ctx",
         "seed",
-        "suggestions_enabled",
-        "suggestions_model",
         "temperature",
         "target_language",
         "theme",
@@ -69,8 +67,7 @@ def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_pa
     legacy.write_text(
         legacy.read_text(encoding="utf-8")
         .replace("temperature=1.25", "temperature=not-a-number")
-        .replace("num_ctx=8192", "num_ctx=1024")
-        .replace("suggestions_model=qwen3:4b\n", ""),
+        .replace("num_ctx=8192", "num_ctx=1024"),
         encoding="utf-8",
     )
     before = legacy.read_bytes()
@@ -83,7 +80,6 @@ def test_qsettings_migration_handles_malformed_partial_and_repeated_reads(tmp_pa
     repeated = repository.load()
 
     assert set(migrated.invalid_keys) == {"temperature", "num_ctx"}
-    assert migrated.settings.suggestions.model is None
     assert migrated.migration is not None
     assert migrated.migration.status == "migrated"
     assert repeated.migration is not None

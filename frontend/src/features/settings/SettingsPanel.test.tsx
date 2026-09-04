@@ -71,7 +71,6 @@ describe("SettingsPanel", () => {
       generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "" },
       memory: { enabled: true },
       translation: { enabled: false, target_language: "Spanish" },
-      suggestions: { enabled: true, model: null },
     };
     const models: ModelResponse = {
       required_models: [],

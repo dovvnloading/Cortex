@@ -19,7 +19,6 @@ async function stubWorkspace(page: Page, {
     generation: { temperature: 0.7, num_ctx: 4096, seed: -1 },
     memory: { enabled: true },
     translation: { enabled: false },
-    suggestions: { enabled: false, model: null },
   };
 
   await page.route("**/api/v1/session/exchange", async (route) => {
