@@ -1,4 +1,9 @@
-"""Authenticated fake-only execution API and SSE contract tests."""
+"""Authenticated execution API and SSE contract tests.
+
+Driven through the deterministic preview coordinator so owner scoping,
+idempotent replay, durable cancel, and the SSE stream can be asserted without
+running real work.
+"""
 
 from __future__ import annotations
 

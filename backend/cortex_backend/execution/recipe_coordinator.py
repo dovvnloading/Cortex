@@ -285,7 +285,7 @@ class RecipeExecutionCoordinator:
     def recover_jobs(self, recovered_job_ids: Iterable[str]) -> None:
         """Resume only recipe jobs after a lifecycle owner reclaimed leases.
 
-        The normal qualification lifecycle owns its supervisor lease itself.
+        The lifecycle owns its supervisor lease itself.
         A local composite runtime can instead claim that lease once and pass
         the recovered IDs here, avoiding two independent supervisors racing
         over the same durable store.

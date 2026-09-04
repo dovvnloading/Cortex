@@ -173,7 +173,7 @@ class AppPaths:
 
     @property
     def execution_database(self) -> Path:
-        """Durable Phase 1 execution state kept separate from chat/settings data."""
+        """Durable execution state kept separate from chat/settings data."""
         return self.data_dir / "execution.sqlite"
 
     @property

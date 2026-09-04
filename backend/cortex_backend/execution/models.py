@@ -1,4 +1,4 @@
-"""Typed records used by the Phase 1 durable execution store."""
+"""Typed records used by the durable execution store."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Phase 1 durable fake-executor lifecycle contract tests."""
+"""Durable execution store: idempotency, replay, leases, and retention."""
 
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
         profile="fake.v1",
         payload={},
     )
-    content = b"phase1-artifact"
+    content = b"stored-artifact"
     artifact = repository.publish_artifact(
         job.job_id,
         name="result.txt",

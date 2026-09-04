@@ -1,4 +1,4 @@
-"""Durable SQLite repository for Phase 1 execution lifecycle tests."""
+"""Durable SQLite repository backing the execution lifecycle."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class ApprovalTransitionError(ExecutionRepositoryError):
 
 
 class ArtifactLimitError(ExecutionRepositoryError):
-    """An artifact exceeded the configured Phase 1 limit."""
+    """An artifact exceeded the configured size limit."""
 
 
 @dataclass(frozen=True, slots=True)

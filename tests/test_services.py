@@ -1,4 +1,4 @@
-"""Headless tests for the Stage 1 Phase 2 service extraction."""
+"""Headless tests for the service layer extracted out of the routes."""
 
 from __future__ import annotations
 
