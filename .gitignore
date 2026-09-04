@@ -37,6 +37,7 @@ dist/
 cortex.instance.*
 packaging/.runtime/
 
-# Coding-agent scratch worktrees and clones. Never part of the repository.
+# Coding-agent scratch worktrees, clones, and session state. Never part of the
+# repository.
 .codex-worktrees/
-
+.claude/
