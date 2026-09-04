@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 
 
 def test_preview_serves_frontend_bundle_and_preserves_api_boundary(tmp_path: Path):
@@ -17,6 +18,7 @@ def test_preview_serves_frontend_bundle_and_preserves_api_boundary(tmp_path: Pat
     )
     (assets / "app.js").write_text("console.log('cortex');", encoding="utf-8")
     app = create_app(
+        build_demo_dependencies(),
         allowed_hosts=("testserver", "127.0.0.1", "localhost", "::1"),
         serve_frontend=True,
         frontend_dist=dist,

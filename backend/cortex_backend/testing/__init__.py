@@ -1,5 +1,6 @@
 """Deterministic test doubles for the local Cortex backend."""
 
+from .dependencies import build_demo_dependencies
 from .fake_ollama import (
     FakeGenerationEngine,
     FakeOllamaGateway,
@@ -8,6 +9,7 @@ from .fake_ollama import (
 )
 
 __all__ = [
+    "build_demo_dependencies",
     "FakeGenerationEngine",
     "FakeOllamaGateway",
     "FakeOllamaState",

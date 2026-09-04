@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from cortex_backend.api import create_app  # noqa: E402
+from cortex_backend.testing import build_demo_dependencies  # noqa: E402
 
 
 CONTRACT_DIR = ROOT / "contracts"
@@ -47,7 +48,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    app = create_app(allowed_hosts=("127.0.0.1", "localhost", "::1"))
+    # The contract is a description of the routes, so the in-memory stack is
+    # exactly right here -- but it now has to be asked for by name.
+    app = create_app(
+        build_demo_dependencies(),
+        allowed_hosts=("127.0.0.1", "localhost", "::1"),
+    )
     specification = app.openapi()
     try:
         if args.check:

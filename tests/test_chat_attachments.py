@@ -15,7 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.core.generation import GenerationAttachment
 import cortex_backend.services.attachments as attachments_module
 from cortex_backend.services.attachments import (

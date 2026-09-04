@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 
 import Cortex_Preview
 from Cortex_Preview import build_preview_app
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
 from cortex_backend.repositories.legacy_storage import (
     DatabaseManager,
