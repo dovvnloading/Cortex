@@ -299,7 +299,7 @@ def test_a_worker_that_survives_the_kill_ladder_is_reported(caplog):
     resources on every run, and with nothing recorded that is
     indistinguishable from a worker which simply never produced a result.
     """
-    from cortex_backend.execution import local_runtime
+    from cortex_backend.execution import local_process
 
     class _Unkillable:
         def is_alive(self):
@@ -314,15 +314,15 @@ def test_a_worker_that_survives_the_kill_ladder_is_reported(caplog):
         def kill(self):
             raise OSError("kill refused")
 
-    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_runtime"):
-        local_runtime._stop_process(_Unkillable(), grace_seconds=0.0)
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_process"):
+        local_process._stop_process(_Unkillable(), grace_seconds=0.0)
 
     assert any("could not be killed" in record.message for record in caplog.records)
 
 
 def test_ordinary_teardown_stays_quiet(caplog):
     """A worker that stops on request must not log anything at warning level."""
-    from cortex_backend.execution import local_runtime
+    from cortex_backend.execution import local_process
 
     class _Cooperative:
         def __init__(self):
@@ -338,7 +338,7 @@ def test_ordinary_teardown_stays_quiet(caplog):
         def terminate(self):  # pragma: no cover - never reached
             raise AssertionError("terminate should not be needed")
 
-    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_runtime"):
-        local_runtime._stop_process(_Cooperative(), grace_seconds=0.0)
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.local_process"):
+        local_process._stop_process(_Cooperative(), grace_seconds=0.0)
 
     assert caplog.records == []
