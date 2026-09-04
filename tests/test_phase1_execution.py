@@ -135,7 +135,7 @@ def test_artifact_store_is_hash_verified_bounded_and_cleaned(tmp_path):
     with pytest.raises(ExecutionRepositoryError):
         repository.publish_artifact(job.job_id, name="..\\escape.txt", content=b"no")
     future = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-    assert repository.purge_expired(now=future) == 1
+    assert repository.cleanup_expired(now=future).artifacts == 1
     with pytest.raises(ExecutionRepositoryError):
         repository.read_artifact(artifact.artifact_id)
 
@@ -164,9 +164,9 @@ def test_purging_a_terminal_job_keeps_fresh_artifacts_for_retention(tmp_path):
         data={"ok": True},
     )
 
-    assert repository.purge_expired(
+    assert repository.cleanup_expired(
         now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-    ) == 0
+    ).artifacts == 0
     assert Path(artifact.path).exists()
     assert repository.get_artifact(artifact.artifact_id) is not None
 

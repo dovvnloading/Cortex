@@ -1,13 +1,16 @@
-"""Build the local Cortex FastAPI application and its durable dependencies."""
+"""Build the local Cortex FastAPI application and its durable dependencies.
+
+This module is the composition root. It has no entry point of its own:
+``main.py`` calls :func:`build_preview_app` and owns the process --
+instance lock, frontend build, WebView2 runtime, handoff secret, signal
+handling, and startup diagnostics.
+"""
 
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 import sys
-from urllib.parse import quote
-import webbrowser
 
 
 ROOT = Path(__file__).resolve().parent
@@ -15,7 +18,6 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import httpx  # noqa: E402
 import ollama  # noqa: E402
-import uvicorn  # noqa: E402
 
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
@@ -48,33 +50,6 @@ from cortex_backend.services.attachments import ChatAttachmentService  # noqa: E
 from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
 from cortex_backend.services.model_catalog import CombinedModelCatalog  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
-
-
-def _preview_browser_url(port: int, bootstrap_token: str) -> str:
-    """Build the one-time handoff URL without exposing its credential to logs."""
-
-    return f"http://127.0.0.1:{port}/#bootstrap={quote(bootstrap_token, safe='')}"
-
-
-def _open_preview_browser(app, *, port: int) -> None:
-    """Open the authenticated preview after Uvicorn has bound its port.
-
-    The token remains in the URL fragment, where the frontend exchanges and
-    scrubs it; it is never written to stdout/stderr or sent in an HTTP request.
-    """
-
-    token = app.state.session_manager.bootstrap_token
-    url = _preview_browser_url(port, token)
-
-    def open_browser() -> None:
-        try:
-            webbrowser.open(url, new=2)
-        except Exception:
-            # Browser integration is best effort. Do not log the URL because it
-            # contains the one-time bootstrap credential.
-            return
-
-    app.router.on_startup.append(open_browser)
 
 
 def build_preview_app(
@@ -223,26 +198,3 @@ def build_preview_app(
         paths.execution_database,
     )
     return app
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the opt-in Cortex web preview.")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Do not open a browser automatically.",
-    )
-    args = parser.parse_args()
-    if not 1024 <= args.port <= 65535:
-        parser.error("--port must be between 1024 and 65535")
-
-    app = build_preview_app()
-    print(f"Cortex preview listening on http://127.0.0.1:{args.port}")
-    if not args.no_browser:
-        _open_preview_browser(app, port=args.port)
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
-
-
-if __name__ == "__main__":
-    main()

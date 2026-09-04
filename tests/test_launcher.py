@@ -191,6 +191,32 @@ def test_desktop_url_keeps_bootstrap_token_in_fragment():
     assert url == "http://127.0.0.1:43125/#bootstrap=one%20time%2Ftoken"
 
 
+def test_launcher_startup_diagnostics_never_record_a_bootstrap_credential(tmp_path):
+    """The credential lives in a URL fragment and must stay out of the log.
+
+    Cortex_Preview used to carry a second, browser-opening entry point with its
+    own "never print the token" test. That entry point is gone; this asserts the
+    same property on the launcher that actually ships, where a startup failure
+    is the realistic way a URL reaches durable storage.
+    """
+    error = RuntimeError(
+        "failed opening http://127.0.0.1:43125/#bootstrap=super-secret-token"
+        "&handoff=super-secret-handoff"
+    )
+
+    path = launcher_main._write_startup_diagnostic(
+        stage="desktop window",
+        error=error,
+        data_dir=tmp_path,
+    )
+
+    assert path is not None
+    recorded = path.read_text(encoding="utf-8")
+    assert "super-secret-token" not in recorded
+    assert "super-secret-handoff" not in recorded
+    assert "redacted" in recorded
+
+
 def test_desktop_url_carries_the_private_handoff_secret_in_the_fragment():
     url = launcher_main._desktop_url(43125, "bootstrap", "handoff secret/token")
 
