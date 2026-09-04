@@ -1,4 +1,4 @@
-"""Explicit qualification-only recipe API and client-boundary tests."""
+"""Recipe API and client-boundary tests over an explicit execution lifecycle."""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from PIL import Image
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
-from cortex_backend.execution.qualification import build_recipe_coordinator_factory
-from cortex_backend.execution.recipe_coordinator import RecipeWorkerOutput
+from cortex_backend.execution.recipe_coordinator import (
+    RecipeExecutionCoordinator,
+    RecipeWorkerOutput,
+)
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth
 from support import session_headers as _session
@@ -89,10 +91,12 @@ def _app(tmp_path):
     )
     lifecycle = ExecutionLifecycle(
         repository,
-        coordinator_factory=build_recipe_coordinator_factory(lambda _job: _Attempt()),
+        coordinator_factory=lambda repo: RecipeExecutionCoordinator(
+            repo, lambda _job: _Attempt()
+        ),
         health_check=RuntimeHealth.ready,
         enabled=True,
-        profile="qualification",
+        profile="local",
     )
     app = create_app(
         build_demo_dependencies(),
@@ -116,7 +120,7 @@ def _payload(artifact_id: str, *, request_id: str = "api-recipe", steps=None) ->
     }
 
 
-def test_recipe_route_requires_ready_qualification_and_preserves_default_off(tmp_path):
+def test_recipe_route_requires_a_ready_runtime_and_preserves_default_off(tmp_path):
     app = create_app(build_demo_dependencies(), allowed_hosts=ALLOWED_HOSTS)
     with TestClient(app) as client:
         headers = _session(client, app)

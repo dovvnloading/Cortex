@@ -32,7 +32,8 @@ The main surfaces are:
 - `contracts/`: generated API artifacts;
 - `assets/`: externalized prompts and other runtime assets;
 - `packaging/`: Windows packaging and WebView2 bootstrapper;
-- `tools/`: contract generation, qualification, and screenshot tooling; and
+- `tools/`: contract generation, the artifact-boundary review, and screenshot
+  tooling; and
 - `tests/`: Python API, persistence, lifecycle, worker, and migration coverage.
 
 ## Instruction and trust rules
@@ -119,7 +120,7 @@ Pop-Location
 ```
 
 When a change touches execution, persistence, API contracts, cancellation,
-worker boundaries, or resource limits, run the relevant qualification tests in
+worker boundaries, or resource limits, run the artifact-boundary review in
 addition to the ordinary tests. When mutation testing is available, mutate the
 implementation under test, record killed/survived/timeout mutants, and turn
 meaningful survivors into tests or explicitly reviewed limitations.

@@ -183,7 +183,7 @@ backend/cortex_backend/   API, repositories, services, and worker boundaries
 contracts/                generated TypeScript API contracts
 assets/                   externalized model prompt assets
 packaging/                Windows PyInstaller build and WebView2 bootstrapper
-tools/                    contract generation, qualification spikes, screenshots
+tools/                    contract generation, artifact review, screenshots
 tests/                    Python API, lifecycle, worker, and migration tests
 ```
 
@@ -245,7 +245,7 @@ For contributor setup, install `requirements-dev.txt` as described in
 `CONTRIBUTING.md` so the local Ruff version matches CI:
 
 ```powershell
-./scripts/check.ps1              # fast gates, including security/watchdog qualification
+./scripts/check.ps1              # fast gates, including the artifact-boundary review
 ./scripts/check.ps1 -Tier full   # adds compileall, Playwright, and the bundle build
 ```
 
