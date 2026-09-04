@@ -15,6 +15,8 @@ import subprocess
 import uuid
 from typing import Any
 
+from cortex_backend import __version__
+
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +312,7 @@ def _install_if_needed(build_root: Path, expected_lock_digest: str, cache_root: 
 def build_frontend(
     frontend_root: Path,
     *,
-    cortex_version: str = "0.1.0",
+    cortex_version: str = __version__,
 ) -> Path:
     frontend_root = frontend_root.resolve()
     if not (frontend_root / "package.json").is_file():
@@ -374,7 +376,7 @@ def ensure_frontend(
     force: bool = False,
     skip_check: bool = False,
     packaged: bool = False,
-    cortex_version: str = "0.1.0",
+    cortex_version: str = __version__,
 ) -> Path:
     """Return a verified bundle, building only in an identifiable source tree."""
     frontend_root = frontend_root.resolve()

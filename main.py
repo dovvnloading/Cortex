@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 import uvicorn  # noqa: E402
 
 from Cortex_Preview import build_preview_app  # noqa: E402
+from cortex_backend import __version__ as CORTEX_VERSION  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
     DesktopWindowConfig,
@@ -46,7 +47,6 @@ from cortex_backend.launcher.supervisor import (  # noqa: E402
 # --port value remains strict and will still fail if that port is occupied.
 DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
-CORTEX_VERSION = "0.1.0"
 STARTUP_LOG_NAME = "startup.log"
 MAX_STARTUP_LOG_BYTES = 64 * 1024
 _last_startup_log_path: Path | None = None
