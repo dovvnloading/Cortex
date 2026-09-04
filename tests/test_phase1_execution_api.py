@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 from fastapi.testclient import TestClient
@@ -398,3 +399,51 @@ def test_approval_api_rejects_fake_malformed_and_expired_decisions(tmp_path):
             json={"decision": "approved"},
         )
         assert fake_decision.status_code == 409
+
+
+def test_event_stream_survives_an_idle_approval_wait_and_stays_off_the_event_loop(
+    tmp_path, monkeypatch
+):
+    """A job parked on an approval emits nothing, and that is the normal case.
+
+    The stream used to close after 600 ten-millisecond ticks -- six seconds --
+    so the one situation it exists to report on was also the one it gave up
+    on first. Approvals are valid for up to MAX_APPROVAL_TTL_SECONDS, and the
+    idle cap now clears that with a keep-alive comment in the meantime.
+
+    The same loop reads SQLite on every tick. Those reads have to happen off
+    the event loop, or the stream stalls every other request while it polls.
+    """
+
+    from cortex_backend.api import routes
+
+    monkeypatch.setattr(routes, "EXECUTION_STREAM_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(routes, "EXECUTION_STREAM_HEARTBEAT_SECONDS", 0.0)
+    monkeypatch.setattr(routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
+
+    reader_threads: set[int] = set()
+    real_poll = routes._poll_execution_stream
+
+    def recording_poll(*args, **kwargs):
+        reader_threads.add(threading.get_ident())
+        return real_poll(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_poll_execution_stream", recording_poll)
+
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        _pending_approval(app, owner=_owner(app, headers), job_id="idle-approval", ttl_seconds=120.0)
+
+        response = client.get("/api/v1/execution/idle-approval/events", headers=headers)
+
+    assert response.status_code == 200
+    # The job never reached a terminal state, so the stream closed on the idle
+    # cap rather than on completion -- and it announced itself while waiting.
+    assert ": keep-alive" in response.text
+    assert "execution.completed" not in response.text
+
+    assert reader_threads, "the stream never polled the repository"
+    assert threading.get_ident() not in reader_threads, (
+        "repository reads ran on the caller's thread instead of a worker thread"
+    )

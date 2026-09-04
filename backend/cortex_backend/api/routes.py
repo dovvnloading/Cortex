@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import re
+import time
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -160,6 +161,18 @@ from .security import SessionPrincipal, SessionSecurityError
 
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
+
+# Execution SSE pacing. The generation stream polls an in-memory event list
+# (api/jobs.py) and can afford to be quick about it; this one polls SQLite, so
+# each tick costs a real connection and query. Matching the generation
+# stream's interval keeps both predictable without paying for it 100 times a
+# second.
+EXECUTION_STREAM_POLL_SECONDS = 0.025
+# A job parked on an approval emits no events at all, and approvals are valid
+# for up to MAX_APPROVAL_TTL_SECONDS (300s). An idle cap shorter than that
+# closed the stream out from under the very case it exists to report on.
+EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+EXECUTION_STREAM_HEARTBEAT_SECONDS = 15.0
 
 # Chat-title generation (see the runner() closure in _start_generation_job)
 # runs after JobProgressSink.begin_commit seals the turn as durably
@@ -1168,31 +1181,42 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         cursor = _last_event_cursor(request, last_event_id)
 
+        owner = _durable_owner(principal)
+
         async def stream():
             next_sequence = cursor
-            idle_rounds = 0
+            idle_since = time.monotonic()
+            last_heartbeat = idle_since
             while True:
-                events = repository.events(job_id, after_sequence=next_sequence)
+                # One hop off the event loop per tick, covering both reads.
+                # These are synchronous SQLite calls -- each opens a
+                # connection and issues its pragmas -- and running them
+                # inline blocked the loop that also serves the generation
+                # stream and every other request.
+                events, current = await asyncio.to_thread(
+                    _poll_execution_stream, repository, job_id, owner, next_sequence
+                )
                 if events:
-                    idle_rounds = 0
+                    idle_since = time.monotonic()
                     for event in events:
                         next_sequence = event.sequence
                         yield _execution_sse_line(event)
-                    current = repository.get_job(job_id, owner=_durable_owner(principal))
-                    if current is not None and current.status in TerminalExecutionStatus:
+                    last_heartbeat = idle_since
+                if current is None or current.status in TerminalExecutionStatus:
+                    return
+                now = time.monotonic()
+                if not events:
+                    if now - idle_since >= EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS:
                         return
-                else:
-                    idle_rounds += 1
-                    current = repository.get_job(job_id, owner=_durable_owner(principal))
-                    if current is None:
-                        return
-                    if current.status in TerminalExecutionStatus:
-                        return
-                    if idle_rounds >= 600:
-                        return
+                    if now - last_heartbeat >= EXECUTION_STREAM_HEARTBEAT_SECONDS:
+                        last_heartbeat = now
+                        # An SSE comment: clients ignore it, but it keeps the
+                        # connection demonstrably alive while a job waits on
+                        # an approval that emits nothing.
+                        yield ": keep-alive\n\n"
                 if await request.is_disconnected():
                     return
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(EXECUTION_STREAM_POLL_SECONDS)
 
         return StreamingResponse(
             stream(),
@@ -3175,6 +3199,18 @@ def _last_event_cursor(request: Request, value: str | None = None) -> int:
     if cursor < 0:
         raise HTTPException(status_code=400, detail="Last-Event-ID must be non-negative.")
     return cursor
+
+
+def _poll_execution_stream(repository, job_id: str, owner: str, after_sequence: int):
+    """Read new events and the current job in one trip off the event loop.
+
+    Both calls are synchronous SQLite. Pairing them here means the SSE stream
+    pays one thread hop per tick instead of two, and sees an event batch and a
+    job status read taken at the same point in time.
+    """
+
+    events = repository.events(job_id, after_sequence=after_sequence)
+    return events, repository.get_job(job_id, owner=owner)
 
 
 def _execution_sse_line(event: ExecutionEvent) -> str:
