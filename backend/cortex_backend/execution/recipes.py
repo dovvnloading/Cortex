@@ -11,7 +11,7 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localco
 import hashlib
 import json
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -236,7 +236,10 @@ class CheckPlan(_StrictModel):
         return self
 
 
-def _parse_payload(payload: Mapping[str, Any], model: type[_StrictModel], code: str) -> _StrictModel:
+_PlanT = TypeVar("_PlanT", bound=_StrictModel)
+
+
+def _parse_payload(payload: Mapping[str, Any], model: type[_PlanT], code: str) -> _PlanT:
     if not isinstance(payload, Mapping):
         raise RecipeValidationError(code)
     try:
@@ -256,21 +259,15 @@ def _parse_payload(payload: Mapping[str, Any], model: type[_StrictModel], code: 
 
 
 def parse_image_transform(payload: Mapping[str, Any]) -> ImageTransformPlan:
-    result = _parse_payload(payload, ImageTransformPlan, "invalid_image_recipe")
-    assert isinstance(result, ImageTransformPlan)
-    return result
+    return _parse_payload(payload, ImageTransformPlan, "invalid_image_recipe")
 
 
 def parse_calculator(payload: Mapping[str, Any]) -> CalculatorPlan:
-    result = _parse_payload(payload, CalculatorPlan, "invalid_calculation")
-    assert isinstance(result, CalculatorPlan)
-    return result
+    return _parse_payload(payload, CalculatorPlan, "invalid_calculation")
 
 
 def parse_check(payload: Mapping[str, Any]) -> CheckPlan:
-    result = _parse_payload(payload, CheckPlan, "invalid_check")
-    assert isinstance(result, CheckPlan)
-    return result
+    return _parse_payload(payload, CheckPlan, "invalid_check")
 
 
 def evaluate_calculator(plan: CalculatorPlan) -> Decimal:
@@ -314,7 +311,8 @@ def evaluate_check(plan: CheckPlan) -> bool:
         return plan.left > plan.right
     if plan.operation == "greater_or_equal":
         return plan.left >= plan.right
-    assert plan.tolerance is not None
+    if plan.tolerance is None:
+        raise PrimitiveEvaluationError("check_tolerance_missing")
     return abs(plan.left - plan.right) <= plan.tolerance
 
 

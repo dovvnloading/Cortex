@@ -337,7 +337,8 @@ class _JobObjectLauncher:
                     self._close_handle(win32, job)
                     raise _JobObjectContainmentError("could not configure the process containment job")
 
-            assert job is not None
+            if job is None:
+                raise _JobObjectContainmentError("no process containment job to assign")
             process_handle = win32.OpenProcess(
                 _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
             )
@@ -560,7 +561,10 @@ class LlamaServerManager:
             if verdict.reusable:
                 self._raise_if_stopping(token)
                 with self._state_lock:
-                    assert self._base_url is not None
+                    if self._base_url is None:
+                        raise LlamaCppError(
+                            "The local model runtime reported a reusable server with no address."
+                        )
                     return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
 
             with self._state_lock:
@@ -828,7 +832,8 @@ class LlamaServerManager:
     def _record_restart(
         self, verdict: _ReuseVerdict, model_path: Path, effective_num_ctx: int
     ) -> None:
-        assert verdict.reason is not None
+        if verdict.reason is None:
+            raise LlamaCppError("A restart was recorded without a reason.")
         with self._state_lock:
             safe_reason = _safe_restart_reason(verdict.reason)
             self._last_restart_reason = safe_reason
@@ -1111,7 +1116,8 @@ class LlamaServerManager:
     ) -> ServerHandle:
         with self._state_lock:
             self._state = "downloading_binary"
-        assert self._release is not None
+        if self._release is None:
+            raise LlamaCppError("No pinned runtime release is selected.")
         try:
             cached = self._fetcher.is_cached(
                 self._release,
