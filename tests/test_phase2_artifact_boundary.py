@@ -306,7 +306,7 @@ def test_repository_expiry_cleanup_fails_closed_for_external_database_paths(tmp_
         )
 
     with pytest.raises(ExecutionRepositoryError):
-        repository.purge_expired(now="9999-01-01T00:00:00+00:00")
+        repository.cleanup_expired(now="9999-01-01T00:00:00+00:00")
     assert external.read_text(encoding="utf-8") == "must remain"
 
 

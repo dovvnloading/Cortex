@@ -238,7 +238,7 @@ def _retention(
         pass
     else:
         raise QualificationFailure("retention_expiry_not_enforced")
-    removed = repository.purge_expired()
+    removed = repository.cleanup_expired().artifacts
     _require(repository.get_artifact(attachment.artifact.artifact_id, owner=owner) is None, "retention_purge_failed")
     return {
         "status": "passed",

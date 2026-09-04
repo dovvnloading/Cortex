@@ -78,13 +78,13 @@ def test_safe_cleanup_keeps_fresh_retained_artifact_and_removes_expired_rows(tmp
     assert not Path(artifact.path).exists()
 
 
-def test_purge_expired_keeps_recent_terminal_job_without_artifact(tmp_path):
+def test_cleanup_keeps_a_recent_terminal_job_without_an_artifact(tmp_path):
     repository = _repository(tmp_path)
     job = _terminal_job(repository, "recent-no-artifact")
 
-    assert repository.purge_expired(
+    assert repository.cleanup_expired(
         now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-    ) == 0
+    ).artifacts == 0
     assert repository.get_job(job.job_id) is not None
 
 

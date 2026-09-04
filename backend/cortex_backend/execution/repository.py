@@ -1334,18 +1334,6 @@ class ExecutionRepository:
             events=removed_events,
         )
 
-    def purge_expired(
-        self,
-        *,
-        now: str | None = None,
-        terminal_job_retention_seconds: int = DEFAULT_TERMINAL_JOB_RETENTION_SECONDS,
-    ) -> int:
-        """Remove expired artifacts and terminal jobs without orphaning files."""
-        return self.cleanup_expired(
-            now=now,
-            terminal_job_retention_seconds=terminal_job_retention_seconds,
-        ).artifacts
-
     def _validated_cleanup_path(self, path: Path) -> Path:
         """Validate a source path without following an untrusted reparse hop."""
 
