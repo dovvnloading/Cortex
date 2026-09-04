@@ -346,7 +346,8 @@ class ExecutionRepository:
                 row = connection.execute(
                     "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
                 ).fetchone()
-                assert row is not None
+                if row is None:
+                    raise ExecutionRepositoryError("job row vanished after insert")
                 return self._job_from_row(row), True
         except ExecutionRepositoryError as exc:
             with self.connect() as connection:
@@ -566,7 +567,8 @@ class ExecutionRepository:
                 updated = connection.execute(
                     "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
                 ).fetchone()
-                assert updated is not None
+                if updated is None:
+                    raise ExecutionRepositoryError("job row vanished after update")
                 # Defer approval-state computation until this connection
                 # closes, for the same reason as the terminal race guard
                 # above: this row comes from a bare
@@ -591,7 +593,8 @@ class ExecutionRepository:
             # (e.g. a concurrent purge) -- fall back to the original row so
             # the race guard still returns a job rather than raising.
             return self._job_from_row(row)
-        assert updated is not None
+        if updated is None:
+            raise ExecutionRepositoryError("job row vanished after update")
         job = self.get_job(job_id, owner=updated_owner)
         if job is not None:
             return job
