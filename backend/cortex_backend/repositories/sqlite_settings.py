@@ -192,6 +192,15 @@ class SQLiteSettingsRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with self.connect() as connection:
+                # WAL is stored in the database header, so this only has to run
+                # once to apply to every later connection. It is not optional
+                # here: connect() sets synchronous = NORMAL, and NORMAL is only
+                # crash-safe under WAL. In the default rollback-journal mode the
+                # same pragma lets an OS crash or power loss corrupt the file
+                # outright, which is exactly why the chat store switched (see
+                # legacy_storage._create_tables). Backups stay whole because
+                # _create_backup checkpoints before copying.
+                connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS cortex_settings (
@@ -298,13 +307,50 @@ class SQLiteSettingsRepository:
                         "Settings recovery failed and the corrupt primary could not be restored; "
                         f"it remains at {corrupt_path}."
                     ) from rollback_exc
+                # The rollback put the original primary back, so its own
+                # sidecars are still the right ones. Leave them alone.
                 raise
+            # Recovery succeeded: the sidecars still on disk describe the
+            # quarantined database, not the backup that just replaced it.
+            self._discard_sidecars()
             self.last_corrupt_path = corrupt_path
             return str(candidate)
 
         raise SettingsRepositoryError(
             "Settings database is corrupt and no valid backup is available."
         )
+
+    def _sidecar_paths(self) -> tuple[Path, ...]:
+        """The WAL sidecars SQLite keeps beside the primary database file."""
+        return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
+
+    def _discard_sidecars(self) -> None:
+        """Drop WAL sidecars left behind after the primary file is replaced.
+
+        Replacing the primary out from under SQLite (recovery, restore) leaves
+        the previous database's -wal and -shm in place. The next connection
+        would treat them as belonging to the new file and replay them onto it.
+        They describe a database that no longer exists, so remove them before
+        anything opens the replacement.
+        """
+        for sidecar in self._sidecar_paths():
+            try:
+                sidecar.unlink(missing_ok=True)
+            except OSError as exc:
+                raise SettingsRepositoryError(
+                    "Could not remove a stale settings write-ahead log."
+                ) from exc
+
+    def _checkpoint(self) -> None:
+        """Fold the write-ahead log back into the primary file.
+
+        In WAL mode a committed write can still live only in the -wal sidecar,
+        so a plain file copy of the primary would omit it. TRUNCATE moves those
+        commits into the main file and empties the sidecar, which is what makes
+        the copy below a complete, self-contained snapshot.
+        """
+        with self.connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _create_backup(self) -> str | None:
         with self._write_lock:
@@ -315,6 +361,7 @@ class SQLiteSettingsRepository:
                     "Could not create a settings database backup from an invalid database."
                 )
             try:
+                self._checkpoint()
                 # Preserve the prior verified backup before replacing the current
                 # generation. If the new copy fails, the old .bak remains intact.
                 if self.backup_path.exists() and self._database_is_valid(self.backup_path):
@@ -340,6 +387,9 @@ class SQLiteSettingsRepository:
             if candidate is None:
                 raise SettingsRepositoryError("No valid settings database backup is available.")
             self._atomic_copy_database(candidate, self.db_path)
+            # Before _ensure_schema opens the restored file: any -wal still
+            # sitting there belongs to the database this copy just replaced.
+            self._discard_sidecars()
             self._ensure_schema()
 
     def _read_row(self) -> tuple[CortexSettings, str] | None:

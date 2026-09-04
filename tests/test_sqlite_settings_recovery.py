@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import shutil
+import sqlite3
 
 import pytest
 
@@ -162,3 +163,78 @@ def test_save_compare_and_swap_rejects_stale_revision_without_overwrite(tmp_path
         repository.save(stale, expected_revision=0)
 
     assert repository.load().settings == first
+
+
+def _payload_revision(database: Path) -> int:
+    """Read the stored revision straight from a settings file on disk."""
+    connection = sqlite3.connect(database)
+    try:
+        row = connection.execute("SELECT revision FROM cortex_settings WHERE id = 1").fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return int(row[0])
+
+
+def test_settings_database_uses_wal_with_normal_synchronous(tmp_path: Path):
+    """synchronous = NORMAL is only crash-safe under WAL; assert both together."""
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+
+    with repository.connect() as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+
+    assert journal_mode.lower() == "wal"
+    assert int(synchronous) == 1
+
+
+def test_backup_captures_writes_that_are_still_only_in_the_write_ahead_log(tmp_path: Path):
+    """A backup is a file copy, so it must checkpoint the WAL before copying.
+
+    While any other connection holds the database open -- routine for an API
+    serving concurrent requests -- SQLite keeps committed pages in the -wal
+    sidecar. Copying the primary file alone at that moment produces a backup
+    with no settings row in it at all.
+    """
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    original = repository.load().settings
+
+    concurrent_reader = sqlite3.connect(repository.db_path)
+    try:
+        # sqlite3 opens the file lazily; read once so the connection is really
+        # attached and SQLite has to keep the sidecar alive.
+        concurrent_reader.execute("SELECT id FROM cortex_settings").fetchall()
+
+        repository.save(original.model_copy(update={"revision": 1}), expected_revision=0)
+        assert Path(f"{repository.db_path}-wal").exists(), "expected a live write-ahead log"
+        # save() rotates the backup before writing, so this call is what must
+        # capture revision 1.
+        repository.save(original.model_copy(update={"revision": 2}), expected_revision=1)
+
+        assert _payload_revision(repository.backup_path) == 1
+    finally:
+        concurrent_reader.close()
+
+
+def test_restore_discards_the_replaced_databases_write_ahead_log(tmp_path: Path):
+    """A restored file must not inherit sidecars describing the old database.
+
+    An unclean shutdown can leave a -wal and -shm behind. Once the primary is
+    replaced from a backup they describe a database that no longer exists, and
+    the next connection would replay them onto the replacement.
+    """
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    original = repository.load().settings
+    repository.save(original.model_copy(update={"revision": 1}), expected_revision=0)
+    repository.save(original.model_copy(update={"revision": 2}), expected_revision=1)
+
+    stale_wal = Path(f"{repository.db_path}-wal")
+    stale_shm = Path(f"{repository.db_path}-shm")
+    stale_wal.write_bytes(b"leftover write-ahead log")
+    stale_shm.write_bytes(b"leftover shared memory index")
+
+    repository.restore_backup()
+
+    assert not stale_wal.exists()
+    assert not stale_shm.exists()
+    assert repository.load().settings.revision == 1
