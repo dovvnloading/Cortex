@@ -110,13 +110,15 @@ class AppPathsTests(unittest.TestCase):
 
 class BackendBoundaryTests(unittest.TestCase):
     def test_backend_has_no_ui_or_transport_imports(self):
+        # The Qt entries stay: they are what stops a UI framework creeping
+        # back into the headless core. fastapi stays for the same reason on
+        # the transport side. main_window and Chat_LLM named modules from a
+        # tree that no longer exists, so they guarded nothing.
         forbidden_roots = {
             "PySide6",
             "PyQt5",
             "PyQt6",
             "fastapi",
-            "main_window",
-            "Chat_LLM",
         }
 
         for relative_directory in ("core", "repositories", "services"):
@@ -201,12 +203,6 @@ class BackendBoundaryTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
-
-    def test_removed_desktop_tree_contains_no_runtime_modules(self):
-        legacy_tree = REPOSITORY_ROOT / "Chat_LLM" / "Chat_LLM"
-        self.assertFalse(list(legacy_tree.glob("*.py")))
-        self.assertFalse((REPOSITORY_ROOT / "Cortex_Startup.py").exists())
-        self.assertFalse((REPOSITORY_ROOT / "index.html").exists())
 
 
 if __name__ == "__main__":

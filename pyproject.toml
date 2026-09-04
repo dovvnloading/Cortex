@@ -36,7 +36,6 @@ cortex_backend = ["py.typed"]
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["Chat_LLM"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "B", "UP"]

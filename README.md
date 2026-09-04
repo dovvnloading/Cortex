@@ -251,11 +251,10 @@ For contributor setup, install `requirements-dev.txt` as described in
 ```
 
 For coding-agent work, read the repository-level [agent operating
-contract](AGENTS.md) first. The [local coding-agent harness
-standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md) records the researched
-target architecture and release gates. Cortex's current product boundary is
-still bounded local execution; the standard does not imply that arbitrary
-workspace or shell authority is enabled.
+contract](AGENTS.md) first. Cortex's current product boundary is bounded local
+execution: approval-gated code in a restricted Python subset, safe computation,
+and fixed-function image recipes. Nothing here enables arbitrary workspace or
+shell authority.
 
 To run them automatically before every push:
 
@@ -308,12 +307,6 @@ before approving a run. See [SECURITY.md](SECURITY.md) for reporting guidance.
 ## Project documentation
 
 - [Agent operating contract](AGENTS.md)
-- [Local coding-agent harness standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md)
-  (background research and target design, not policy -- see `AGENTS.md`)
-- [What's next](docs/NEXT.md)
-- [Attachment boundary](docs/CHAT_ATTACHMENTS.md)
-- [Execution architecture records](docs/adr/)
-- [Archived planning documents](docs/archive/)
 - [Contributing guide](CONTRIBUTING.md)
 - [Change log](Change_Log.md)
 - [Security policy](SECURITY.md)

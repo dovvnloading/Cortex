@@ -7,9 +7,7 @@ loopback-only operation, and a clean launcher lifecycle.
 Before changing code, read the repository [agent operating
 contract](AGENTS.md). It defines the required inspect -> reproduce -> patch ->
 verify -> review workflow, the current bounded-execution boundary, and the
-evidence expected in a handoff. The researched [local coding-agent harness
-standard](docs/LOCAL_CODING_AGENT_HARNESS_STANDARD.md) is the reference for
-future workspace-agent capabilities.
+evidence expected in a handoff.
 
 ## Development setup
 

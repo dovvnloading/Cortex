@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
-const outDir = resolve(repoRoot, "docs", "images");
+// .github/images is where the README actually reads its screenshots from.
+const outDir = resolve(repoRoot, ".github", "images");
 
 // Playwright lives in frontend/node_modules, not next to this script, so
 // resolve it from there rather than relying on the caller's directory.
@@ -50,7 +51,7 @@ const page = await browser.newPage({
 const shot = async (name) => {
   const path = resolve(outDir, `${name}.png`);
   await page.screenshot({ path });
-  console.log(`  wrote docs/images/${name}.png`);
+  console.log(`  wrote .github/images/${name}.png`);
 };
 
 // Freeze anything time-based so repeated runs stay identical.

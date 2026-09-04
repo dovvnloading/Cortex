@@ -5,7 +5,7 @@
 .DESCRIPTION
     Starts tools/screenshots/demo_server.py on an isolated port, hands the
     one-time bootstrap token to the Playwright capture script, writes the
-    images to docs/images/, and stops the server again.
+    images to .github/images/, and stops the server again.
 
     The workspace is fixture data and no model is contacted, so re-running this
     reproduces the same images. Requires a built frontend bundle:
@@ -57,7 +57,7 @@ try {
     node (Join-Path $PSScriptRoot 'capture.mjs') $token --port $Port
     if ($LASTEXITCODE -ne 0) { throw "Capture failed with exit code $LASTEXITCODE." }
 
-    Write-Host 'Screenshots written to docs/images/.' -ForegroundColor Green
+    Write-Host 'Screenshots written to .github/images/.' -ForegroundColor Green
 } finally {
     if ($server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
