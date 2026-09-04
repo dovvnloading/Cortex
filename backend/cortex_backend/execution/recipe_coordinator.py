@@ -11,13 +11,11 @@ the complete result has been validated.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-import base64
 from dataclasses import dataclass
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from queue import Empty, Queue
 import re
 import tempfile
 from threading import Event, Lock, Thread
@@ -32,28 +30,13 @@ from .artifact_boundary import (
     PublishedArtifact,
     sniff_artifact_mime,
 )
-from .broker import BrokerMessage
 from .models import ExecutionJob, TerminalExecutionStatus
+from .recipe_provider import MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
 from .recipes import ImageTransformPlan, RecipeValidationError, parse_image_transform
 from .repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
     LeaseConflict,
-)
-from .worker_protocol import (
-    MAX_WORKER_CHUNK_BYTES,
-    MAX_WORKER_INPUT_BYTES,
-    MAX_WORKER_OUTPUT_BYTES,
-    WorkerAck,
-    WorkerCancel,
-    WorkerCollect,
-    WorkerError,
-    WorkerInputChunk,
-    WorkerInputComplete,
-    WorkerOutputChunk,
-    WorkerPrepare,
-    WorkerProtocolError,
-    WorkerResult,
 )
 
 
@@ -125,7 +108,7 @@ class RecipeWorkerOutput:
     def __post_init__(self) -> None:
         if not isinstance(self.content, bytes) or not self.content:
             raise RecipeExecutionError("worker_output_invalid")
-        if len(self.content) > MAX_WORKER_OUTPUT_BYTES:
+        if len(self.content) > MAX_OUTPUT_BYTES:
             raise RecipeExecutionError("worker_output_too_large")
         if self.mime_type not in _MIME_TO_FORMAT or _MIME_TO_FORMAT[self.mime_type] != self.format:
             raise RecipeExecutionError("worker_output_invalid")
@@ -167,366 +150,6 @@ class RecipeWorkerAttempt(Protocol):
 
 RecipeWorkerAttemptFactory = Callable[[ExecutionJob], RecipeWorkerAttempt]
 
-
-class RecipeWorkerConnection(Protocol):
-    """The narrow surface of an authenticated broker connection."""
-
-    def send_message(self, message: BrokerMessage) -> None:
-        ...
-
-    def receive_message(self) -> BrokerMessage:
-        ...
-
-    def close(self) -> None:
-        ...
-
-
-class _ResponseReader:
-    """Make a blocking broker receive cancellable without changing the transport."""
-
-    def __init__(self, connection: RecipeWorkerConnection) -> None:
-        self.connection = connection
-        self.items: Queue[Any] = Queue(maxsize=16)
-        self.stop_event = Event()
-        self.thread = Thread(target=self._run, name="cortex-recipe-worker-reader", daemon=True)
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def _run(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                self.items.put(self.connection.receive_message())
-            except Exception as error:
-                if not self.stop_event.is_set():
-                    try:
-                        self.items.put(error, timeout=0.1)
-                    except Exception:
-                        pass
-                return
-
-    def next(self, timeout: float) -> Any:
-        try:
-            return self.items.get(timeout=max(0.001, timeout))
-        except Empty:
-            return None
-
-    def close(self) -> None:
-        self.stop_event.set()
-        try:
-            self.connection.close()
-        except Exception:
-            pass
-        self.thread.join(timeout=1.0)
-
-
-class RecipeWorkerClient:
-    """Client for the authenticated worker protocol, adapted as one attempt.
-
-    The client accepts only in-memory bytes and typed plans.  It validates every
-    response envelope, chunk offset, digest, MIME claim, and terminal condition.
-    """
-
-    def __init__(
-        self,
-        connection: RecipeWorkerConnection,
-        *,
-        installation_principal_id: str,
-        timeout_seconds: float = DEFAULT_WORKER_TIMEOUT_SECONDS,
-        cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
-    ) -> None:
-        if not all(callable(getattr(connection, name, None)) for name in ("send_message", "receive_message", "close")):
-            raise TypeError("worker client requires an authenticated broker connection")
-        _safe_id(installation_principal_id, "installation_principal_id")
-        if re.fullmatch(r"[0-9a-f]{64}", installation_principal_id) is None:
-            raise ValueError("installation_principal_id must be a broker principal")
-        if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0.1 <= timeout_seconds <= 600:
-            raise ValueError("timeout_seconds is outside the bounded worker limit")
-        if not isinstance(cancel_grace_seconds, (int, float)) or isinstance(cancel_grace_seconds, bool) or not 0.1 <= cancel_grace_seconds <= 30:
-            raise ValueError("cancel_grace_seconds is outside the bounded worker limit")
-        self._connection = connection
-        self._principal = installation_principal_id
-        self._timeout = float(timeout_seconds)
-        self._cancel_grace = float(cancel_grace_seconds)
-        self._reader: _ResponseReader | None = None
-        self._active_cancel: Event | None = None
-        self._cancel_sent = False
-        self._started = False
-        self._closed = False
-        self._lock = Lock()
-
-    @property
-    def principal_id(self) -> str:
-        return self._principal
-
-    def _message(self, operation: str, request_id: str, job_id: str, model: Any) -> BrokerMessage:
-        return BrokerMessage(
-            schema_version="broker.message.v1",
-            direction="to_executor",
-            operation=operation,
-            request_id=request_id,
-            job_id=job_id,
-            installation_principal_id=self._principal,
-            body=model.model_dump(mode="json"),
-        )
-
-    def _send(self, message: BrokerMessage) -> None:
-        try:
-            self._connection.send_message(message)
-        except Exception:
-            raise RecipeExecutionError("worker_transport_failed") from None
-
-    def _validate_response(self, message: Any, request_id: str, job_id: str, operation: str) -> Any:
-        if not isinstance(message, BrokerMessage):
-            raise RecipeExecutionError("worker_message_invalid")
-        if (
-            message.direction != "to_broker"
-            or message.operation not in {operation, "cancel"}
-            or message.request_id != request_id
-            or message.job_id != job_id
-            or message.installation_principal_id != self._principal
-        ):
-            raise RecipeExecutionError("worker_identity_mismatch")
-        body = message.body
-        if not isinstance(body, dict):
-            raise RecipeExecutionError("worker_message_invalid")
-        schema = body.get("schema_version")
-        try:
-            if schema == "recipe.worker.ack.v1":
-                return WorkerAck.model_validate(body)
-            if schema == "recipe.worker.result.v1":
-                return WorkerResult.model_validate(body)
-            if schema == "recipe.worker.error.v1":
-                return WorkerError.model_validate(body)
-            if schema == "recipe.worker.output_chunk.v1":
-                return WorkerOutputChunk.model_validate(body)
-        except (TypeError, ValueError):
-            raise RecipeExecutionError("worker_message_invalid") from None
-        raise RecipeExecutionError("worker_message_invalid")
-
-    def _send_cancel(self, request_id: str, job_id: str, reason: str) -> None:
-        if self._cancel_sent:
-            return
-        if reason not in {"user", "timeout", "shutdown"}:
-            reason = "user"
-        self._cancel_sent = True
-        self._send(
-            self._message(
-                "cancel",
-                request_id,
-                job_id,
-                WorkerCancel(
-                    schema_version="recipe.worker.cancel.v1",
-                    request_id=request_id,
-                    job_id=job_id,
-                    reason=reason,
-                ),
-            )
-        )
-
-    def _wait(
-        self,
-        *,
-        request_id: str,
-        job_id: str,
-        operation: str,
-        expected: tuple[type[Any], ...],
-        cancel_event: Event,
-        deadline: float,
-    ) -> Any:
-        if self._reader is None:
-            raise RecipeExecutionError("worker_transport_failed")
-        cancel_deadline: float | None = None
-        while True:
-            now = time.monotonic()
-            if cancel_event.is_set() and not self._cancel_sent:
-                self._send_cancel(request_id, job_id, "user")
-                cancel_deadline = now + self._cancel_grace
-            elif not self._cancel_sent and now >= deadline:
-                self._send_cancel(request_id, job_id, "timeout")
-                cancel_deadline = now + self._cancel_grace
-            if self._cancel_sent and cancel_deadline is not None and now >= cancel_deadline:
-                raise RecipeExecutionError("cancelled" if cancel_event.is_set() else "worker_timeout")
-            wait_for = 0.05
-            if not self._cancel_sent:
-                wait_for = min(wait_for, max(0.001, deadline - now))
-            elif cancel_deadline is not None:
-                wait_for = min(wait_for, max(0.001, cancel_deadline - now))
-            item = self._reader.next(wait_for)
-            if item is None:
-                continue
-            if isinstance(item, BaseException):
-                raise RecipeExecutionError("cancelled" if self._cancel_sent and cancel_event.is_set() else "worker_transport_failed")
-            response = self._validate_response(item, request_id, job_id, operation)
-            if isinstance(response, WorkerError):
-                if response.code == "cancelled" or self._cancel_sent and cancel_event.is_set():
-                    raise RecipeExecutionError("cancelled")
-                if response.code == "timeout":
-                    raise RecipeExecutionError("worker_timeout")
-                raise RecipeExecutionError(response.code)
-            if self._cancel_sent:
-                if isinstance(response, WorkerAck) and response.acknowledged_operation == "cancel":
-                    raise RecipeExecutionError("cancelled" if cancel_event.is_set() else "worker_timeout")
-                continue
-            if not isinstance(response, expected):
-                raise RecipeExecutionError("worker_response_unexpected")
-            return response
-
-    def transform(
-        self,
-        request_id: str,
-        job_id: str,
-        plan: ImageTransformPlan,
-        content: bytes,
-        cancel_event: Event,
-    ) -> RecipeWorkerOutput:
-        if self._started or self._closed:
-            raise RecipeExecutionError("worker_attempt_reused")
-        _safe_id(request_id, "request_id")
-        _safe_id(job_id, "job_id")
-        if not isinstance(plan, ImageTransformPlan):
-            raise RecipeExecutionError("invalid_plan")
-        if not isinstance(content, bytes) or not 1 <= len(content) <= MAX_WORKER_INPUT_BYTES:
-            raise RecipeExecutionError("input_too_large" if isinstance(content, bytes) else "invalid_input")
-        if not isinstance(cancel_event, Event):
-            raise TypeError("cancel_event must be a threading.Event")
-        self._started = True
-        self._active_cancel = cancel_event
-        self._cancel_sent = False
-        self._reader = _ResponseReader(self._connection)
-        self._reader.start()
-        digest = sha256(content).hexdigest()
-        try:
-            try:
-                input_mime = sniff_artifact_mime(content)
-            except ArtifactBoundaryError:
-                raise RecipeExecutionError("invalid_input") from None
-            if input_mime not in _MIME_TO_FORMAT:
-                raise RecipeExecutionError("invalid_input")
-            prepare = WorkerPrepare(
-                schema_version="recipe.worker.prepare.v1",
-                request_id=request_id,
-                job_id=job_id,
-                plan=plan,
-                input_size=len(content),
-                input_sha256=digest,
-                input_mime_type=input_mime,
-            )
-            deadline = time.monotonic() + self._timeout
-            self._send(self._message("prepare", request_id, job_id, prepare))
-            self._wait(
-                request_id=request_id,
-                job_id=job_id,
-                operation="prepare",
-                expected=(WorkerAck,),
-                cancel_event=cancel_event,
-                deadline=deadline,
-            )
-            for offset in range(0, len(content), MAX_WORKER_CHUNK_BYTES):
-                chunk = content[offset : offset + MAX_WORKER_CHUNK_BYTES]
-                message = WorkerInputChunk(
-                    schema_version="recipe.worker.input_chunk.v1",
-                    request_id=request_id,
-                    job_id=job_id,
-                    offset=offset,
-                    data=base64.urlsafe_b64encode(chunk).decode("ascii").rstrip("="),
-                    sha256=sha256(chunk).hexdigest(),
-                )
-                self._send(self._message("input_chunk", request_id, job_id, message))
-                self._wait(
-                    request_id=request_id,
-                    job_id=job_id,
-                    operation="input_chunk",
-                    expected=(WorkerAck,),
-                    cancel_event=cancel_event,
-                    deadline=deadline,
-                )
-            complete = WorkerInputComplete(
-                schema_version="recipe.worker.input_complete.v1",
-                request_id=request_id,
-                job_id=job_id,
-                input_size=len(content),
-                input_sha256=digest,
-            )
-            self._send(self._message("input_complete", request_id, job_id, complete))
-            result = self._wait(
-                request_id=request_id,
-                job_id=job_id,
-                operation="input_complete",
-                expected=(WorkerResult,),
-                cancel_event=cancel_event,
-                deadline=deadline,
-            )
-            assert isinstance(result, WorkerResult)
-            output = bytearray()
-            while len(output) < result.output_size:
-                collect = WorkerCollect(
-                    schema_version="recipe.worker.collect.v1",
-                    request_id=request_id,
-                    job_id=job_id,
-                    offset=len(output),
-                    max_bytes=MAX_WORKER_CHUNK_BYTES,
-                )
-                self._send(self._message("collect", request_id, job_id, collect))
-                chunk = self._wait(
-                    request_id=request_id,
-                    job_id=job_id,
-                    operation="collect",
-                    expected=(WorkerOutputChunk,),
-                    cancel_event=cancel_event,
-                    deadline=deadline,
-                )
-                assert isinstance(chunk, WorkerOutputChunk)
-                if chunk.offset != len(output):
-                    raise RecipeExecutionError("worker_output_offset_invalid")
-                try:
-                    decoded = chunk.decoded()
-                except WorkerProtocolError:
-                    raise RecipeExecutionError("worker_output_chunk_invalid") from None
-                if not decoded or len(output) + len(decoded) > result.output_size:
-                    raise RecipeExecutionError("worker_output_size_mismatch")
-                output.extend(decoded)
-                if chunk.final and len(output) != result.output_size:
-                    raise RecipeExecutionError("worker_output_size_mismatch")
-            if not output or len(output) != result.output_size or not chunk.final:
-                raise RecipeExecutionError("worker_output_size_mismatch")
-            content_out = bytes(output)
-            digest_out = sha256(content_out).hexdigest()
-            if digest_out != result.output_sha256:
-                raise RecipeExecutionError("worker_output_hash_mismatch")
-            if result.mime_type not in _MIME_TO_FORMAT or _MIME_TO_FORMAT[result.mime_type] != result.format:
-                raise RecipeExecutionError("worker_output_mime_mismatch")
-            return RecipeWorkerOutput(
-                content=content_out,
-                mime_type=result.mime_type,
-                format=result.format,
-                width=result.width,
-                height=result.height,
-                sha256=digest_out,
-            )
-        except RecipeExecutionError:
-            raise
-        except (TypeError, ValueError, WorkerProtocolError):
-            raise RecipeExecutionError("worker_protocol_failed") from None
-
-    def cancel(self, reason: str = "user") -> None:
-        if reason not in {"user", "timeout", "shutdown"}:
-            reason = "user"
-        active = self._active_cancel
-        if active is not None:
-            active.set()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._reader is not None:
-            self._reader.close()
-        else:
-            try:
-                self._connection.close()
-            except Exception:
-                pass
 
 
 class RecipeExecutionCoordinator:
@@ -771,7 +394,7 @@ class RecipeExecutionCoordinator:
             detected = sniff_artifact_mime(content)
         except (ExecutionRepositoryError, ArtifactBoundaryError):
             raise RecipeExecutionError("input_artifact_unavailable") from None
-        if detected != artifact.mime_type or len(content) > MAX_WORKER_INPUT_BYTES:
+        if detected != artifact.mime_type or len(content) > MAX_INPUT_BYTES:
             raise RecipeExecutionError("input_artifact_invalid")
         return content
 
@@ -979,8 +602,6 @@ __all__ = [
     "RecipeImageRequest",
     "RecipeWorkerAttempt",
     "RecipeWorkerAttemptFactory",
-    "RecipeWorkerClient",
-    "RecipeWorkerConnection",
     "RecipeWorkerOutput",
     "RECIPE_IMAGE_PROFILE",
     "RECIPE_PAYLOAD_SCHEMA",
