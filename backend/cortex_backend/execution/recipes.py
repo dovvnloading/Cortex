@@ -1,4 +1,4 @@
-"""Strict Phase 2 contracts for trusted, fixed-function primitives.
+"""Strict contracts for trusted, fixed-function primitives.
 
 This module validates typed plans only.  It does not decode images, evaluate model
 source, access paths, launch processes, or publish artifacts.  A later qualified

@@ -1,4 +1,4 @@
-"""Phase 2 typed primitive contracts stay bounded and execution-free."""
+"""Typed primitive contracts stay bounded and execution-free."""
 
 from __future__ import annotations
 

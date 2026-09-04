@@ -1,4 +1,4 @@
-"""Contract-level invariants for the not-yet-wired Phase 1 transport."""
+"""The execution event and approval vocabularies are frozen."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from cortex_backend.execution.models import (
 )
 
 
-def test_phase1_event_and_approval_vocabularies_are_frozen() -> None:
+def test_event_and_approval_vocabularies_are_frozen() -> None:
     assert EXECUTION_EVENT_NAMES == (
         "execution.queued",
         "execution.started",
@@ -28,7 +28,7 @@ def test_phase1_event_and_approval_vocabularies_are_frozen() -> None:
     )
 
 
-def test_phase1_terminal_events_are_explicit() -> None:
+def test_terminal_events_are_explicit() -> None:
     terminal = {
         "execution.completed",
         "execution.failed",

@@ -1,4 +1,4 @@
-"""Stage 5 settings migration, backup, model, and diagnostics tests."""
+"""Settings migration, backup, model, and diagnostics tests."""
 
 from __future__ import annotations
 

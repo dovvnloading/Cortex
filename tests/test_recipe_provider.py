@@ -1,4 +1,4 @@
-"""Qualification tests for the disabled fixed-function image provider."""
+"""Tests for the fixed-function image provider while it is disabled."""
 
 from __future__ import annotations
 
