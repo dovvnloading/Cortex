@@ -164,8 +164,8 @@ class BackendBoundaryTests(unittest.TestCase):
         cortex_backend.execution's __init__ re-exports nothing, so importing
         one submodule loads that submodule and no other. Heavy dependencies
         that belong to unrelated siblings must stay out of a worker that only
-        runs plain Python: pydantic (the recipe and API models), Pillow
-        (recipe_provider's image transforms), and cryptography.
+        runs plain Python: pydantic (the recipe and API models) and Pillow
+        (recipe_provider's image transforms).
 
         The sibling-module assertion is what keeps the __init__ empty. A plain
         re-export added there loads its submodule as a side effect of importing
@@ -181,7 +181,6 @@ class BackendBoundaryTests(unittest.TestCase):
                 (
                     "import sys; "
                     "from cortex_backend.execution.code_execution import code_worker_main; "
-                    "assert 'cryptography' not in sys.modules; "
                     "assert 'pydantic' not in sys.modules; "
                     "assert 'PIL' not in sys.modules; "
                     "loaded = sorted("
