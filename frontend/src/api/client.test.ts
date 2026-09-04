@@ -335,7 +335,7 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
   });
 
-  it("starts a typed recipe request on the explicit qualification route", async () => {
+  it("starts a typed recipe request on the recipe route", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       job_id: "recipe-job",
       request_id: "recipe-request",
@@ -368,7 +368,7 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
   });
 
-  it("stages a bounded attachment through the qualification route", async () => {
+  it("stages a bounded attachment through the attachment route", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       job_id: "attachment-job",
       request_id: "attachment-request",

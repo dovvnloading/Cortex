@@ -17,7 +17,7 @@ import sys
 from tempfile import TemporaryDirectory
 from collections.abc import Callable
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 import cortex_backend.execution.artifact_boundary as boundary_module  # noqa: E402

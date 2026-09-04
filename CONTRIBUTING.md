@@ -59,7 +59,7 @@ One script runs the repository's fast quality gates on your machine:
 ```
 
 That is the `quick` tier -- environment and lockfile checks, lint, backend
-tests, contract drift, security/watchdog qualification, and frontend
+tests, contract drift, the artifact-boundary review, and frontend
 types/lint/unit tests. The lockfile check needs `uv` (`python -m pip install
 uv`); without it that one step reports `skip` rather than failing, and CI still
 enforces it. Before opening a pull request, run the `full` tier, which adds
@@ -72,9 +72,9 @@ build:
 
 Use `-SkipFrontend` or `-SkipBackend` to narrow the run while iterating.
 
-Packaging (PyInstaller), the recipe-worker and coordinator qualification
-spikes, and WebView2 signature verification are deliberately left out of both
-tiers: they take 35+ minutes and need signing tooling. CI covers them.
+Packaging (PyInstaller) and WebView2 signature verification are deliberately
+left out of both tiers: they take 35+ minutes and need Windows packaging
+tooling. CI covers them.
 
 ### Run the checks automatically before a push
 

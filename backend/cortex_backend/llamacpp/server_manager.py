@@ -12,11 +12,9 @@ down, or (d) the process itself dies.  Nothing here ever unloads a model
 fired, and this class records which one (see ``last_restart_reason``).
 
 This is a small, dedicated subprocess manager built directly on
-``subprocess.Popen`` -- the existing ``execution/native_*``/``worker_*``
-machinery is a purpose-built AppContainer sandbox + signing pipeline for
-running *untrusted, model-generated code*, which is a fundamentally
-different (and much heavier) problem than "run a binary Cortex itself
-downloaded and pinned." See the design plan for the full comparison.
+``subprocess.Popen``. Running a binary Cortex itself downloaded and pinned
+is a different problem from running untrusted, model-generated code, and
+this manager solves only the first one.
 """
 
 from __future__ import annotations
@@ -214,13 +212,7 @@ def _spawn_process(
 
 
 # Windows Job Object plumbing so llama-server cannot outlive this process.
-# Sandboxed execution workers already get this exact policy (see
-# execution/native_win32.py's Win32SuspendedWorker); it was simply missing
-# here. Kept self-contained rather than importing that module's structs --
-# this manager deliberately does not depend on the AppContainer sandbox
-# machinery (see the module docstring), and the struct layout below is
-# stable, documented Win32 API surface, not something specific to either
-# module.
+# The struct layout below is stable, documented Win32 API surface.
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _PROCESS_SET_QUOTA = 0x0100

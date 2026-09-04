@@ -237,12 +237,12 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         payload: RecipeImageTransformRequest,
         principal: SessionPrincipal = Depends(require_session),
     ) -> RecipeImageTransformAccepted:
-        """Start one explicitly qualified, owner-scoped image recipe.
+        """Start one owner-scoped image recipe.
 
         The route is intentionally unavailable unless the app was built with
-        the explicit qualification lifecycle and that lifecycle completed its
-        health-gated startup. Attachment staging is a separate trusted boundary;
-        callers provide only its opaque artifact identifier here.
+        an execution lifecycle that completed its health-gated startup.
+        Attachment staging is a separate trusted boundary; callers provide
+        only its opaque artifact identifier here.
         """
 
         coordinator = _recipe_coordinator(request)

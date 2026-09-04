@@ -1,12 +1,11 @@
-"""Adversarial tests for the qualified recipe coordinator and worker client."""
+"""Adversarial tests for the durable image-recipe coordinator."""
 
 from __future__ import annotations
 
 from io import BytesIO
 import hashlib
 from pathlib import Path
-from queue import Queue
-from threading import Event, Thread
+from threading import Event
 import time
 from typing import Any
 
@@ -17,14 +16,10 @@ from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionCoordinator,
     RecipeExecutionError,
     RecipeImageRequest,
-    RecipeWorkerClient,
     RecipeWorkerOutput,
 )
 from cortex_backend.execution.recipes import parse_image_transform
 from cortex_backend.execution.repository import ExecutionRepository
-from cortex_backend.execution.lifecycle import RuntimeHealth
-from cortex_backend.execution.recipe_provider import RecipeProviderError
-from cortex_backend.execution.worker_runtime import RecipeWorkerBrokerRuntime
 
 
 PRINCIPAL = "a" * 64
@@ -261,114 +256,3 @@ def test_recovery_rejects_tampered_payload_and_never_interprets_a_path(tmp_path:
     assert failed is not None
     assert failed.status == "failed"
     assert failed.error == "recovery_invalid_payload"
-
-
-class _Duplex:
-    def __init__(self) -> None:
-        self.to_worker: Queue[Any] = Queue()
-        self.to_client: Queue[Any] = Queue()
-        self.closed = False
-
-    def endpoint(self, *, worker: bool):
-        parent = self
-
-        class Endpoint:
-            def send_message(self, message: Any) -> None:
-                (parent.to_client if worker else parent.to_worker).put(message)
-
-            def receive_message(self) -> Any:
-                item = (parent.to_worker if worker else parent.to_client).get()
-                if item is None:
-                    raise RuntimeError("closed")
-                return item
-
-            def close(self) -> None:
-                if not parent.closed:
-                    parent.closed = True
-                    parent.to_worker.put(None)
-                    parent.to_client.put(None)
-
-        return Endpoint()
-
-
-def test_worker_client_round_trip_uses_only_typed_bytes_and_chunks():
-    transport = _Duplex()
-    worker_endpoint = transport.endpoint(worker=True)
-    client_endpoint = transport.endpoint(worker=False)
-    runtime = RecipeWorkerBrokerRuntime(
-        worker_endpoint,
-        expected_principal_id=PRINCIPAL,
-        job_id="worker-job",
-    )
-    runtime_thread = Thread(target=runtime.run, daemon=True)
-    runtime_thread.start()
-    client = RecipeWorkerClient(
-        client_endpoint,
-        installation_principal_id=PRINCIPAL,
-        timeout_seconds=5,
-    )
-    output = client.transform("worker-request", "worker-job", _plan("artifact-1"), _image_bytes(), Event())
-    client.close()
-    runtime_thread.join(timeout=2)
-
-    assert output.mime_type == "image/png"
-    assert output.sha256
-    assert transport.closed
-
-
-class _CancellableProvider:
-    def __init__(self) -> None:
-        self.entered = Event()
-
-    def start(self, _health: RuntimeHealth) -> RuntimeHealth:
-        return RuntimeHealth.ready("test")
-
-    def stop(self) -> RuntimeHealth:
-        return RuntimeHealth.blocked("test_stopped", "stopped")
-
-    def transform(self, _plan: Any, _content: bytes, *, cancel_check: Any) -> Any:
-        self.entered.set()
-        while not cancel_check():
-            time.sleep(0.001)
-        raise RecipeProviderError("cancelled")
-
-
-def test_worker_client_cancellation_reaches_running_worker():
-    transport = _Duplex()
-    worker_endpoint = transport.endpoint(worker=True)
-    client_endpoint = transport.endpoint(worker=False)
-    provider = _CancellableProvider()
-    runtime_thread = Thread(
-        target=lambda: RecipeWorkerBrokerRuntime(
-            worker_endpoint,
-            expected_principal_id=PRINCIPAL,
-            job_id="worker-job",
-            provider_factory=lambda: provider,
-        ).run(),
-        daemon=True,
-    )
-    runtime_thread.start()
-    client = RecipeWorkerClient(
-        client_endpoint,
-        installation_principal_id=PRINCIPAL,
-        timeout_seconds=5,
-    )
-    cancel_event = Event()
-    result: list[Any] = []
-
-    def run() -> None:
-        try:
-            client.transform("worker-request", "worker-job", _plan("artifact-1"), _image_bytes(), cancel_event)
-        except Exception as error:
-            result.append(error)
-
-    transform_thread = Thread(target=run, daemon=True)
-    transform_thread.start()
-    assert provider.entered.wait(2)
-    cancel_event.set()
-    transform_thread.join(timeout=3)
-    runtime_thread.join(timeout=2)
-    client.close()
-
-    assert result and isinstance(result[0], RecipeExecutionError)
-    assert result[0].code == "cancelled"

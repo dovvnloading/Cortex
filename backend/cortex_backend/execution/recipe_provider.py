@@ -4,8 +4,8 @@ This module is a bounded transform core, not an execution route.  It accepts
 validated ``ImageTransformPlan`` objects and immutable bytes, never paths or
 model source, and returns a new encoded image only after decoding and
 re-validating the result. The provider starts only after a caller supplies a
-health result. The normal local runtime invokes it inside a short-lived worker
-process; the qualification profile may supply a stricter external health gate.
+health result. The local runtime invokes it inside a short-lived worker
+process.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .artifact_boundary import ArtifactBoundaryError, sniff_artifact_mime
 from .lifecycle import RuntimeHealth
 from .recipes import ImageTransformPlan
 
-try:  # Keep the application importable when the optional qualification wheel is absent.
+try:  # Keep the application importable when the optional imaging wheel is absent.
     import PIL
     from PIL import Image, ImageEnhance, ImageFile
     from PIL import UnidentifiedImageError

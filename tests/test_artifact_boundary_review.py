@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tools.execution_spikes.artifact_security_review import run_review
+from tools.artifact_boundary_review import run_review
 
 
 def test_artifact_security_review_is_reproducible_and_complete():

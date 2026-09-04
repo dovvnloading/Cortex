@@ -24,10 +24,7 @@ from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.api.security import SessionManager  # noqa: E402
 from cortex_backend.core.paths import AppPaths  # noqa: E402
 from cortex_backend.execution.lifecycle import ExecutionLifecycle  # noqa: E402
-from cortex_backend.execution.qualification import (  # noqa: E402
-    QualificationLifecycleConfig,
-    build_execution_lifecycle,
-)
+from cortex_backend.execution.profiles import build_execution_lifecycle  # noqa: E402
 from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
 from cortex_backend.llamacpp.binary_fetcher import BinaryFetcher  # noqa: E402
 from cortex_backend.llamacpp.binary_release import CURRENT_RELEASE  # noqa: E402
@@ -60,23 +57,20 @@ def build_app(
     serve_frontend: bool = True,
     handoff_secret: str | None = None,
     execution_profile: str | None = "local",
-    qualification: QualificationLifecycleConfig | None = None,
     execution_lifecycle: ExecutionLifecycle | None = None,
 ):
     """Build the local web application without starting a server.
 
     Source and packaged launches select the checked-in ``local`` execution
-    profile. Pass ``execution_profile="disabled"`` for a chat-only preview or
-    inject a lifecycle explicitly for qualification tests.
+    profile. Pass ``execution_profile="disabled"`` for a chat-only build, or
+    inject a lifecycle explicitly in tests.
     """
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
     execution_repository = ExecutionRepository(
         paths.execution_database,
         paths.execution_artifacts,
     )
-    if execution_lifecycle is not None and (
-        execution_profile is not None or qualification is not None
-    ):
+    if execution_lifecycle is not None and execution_profile is not None:
         raise ValueError(
             "execution lifecycle cannot be combined with an execution profile"
         )
@@ -84,7 +78,6 @@ def build_app(
         execution_lifecycle = build_execution_lifecycle(
             execution_repository,
             profile=execution_profile,
-            qualification=qualification,
         )
     database = DatabaseManager(app_paths=paths)
     database.migrate_from_json_if_needed()
