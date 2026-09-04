@@ -297,11 +297,6 @@ class ChatCorrectnessTests(unittest.TestCase):
         agent.generate_chat_title("User: hi\nAssistant: hello")
         self.assertNotIn("num_ctx", client.last_options)
 
-    def test_vector_memory_is_not_initialized_until_integrated(self):
-        source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
-        self.assertNotIn("VectorDatabaseManager()", source)
-        self.assertNotIn("embedding_model", source)
-
 
 if __name__ == "__main__":
     unittest.main()

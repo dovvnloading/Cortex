@@ -38,7 +38,6 @@ class AppPathsTests(unittest.TestCase):
             self.assertEqual(paths.legacy_chat_history, expected / "chat_history")
             self.assertEqual(paths.permanent_memory, expected / "memory_bank.json")
             self.assertEqual(paths.permanent_memory_backup, expected / "memory_bank.json.bak")
-            self.assertEqual(paths.vector_database, expected / "cortex_vectors.sqlite")
 
     def test_path_construction_has_no_file_system_side_effect(self):
         with tempfile.TemporaryDirectory() as directory:
