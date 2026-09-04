@@ -172,11 +172,6 @@ class AppPaths:
         return self.data_dir / "cortex_settings.sqlite"
 
     @property
-    def vector_database(self) -> Path:
-        """Retain the dormant legacy path without enabling vector memory."""
-        return self.data_dir / "cortex_vectors.sqlite"
-
-    @property
     def execution_database(self) -> Path:
         """Durable Phase 1 execution state kept separate from chat/settings data."""
         return self.data_dir / "execution.sqlite"
