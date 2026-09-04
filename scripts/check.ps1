@@ -135,7 +135,7 @@ if (-not $SkipBackend) {
     }
 
     Invoke-Step 'Lint Python (ruff)' {
-        python -m ruff check backend tests tools main.py Cortex_Preview.py
+        python -m ruff check backend tests tools main.py app_factory.py
     }
 
     Invoke-Step 'Backend tests (pytest)' {
@@ -156,7 +156,7 @@ if (-not $SkipBackend) {
 
     if ($Tier -eq 'full') {
         Invoke-Step 'Compile application modules' {
-            python -m compileall -q main.py Cortex_Preview.py backend
+            python -m compileall -q main.py app_factory.py backend
         }
     }
 }

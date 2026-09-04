@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import uvicorn  # noqa: E402
 
-from Cortex_Preview import build_preview_app  # noqa: E402
+from app_factory import build_app  # noqa: E402
 from cortex_backend import __version__ as CORTEX_VERSION  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
@@ -424,7 +424,7 @@ def _run_web(args: argparse.Namespace) -> int:
                 )
                 return 2
 
-            app = build_preview_app(
+            app = build_app(
                 data_dir=paths.data_dir,
                 frontend_dist=dist,
                 serve_frontend=not args.dev,

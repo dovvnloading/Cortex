@@ -58,9 +58,9 @@ def test_disabled_profile_never_calls_health_or_coordinator(tmp_path):
 
 
 def test_preview_builder_uses_the_checked_in_local_profile_by_default(tmp_path):
-    from Cortex_Preview import build_preview_app
+    from app_factory import build_app
 
-    app = build_preview_app(data_dir=tmp_path / "app-data", serve_frontend=False)
+    app = build_app(data_dir=tmp_path / "app-data", serve_frontend=False)
 
     assert app.state.execution_lifecycle.profile == "local"
     assert app.state.execution_lifecycle.snapshot.state == "stopped"

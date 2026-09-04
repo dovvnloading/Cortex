@@ -12,8 +12,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import Cortex_Preview
-from Cortex_Preview import build_preview_app
+import app_factory
+from app_factory import build_app
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
@@ -185,7 +185,7 @@ def test_packaged_runtime_builder_opens_existing_chat_fixture_without_qt(tmp_pat
     legacy_dir.mkdir()
     shutil.copy2(CHAT_FIXTURE, legacy_dir / CHAT_FIXTURE.name)
 
-    app = build_preview_app(
+    app = build_app(
         data_dir=tmp_path,
         serve_frontend=False,
     )
@@ -219,7 +219,7 @@ def test_packaged_runtime_quarantines_unopenable_legacy_chat_before_api_read(tmp
         encoding="utf-8",
     )
 
-    app = build_preview_app(
+    app = build_app(
         data_dir=tmp_path,
         serve_frontend=False,
         execution_profile="disabled",
@@ -243,16 +243,16 @@ def test_preview_app_builds_ollama_client_with_a_bounded_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     captured_kwargs: dict[str, object] = {}
-    real_client_cls = Cortex_Preview.ollama.Client
+    real_client_cls = app_factory.ollama.Client
 
     class RecordingClient(real_client_cls):
         def __init__(self, *, host=None, **kwargs):
             captured_kwargs.update(kwargs)
             super().__init__(host=host, **kwargs)
 
-    monkeypatch.setattr(Cortex_Preview.ollama, "Client", RecordingClient)
+    monkeypatch.setattr(app_factory.ollama, "Client", RecordingClient)
 
-    build_preview_app(data_dir=tmp_path, serve_frontend=False)
+    build_app(data_dir=tmp_path, serve_frontend=False)
 
     assert captured_kwargs.get("timeout") is not None
     assert isinstance(captured_kwargs["timeout"], httpx.Timeout)

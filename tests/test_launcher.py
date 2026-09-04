@@ -195,7 +195,7 @@ def test_desktop_url_keeps_bootstrap_token_in_fragment():
 def test_launcher_startup_diagnostics_never_record_a_bootstrap_credential(tmp_path):
     """The credential lives in a URL fragment and must stay out of the log.
 
-    Cortex_Preview used to carry a second, browser-opening entry point with its
+    app_factory used to carry a second, browser-opening entry point with its
     own "never print the token" test. That entry point is gone; this asserts the
     same property on the launcher that actually ships, where a startup failure
     is the realistic way a URL reaches durable storage.
@@ -572,7 +572,7 @@ def test_default_runtime_starts_backend_then_native_window(
     probed_urls: list[str] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
-    monkeypatch.setattr(launcher_main, "build_preview_app", lambda **_kwargs: app)
+    monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
     monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
