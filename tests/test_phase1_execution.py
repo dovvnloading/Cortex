@@ -507,7 +507,7 @@ def test_create_job_duplicate_request_reports_real_approval_state(tmp_path):
     bare `SELECT * FROM execution_jobs`, which has no execution_approvals
     join and therefore no approval_state column -- so _job_from_row()
     defaulted to "not_required" even for a job sitting in "pending" or
-    "expired" approval. See docs/audits/2026-09-03-ownership-review.md #17.
+    "expired" approval.
     """
     repository = _repository(tmp_path)
     job, created = repository.create_job(
