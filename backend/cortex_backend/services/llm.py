@@ -782,10 +782,16 @@ class SynthesisAgent:
 
         output_reservation = cls.output_token_reservation(num_ctx)
         selected: list[dict] = []
+        # Rendered form of `selected`, kept in step with it. Re-rendering the
+        # whole transcript for every candidate made this walk quadratic in the
+        # thread's character count, and it was 87% of the cost of preparing a
+        # turn. See _prepend_history_chunks for why prepending is exact.
+        chunks: tuple[str, ...] = ()
 
         for message in reversed(messages):
             candidate = [message, *selected]
-            history = cls._format_history_messages(candidate)
+            candidate_chunks = cls._prepend_history_chunks(message, selected, chunks)
+            history = cls._join_history_chunks(candidate_chunks)
             prompt = PromptTemplate.build_synthesis_prompt(
                 query,
                 history,
@@ -800,6 +806,7 @@ class SynthesisAgent:
             prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
                 selected = candidate
+                chunks = candidate_chunks
             # Candidate sizes are not monotonic: dropping a newly-unpaired
             # trailing assistant message (see _format_history_messages)
             # shrinks the *next* candidate, so an oversized exchange must not
@@ -879,6 +886,52 @@ class SynthesisAgent:
             paired.append({"role": "user", "content": question})
             paired.append({"role": "assistant", "content": answer})
         return paired
+
+    @staticmethod
+    def _join_history_chunks(chunks: tuple[str, ...]) -> str:
+        """Render prepared chunks exactly as _format_history_messages would."""
+        return "\n\n".join(chunks).strip() or "No history available."
+
+    @classmethod
+    def _prepend_history_chunks(
+        cls,
+        message: dict,
+        selected: list[dict],
+        chunks: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Chunks for ``[message, *selected]``, given the chunks for ``selected``.
+
+        _format_history_messages pairs greedily from the front, so prepending a
+        message can in general re-pair everything behind it. Here it cannot,
+        because of how _select_history builds its list: every accepted
+        ``selected`` was itself produced by one prepend onto the previous one.
+
+        Three cases, matching the formatter exactly:
+
+        * The new message is not a user turn. The formatter skips it (index 0
+          is not a user role) and continues from ``selected`` at its own index
+          0 -- which is what ``chunks`` already describes. Unchanged.
+
+        * The new message is a user turn and ``selected`` does not start with
+          an assistant reply. It renders alone and the rest is untouched.
+
+        * The new message is a user turn and ``selected`` starts with an
+          assistant reply. They pair, and the formatter then continues from
+          ``selected[1:]``.
+
+        The last case is the one that looks like it needs a re-render, and does
+        not. ``selected`` can only begin with an assistant message if the last
+        accepted prepend was case one -- which left the chunks unchanged. So
+        the chunks for ``selected[1:]`` are the chunks for ``selected``.
+        """
+        if str(message.get("role", "")) != "user":
+            return chunks
+
+        user_content = str(message.get("content", ""))
+        if selected and str(selected[0].get("role", "")) == "assistant":
+            assistant_content = str(selected[0].get("content", ""))
+            return (f"User: {user_content}\nAI: {assistant_content}", *chunks)
+        return (f"User: {user_content}", *chunks)
 
     @staticmethod
     def _format_history_messages(messages: list[dict]) -> str:
