@@ -524,7 +524,7 @@ def test_gguf_download_job_failure_reports_the_specific_reason(monkeypatch, tmp_
         del url, filename, directory, progress_callback, cancellation_event
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
 
-    monkeypatch.setattr("cortex_backend.api.routes.download_gguf", fake_download_gguf)
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
 
     app = create_app(
         build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path
@@ -569,7 +569,7 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
             progress_callback(GGUFDownloadProgress(filename=filename, status="success", completed=4, total=4))
         return path
 
-    monkeypatch.setattr("cortex_backend.api.routes.download_gguf", fake_download_gguf)
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
 
     app = create_app(
         build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path
@@ -603,7 +603,7 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
 
 def test_huggingface_file_listing_route(monkeypatch) -> None:
     monkeypatch.setattr(
-        "cortex_backend.api.routes.list_huggingface_gguf_files",
+        "cortex_backend.api.routers.models.list_huggingface_gguf_files",
         lambda repo_id: ("model.Q4_K_M.gguf", "model.Q8_0.gguf"),
     )
     app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))

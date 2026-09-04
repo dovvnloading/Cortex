@@ -31,7 +31,7 @@ from cortex_backend.execution.lifecycle import ExecutionLifecycle
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from .jobs import JobRegistry
-from .routes import build_router
+from .routers import build_router
 from .security import SessionManager
 
 logger = logging.getLogger(__name__)
