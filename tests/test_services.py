@@ -32,6 +32,13 @@ class _ProgressRecorder:
 
 
 class _FakeEngine:
+    """A double that implements the whole GenerationEngine surface.
+
+    It used to implement only part of it, which is why the service probed for
+    the rest with getattr. The probes are gone, so a double that skips a member
+    is a double of an engine that cannot exist.
+    """
+
     def __init__(self, *, translation: TranslationResult | None = None):
         self.translation = translation or TranslationResult.succeeded("translated")
         self.history_messages: list[dict] | None = None
@@ -39,6 +46,12 @@ class _FakeEngine:
         self.options: dict | None = None
         self.title_history: str | None = None
         self.title_response: str | None = None
+        self.last_code_proposal = None
+        self.last_code_rejection = None
+        self._status_callback = None
+
+    def set_status_callback(self, callback) -> None:
+        self._status_callback = callback
 
     def fit_memories_to_context(
         self,
@@ -49,8 +62,9 @@ class _FakeEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations=(),
     ) -> list[str]:
-        del code_execution_eligible, bypass_system_prompt
+        del code_execution_eligible, bypass_system_prompt, host_observations
         self.memory_inputs = list(memories)
         return list(memories)
 
@@ -65,10 +79,19 @@ class _FakeEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations=(),
+        attachments=(),
     ) -> str:
-        del code_execution_eligible, bypass_system_prompt
+        del code_execution_eligible, bypass_system_prompt, host_observations, attachments
         self.history_messages = messages
         return "formatted history"
+
+    def fit_history(self, messages, **kwargs):
+        return self.fit_history_to_context(messages, **kwargs), list(messages)
+
+    def fit_attachments_to_context(self, attachments, **kwargs):
+        del kwargs
+        return tuple(attachments)
 
     def generate(
         self,
@@ -79,7 +102,12 @@ class _FakeEngine:
         memories_enabled: bool,
         user_system_instructions: str | None,
         options: dict,
+        attachments=(),
+        cancellation_event=None,
+        history_messages=None,
+        host_observations=(),
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
+        del attachments, cancellation_event, history_messages, host_observations
         self.options = options
         stats = GenerationStats(eval_count=10, eval_duration_ms=100.0, tokens_per_second=100.0)
         return "response", "thoughts", MemoryCommand(("remember tea",), False), stats
@@ -87,21 +115,15 @@ class _FakeEngine:
     def translate_text(self, text: str, target_language: str) -> TranslationResult:
         return self.translation
 
-    def generate_chat_title(self, chat_history: str) -> str | None:
+    def generate_chat_title(self, chat_history: str, *, options=None) -> str | None:
+        del options
         self.title_history = chat_history
         return self.title_response
 
 
 class _StatusReportingEngine(_FakeEngine):
-    """An engine that reports startup progress (e.g. a llama.cpp runtime
-    downloading/starting) via the optional set_status_callback hook."""
-
-    def __init__(self):
-        super().__init__()
-        self._status_callback = None
-
-    def set_status_callback(self, callback) -> None:
-        self._status_callback = callback
+    """An engine that reports startup progress -- e.g. a llama.cpp runtime
+    downloading a binary or loading a model -- through set_status_callback."""
 
     def generate(self, **kwargs):
         if self._status_callback is not None:
