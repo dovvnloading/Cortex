@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from cortex_backend.execution import (
-    ArtifactBoundary,
+from cortex_backend.execution.artifact_boundary import ArtifactBoundary
+from cortex_backend.execution.attachment_staging import (
     AttachmentStagingError,
     AttachmentStagingService,
-    ExecutionRepository,
 )
+from cortex_backend.execution.repository import ExecutionRepository
 
 
 OWNER = "a" * 64

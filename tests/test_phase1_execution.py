@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from cortex_backend.execution import (
+from cortex_backend.execution.repository import (
     ArtifactLimitError,
     ExecutionRepository,
     ExecutionRepositoryError,

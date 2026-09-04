@@ -13,11 +13,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from cortex_backend.api import build_demo_dependencies, create_app
-from cortex_backend.execution import (
-    ExecutionRepository,
-    RecipeWorkerOutput,
-    build_recipe_coordinator_factory,
-)
+from cortex_backend.execution.qualification import build_recipe_coordinator_factory
+from cortex_backend.execution.recipe_coordinator import RecipeWorkerOutput
+from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth
 from support import session_headers as _session
 
