@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 import json
@@ -562,7 +563,14 @@ class JobRegistry:
         cursor = after_sequence
         while True:
             with self._lock:
-                pending = [event for event in record.events if event.sequence > cursor]
+                # record.events is appended in sequence order and evicted from
+                # the front, so it is always sorted. Scanning all of it on
+                # every tick meant holding the registry lock while walking up
+                # to max_event_count entries, usually to find nothing: at the
+                # poll interval that is thousands of comparisons a second per
+                # open stream. Locate the cursor instead, then take the tail.
+                start = bisect_right(record.events, cursor, key=lambda event: event.sequence)
+                pending = record.events[start:]
                 terminal = record.status in TERMINAL_STATUSES
             if pending:
                 for event in pending:
