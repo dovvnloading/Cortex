@@ -49,7 +49,6 @@ from cortex_backend.services.attachments import (
     MAX_CHAT_ATTACHMENTS,
     MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
 )
-from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.attachment_staging import (
     AttachmentStagingError,
 )
@@ -1140,18 +1139,6 @@ def _execution_runtime(request: Request):
     """Require an explicitly enabled execution runtime for shared job routes."""
     coordinator = getattr(request.app.state, "execution_coordinator", None)
     if not request.app.state.preview or coordinator is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Execution preview is unavailable.",
-        )
-    return coordinator
-
-
-def _fake_execution_coordinator(request: Request) -> DurableFakeCoordinator:
-    """Keep the deterministic preview route separate from recipe execution."""
-
-    coordinator = _execution_runtime(request)
-    if not isinstance(coordinator, DurableFakeCoordinator):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution preview is unavailable.",

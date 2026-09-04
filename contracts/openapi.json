@@ -1011,49 +1011,6 @@
         "title": "DiagnosticsResponse",
         "type": "object"
       },
-      "ExecutionAccepted": {
-        "additionalProperties": false,
-        "properties": {
-          "job_id": {
-            "title": "Job Id",
-            "type": "string"
-          },
-          "profile": {
-            "const": "fake.v1",
-            "title": "Profile",
-            "type": "string"
-          },
-          "request_id": {
-            "title": "Request Id",
-            "type": "string"
-          },
-          "sequence": {
-            "title": "Sequence",
-            "type": "integer"
-          },
-          "status": {
-            "enum": [
-              "queued",
-              "running",
-              "cancelling",
-              "succeeded",
-              "failed",
-              "cancelled"
-            ],
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "job_id",
-          "request_id",
-          "profile",
-          "status",
-          "sequence"
-        ],
-        "title": "ExecutionAccepted",
-        "type": "object"
-      },
       "ExecutionApprovalDecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1070,45 +1027,6 @@
           "decision"
         ],
         "title": "ExecutionApprovalDecisionRequest",
-        "type": "object"
-      },
-      "ExecutionPreviewRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "outcome": {
-            "default": "success",
-            "enum": [
-              "success",
-              "failure"
-            ],
-            "title": "Outcome",
-            "type": "string"
-          },
-          "request_id": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Request Id",
-            "type": "string"
-          },
-          "step_delay_seconds": {
-            "default": 0.0,
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Step Delay Seconds",
-            "type": "number"
-          },
-          "steps": {
-            "default": 3,
-            "maximum": 20.0,
-            "minimum": 1.0,
-            "title": "Steps",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "request_id"
-        ],
-        "title": "ExecutionPreviewRequest",
         "type": "object"
       },
       "ExecutionSSEEvent": {
@@ -4176,49 +4094,6 @@
           }
         ],
         "summary": "Start Code Execution"
-      }
-    },
-    "/api/v1/execution/preview/fake": {
-      "post": {
-        "operationId": "start_fake_execution_api_v1_execution_preview_fake_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExecutionPreviewRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExecutionAccepted"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "CortexSession": []
-          }
-        ],
-        "summary": "Start Fake Execution"
       }
     },
     "/api/v1/execution/recipe/image": {

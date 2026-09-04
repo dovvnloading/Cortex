@@ -1,4 +1,10 @@
-"""Durable background coordinator backed only by the Phase 1 fake provider."""
+"""Durable background coordinator backed only by the fake provider.
+
+Test infrastructure, and it lives here so it cannot reach a shipped build.
+It drives the generic execution surface -- owner scoping, idempotent replay,
+durable cancel, leases, the task list, and the SSE stream -- deterministically,
+which the real coordinators cannot do without running actual work.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +14,15 @@ from typing import Any
 from collections.abc import Mapping
 from uuid import uuid4
 
-from .fake import FakeExecutionCancelled, FakeExecutionFailure, FakeExecutionPlan, FakeExecutionProvider
-from .models import ExecutionJob, TerminalExecutionStatus
-from .repository import ExecutionRepository, LeaseConflict
+from cortex_backend.execution.models import ExecutionJob, TerminalExecutionStatus
+from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
+
+from .fake_execution import (
+    FakeExecutionCancelled,
+    FakeExecutionFailure,
+    FakeExecutionPlan,
+    FakeExecutionProvider,
+)
 
 
 class DurableFakeCoordinator:

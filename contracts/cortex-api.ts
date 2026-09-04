@@ -189,23 +189,8 @@ export interface DiagnosticsResponse {
   llamacpp?: LlamaCppRuntimeStatus;
 }
 
-export interface ExecutionAccepted {
-  job_id: string;
-  request_id: string;
-  profile: "fake.v1";
-  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
-  sequence: number;
-}
-
 export interface ExecutionApprovalDecisionRequest {
   decision: "approved" | "denied";
-}
-
-export interface ExecutionPreviewRequest {
-  request_id: string;
-  outcome?: "success" | "failure";
-  steps?: number;
-  step_delay_seconds?: number;
 }
 
 export interface ExecutionSSEEvent {

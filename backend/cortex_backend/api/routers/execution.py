@@ -25,7 +25,6 @@ from cortex_backend.api.routes import (
     _execution_sse_line,
     _execution_status_response,
     _execution_task_summary,
-    _fake_execution_coordinator,
     _last_event_cursor,
     _load_settings,
     _poll_execution_stream,
@@ -45,9 +44,7 @@ from cortex_backend.api.schemas import (
     CodeExecutionAccepted,
     CodeExecutionRequest,
     CodeExecutionSourceResponse,
-    ExecutionAccepted,
     ExecutionApprovalDecisionRequest,
-    ExecutionPreviewRequest,
     ExecutionSSEEvent,
     ExecutionStatusResponse,
     ExecutionTaskListResponse,
@@ -66,7 +63,6 @@ from cortex_backend.execution.code_execution import (
     CodeExecutionError,
     CodeExecutionRequest as CodeExecutionTaskRequest,
 )
-from cortex_backend.execution.fake import FakeExecutionPlan
 from cortex_backend.execution.models import TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
@@ -99,38 +95,6 @@ from fastapi.responses import (
 
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     """Attach the execution routes to ``router``."""
-
-
-    @router.post(
-        "/execution/preview/fake",
-        response_model=ExecutionAccepted,
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    def start_fake_execution(
-        request: Request,
-        payload: ExecutionPreviewRequest,
-        principal: SessionPrincipal = Depends(require_session),
-    ) -> ExecutionAccepted:
-        coordinator = _fake_execution_coordinator(request)
-        try:
-            job = coordinator.start(
-                owner=_durable_owner(principal),
-                request_id=payload.request_id,
-                plan=FakeExecutionPlan(
-                    outcome=payload.outcome,
-                    steps=payload.steps,
-                    step_delay_seconds=payload.step_delay_seconds,
-                ),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return ExecutionAccepted(
-            job_id=job.job_id,
-            request_id=job.request_id,
-            profile="fake.v1",
-            status=job.status,
-            sequence=job.sequence,
-        )
 
 
     @router.post(

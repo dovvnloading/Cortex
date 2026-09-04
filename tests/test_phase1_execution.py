@@ -16,8 +16,8 @@ from cortex_backend.execution.repository import (
     ExecutionRepositoryError,
     LeaseConflict,
 )
-from cortex_backend.execution.coordinator import DurableFakeCoordinator
-from cortex_backend.execution.fake import FakeExecutionPlan
+from cortex_backend.testing import DurableFakeCoordinator
+from cortex_backend.testing import FakeExecutionPlan
 from cortex_backend.execution.repository import ApprovalPolicyError, ApprovalTransitionError
 
 

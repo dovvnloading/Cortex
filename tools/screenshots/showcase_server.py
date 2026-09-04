@@ -48,7 +48,7 @@ from cortex_backend.core.settings import (  # noqa: E402
     ModelSettings,
     TranslationSettings,
 )
-from cortex_backend.execution.coordinator import DurableFakeCoordinator  # noqa: E402
+from cortex_backend.testing import DurableFakeCoordinator  # noqa: E402
 from cortex_backend.execution.repository import ExecutionRepository  # noqa: E402
 from cortex_backend.repositories.chats import InMemoryChatRepository  # noqa: E402
 from cortex_backend.repositories.memories import InMemoryMemoryRepository  # noqa: E402

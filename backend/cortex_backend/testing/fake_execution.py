@@ -1,4 +1,4 @@
-"""Deterministic fake execution provider for Phase 1 lifecycle tests."""
+"""Deterministic fake execution provider for lifecycle tests."""
 
 from __future__ import annotations
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
-from cortex_backend.execution.coordinator import DurableFakeCoordinator
+from cortex_backend.testing import DurableFakeCoordinator, install_execution_preview
 from cortex_backend.execution.repository import ExecutionRepository
 from support import session_headers as _session
 
@@ -28,7 +28,7 @@ def _app(tmp_path, *, preview: bool = True):
         preview=preview,
         execution_coordinator=coordinator,
     )
-    return app
+    return install_execution_preview(app)
 
 
 def _owner(app, headers: dict[str, str]) -> str:

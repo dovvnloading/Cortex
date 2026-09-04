@@ -392,13 +392,6 @@ ExecutionApprovalState = Literal[
 ]
 
 
-class ExecutionPreviewRequest(APIModel):
-    request_id: str = Field(min_length=1, max_length=200)
-    outcome: Literal["success", "failure"] = "success"
-    steps: int = Field(default=3, ge=1, le=20)
-    step_delay_seconds: float = Field(default=0.0, ge=0.0, le=1.0)
-
-
 class ScratchComputeRequest(APIModel):
     """One bounded expression, never Python source or a shell command."""
 
@@ -539,14 +532,6 @@ class AttachmentStageRequest(APIModel):
         le=MAX_ATTACHMENT_RETENTION_SECONDS,
         strict=True,
     )
-
-
-class ExecutionAccepted(APIModel):
-    job_id: str
-    request_id: str
-    profile: Literal["fake.v1"]
-    status: ExecutionStatus
-    sequence: int
 
 
 class ScratchComputeAccepted(APIModel):
