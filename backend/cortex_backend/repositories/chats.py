@@ -54,6 +54,10 @@ class ChatRepository(Protocol):
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None: ...
 
+    def get_chat_overview(self, thread_id: str) -> dict[str, Any] | None:
+        """Title, timestamp and revision without materialising the messages."""
+        ...
+
     def create_chat(self, thread_id: str, title: str) -> None: ...
 
     def add_message(
@@ -123,6 +127,9 @@ class LegacyDatabaseChatRepository:
 
     def get_chat(self, thread_id: str) -> dict[str, Any] | None:
         return _sanitize_chat_messages(self._database.load_chat(thread_id))
+
+    def get_chat_overview(self, thread_id: str) -> dict[str, Any] | None:
+        return self._database.load_chat_overview(thread_id)
 
     def create_chat(self, thread_id: str, title: str) -> None:
         self._database.create_chat(thread_id, title)
@@ -300,6 +307,19 @@ class InMemoryChatRepository:
         with self._lock:
             chat = self._chats.get(thread_id)
             return _sanitize_chat_messages(deepcopy(chat)) if chat is not None else None
+
+    def get_chat_overview(self, thread_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                return None
+            return {
+                "id": chat["id"],
+                "title": chat.get("title"),
+                "timestamp": chat.get("timestamp"),
+                "group_id": chat.get("group_id"),
+                "revision": len(chat.get("messages", ())),
+            }
 
     def create_chat(self, thread_id: str, title: str) -> None:
         with self._lock:

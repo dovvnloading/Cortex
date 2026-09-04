@@ -300,3 +300,70 @@ class ChatCorrectnessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatOverviewTests(unittest.TestCase):
+    """The overview must agree with the full load on everything it reports.
+
+    A generation turn reads the thread five times. Three of those reads want
+    only the title or the revision, and chat_revision() is the message count --
+    so the cheap read has to produce exactly the number the expensive one
+    would, or a compare-and-swap starts rejecting valid writes.
+    """
+
+    def _repository(self, directory):
+        database = DatabaseManager(
+            db_path=str(Path(directory) / "chats.sqlite"),
+            legacy_history_dir=str(Path(directory) / "history"),
+        )
+        return LegacyDatabaseChatRepository(database)
+
+    def test_overview_matches_the_full_load_for_every_shared_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._repository(directory)
+            repository.add_message("t", "user", "first", thread_title="Named")
+            for index in range(9):
+                repository.add_message("t", "assistant", f"reply {index}")
+                repository.add_message("t", "user", f"question {index}")
+
+            chat = repository.get_chat("t")
+            overview = repository.get_chat_overview("t")
+
+            self.assertIsNotNone(overview)
+            for field in ("id", "title", "timestamp", "group_id"):
+                self.assertEqual(overview[field], chat[field], field)
+            self.assertEqual(overview["revision"], len(chat["messages"]))
+
+    def test_overview_tracks_the_revision_as_messages_land(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._repository(directory)
+            repository.add_message("t", "user", "one", thread_title="Named")
+            self.assertEqual(repository.get_chat_overview("t")["revision"], 1)
+            repository.add_message("t", "assistant", "two")
+            self.assertEqual(repository.get_chat_overview("t")["revision"], 2)
+
+    def test_overview_follows_a_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._repository(directory)
+            repository.add_message("t", "user", "one", thread_title="New Chat")
+            repository.rename_chat("t", "A better title")
+
+            self.assertEqual(repository.get_chat_overview("t")["title"], "A better title")
+
+    def test_overview_of_an_unknown_thread_is_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._repository(directory)
+            self.assertIsNone(repository.get_chat_overview("missing"))
+
+    def test_the_in_memory_repository_reports_the_same_shape(self):
+        memory = InMemoryChatRepository()
+        memory.create_chat("t", "Named")
+        memory.add_message("t", "user", "one")
+
+        overview = memory.get_chat_overview("t")
+        chat = memory.get_chat("t")
+
+        self.assertEqual(set(overview), {"id", "title", "timestamp", "group_id", "revision"})
+        self.assertEqual(overview["revision"], len(chat["messages"]))
+        self.assertEqual(overview["title"], chat["title"])
+        self.assertIsNone(memory.get_chat_overview("missing"))
