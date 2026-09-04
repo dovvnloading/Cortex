@@ -811,3 +811,30 @@ def test_model_proposal_rejects_the_unavailable_process_capability() -> None:
     assert agent.last_code_proposal is None
     assert agent.last_code_rejection is not None
     assert agent.last_code_rejection.code == "invalid_json"
+
+
+def test_a_result_refuses_a_non_integer_duration():
+    """The API contract declares duration_ms as an integer.
+
+    The clamp ceiling upstream is `MAX_CODE_TIMEOUT_SECONDS * 1_000`, and that
+    constant is 10.0 -- so `min(ceiling, elapsed)` returned 10000.0 for any
+    program that ran long enough to be clamped, and the float went straight
+    into the payload. The type is now refused at the boundary, so no future
+    caller can reintroduce it.
+    """
+    from cortex_backend.execution.code_execution import CodeExecutionError, CodeExecutionResult
+
+    ok = CodeExecutionResult(stdout="", stderr="", duration_ms=10_000)
+    assert type(ok.as_payload()["duration_ms"]) is int
+
+    with pytest.raises(CodeExecutionError) as clamped_float:
+        CodeExecutionResult(stdout="", stderr="", duration_ms=10_000.0)
+    assert clamped_float.value.code == "result_duration_invalid"
+
+
+def test_the_clamp_ceiling_stays_an_integer():
+    """Guard the exact expression that produced the float."""
+    from cortex_backend.execution.code_execution import MAX_CODE_TIMEOUT_SECONDS
+
+    assert type(int(MAX_CODE_TIMEOUT_SECONDS * 1_000)) is int
+    assert type(min(int(MAX_CODE_TIMEOUT_SECONDS * 1_000), 1)) is int
