@@ -13,7 +13,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.repository import (
     ExecutionRepository,

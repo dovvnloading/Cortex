@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.repositories.chats import (
     ChatGroupNotFound,
     InMemoryChatRepository,

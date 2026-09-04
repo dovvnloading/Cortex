@@ -14,7 +14,8 @@ from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
 import cortex_backend.llamacpp.download as download_module
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.schemas import ModelDownloadRequest
 from cortex_backend.llamacpp.download import (
     DownloadSource,

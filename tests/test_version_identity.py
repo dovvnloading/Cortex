@@ -65,7 +65,8 @@ def test_no_module_hard_codes_the_version(relative: str) -> None:
 
 def test_the_api_reports_the_declared_version() -> None:
     """The version a client sees has to be the one the package declares."""
-    from cortex_backend.api import build_demo_dependencies, create_app
+    from cortex_backend.api import create_app
+    from cortex_backend.testing import build_demo_dependencies
 
     app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
 

@@ -19,29 +19,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from cortex_backend import __version__
-from cortex_backend.repositories.chats import ChatRepository, InMemoryChatRepository
-from cortex_backend.repositories.memories import (
-    InMemoryMemoryRepository,
-    MemoryRepository,
-)
-from cortex_backend.repositories.settings import (
-    InMemorySettingsRepository,
-    SettingsRepository,
-)
+from cortex_backend.repositories.chats import ChatRepository
+from cortex_backend.repositories.memories import MemoryRepository
+from cortex_backend.repositories.settings import SettingsRepository
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
-from cortex_backend.services.models import ModelCatalog, ModelService
+from cortex_backend.services.models import ModelCatalog
 from cortex_backend.execution.coordinator import DurableFakeCoordinator
 from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.lifecycle import ExecutionLifecycle
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
-from cortex_backend.testing.fake_ollama import (
-    FakeGenerationEngine,
-    FakeOllamaGateway,
-    FakeOllamaState,
-)
-
 from .jobs import JobRegistry
 from .routes import build_router
 from .security import SessionManager
@@ -61,36 +49,8 @@ class BackendDependencies:
     attachments: ChatAttachmentService | None = None
 
 
-def build_demo_dependencies(
-    *,
-    ollama_state: FakeOllamaState | None = None,
-) -> BackendDependencies:
-    """Build deterministic in-memory dependencies without Qt or Ollama."""
-    state = ollama_state or FakeOllamaState()
-    settings = InMemorySettingsRepository()
-    chats = InMemoryChatRepository()
-    memories = InMemoryMemoryRepository()
-    gateway = FakeOllamaGateway(state)
-    models = ModelService(gateway)
-    generation = GenerationService(
-        history_loader=lambda thread_id: (chats.get_chat(thread_id) or {}).get(
-            "messages", []
-        ),
-        memory_loader=memories.get_memos,
-        engine_factory=lambda snapshot: FakeGenerationEngine(state),
-    )
-    return BackendDependencies(
-        settings=settings,
-        chats=chats,
-        memories=memories,
-        models=models,
-        generation=generation,
-        attachments=ChatAttachmentService(),
-    )
-
-
 def create_app(
-    dependencies: BackendDependencies | None = None,
+    dependencies: BackendDependencies,
     *,
     session_manager: SessionManager | None = None,
     preview: bool = True,
@@ -234,7 +194,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
-    app.state.dependencies = dependencies or build_demo_dependencies()
+    app.state.dependencies = dependencies
     app.state.chat_attachment_service = getattr(
         app.state.dependencies, "attachments", None
     )

@@ -9,7 +9,8 @@ import time
 from fastapi.testclient import TestClient
 
 import cortex_backend.api.routes as api_routes
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 from support import session_headers as _session
 

@@ -216,3 +216,33 @@ class BackendBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductionBoundaryTests(unittest.TestCase):
+    def test_the_api_package_does_not_import_test_doubles(self):
+        """A packaged build must not carry the fake model gateway.
+
+        cortex_backend.api.app used to import the fakes at module scope for a
+        demo-dependency helper, and create_app fell back to it whenever it was
+        called without dependencies -- so a mis-wired composition root produced
+        a working application backed by a fake instead of failing.
+        """
+        for path in (BACKEND_PACKAGE / "api").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                modules: list[str] = []
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    modules = [node.module]
+                for module in modules:
+                    self.assertFalse(
+                        module.startswith("cortex_backend.testing"),
+                        f"{path} imports {module}",
+                    )
+
+    def test_create_app_requires_its_dependencies(self):
+        from cortex_backend.api import create_app
+
+        with self.assertRaises(TypeError):
+            create_app()

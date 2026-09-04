@@ -13,7 +13,8 @@ from typing import Any
 from fastapi.testclient import TestClient
 import pytest
 
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.jobs import JobConflict, JobRegistry
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 from support import session_headers as _session

@@ -11,7 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main as launcher_main
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
 from cortex_backend.launcher import supervisor as supervisor_module

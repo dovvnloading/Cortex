@@ -17,7 +17,8 @@ from urllib.parse import quote
 from fastapi.testclient import TestClient
 import pytest
 
-from cortex_backend.api import build_demo_dependencies, create_app
+from cortex_backend.api import create_app
+from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.routes import _generation_snapshot, _model_sets
 from cortex_backend.api.jobs import JobConflict, JobOwnershipError, JobRegistry
 from cortex_backend.api.security import SessionManager, SessionSecurityError
@@ -50,7 +51,7 @@ def _events(body: str) -> list[dict]:
 
 
 def test_generation_stream_openapi_declares_sse_media_type():
-    app = create_app(allowed_hosts=ALLOWED_HOSTS)
+    app = create_app(build_demo_dependencies(), allowed_hosts=ALLOWED_HOSTS)
     response = app.openapi()["paths"]["/api/v1/generations/{job_id}/events"][
         "get"
     ]["responses"]["200"]
@@ -64,7 +65,7 @@ def test_generation_stream_openapi_declares_sse_media_type():
 
 
 def test_authenticated_openapi_declares_bearer_security_and_execution_sse_contract():
-    app = create_app(allowed_hosts=ALLOWED_HOSTS)
+    app = create_app(build_demo_dependencies(), allowed_hosts=ALLOWED_HOSTS)
     specification = app.openapi()
     execution_events = specification["paths"]["/api/v1/execution/{job_id}/events"]["get"]
     handoff = specification["paths"]["/api/v1/session/handoff"]["post"]
@@ -155,7 +156,7 @@ def test_session_exchange_rejects_non_ascii_bootstrap_token_cleanly():
 
 def test_security_rejects_non_loopback_host_and_origin():
     app, client = _client()
-    default_app = create_app()
+    default_app = create_app(build_demo_dependencies())
     assert default_app.state.session_manager.allowed_hosts == frozenset(
         {"127.0.0.1", "localhost", "::1"}
     )
@@ -1030,6 +1031,7 @@ def test_lifespan_runtime_teardown_runs_even_if_job_shutdown_raises():
     fake_manager = _FakeLlamaManager()
     fake_chat_client = _FakeLlamaChatClient()
     app = create_app(
+        build_demo_dependencies(),
         allowed_hosts=ALLOWED_HOSTS,
         llamacpp_manager=fake_manager,
         llamacpp_chat_client=fake_chat_client,
@@ -1071,6 +1073,7 @@ def test_lifespan_closes_llama_resources_when_execution_shutdown_raises():
     fake_manager = _FakeLlamaManager()
     fake_chat_client = _FakeLlamaChatClient()
     app = create_app(
+        build_demo_dependencies(),
         allowed_hosts=ALLOWED_HOSTS,
         execution_coordinator=_RaisingCoordinator(),
         llamacpp_manager=fake_manager,
@@ -1115,6 +1118,7 @@ def test_lifespan_closes_llama_resources_when_execution_start_raises():
     fake_manager = _FakeLlamaManager()
     fake_chat_client = _FakeLlamaChatClient()
     app = create_app(
+        build_demo_dependencies(),
         allowed_hosts=ALLOWED_HOSTS,
         execution_lifecycle=_RaisingLifecycle(),
         llamacpp_manager=fake_manager,
