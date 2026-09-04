@@ -16,8 +16,9 @@ from time import monotonic
 from typing import Final
 from collections.abc import Callable
 
+from .models import PROFILE_NAME_PATTERN
 
-_SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_WALL_TIME_MS: Final[int] = 600_000
 MAX_CPU_TIME_MS: Final[int] = 600_000
@@ -61,7 +62,7 @@ class ResourceBudget:
     idle_timeout_ms: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile, str) or _SAFE_PROFILE.fullmatch(self.profile) is None:
+        if not isinstance(self.profile, str) or PROFILE_NAME_PATTERN.fullmatch(self.profile) is None:
             raise ValueError("resource profile is invalid")
         _bounded_int(self.wall_time_ms, maximum=MAX_WALL_TIME_MS)
         _bounded_int(self.cpu_time_ms, maximum=MAX_CPU_TIME_MS)

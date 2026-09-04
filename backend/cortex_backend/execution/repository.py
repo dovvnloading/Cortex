@@ -19,6 +19,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from .models import (
+    PROFILE_NAME_PATTERN,
     ExecutionApproval,
     ExecutionApprovalState,
     ExecutionArtifact,
@@ -34,7 +35,6 @@ MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
 DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
-_SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9._-]{0,99}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _SCHEMA_LOCK = RLock()
@@ -320,7 +320,7 @@ class ExecutionRepository:
         profile: str,
         payload: Mapping[str, Any],
     ) -> tuple[ExecutionJob, bool]:
-        if not _SAFE_PROFILE.fullmatch(profile):
+        if not PROFILE_NAME_PATTERN.fullmatch(profile):
             raise ValueError("profile must be a bounded lowercase identifier")
         encoded = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = self._now()

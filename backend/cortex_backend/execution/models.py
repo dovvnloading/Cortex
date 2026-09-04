@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Literal
 from collections.abc import Mapping
 
+
+# One profile name, one shape. The durable store and the resource governor both
+# validate it, and they used to do so with separate copies of this pattern that
+# had drifted to different length limits -- so a name the store accepted could
+# still be refused when its budget was built. Anything that names a profile
+# imports this.
+PROFILE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 ExecutionStatus = Literal[
     "queued",

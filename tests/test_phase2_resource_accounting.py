@@ -118,3 +118,33 @@ def test_governor_returns_redacted_cumulative_usage():
     assert governor.finish() == usage
     assert not hasattr(usage, "path")
     assert math.isfinite(usage.wall_time_ms)
+
+
+def test_the_store_and_the_governor_agree_on_what_a_profile_name_is(tmp_path):
+    """Both layers validate profile names, so they must use one pattern.
+
+    They used to hold separate copies that had drifted to different length
+    limits (99 in the store, 63 here). A name between the two was storable but
+    could not be given a budget, so a job could be admitted and then fail when
+    its limits were built.
+    """
+
+    from cortex_backend.execution.models import PROFILE_NAME_PATTERN
+    from cortex_backend.execution.repository import ExecutionRepository
+
+    repository = ExecutionRepository(tmp_path / "execution.sqlite3", tmp_path / "artifacts")
+    owner = repository.installation_principal_id
+    too_long = "a" * 65
+
+    assert PROFILE_NAME_PATTERN.fullmatch(too_long) is None
+
+    with pytest.raises(ValueError):
+        repository.create_job(
+            job_id="job-profile-length",
+            owner=owner,
+            request_id="req-profile-length",
+            profile=too_long,
+            payload={},
+        )
+    with pytest.raises(ValueError):
+        _budget(profile=too_long)
