@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import re
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 from collections.abc import Callable
 
 from .repository import ExecutionRepository
@@ -32,6 +32,41 @@ class LifecycleCoordinator(Protocol):
 
     def shutdown(self) -> None:
         """Cancel owned work and release lifecycle resources."""
+
+
+@runtime_checkable
+class ScratchCapable(Protocol):
+    """A coordinator that can run ``scratch.auto.v1``."""
+
+    scratch_available: bool
+
+    def start_scratch(self, request: Any) -> Any:
+        """Admit one bounded expression."""
+
+
+@runtime_checkable
+class CodeCapable(Protocol):
+    """A coordinator that can run ``code.exec.v1``."""
+
+    code_execution_available: bool
+
+    def start_code(self, request: Any) -> Any:
+        """Admit one approval-gated program."""
+
+
+@runtime_checkable
+class RecipeCapable(Protocol):
+    """A coordinator that can run ``recipe.image.v1``.
+
+    ``image_transform_available`` is deliberately absent. A recipe-only
+    coordinator does not define it, and the route treats a missing flag as
+    available -- see ``_recipe_coordinator``.
+    """
+
+    artifact_boundary: Any
+
+    def start_image_transform(self, request: Any) -> Any:
+        """Admit one fixed image recipe."""
 
 
 @dataclass(frozen=True, slots=True)

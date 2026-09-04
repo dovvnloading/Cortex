@@ -59,6 +59,11 @@ from cortex_backend.execution.code_execution import (
     CodeExecutionError,
     CodeExecutionRequest as CodeExecutionTaskRequest,
 )
+from cortex_backend.execution.lifecycle import (
+    CodeCapable,
+    RecipeCapable,
+    ScratchCapable,
+)
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionError,
@@ -1161,9 +1166,10 @@ def _recipe_coordinator(request: Request):
         )
     coordinator = getattr(lifecycle, "coordinator", None)
     if (
-        coordinator is None
-        or not callable(getattr(coordinator, "start_image_transform", None))
-        or not isinstance(getattr(coordinator, "artifact_boundary", None), ArtifactBoundary)
+        not isinstance(coordinator, RecipeCapable)
+        or not isinstance(coordinator.artifact_boundary, ArtifactBoundary)
+        # A recipe-only coordinator does not carry this flag; only the local
+        # runtime does, and only it can lose image support at probe time.
         or not getattr(coordinator, "image_transform_available", True)
     ):
         raise HTTPException(
@@ -1177,10 +1183,7 @@ def _scratch_coordinator(request: Request):
     """Require the narrow local safe-compute capability explicitly."""
 
     coordinator = _execution_runtime(request)
-    if (
-        not getattr(coordinator, "scratch_available", False)
-        or not callable(getattr(coordinator, "start_scratch", None))
-    ):
+    if not isinstance(coordinator, ScratchCapable) or not coordinator.scratch_available:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Safe computation is unavailable.",
@@ -1192,10 +1195,7 @@ def _code_coordinator(request: Request):
     """Require the local approval-gated code capability explicitly."""
 
     coordinator = _execution_runtime(request)
-    if (
-        not getattr(coordinator, "code_execution_available", False)
-        or not callable(getattr(coordinator, "start_code", None))
-    ):
+    if not isinstance(coordinator, CodeCapable) or not coordinator.code_execution_available:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Local code execution is unavailable.",
