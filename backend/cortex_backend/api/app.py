@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from cortex_backend import __version__
 from cortex_backend.repositories.chats import ChatRepository, InMemoryChatRepository
 from cortex_backend.repositories.memories import (
     InMemoryMemoryRepository,
@@ -226,7 +227,7 @@ def create_app(
 
     app = FastAPI(
         title="Cortex Local API",
-        version="0.1.0",
+        version=__version__,
         description="Loopback-only versioned backend contract for the Cortex web migration.",
         lifespan=lifespan,
         docs_url=None,

@@ -1,0 +1,163 @@
+name: Release
+
+# Tags are the trigger, but the tag is not the source of truth: the version is
+# cortex_backend.__version__, and the first job refuses to build if a tag
+# disagrees with it. Two tags already exist (v0.95.7, v1.0.0) that were never
+# reflected in the code, which is the failure this is meant to stop repeating.
+#
+# Nothing here publishes to an index. It builds the same one-folder Windows
+# package the heavy job already builds, verifies it starts, and attaches it to
+# a draft release for the maintainer to review and publish by hand.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (must already match the declared version)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.declared.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Read the declared version
+        id: declared
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'backend'); import cortex_backend; print(cortex_backend.__version__)"
+          if (-not $version) { throw "Could not read cortex_backend.__version__." }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Declared version: $version"
+
+      - name: Refuse a tag that disagrees with the declared version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $expected = "v${{ steps.declared.outputs.version }}"
+          if ($tag -ne $expected) {
+            throw "Tag '$tag' does not match the declared version ('$expected'). Bump cortex_backend.__version__ and let frontend/package.json follow, or retag."
+          }
+          Write-Host "Tag $tag matches the declared version."
+
+  package:
+    needs: verify-version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.lock.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the frontend bundle
+        shell: pwsh
+        run: python main.py --build-frontend --data-dir "$env:RUNNER_TEMP\cortex-release-data"
+
+      - name: Install package builder
+        run: python -m pip install "pyinstaller==6.14.2"
+
+      - name: Prepare signed WebView2 bootstrapper
+        shell: pwsh
+        run: ./packaging/prepare_webview2.ps1
+
+      - name: Build one-folder Windows package
+        run: python -m PyInstaller --noconfirm --clean packaging/Cortex.spec
+
+      - name: Verify packaged WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          $bootstrapper = Get-ChildItem dist/Cortex -Recurse -Filter MicrosoftEdgeWebview2Setup.exe | Select-Object -First 1
+          if ($null -eq $bootstrapper) { throw "Packaged WebView2 bootstrapper is missing." }
+          $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper.FullName
+          if ($signature.Status -ne "Valid") { throw "Packaged WebView2 signature is invalid." }
+
+      # The same smoke test the heavy job runs. A release that cannot reach its
+      # own health endpoint is not a release.
+      - name: Smoke-test the packaged launcher
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "cortex-release-smoke"
+          $executable = Join-Path (Get-Location) "dist\Cortex\Cortex.exe"
+          $process = $null
+          $ready = $false
+          try {
+            $process = Start-Process -FilePath $executable -ArgumentList @("--headless", "--data-dir", $data) -PassThru
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Packaged Cortex exited before its health endpoint became ready (code $($process.ExitCode))."
+              }
+              $recordPath = Join-Path $data "cortex.instance.json"
+              if (Test-Path -LiteralPath $recordPath -PathType Leaf) {
+                try {
+                  $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+                  $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$($record.port)/api/v1/health/ready"
+                  if ($response.StatusCode -eq 200) { $ready = $true; break }
+                } catch {
+                  # The backend can be between record creation and bind.
+                }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) { throw "Packaged Cortex did not expose its health endpoint within 30 seconds." }
+          } finally {
+            if ($null -ne $process) {
+              $process.Refresh()
+              if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            }
+          }
+
+      - name: Archive the package
+        shell: pwsh
+        run: |
+          $name = "Cortex-${{ needs.verify-version.outputs.version }}-windows-x64.zip"
+          Compress-Archive -Path dist/Cortex/* -DestinationPath $name
+          "ARCHIVE=$name" >> $env:GITHUB_ENV
+
+      - name: Create a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create $tag $env:ARCHIVE `
+            --draft `
+            --title "Cortex $tag" `
+            --notes "Unsigned build produced by the release workflow. Review before publishing."

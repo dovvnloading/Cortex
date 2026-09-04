@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-backend"
-version = "0.1.0"
+# Read from cortex_backend.__version__; see [tool.setuptools.dynamic].
+dynamic = ["version"]
 description = "Windows-first, local-first desktop assistant backend."
 requires-python = ">=3.10"
 license = "MIT"
@@ -26,6 +27,9 @@ dev = [
     "pytest>=8,<10",
     "ruff==0.16.5",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "cortex_backend.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["backend"]
