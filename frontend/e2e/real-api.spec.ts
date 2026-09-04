@@ -18,6 +18,16 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
  * not mock.
  */
 
+/**
+ * These tests share one backend process, which holds exactly one bootstrap
+ * token at a time -- `/session/handoff` replaces the previous one and marks it
+ * unused. That is correct for the launcher, which mints one token for one
+ * window, but it means two tests minting concurrently invalidate each other.
+ * `fullyParallel` in the config would do exactly that, so this file opts out
+ * and runs its tests in order in a single worker.
+ */
+test.describe.configure({ mode: "default" });
+
 const HANDOFF_SECRET = "e2e-handoff-secret";
 
 /** A fresh bootstrap token, the way the launcher obtains one. */
