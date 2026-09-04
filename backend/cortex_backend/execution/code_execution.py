@@ -348,14 +348,17 @@ class _CodeValidator(ast.NodeVisitor):
             raise CodeExecutionError("loop_target_not_allowed")
         if not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name) or node.iter.func.id != "range":
             raise CodeExecutionError("bounded_range_required")
-        if not _constant_range_bound(node.iter):
+        # `is None` rather than a truthiness test: the bound is the range's
+        # length, and range(0) is a legal empty loop whose length is 0.
+        bound = _constant_range_bound(node.iter)
+        if bound is None:
             raise CodeExecutionError("bounded_range_required")
-        return self._visit_bounded_loop(node, _constant_range_bound(node.iter) or 0)
+        return self._visit_bounded_loop(node, bound)
 
     def visit_comprehension(self, node: ast.comprehension) -> Any:
         if node.is_async or not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name) or node.iter.func.id != "range":
             raise CodeExecutionError("bounded_range_required")
-        if not _constant_range_bound(node.iter):
+        if _constant_range_bound(node.iter) is None:
             raise CodeExecutionError("bounded_range_required")
         return self.generic_visit(node)
 

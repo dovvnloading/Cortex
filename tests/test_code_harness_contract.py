@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import tempfile
 
+import pytest
+
 from cortex_backend.execution.code_execution import (
     CodeExecutionError,
     run_code_in_worker,
@@ -228,3 +230,44 @@ def test_contract_stays_small_enough_for_a_local_model() -> None:
     assert approximate_tokens < 1000, (
         f"The code contract grew to roughly {approximate_tokens:.0f} tokens."
     )
+
+
+def test_an_empty_bounded_range_is_a_legal_program() -> None:
+    """range(0) is empty, not unbounded.
+
+    The bound the validator computes is the range's *length*, so an empty
+    range yields 0. A truthiness test on that value rejected a legal program
+    with `bounded_range_required` -- an error code that describes the opposite
+    of what is wrong, and one a model asked to repair its own code cannot act
+    on. Empty ranges are how a small model naturally writes a loop whose
+    literal count happens to be zero.
+    """
+
+    for source in (
+        "total = 0\nfor i in range(0):\n    total = total + i\n_result = total",
+        # Also empty: a start at or past the stop.
+        "total = 0\nfor i in range(5, 3):\n    total = total + i\n_result = total",
+        "_result = sum([i for i in range(0)])",
+        "_result = sum(i for i in range(0))",
+    ):
+        validate_code_source(source)
+        result = run_code_in_worker(source, {}, tempfile.mkdtemp())
+        assert result.value == 0, f"{source!r} should produce 0"
+
+
+def test_an_empty_outer_loop_still_bounds_the_work_inside_it() -> None:
+    """A zero-length outer bound must not become an escape hatch.
+
+    The nested-loop budget multiplies bounds together, so an outer bound of 0
+    zeroes the product. That is correct -- the body never runs -- but the inner
+    loop must still be a constant-bounded range rather than anything the
+    validator would otherwise refuse.
+    """
+
+    with pytest.raises(CodeExecutionError) as unbounded:
+        validate_code_source("n = 9\nfor i in range(0):\n    for j in range(n):\n        pass")
+    assert unbounded.value.code == "bounded_range_required"
+
+    with pytest.raises(CodeExecutionError) as illegal_body:
+        validate_code_source("for i in range(0):\n    import math")
+    assert illegal_body.value.code == "imports_not_allowed"
