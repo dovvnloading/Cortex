@@ -61,6 +61,23 @@ def test_a_coordinator_missing_one_member_fails_its_protocol():
     assert not isinstance(HalfScratch(), ScratchCapable)
 
 
+def _declared_members(protocol: type) -> set[str]:
+    """The protocol's own surface, without relying on a CPython internal.
+
+    ``__protocol_attrs__`` would say this in one line, but it only exists from
+    3.12 and this project supports 3.10. Annotations cover the data members and
+    the class body covers the methods.
+    """
+
+    members = set(getattr(protocol, "__annotations__", {}))
+    members |= {
+        name
+        for name, value in vars(protocol).items()
+        if callable(value) and not name.startswith("_")
+    }
+    return members
+
+
 @pytest.mark.parametrize(
     ("protocol", "members"),
     [
@@ -72,4 +89,4 @@ def test_a_coordinator_missing_one_member_fails_its_protocol():
 def test_each_protocol_pins_the_members_the_routes_rely_on(protocol, members):
     """Pin the surface itself, so widening a protocol is a deliberate edit."""
 
-    assert set(protocol.__protocol_attrs__) == set(members)
+    assert _declared_members(protocol) == set(members)
