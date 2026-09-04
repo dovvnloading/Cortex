@@ -245,7 +245,7 @@ def _reject_invalid_new_chat_thread_id(thread_id: str) -> None:
     """
     if not _NEW_CHAT_THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 "thread_id must be an alphanumeric identifier (dashes and "
                 "underscores allowed) up to 128 characters."
@@ -706,12 +706,12 @@ def build_router() -> APIRouter:
     ) -> MemoryResponse:
         if not payload.confirm:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Clearing permanent memories requires explicit confirmation.",
             )
         if payload.confirmation_intent not in (None, "clear_permanent_memory"):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="A clear-memory confirmation intent is required.",
             )
         try:
@@ -793,7 +793,7 @@ def build_router() -> APIRouter:
             _raise_scratch_request_error(exc)
         except (TypeError, ValueError) as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Safe computation request is invalid.",
             ) from exc
         return ScratchComputeAccepted(
@@ -844,11 +844,11 @@ def build_router() -> APIRouter:
                 ),
             }.get(exc.code, "Code execution request is invalid.")
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT if exc.code == "request_conflict" else status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_409_CONFLICT if exc.code == "request_conflict" else status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=detail,
             ) from exc
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Code execution request is invalid.") from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Code execution request is invalid.") from exc
         return CodeExecutionAccepted(
             job_id=job.job_id,
             request_id=job.request_id,
@@ -893,7 +893,7 @@ def build_router() -> APIRouter:
             _raise_recipe_request_error(exc)
         except (TypeError, ValueError) as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Recipe request is invalid.",
             ) from exc
         return RecipeImageTransformAccepted(
@@ -926,7 +926,7 @@ def build_router() -> APIRouter:
             content = base64.b64decode(payload.content_base64, validate=True)
         except (ValueError, binascii.Error):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Attachment payload is invalid.",
             ) from None
         try:
@@ -977,7 +977,7 @@ def build_router() -> APIRouter:
             content = base64.b64decode(payload.content_base64, validate=True)
         except (ValueError, binascii.Error):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Attachment payload is invalid.",
             ) from None
         service = _chat_attachment_service(request, deps)
@@ -2884,7 +2884,7 @@ def _raise_recipe_request_error(exc: RecipeExecutionError) -> NoReturn:
             detail="Source artifact is unavailable.",
         ) from exc
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="Recipe request could not be accepted safely.",
     ) from exc
 
@@ -2898,7 +2898,7 @@ def _raise_scratch_request_error(exc: ScratchComputeError) -> NoReturn:
             detail="Safe computation request conflicts with an existing request.",
         ) from exc
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="Safe computation request could not be accepted safely.",
     ) from exc
 
@@ -2922,7 +2922,7 @@ def _raise_attachment_staging_error(exc: AttachmentStagingError) -> NoReturn:
             detail="Attachment request is no longer available.",
         ) from exc
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="Attachment could not be staged safely.",
     ) from exc
 
@@ -2966,7 +2966,7 @@ def _raise_chat_attachment_error(exc: ChatAttachmentError) -> NoReturn:
     elif exc.code in {"attachment_unavailable", "attachment_integrity_failed"}:
         status_code = status.HTTP_404_NOT_FOUND
     else:
-        status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     raise HTTPException(
         status_code=status_code,
         detail=messages.get(exc.code, "Attachment could not be staged safely."),

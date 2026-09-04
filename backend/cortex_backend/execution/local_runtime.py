@@ -81,6 +81,8 @@ DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
 # so a healthy worker is not reported as a code timeout while it is starting.
 DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS = 15.0
 DEFAULT_CANCEL_GRACE_SECONDS = 0.35
+_LOGGER = logging.getLogger("cortex.execution.local_runtime")
+
 _RECIPE_PROCESS_ERROR = "worker_provider_failed"
 
 
@@ -142,23 +144,32 @@ def _process_is_alive(process: Any) -> bool:
 
 
 def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS) -> None:
-    """Bounded clean-up for a worker that may have stopped responding."""
+    """Bounded clean-up for a worker that may have stopped responding.
+
+    Every step is best-effort by design: teardown must finish even when the
+    process object is in a bad state. Best-effort is not the same as silent,
+    though. A step that always fails is a worker path that always leaks a
+    sandboxed child, and with nothing recorded that is indistinguishable from
+    a worker which simply never produced a result. One flaky teardown is
+    ordinary, hence debug; a child that survives the whole ladder is not, hence
+    the warning at the end.
+    """
 
     grace = max(0.0, grace_seconds)
     try:
         process.join(timeout=grace)
     except Exception:
-        pass
+        _LOGGER.debug("Worker join during teardown failed.", exc_info=True)
     if not _process_is_alive(process):
         return
     try:
         process.terminate()
     except Exception:
-        pass
+        _LOGGER.debug("Worker terminate during teardown failed.", exc_info=True)
     try:
         process.join(timeout=grace)
     except Exception:
-        pass
+        _LOGGER.debug("Worker join after terminate failed.", exc_info=True)
     if not _process_is_alive(process):
         return
     # A worker that survives terminate() would otherwise be leaked while still
@@ -166,11 +177,20 @@ def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_S
     try:
         process.kill()
     except Exception:
+        _LOGGER.warning(
+            "A local execution worker could not be killed; it may still hold "
+            "its sandbox resources."
+        )
         return
     try:
         process.join(timeout=grace)
     except Exception:
-        pass
+        _LOGGER.debug("Worker join after kill failed.", exc_info=True)
+    if _process_is_alive(process):
+        _LOGGER.warning(
+            "A local execution worker survived terminate and kill; it may still "
+            "hold its sandbox resources."
+        )
 
 
 class LocalRecipeWorkerAttempt:
