@@ -17,7 +17,8 @@ from cortex_backend.execution.code_execution import (
     run_code_in_worker,
 )
 from cortex_backend.execution import code_execution
-from cortex_backend.execution.local_runtime import LocalExecutionCoordinator, _stop_process
+from cortex_backend.execution.local_process import _stop_process
+from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
 
@@ -136,7 +137,7 @@ def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_
 def test_code_worker_waits_for_the_go_ahead_before_running_source(monkeypatch, tmp_path: Path) -> None:
     """Regression guard: the source must not run until the parent confirms
     the resource-limiting Job Object is attached (or that this platform has
-    none to attach) -- see local_runtime.py's _LocalCodeAttempt.evaluate()."""
+    none to attach) -- see local_code_attempt.py's LocalCodeAttempt.evaluate()."""
 
     class _Connection:
         def __init__(self, go: object) -> None:

@@ -1,26 +1,26 @@
-"""Practical local execution runtime for the open-source desktop app.
+"""One lifecycle owner for the local execution capabilities.
 
-It exposes two intentionally narrow background capabilities:
+It coordinates three intentionally narrow background capabilities, each of
+which does its work in a short-lived child process defined in its own module:
 
-* ``scratch.auto.v1`` evaluates a safe decimal expression in a short-lived
-  worker process; and
-* ``recipe.image.v1`` runs the fixed image provider in a short-lived worker
-  process after attachment staging has copied bytes into the artifact store.
+* ``scratch.auto.v1`` evaluates a safe decimal expression;
+* ``code.exec.v1`` runs one validated, user-approved program; and
+* ``recipe.image.v1`` runs the fixed image provider after attachment staging
+  has copied bytes into the artifact store.
 
-Neither capability accepts a path, shell command, Python source, package name,
-or network instruction.  The parent owns durable state, cancellation, and
-artifact publication; workers receive only immutable input and return compact
-validated output.
+Only ``code.exec.v1`` accepts source, and only behind an explicit approval.
+None of the three accepts a path, shell command, package name, or network
+instruction. This coordinator owns durable state, leases, cancellation, and
+artifact publication; the workers receive only immutable input and return
+compact validated output.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 import hmac
 import json
-import logging
-import multiprocessing
-import os
 import shutil
 from threading import Event, Lock, Thread
 import time
@@ -31,30 +31,34 @@ from .artifact_boundary import ArtifactBoundary
 from .code_execution import (
     CODE_EXECUTION_PAYLOAD_SCHEMA,
     CODE_EXECUTION_PROFILE,
-    CODE_EXECUTION_RESULT_SCHEMA,
     CodeCapabilities,
     CodeExecutionError,
     CodeExecutionRequest,
-    CodeExecutionResult,
-    MAX_CODE_MEMORY_BYTES,
-    MAX_CODE_OUTPUT_BYTES,
-    MAX_CODE_VALUE_BYTES,
     MAX_CODE_TIMEOUT_SECONDS,
-    _WindowsProcessJob,
-    code_worker_main,
-    validate_code_source,
 )
 from .lifecycle import RuntimeHealth
+from .local_code_attempt import (
+    DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
+    DEFAULT_CODE_TIMEOUT_SECONDS,
+    LocalCodeAttempt,
+)
+from .local_recipe_attempt import (
+    DEFAULT_IMAGE_TIMEOUT_SECONDS,
+    LocalRecipeWorkerAttempt,
+)
+from .local_scratch_attempt import (
+    DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS,
+    DEFAULT_SCRATCH_TIMEOUT_SECONDS,
+    LocalScratchAttempt,
+)
 from .models import ExecutionJob, TerminalExecutionStatus
 from .recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
     RecipeExecutionCoordinator,
     RecipeExecutionError,
     RecipeImageRequest,
-    RecipeWorkerOutput,
 )
-from .recipe_provider import RecipeImageProvider, RecipeProviderError
-from .recipes import RecipeValidationError, parse_image_transform
+from .recipe_provider import RecipeImageProvider
 from .repository import (
     ExecutionRepository,
     ExecutionTransitionConflict,
@@ -65,508 +69,16 @@ from .scratch_compute import (
     SCRATCH_PAYLOAD_SCHEMA,
     ScratchComputeError,
     ScratchComputeRequest,
-    ScratchComputeResult,
     scratch_result_payload,
-    scratch_worker_main,
     validate_scratch_expression,
 )
 
 
-DEFAULT_SCRATCH_TIMEOUT_SECONDS = 3.0
-DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS = 15.0
-DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
-DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
-# Importing a frozen desktop process can take longer than evaluating a small
-# program. Keep that bootstrap grace separate from the code's wall-clock limit
-# so a healthy worker is not reported as a code timeout while it is starting.
-DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS = 15.0
-DEFAULT_CANCEL_GRACE_SECONDS = 0.35
+
+
+
+
 _LOGGER = logging.getLogger("cortex.execution.local_runtime")
-
-_RECIPE_PROCESS_ERROR = "worker_provider_failed"
-
-
-def _recipe_worker_main(
-    connection: Any,
-    cancel_event: Any,
-    plan_payload: Mapping[str, Any],
-    content: bytes,
-) -> None:
-    """Run only the fixed provider in a child process and return bytes/metadata."""
-
-    try:
-        provider = RecipeImageProvider()
-        health = provider.start(
-            RuntimeHealth.ready("The local image worker dependency check passed.")
-        )
-        if not health.available:
-            connection.send({"ok": False, "code": _RECIPE_PROCESS_ERROR})
-            return
-        plan = parse_image_transform(plan_payload)
-        result = provider.transform(
-            plan,
-            content,
-            cancel_check=lambda: bool(cancel_event.is_set()),
-        )
-        connection.send(
-            {
-                "ok": True,
-                "content": result.content,
-                "mime_type": result.mime_type,
-                "format": result.format,
-                "width": result.width,
-                "height": result.height,
-                "sha256": result.sha256,
-            }
-        )
-    except (RecipeProviderError, RecipeValidationError):
-        try:
-            connection.send({"ok": False, "code": _RECIPE_PROCESS_ERROR})
-        except Exception:
-            pass
-    except Exception:
-        try:
-            connection.send({"ok": False, "code": "worker_failed"})
-        except Exception:
-            pass
-    finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
-
-
-def _process_is_alive(process: Any) -> bool:
-    try:
-        return bool(process.is_alive())
-    except Exception:
-        return False
-
-
-def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS) -> None:
-    """Bounded clean-up for a worker that may have stopped responding.
-
-    Every step is best-effort by design: teardown must finish even when the
-    process object is in a bad state. Best-effort is not the same as silent,
-    though. A step that always fails is a worker path that always leaks a
-    sandboxed child, and with nothing recorded that is indistinguishable from
-    a worker which simply never produced a result. One flaky teardown is
-    ordinary, hence debug; a child that survives the whole ladder is not, hence
-    the warning at the end.
-    """
-
-    grace = max(0.0, grace_seconds)
-    try:
-        process.join(timeout=grace)
-    except Exception:
-        _LOGGER.debug("Worker join during teardown failed.", exc_info=True)
-    if not _process_is_alive(process):
-        return
-    try:
-        process.terminate()
-    except Exception:
-        _LOGGER.debug("Worker terminate during teardown failed.", exc_info=True)
-    try:
-        process.join(timeout=grace)
-    except Exception:
-        _LOGGER.debug("Worker join after terminate failed.", exc_info=True)
-    if not _process_is_alive(process):
-        return
-    # A worker that survives terminate() would otherwise be leaked while still
-    # holding its sandbox resources, so escalate to an unconditional kill.
-    try:
-        process.kill()
-    except Exception:
-        _LOGGER.warning(
-            "A local execution worker could not be killed; it may still hold "
-            "its sandbox resources."
-        )
-        return
-    try:
-        process.join(timeout=grace)
-    except Exception:
-        _LOGGER.debug("Worker join after kill failed.", exc_info=True)
-    if _process_is_alive(process):
-        _LOGGER.warning(
-            "A local execution worker survived terminate and kill; it may still "
-            "hold its sandbox resources."
-        )
-
-
-class LocalRecipeWorkerAttempt:
-    """A cancellable, short-lived local process wrapper for the fixed recipe."""
-
-    def __init__(
-        self,
-        _job: ExecutionJob,
-        *,
-        timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
-        cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
-    ) -> None:
-        if timeout_seconds <= 0 or cancel_grace_seconds <= 0:
-            raise ValueError("worker timeouts must be positive")
-        self._context = multiprocessing.get_context("spawn")
-        self._cancel_event = self._context.Event()
-        self._timeout_seconds = float(timeout_seconds)
-        self._cancel_grace_seconds = float(cancel_grace_seconds)
-        self._lock = Lock()
-        self._process: Any | None = None
-        self._closed = False
-
-    def transform(
-        self,
-        _request_id: str,
-        job_id: str,
-        plan: Any,
-        content: bytes,
-        cancel_event: Event,
-    ) -> RecipeWorkerOutput:
-        if self._closed:
-            raise RecipeExecutionError("worker_closed")
-        if cancel_event.is_set() or self._cancel_event.is_set():
-            raise RecipeExecutionError("cancelled")
-        try:
-            plan_payload = plan.model_dump(mode="json")
-        except Exception:
-            raise RecipeExecutionError("worker_plan_invalid") from None
-        receiver = sender = process = None
-        try:
-            receiver, sender = self._context.Pipe(duplex=False)
-            process = self._context.Process(
-                target=_recipe_worker_main,
-                args=(sender, self._cancel_event, plan_payload, content),
-                name=f"cortex-image-{job_id}",
-                daemon=True,
-            )
-            with self._lock:
-                if self._closed:
-                    raise RecipeExecutionError("worker_closed")
-                self._process = process
-            process.start()
-            sender.close()
-            sender = None
-            deadline = time.monotonic() + self._timeout_seconds
-            cancelled_at: float | None = None
-            while True:
-                if cancel_event.is_set() or self._cancel_event.is_set():
-                    self._cancel_event.set()
-                    cancelled_at = cancelled_at or time.monotonic()
-                if receiver.poll(0.025):
-                    try:
-                        message = receiver.recv()
-                    except (EOFError, OSError):
-                        raise RecipeExecutionError("worker_failed") from None
-                    return self._output_from_message(message)
-                now = time.monotonic()
-                if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
-                    raise RecipeExecutionError("cancelled")
-                if now >= deadline:
-                    raise RecipeExecutionError("worker_timeout")
-        finally:
-            if sender is not None:
-                try:
-                    sender.close()
-                except Exception:
-                    pass
-            if receiver is not None:
-                try:
-                    receiver.close()
-                except Exception:
-                    pass
-            if process is not None:
-                _stop_process(process, grace_seconds=self._cancel_grace_seconds)
-            with self._lock:
-                if self._process is process:
-                    self._process = None
-
-    @staticmethod
-    def _output_from_message(message: object) -> RecipeWorkerOutput:
-        if not isinstance(message, Mapping):
-            raise RecipeExecutionError("worker_output_invalid")
-        if message.get("ok") is not True:
-            code = message.get("code")
-            if code == "cancelled":
-                raise RecipeExecutionError("cancelled")
-            raise RecipeExecutionError(_RECIPE_PROCESS_ERROR)
-        try:
-            return RecipeWorkerOutput(
-                content=message["content"],
-                mime_type=message["mime_type"],
-                format=message["format"],
-                width=message["width"],
-                height=message["height"],
-                sha256=message["sha256"],
-            )
-        except (KeyError, TypeError, RecipeExecutionError):
-            raise RecipeExecutionError("worker_output_invalid") from None
-
-    def cancel(self, _reason: str = "user") -> None:
-        self._cancel_event.set()
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            process = self._process
-        self._cancel_event.set()
-        if process is not None:
-            _stop_process(process, grace_seconds=self._cancel_grace_seconds)
-
-
-class _LocalScratchAttempt:
-    """Spawn the limited expression evaluator with a hard wall-clock deadline."""
-
-    def __init__(
-        self,
-        *,
-        timeout_seconds: float = DEFAULT_SCRATCH_TIMEOUT_SECONDS,
-        startup_timeout_seconds: float = DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS,
-        cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
-    ) -> None:
-        if timeout_seconds <= 0 or startup_timeout_seconds <= 0 or cancel_grace_seconds <= 0:
-            raise ValueError("worker timeouts must be positive")
-        self._context = multiprocessing.get_context("spawn")
-        self._cancel_event = self._context.Event()
-        self._timeout_seconds = float(timeout_seconds)
-        self._startup_timeout_seconds = float(startup_timeout_seconds)
-        self._cancel_grace_seconds = float(cancel_grace_seconds)
-        self._lock = Lock()
-        self._process: Any | None = None
-        self._closed = False
-
-    def evaluate(self, expression: str, cancel_event: Event) -> ScratchComputeResult:
-        if self._closed:
-            raise ScratchComputeError("worker_closed")
-        receiver = sender = process = None
-        try:
-            receiver, sender = self._context.Pipe(duplex=False)
-            process = self._context.Process(
-                target=scratch_worker_main,
-                args=(sender, self._cancel_event, expression),
-                name="cortex-scratch",
-                daemon=True,
-            )
-            with self._lock:
-                if self._closed:
-                    raise ScratchComputeError("worker_closed")
-                self._process = process
-            process.start()
-            sender.close()
-            sender = None
-            startup_deadline = time.monotonic() + self._startup_timeout_seconds
-            deadline: float | None = None
-            cancelled_at: float | None = None
-            while True:
-                if cancel_event.is_set() or self._cancel_event.is_set():
-                    self._cancel_event.set()
-                    cancelled_at = cancelled_at or time.monotonic()
-                if receiver.poll(0.025):
-                    try:
-                        message = receiver.recv()
-                    except (EOFError, OSError):
-                        raise ScratchComputeError("worker_failed") from None
-                    if not isinstance(message, Mapping):
-                        raise ScratchComputeError("worker_output_invalid")
-                    if message.get("ok") is True and message.get("event") == "ready":
-                        deadline = time.monotonic() + self._timeout_seconds
-                        continue
-                    if message.get("ok") is not True:
-                        code = message.get("code")
-                        raise ScratchComputeError(
-                            "cancelled" if code == "cancelled" else "worker_failed"
-                        )
-                    try:
-                        return ScratchComputeResult(value=message["value"])
-                    except (KeyError, TypeError, ValueError):
-                        raise ScratchComputeError("worker_output_invalid") from None
-                now = time.monotonic()
-                if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
-                    raise ScratchComputeError("cancelled")
-                if deadline is None and now >= startup_deadline:
-                    raise ScratchComputeError("worker_startup_timeout")
-                if deadline is not None and now >= deadline:
-                    raise ScratchComputeError("worker_timeout")
-        finally:
-            if sender is not None:
-                try:
-                    sender.close()
-                except Exception:
-                    pass
-            if receiver is not None:
-                try:
-                    receiver.close()
-                except Exception:
-                    pass
-            if process is not None:
-                _stop_process(process, grace_seconds=self._cancel_grace_seconds)
-            with self._lock:
-                if self._process is process:
-                    self._process = None
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            process = self._process
-        self._cancel_event.set()
-        if process is not None:
-            _stop_process(process, grace_seconds=self._cancel_grace_seconds)
-
-
-class _LocalCodeAttempt:
-    """Run one validated code request in a short-lived child process."""
-
-    def __init__(
-        self,
-        *,
-        timeout_seconds: float = DEFAULT_CODE_TIMEOUT_SECONDS,
-        startup_timeout_seconds: float = DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
-        cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
-    ) -> None:
-        if timeout_seconds <= 0 or startup_timeout_seconds <= 0 or cancel_grace_seconds <= 0:
-            raise ValueError("worker timeouts must be positive")
-        self._context = multiprocessing.get_context("spawn")
-        self._cancel_event = self._context.Event()
-        self._timeout_seconds = float(timeout_seconds)
-        self._startup_timeout_seconds = float(startup_timeout_seconds)
-        self._cancel_grace_seconds = float(cancel_grace_seconds)
-        self._lock = Lock()
-        self._process: Any | None = None
-        self._closed = False
-
-    def evaluate(
-        self,
-        source: str,
-        capabilities: CodeCapabilities,
-        workspace: str,
-        cancel_event: Event,
-    ) -> CodeExecutionResult:
-        if self._closed:
-            raise CodeExecutionError("worker_closed")
-        validate_code_source(source)
-        receiver = sender = process = None
-        worker_job: _WindowsProcessJob | None = None
-        try:
-            # Duplex, unlike the scratch/recipe workers: the child must be
-            # held at its "ready" checkpoint (after environment scrubbing,
-            # before running any of the source) until this end confirms the
-            # Job Object is attached, so job_sent below can tell it to go.
-            receiver, sender = self._context.Pipe()
-            process = self._context.Process(
-                target=code_worker_main,
-                args=(sender, source, capabilities.as_dict(), workspace),
-                name="cortex-code",
-                daemon=True,
-            )
-            with self._lock:
-                if self._closed:
-                    raise CodeExecutionError("worker_closed")
-                self._process = process
-            process.start()
-            sender.close()
-            sender = None
-            startup_deadline = time.monotonic() + self._startup_timeout_seconds
-            deadline: float | None = None
-            cancelled_at: float | None = None
-            job_sent = False
-            while True:
-                if cancel_event.is_set() or self._cancel_event.is_set():
-                    self._cancel_event.set()
-                    cancelled_at = cancelled_at or time.monotonic()
-                if receiver.poll(0.025):
-                    try:
-                        message = receiver.recv()
-                    except (EOFError, OSError):
-                        raise CodeExecutionError("worker_failed") from None
-                    if (
-                        isinstance(message, Mapping)
-                        and message.get("ok") is True
-                        and message.get("event") == "ready"
-                    ):
-                        if not job_sent:
-                            job_sent = True
-                            if os.name == "nt":
-                                worker_job = _WindowsProcessJob(
-                                    process,
-                                    memory_limit=MAX_CODE_MEMORY_BYTES,
-                                    active_process_limit=4,
-                                    cpu_seconds=self._timeout_seconds + 1.0,
-                                )
-                            receiver.send({"go": True})
-                        deadline = time.monotonic() + self._timeout_seconds
-                        continue
-                    return self._result_from_message(message)
-                now = time.monotonic()
-                if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
-                    raise CodeExecutionError("cancelled")
-                if deadline is None and now >= startup_deadline:
-                    raise CodeExecutionError("worker_startup_timeout")
-                if deadline is not None and now >= deadline:
-                    raise CodeExecutionError("worker_timeout")
-        finally:
-            if sender is not None:
-                try:
-                    sender.close()
-                except Exception:
-                    pass
-            if receiver is not None:
-                try:
-                    receiver.close()
-                except Exception:
-                    pass
-            if worker_job is not None:
-                worker_job.close()
-            if process is not None:
-                _stop_process(process, grace_seconds=self._cancel_grace_seconds)
-            with self._lock:
-                if self._process is process:
-                    self._process = None
-
-    @staticmethod
-    def _result_from_message(message: object) -> CodeExecutionResult:
-        if not isinstance(message, Mapping) or message.get("ok") is not True:
-            code = message.get("code") if isinstance(message, Mapping) else None
-            if not isinstance(code, str) or not code.isidentifier() or len(code) > 64:
-                code = "worker_failed"
-            raise CodeExecutionError(code)
-        result = message.get("result")
-        if not isinstance(result, Mapping) or result.get("schema_version") != CODE_EXECUTION_RESULT_SCHEMA:
-            raise CodeExecutionError("worker_output_invalid")
-        try:
-            stdout = result.get("stdout")
-            stderr = result.get("stderr")
-            truncated = result.get("truncated")
-            duration_ms = result.get("duration_ms")
-            if not isinstance(stdout, str) or not isinstance(stderr, str):
-                raise CodeExecutionError("worker_output_invalid")
-            if len(stdout.encode("utf-8", errors="replace")) > MAX_CODE_OUTPUT_BYTES or len(stderr.encode("utf-8", errors="replace")) > MAX_CODE_OUTPUT_BYTES:
-                raise CodeExecutionError("worker_output_invalid")
-            if type(truncated) is not bool or type(duration_ms) is not int or not 0 <= duration_ms <= int(MAX_CODE_TIMEOUT_SECONDS * 1_000):
-                raise CodeExecutionError("worker_output_invalid")
-            value = result.get("value")
-            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_CODE_VALUE_BYTES:
-                raise CodeExecutionError("worker_output_invalid")
-            return CodeExecutionResult(
-                stdout=stdout,
-                stderr=stderr,
-                value=value,
-                truncated=truncated,
-                duration_ms=duration_ms,
-            )
-        except (CodeExecutionError, TypeError, ValueError, OverflowError):
-            raise CodeExecutionError("worker_output_invalid") from None
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            process = self._process
-        self._cancel_event.set()
-        if process is not None:
-            _stop_process(process, grace_seconds=self._cancel_grace_seconds)
 
 
 class LocalExecutionCoordinator:
@@ -602,11 +114,11 @@ class LocalExecutionCoordinator:
         self._scratch_lock = Lock()
         self._scratch_threads: dict[str, Thread] = {}
         self._scratch_cancel_events: dict[str, Event] = {}
-        self._scratch_attempts: dict[str, _LocalScratchAttempt] = {}
+        self._scratch_attempts: dict[str, LocalScratchAttempt] = {}
         self._code_lock = Lock()
         self._code_threads: dict[str, Thread] = {}
         self._code_cancel_events: dict[str, Event] = {}
-        self._code_attempts: dict[str, _LocalCodeAttempt] = {}
+        self._code_attempts: dict[str, LocalCodeAttempt] = {}
         self._recipe = RecipeExecutionCoordinator(
             repository,
             lambda job: LocalRecipeWorkerAttempt(
@@ -917,7 +429,7 @@ class LocalExecutionCoordinator:
                 # the late renewal may recreate a supposedly released lease.
                 # Leave the record to expire instead of opening split-brain
                 # recovery; the stop event makes the thread exit afterward.
-                logging.warning(
+                _LOGGER.warning(
                     "Cortex execution supervisor did not stop before shutdown timeout; "
                     "its lease will expire naturally."
                 )
@@ -948,14 +460,14 @@ class LocalExecutionCoordinator:
                 )
             except LeaseConflict:
                 self._supervisor_lease_active = False
-                logging.error(
+                _LOGGER.error(
                     "Cortex execution supervisor lost its durable lease to another coordinator."
                 )
                 return
             except Exception as exc:
                 # A transient SQLite failure should be retried before the lease
                 # expires. Never log database paths or lease owner tokens.
-                logging.warning(
+                _LOGGER.warning(
                     "Cortex execution supervisor lease renewal failed (%s).",
                     type(exc).__name__,
                 )
@@ -988,7 +500,7 @@ class LocalExecutionCoordinator:
 
     def _run_code(self, job_id: str, cancel_event: Event) -> None:
         lease_owner = f"code-coordinator-{uuid4().hex}"
-        attempt: _LocalCodeAttempt | None = None
+        attempt: LocalCodeAttempt | None = None
         lease_claimed = False
         with self._code_lock:
             self._code_cancel_events[job_id] = cancel_event
@@ -1065,7 +577,7 @@ class LocalExecutionCoordinator:
                 phase="worker",
                 data={"message": "Running in an isolated local worker."},
             )
-            attempt = _LocalCodeAttempt(timeout_seconds=self.code_timeout_seconds)
+            attempt = LocalCodeAttempt(timeout_seconds=self.code_timeout_seconds)
             with self._code_lock:
                 self._code_attempts[job_id] = attempt
             result = attempt.evaluate(
@@ -1260,7 +772,7 @@ class LocalExecutionCoordinator:
         cancel_event: Event,
     ) -> None:
         lease_owner = f"scratch-coordinator-{uuid4().hex}"
-        attempt: _LocalScratchAttempt | None = None
+        attempt: LocalScratchAttempt | None = None
         with self._scratch_lock:
             self._scratch_cancel_events[job_id] = cancel_event
         try:
@@ -1289,7 +801,7 @@ class LocalExecutionCoordinator:
                 phase="worker",
                 data={"message": "Computing in an isolated local worker."},
             )
-            attempt = _LocalScratchAttempt(
+            attempt = LocalScratchAttempt(
                 timeout_seconds=self.scratch_timeout_seconds,
                 startup_timeout_seconds=self.scratch_startup_timeout_seconds,
             )
