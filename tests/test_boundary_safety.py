@@ -3,7 +3,7 @@
 import unittest
 
 from cortex_backend.core.generation import MemoryCommand, ModelOperationError, TranslationResult
-from cortex_backend.repositories.legacy_storage import PermanentMemoryManager
+from cortex_backend.repositories.storage import PermanentMemoryManager
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.services.memory_commands import apply_memory_command
 

@@ -6,7 +6,7 @@ import unittest
 
 from cortex_backend.api.schemas import AddMessageRequest, ChatMessage
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
-from cortex_backend.repositories.legacy_storage import DatabaseManager
+from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.core.generation import GenerationAttachment
 from cortex_backend.core.settings import CortexSettings
 from cortex_backend.services.llm import SynthesisAgent

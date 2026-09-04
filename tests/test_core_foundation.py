@@ -14,7 +14,7 @@ from unittest import mock
 
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.core import paths as paths_module
-from cortex_backend.repositories.legacy_storage import (
+from cortex_backend.repositories.storage import (
     DatabaseManager,
     PermanentMemoryManager,
 )

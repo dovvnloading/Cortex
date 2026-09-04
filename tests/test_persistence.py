@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import cortex_backend.repositories.legacy_storage as legacy_storage
-from cortex_backend.repositories.legacy_storage import (
+import cortex_backend.repositories.storage as storage
+from cortex_backend.repositories.storage import (
     DatabaseManager,
     PermanentMemoryManager,
     PersistenceError,
@@ -138,13 +138,13 @@ class PersistenceTests(unittest.TestCase):
                 "invalid-role.json": {"id": "invalid-role", "messages": [{"role": "tool", "content": "x"}]},
                 "oversized-content.json": {
                     "id": "oversized-content",
-                    "messages": [{"role": "user", "content": "x" * (legacy_storage.MAX_LEGACY_MESSAGE_CONTENT_CHARS + 1)}],
+                    "messages": [{"role": "user", "content": "x" * (storage.MAX_LEGACY_MESSAGE_CONTENT_CHARS + 1)}],
                 },
                 "too-many-messages.json": {
                     "id": "too-many-messages",
                     "messages": [
                         {"role": "user", "content": "x"}
-                    ] * (legacy_storage.MAX_LEGACY_CHAT_MESSAGES + 1),
+                    ] * (storage.MAX_LEGACY_CHAT_MESSAGES + 1),
                 },
             }
             for filename, record in records.items():
@@ -156,7 +156,7 @@ class PersistenceTests(unittest.TestCase):
             )
             result = manager.migrate_from_json_if_needed()
 
-            self.assertEqual(result, legacy_storage.MigrationResult(quarantined=3))
+            self.assertEqual(result, storage.MigrationResult(quarantined=3))
             self.assertEqual(manager.get_all_chats_summary(), [])
             self.assertEqual(
                 {path.name for path in (legacy / "quarantine").iterdir()},
@@ -175,10 +175,10 @@ class PersistenceTests(unittest.TestCase):
                 db_path=str(root / "chats.sqlite"),
                 legacy_history_dir=str(legacy),
             )
-            with patch.object(legacy_storage, "MAX_LEGACY_CHAT_FILE_BYTES", 32):
+            with patch.object(storage, "MAX_LEGACY_CHAT_FILE_BYTES", 32):
                 result = manager.migrate_from_json_if_needed()
 
-            self.assertEqual(result, legacy_storage.MigrationResult(migrated=1, quarantined=1))
+            self.assertEqual(result, storage.MigrationResult(migrated=1, quarantined=1))
             self.assertTrue((legacy / "quarantine" / "oversized.json").exists())
             self.assertIsNotNone(manager.load_chat("valid"))
 
@@ -240,7 +240,7 @@ class PersistenceTests(unittest.TestCase):
                 return real_replace(source, destination)
 
             with patch(
-                "cortex_backend.repositories.legacy_storage.os.replace",
+                "cortex_backend.repositories.storage.os.replace",
                 side_effect=fail_primary_replace,
             ):
                 with self.assertRaises(PersistenceError):
@@ -299,7 +299,7 @@ class PersistenceTests(unittest.TestCase):
                 return real_replace(source, destination)
 
             with patch(
-                "cortex_backend.repositories.legacy_storage.os.replace",
+                "cortex_backend.repositories.storage.os.replace",
                 side_effect=fail_primary_repair,
             ):
                 recovered = PermanentMemoryManager(memory_file_path=str(memory_path))
@@ -332,7 +332,7 @@ class PersistenceTests(unittest.TestCase):
                 return real_copy(source, destination)
 
             with patch(
-                "cortex_backend.repositories.legacy_storage.shutil.copy2",
+                "cortex_backend.repositories.storage.shutil.copy2",
                 side_effect=fail_primary_copy,
             ):
                 with self.assertRaises(PersistenceError):

@@ -14,7 +14,7 @@ from .memories import (
     LegacyPermanentMemoryRepository,
 )
 from .legacy_settings import LegacySettingsReader
-from .legacy_storage import DatabaseManager, PermanentMemoryManager, PersistenceError
+from .storage import DatabaseManager, PermanentMemoryManager, PersistenceError
 from .settings import (
     InMemorySettingsRepository,
     SettingsReadResult,

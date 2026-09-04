@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from cortex_backend.repositories.legacy_storage import DatabaseManager, PersistenceError
+from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
 
 def _manager_with_data(tmp_path: Path) -> tuple[DatabaseManager, dict]:

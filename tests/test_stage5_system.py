@@ -17,7 +17,7 @@ from Cortex_Preview import build_preview_app
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
-from cortex_backend.repositories.legacy_storage import (
+from cortex_backend.repositories.storage import (
     DatabaseManager,
     PermanentMemoryManager,
 )
