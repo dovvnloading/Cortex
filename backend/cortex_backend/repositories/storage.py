@@ -1,12 +1,13 @@
 """Durable chat and permanent-memory persistence.
 
-Two stores live here:
+Two stores live here, and both are the live ones the application writes to:
 
 1.  DatabaseManager: chat threads, messages, and groups in SQLite.
 2.  PermanentMemoryManager: the user's explicit memos in a JSON file.
 
-Both are the live stores, not a compatibility shim -- the module name is
-historical.
+They share this module because they share a layout -- both are rooted at
+AppPaths and both carry verified backups. Reading legacy JSON chat files is a
+migration path DatabaseManager offers, not what this module is.
 """
 
 import logging

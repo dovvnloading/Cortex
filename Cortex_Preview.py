@@ -38,7 +38,7 @@ from cortex_backend.llamacpp.model_directory import (  # noqa: E402
 from cortex_backend.llamacpp.server_manager import LlamaServerManager  # noqa: E402
 from cortex_backend.repositories.chats import LegacyDatabaseChatRepository  # noqa: E402
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader  # noqa: E402
-from cortex_backend.repositories.legacy_storage import (  # noqa: E402
+from cortex_backend.repositories.storage import (  # noqa: E402
     DatabaseManager,
     PermanentMemoryManager,
 )

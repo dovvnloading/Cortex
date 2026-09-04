@@ -213,7 +213,7 @@ class SQLiteSettingsRepository:
                 # crash-safe under WAL. In the default rollback-journal mode the
                 # same pragma lets an OS crash or power loss corrupt the file
                 # outright, which is exactly why the chat store switched (see
-                # legacy_storage._create_tables). Backups stay whole because
+                # storage._create_tables). Backups stay whole because
                 # _create_backup checkpoints before copying.
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute(

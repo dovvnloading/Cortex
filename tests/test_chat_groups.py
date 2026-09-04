@@ -20,7 +20,7 @@ from cortex_backend.repositories.chats import (
     InMemoryChatRepository,
     LegacyDatabaseChatRepository,
 )
-from cortex_backend.repositories.legacy_storage import DatabaseManager
+from cortex_backend.repositories.storage import DatabaseManager
 from support import session_headers as _session
 
 

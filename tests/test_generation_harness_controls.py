@@ -15,7 +15,7 @@ from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.routes import _merged_model_options
 from cortex_backend.core.settings import CortexSettings, GenerationOptionsOverride
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
-from cortex_backend.repositories.legacy_storage import DatabaseManager
+from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.services.llm import _extract_stats
 from cortex_backend.testing.fake_ollama import FAKE_GENERATION_STATS
 from support import session_headers as _session
