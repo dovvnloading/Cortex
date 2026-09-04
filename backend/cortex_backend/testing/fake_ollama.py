@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from threading import Event
 from dataclasses import dataclass, field
 import json
 import time
@@ -11,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from cortex_backend.core.generation import (
+    GenerationAttachment,
     GenerationStats,
     MemoryCommand,
     ModelOperationError,
@@ -142,6 +145,31 @@ class FakeGenerationEngine:
             used += cost
         return retained
 
+    def fit_attachments_to_context(
+        self,
+        attachments: Sequence[GenerationAttachment],
+        *,
+        query: str,
+        chat_history: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
+    ) -> tuple[GenerationAttachment, ...]:
+        """Keep every attachment; the fake has no real context pressure.
+
+        Present so the fake satisfies GenerationEngine in full. Without it the
+        service had to probe for this method at runtime, and a deterministic
+        double is exactly the thing that should not need probing.
+        """
+
+        del query, chat_history, permanent_memories, memories_enabled
+        del user_system_instructions, num_ctx, code_execution_eligible
+        del bypass_system_prompt
+        return tuple(attachments)
+
     def fit_history_to_context(
         self,
         messages: list[dict[str, Any]],
@@ -153,6 +181,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         del (
             query,
@@ -162,6 +191,7 @@ class FakeGenerationEngine:
             num_ctx,
             code_execution_eligible,
             bypass_system_prompt,
+            attachments,
         )
         return "\n".join(
             f"{message.get('role', 'unknown')}: {message.get('content', '')}"
@@ -177,8 +207,8 @@ class FakeGenerationEngine:
         memories_enabled: bool,
         user_system_instructions: str | None,
         options: dict[str, Any],
-        attachments: tuple[Any, ...] = (),
-        cancellation_event: Any = None,
+        attachments: Sequence[GenerationAttachment] = (),
+        cancellation_event: Event | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del (
             chat_history,

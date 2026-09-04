@@ -280,9 +280,14 @@ class LlamaCppChatClient:
                         if kind == "error":
                             if isinstance(payload, httpx.TransportError):
                                 raise payload
-                            raise RuntimeError("The llama.cpp response reader failed.") from payload
+                            cause = payload if isinstance(payload, BaseException) else None
+                            raise RuntimeError(
+                                "The llama.cpp response reader failed."
+                            ) from cause
                         if kind == "done":
                             break
+                        if not isinstance(payload, str):
+                            continue
                         line = payload
                         if not line or not line.startswith("data:"):
                             continue

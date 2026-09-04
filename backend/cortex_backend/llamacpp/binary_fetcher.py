@@ -12,9 +12,9 @@ import hashlib
 import logging
 import os
 import shutil
-from threading import Event
 import zipfile
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
 import httpx
@@ -43,7 +43,19 @@ _MAX_BINARY_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 _MIN_FREE_SPACE_BYTES = 128 * 1024 * 1024
 
 
-def _raise_if_cancelled(cancellation_event: Event | None) -> None:
+@runtime_checkable
+class Cancellable(Protocol):
+    """Anything that can report that the caller asked to stop.
+
+    threading.Event satisfies this, and so does the server manager's own
+    cancellation token -- which is what actually gets passed here.
+    """
+
+    def is_set(self) -> bool:
+        ...
+
+
+def _raise_if_cancelled(cancellation_event: Cancellable | None) -> None:
     if cancellation_event is not None and cancellation_event.is_set():
         raise BinaryVerificationError("Local model runtime startup was cancelled.")
 
@@ -79,7 +91,7 @@ def _require_free_space(directory: Path, bytes_needed: int, *, reserve: int = _M
         )
 
 
-def _stream_sha256(path: Path, cancellation_event: Event | None = None) -> str:
+def _stream_sha256(path: Path, cancellation_event: Cancellable | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while True:
@@ -91,7 +103,7 @@ def _stream_sha256(path: Path, cancellation_event: Event | None = None) -> str:
     return digest.hexdigest()
 
 
-def hash_directory(root: Path, cancellation_event: Event | None = None) -> str:
+def hash_directory(root: Path, cancellation_event: Cancellable | None = None) -> str:
     """Deterministic manifest hash over every regular file's relative path + content.
 
     llama.cpp's Windows release layout ships each ``.exe`` as a tiny stub
@@ -119,7 +131,7 @@ def hash_directory(root: Path, cancellation_event: Event | None = None) -> str:
 _TreeIdentity = tuple[tuple[str, int, int], ...]
 
 
-def _tree_identity(root: Path, cancellation_event: Event | None = None) -> _TreeIdentity:
+def _tree_identity(root: Path, cancellation_event: Cancellable | None = None) -> _TreeIdentity:
     """Cheap per-file ``(relative_path, size, mtime_ns)`` fingerprint of a tree.
 
     Stat-ing every file is orders of magnitude cheaper than hashing their
@@ -150,7 +162,7 @@ class BinaryFetcher:
         asset: AssetSpec,
         *,
         force_hash: bool = False,
-        cancellation_event: Event | None = None,
+        cancellation_event: Cancellable | None = None,
     ) -> bool:
         """Re-verify the whole extracted directory against the pinned manifest hash.
 
@@ -194,7 +206,7 @@ class BinaryFetcher:
         release: PinnedRelease,
         backend: GpuBackend,
         *,
-        cancellation_event: Event | None = None,
+        cancellation_event: Cancellable | None = None,
     ) -> bool:
         asset = release.assets[backend]
         return self._verify_directory(
@@ -208,7 +220,7 @@ class BinaryFetcher:
         release: PinnedRelease,
         backend: GpuBackend,
         *,
-        cancellation_event: Event | None = None,
+        cancellation_event: Cancellable | None = None,
     ) -> Path:
         """Return a verified llama-server.exe path, downloading on first use."""
         if cancellation_event is not None and cancellation_event.is_set():
@@ -266,7 +278,7 @@ class BinaryFetcher:
         destination: Path,
         expected_sha256: str,
         *,
-        cancellation_event: Event | None = None,
+        cancellation_event: Cancellable | None = None,
     ) -> None:
         digest = hashlib.sha256()
         completed = 0
@@ -337,7 +349,7 @@ class BinaryFetcher:
         archive_path: Path,
         destination: Path,
         *,
-        cancellation_event: Event | None = None,
+        cancellation_event: Cancellable | None = None,
     ) -> None:
         destination.mkdir(parents=True, exist_ok=True)
         resolved_destination = destination.resolve()
@@ -371,7 +383,7 @@ class BinaryFetcher:
             inner.rmdir()
 
     @staticmethod
-    def _remove_tree(root: Path, *, cancellation_event: Event | None = None) -> None:
+    def _remove_tree(root: Path, *, cancellation_event: Cancellable | None = None) -> None:
         """Remove an invalid cache tree while retaining cancellation checks."""
         for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
             _raise_if_cancelled(cancellation_event)

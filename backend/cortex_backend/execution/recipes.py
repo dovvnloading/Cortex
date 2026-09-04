@@ -66,6 +66,10 @@ def _bounded_decimal(value: Decimal) -> Decimal:
         raise ValueError("decimal is outside the supported bound")
     digits = value.as_tuple().digits
     exponent = value.as_tuple().exponent
+    # is_finite() above rules out the 'n'/'N'/'F' exponents Decimal uses
+    # for NaN and Infinity, so this is an int by construction.
+    if not isinstance(exponent, int):
+        raise ValueError("decimal is outside the supported bound")
     if len(digits) > 18 or exponent < -12 or exponent > 12:
         raise ValueError("decimal precision is outside the supported bound")
     return value
@@ -91,7 +95,10 @@ def _coerce_decimal(value: Any) -> Decimal:
 def _bounded_result(value: Decimal) -> Decimal:
     if not value.is_finite() or abs(value) > MAX_RESULT_ABS:
         raise PrimitiveEvaluationError("result_out_of_bounds")
-    if value.as_tuple().exponent < -18:
+    exponent = value.as_tuple().exponent
+    if not isinstance(exponent, int):  # excluded by is_finite() above
+        raise PrimitiveEvaluationError("result_out_of_bounds")
+    if exponent < -18:
         try:
             value = value.quantize(
                 Decimal("1e-18"),

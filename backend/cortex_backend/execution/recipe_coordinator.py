@@ -20,7 +20,7 @@ import re
 import tempfile
 from threading import Event, Lock, Thread
 import time
-from typing import Any, Protocol
+from typing import Final, Any, Protocol
 from uuid import uuid4
 
 from .artifact_boundary import (
@@ -40,7 +40,7 @@ from .repository import (
 )
 
 
-RECIPE_IMAGE_PROFILE = "recipe.image.v1"
+RECIPE_IMAGE_PROFILE: Final = "recipe.image.v1"
 RECIPE_PAYLOAD_SCHEMA = "recipe.execution.v1"
 RECIPE_RESULT_SCHEMA = "recipe.result.v1"
 DEFAULT_RECIPE_RETENTION_SECONDS = 86_400
@@ -371,13 +371,14 @@ class RecipeExecutionCoordinator:
             raise RecipeExecutionError("recovery_invalid_payload") from None
         if payload.get("plan_digest") != plan.digest():
             raise RecipeExecutionError("recovery_invalid_payload")
-        retention = payload.get("retention_seconds")
+        retention = payload.get("retention_seconds", DEFAULT_RECIPE_RETENTION_SECONDS)
         try:
             return RecipeImageRequest(
                 owner=job.owner,
                 request_id=job.request_id,
                 source_artifact_id=source_artifact_id,
                 plan=plan,
+                # Validated by RecipeImageRequest; the store holds plain JSON.
                 retention_seconds=retention,
             )
         except (TypeError, ValueError, RecipeExecutionError):

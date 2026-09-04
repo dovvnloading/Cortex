@@ -249,10 +249,14 @@ def _classify(filename: str, content: bytes) -> tuple[str, str]:
                 "Cortex supports images and common text/code/config documents.",
             )
     _decode_text(content)
-    mime_type = _TEXT_MIME_BY_EXTENSION.get(extension)
+    mime_type: str | None = _TEXT_MIME_BY_EXTENSION.get(extension)
     if mime_type is None:
-        guessed = mimetypes.guess_type(filename, strict=False)[0]
-        mime_type = guessed if guessed and (guessed.startswith("text/") or guessed.startswith("application/")) else "text/plain"
+        sniffed = mimetypes.guess_type(filename, strict=False)[0]
+        mime_type = (
+            sniffed
+            if sniffed and (sniffed.startswith("text/") or sniffed.startswith("application/"))
+            else "text/plain"
+        )
     # SVG is a text document in Cortex, never an image input.  It is not sent
     # through Ollama's image path and remains reference text only.
     if mime_type == "image/svg+xml":
@@ -467,11 +471,14 @@ class ChatAttachmentService:
             raise ChatAttachmentError("attachment_request_conflict")
         result = job.result
         descriptor = self._normalize_descriptor(result)
-        artifact = self.repository.get_artifact(descriptor.attachment_id, owner=job.owner)
+        repository = self.repository
+        if repository is None:
+            raise ChatAttachmentError("attachment_unavailable")
+        artifact = repository.get_artifact(descriptor.attachment_id, owner=job.owner)
         if artifact is None:
             raise ChatAttachmentError("attachment_unavailable")
         try:
-            stored = self.repository.read_artifact(artifact.artifact_id)
+            stored = repository.read_artifact(artifact.artifact_id)
         except ExecutionRepositoryError:
             raise ChatAttachmentError("attachment_unavailable") from None
         if stored != content or artifact.sha256 != descriptor.sha256:

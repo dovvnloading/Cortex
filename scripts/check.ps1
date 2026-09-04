@@ -7,9 +7,9 @@
     Catches failures on your machine in ~2 minutes instead of waiting on CI.
 
     Tiers:
-      quick  (default) Lint, backend tests, contract drift, the artifact-boundary
-                       review, and frontend types/lint/unit tests. This is what
-                       the pre-push hook runs.
+      quick  (default) Lint, type check, backend tests, contract drift, the
+                       artifact-boundary review, and frontend types/lint/unit
+                       tests. This is what the pre-push hook runs.
       full             Everything in quick, plus compileall, Playwright browser
                        installation/e2e tests, and the frontend bundle build.
 
@@ -136,6 +136,10 @@ if (-not $SkipBackend) {
 
     Invoke-Step 'Lint Python (ruff)' {
         python -m ruff check backend tests tools main.py app_factory.py
+    }
+
+    Invoke-Step 'Type-check Python (mypy)' {
+        python -m mypy
     }
 
     Invoke-Step 'Backend tests (pytest)' {

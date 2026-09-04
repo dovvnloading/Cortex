@@ -829,7 +829,7 @@ class JobRegistry:
 def _serialize(result: Any) -> Mapping[str, Any]:
     if isinstance(result, Mapping):
         return result
-    if is_dataclass(result):
+    if is_dataclass(result) and not isinstance(result, type):
         return asdict(result)
     return {"result": result}
 

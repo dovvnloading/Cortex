@@ -213,7 +213,11 @@ def _frontend_build_lock(frontend_root: Path):
             else:
                 import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # POSIX-only; this is the non-nt branch.
+                fcntl.flock(  # type: ignore[attr-defined]
+                    handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                )
             locked = True
         except (OSError, ImportError) as exc:
             raise FrontendBuildError("Another frontend build is already running.") from exc
@@ -229,7 +233,10 @@ def _frontend_build_lock(frontend_root: Path):
                 else:
                     import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(  # type: ignore[attr-defined]
+                        handle.fileno(),
+                        fcntl.LOCK_UN,  # type: ignore[attr-defined]
+                    )
             except OSError:
                 logger.warning("Could not release the frontend build lock: %s", lock_path)
         handle.close()

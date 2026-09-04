@@ -8,16 +8,19 @@ import json
 import os
 from pathlib import Path
 import secrets
-from typing import Any
+from types import ModuleType
+from typing import IO, Any
 import uuid
 
 from cortex_backend.core.paths import AppPathError, AppPaths, secure_private_path
 
+msvcrt: ModuleType | None
 try:
     import msvcrt
 except ImportError:  # pragma: no cover - exercised on non-Windows development hosts
     msvcrt = None
 
+fcntl: ModuleType | None
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl
@@ -58,7 +61,7 @@ class InstanceLock:
         self.lock_path = self.profile_dir / "cortex.instance.lock"
         self.record_path = self.profile_dir / "cortex.instance.json"
         self.secret_path = self.profile_dir / "cortex.instance.secret"
-        self._handle = None
+        self._handle: IO[bytes] | None = None
         self._record: InstanceRecord | None = None
 
     def acquire(self, *, port: int) -> InstanceRecord | None:

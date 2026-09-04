@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import HTTPException, Request, status
@@ -85,6 +85,7 @@ from .schemas import (
     ChatResponse,
     ChatAttachment,
     CodeCapabilitiesRequest,
+    ExecutionEventName,
     ExecutionSSEEvent,
     ExecutionStatusResponse,
     ExecutionTaskSummary,
@@ -1551,7 +1552,9 @@ def _execution_sse_line(event: ExecutionEvent) -> str:
         id=event.sequence,
         sequence=event.sequence,
         job_id=event.job_id,
-        event=f"execution.{event.event}",
+        # The vocabulary is frozen and pinned by test_execution_vocabulary,
+        # which is what actually guarantees this cast is safe.
+        event=cast(ExecutionEventName, f"execution.{event.event}"),
         status=event.status,
         phase=event.phase,
         data=dict(event.data),
