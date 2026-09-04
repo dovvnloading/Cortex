@@ -705,4 +705,51 @@ describe("useGenerationStream", () => {
 
     act(() => result.current.stop());
   });
+
+  it("keeps sessionStorage out of the token hot path but records other frames", async () => {
+    // A cold start replays the job from event 0 (see ChatPage's resume
+    // effect), so the persisted cursor is never what a resume reads back --
+    // only the job and thread identity are. Writing it once per token frame
+    // put a JSON.stringify and a synchronous setItem beside the rAF batching
+    // that exists to keep that path cheap.
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const setItem = vi.spyOn(window.Storage.prototype, "setItem");
+
+    try {
+      act(() => {
+        result.current.start("job-hot", "thread-hot", vi.fn().mockResolvedValue(undefined), vi.fn());
+      });
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+      setItem.mockClear();
+
+      act(() => {
+        for (let index = 1; index <= 20; index += 1) {
+          emitEvent({
+            event: "generation.content_delta",
+            event_id: index,
+            job_id: "job-hot",
+            thread_id: "thread-hot",
+            data: { delta: "x", message: "Response content available." },
+          });
+        }
+      });
+      expect(setItem).not.toHaveBeenCalled();
+
+      act(() => {
+        emitEvent({
+          event: "generation.persisting",
+          event_id: 21,
+          job_id: "job-hot",
+          thread_id: "thread-hot",
+          data: { message: "Saving the response." },
+        });
+      });
+      expect(readActiveJob()).toEqual({ jobId: "job-hot", threadId: "thread-hot", lastEventId: 21 });
+    } finally {
+      setItem.mockRestore();
+      act(() => result.current.stop());
+    }
+  });
 });

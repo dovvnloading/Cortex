@@ -9,8 +9,6 @@ export type GenerationPhase = "idle" | "starting" | "streaming" | "stopping";
 export interface GenerationState {
   jobId: string | null;
   threadId: string | null;
-  /** Last SSE event applied to the globally tracked generation. */
-  lastEventId: number;
   phase: GenerationPhase;
   partialContent: string;
   partialThoughts: string;
@@ -33,6 +31,18 @@ interface ChatStoreState {
   /** User-created folders/projects, in their persisted display order. */
   groups: ChatGroup[];
   generation: GenerationState;
+  /**
+   * Sequence number of the last SSE event applied to the tracked generation.
+   *
+   * Deliberately a sibling of `generation` rather than a field inside it.
+   * Nothing renders this -- only ChatPage's resume effect reads it, and it
+   * does so imperatively via getState(). It does advance on every single SSE
+   * frame, so while it lived inside `generation` it rebuilt that object per
+   * frame, and ChatPage subscribes to the object by reference: the transcript
+   * re-rendered on every frame for a value it never draws, cancelling out the
+   * requestAnimationFrame batching in useGenerationStream.
+   */
+  generationCursor: number;
   generationOptionsByThread: Record<string, GenerationOptionsOverride>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
@@ -61,7 +71,6 @@ interface ChatStoreState {
 const idleGeneration: GenerationState = {
   jobId: null,
   threadId: null,
-  lastEventId: 0,
   phase: "idle",
   partialContent: "",
   partialThoughts: "",
@@ -81,6 +90,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   chats: [],
   groups: [],
   generation: idleGeneration,
+  generationCursor: 0,
   generationOptionsByThread: {},
 
   setChats: (next) =>
@@ -121,7 +131,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
     })),
 
   beginGeneration: (jobId, threadId) =>
-    set({ generation: { ...idleGeneration, jobId, threadId, phase: "starting" } }),
+    set({ generation: { ...idleGeneration, jobId, threadId, phase: "starting" }, generationCursor: 0 }),
   appendContentToken: (jobId, delta) =>
     set((state) =>
       state.generation.jobId === jobId
@@ -134,25 +144,46 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? { generation: { ...state.generation, phase: "streaming", partialThoughts: state.generation.partialThoughts + delta } }
         : state,
     ),
+  // The two reducers below run on *every* SSE frame, and both used to build a
+  // fresh generation object whether or not anything had changed. ChatPage
+  // subscribes to that object by reference, so an unchanged rewrite still
+  // re-rendered the whole transcript -- which is exactly what the rAF batching
+  // in useGenerationStream exists to avoid. Returning `state` untouched when
+  // the value has not moved is what makes that batching effective.
   setGenerationCursor: (jobId, eventId) =>
     set((state) => (
-      state.generation.jobId === jobId && eventId >= state.generation.lastEventId
-        ? { generation: { ...state.generation, lastEventId: eventId } }
+      state.generation.jobId === jobId && eventId > state.generationCursor
+        ? { generationCursor: eventId }
         : state
     )),
   setStatusText: (jobId, text) =>
-    set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, statusText: text } } : state)),
+    set((state) => (
+      state.generation.jobId === jobId && text !== state.generation.statusText
+        ? { generation: { ...state.generation, statusText: text } }
+        : state
+    )),
   markContentReady: (jobId) =>
-    set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, contentReady: true } } : state)),
+    set((state) => (
+      state.generation.jobId === jobId && !state.generation.contentReady
+        ? { generation: { ...state.generation, contentReady: true } }
+        : state
+    )),
   markStopping: (jobId) =>
-    set((state) => (state.generation.jobId === jobId ? { generation: { ...state.generation, phase: "stopping" } } : state)),
+    set((state) => (
+      state.generation.jobId === jobId && state.generation.phase !== "stopping"
+        ? { generation: { ...state.generation, phase: "stopping" } }
+        : state
+    )),
   revertStopping: (jobId) =>
     set((state) =>
       state.generation.jobId === jobId && state.generation.phase === "stopping"
         ? { generation: { ...state.generation, phase: "streaming" } }
         : state,
     ),
-  endGeneration: (jobId) => set((state) => (state.generation.jobId === jobId ? { generation: idleGeneration } : state)),
+  endGeneration: (jobId) =>
+    set((state) => (
+      state.generation.jobId === jobId ? { generation: idleGeneration, generationCursor: 0 } : state
+    )),
 
   setThreadOptions: (threadKey, options) =>
     set((state) => {

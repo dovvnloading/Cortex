@@ -291,13 +291,13 @@ export function ChatPage({
       // The global store is authoritative while the app is alive. Storage is
       // only a best-effort cold-start side channel, so a denied/quota-full
       // sessionStorage must not make a live job look finished on re-entry.
-      const currentGeneration = useChatStore.getState().generation;
+      const { generation: currentGeneration, generationCursor } = useChatStore.getState();
       const activeJob = (
         currentGeneration.jobId && currentGeneration.threadId
           ? {
               jobId: currentGeneration.jobId,
               threadId: currentGeneration.threadId,
-              lastEventId: currentGeneration.lastEventId,
+              lastEventId: generationCursor,
             }
           : null
       ) ?? stored;

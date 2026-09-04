@@ -231,7 +231,18 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 reconnectAttempt = 0;
                 if (event.event_id <= cursor || event.thread_id !== job.threadId) return;
                 cursor = event.event_id;
-                persistActiveJob({ ...job, lastEventId: cursor });
+                const isTokenDelta = event.event === "generation.content_delta"
+                  || event.event === "generation.thinking_delta";
+                // Storage is the cold-start side channel; the store holds the
+                // live cursor. A cold start deliberately replays the job from
+                // event 0 (see ChatPage's resume effect), so the persisted
+                // cursor is never what a resume reads back -- only the job and
+                // thread identity are. Skipping the write on token deltas
+                // therefore costs nothing and takes a JSON.stringify plus a
+                // synchronous setItem out of the hot path, where they were
+                // running once per 80 characters of answer, right next to the
+                // rAF batching that exists to keep that path cheap.
+                if (!isTokenDelta) persistActiveJob({ ...job, lastEventId: cursor });
                 useChatStore.getState().setGenerationCursor(job.jobId, cursor);
                 const data = event.data ?? {};
                 if (typeof data.message === "string") useChatStore.getState().setStatusText(job.jobId, data.message);
