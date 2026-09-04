@@ -159,13 +159,17 @@ class BackendBoundaryTests(unittest.TestCase):
     def test_code_execution_worker_import_stays_lean(self):
         """A code-execution worker subprocess must not pay for its siblings.
 
-        cortex_backend.execution's __init__ resolves every re-exported
-        symbol lazily (see __getattr__ there), so importing one submodule
-        must not force-load unrelated heavy dependencies that only other
-        submodules need: cryptography (native_broker's identity handshake),
+        cortex_backend.execution's __init__ re-exports nothing, so importing
+        one submodule loads that submodule and no other. Heavy dependencies
+        that belong to unrelated siblings must stay out of a worker that only
+        runs plain Python: cryptography (native_broker's identity handshake),
         pydantic (broker/worker_protocol's message schemas), and Pillow
-        (recipe_provider's image transforms) are all irrelevant to plain
-        Python code execution.
+        (recipe_provider's image transforms).
+
+        The sibling-module assertion is what keeps the __init__ empty. A plain
+        re-export added there loads its submodule as a side effect of importing
+        the package, and this fails on that alone -- before the re-exported
+        module happens to be one with a heavy dependency.
         """
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(BACKEND_ROOT)
@@ -178,7 +182,12 @@ class BackendBoundaryTests(unittest.TestCase):
                     "from cortex_backend.execution.code_execution import code_worker_main; "
                     "assert 'cryptography' not in sys.modules; "
                     "assert 'pydantic' not in sys.modules; "
-                    "assert 'PIL' not in sys.modules"
+                    "assert 'PIL' not in sys.modules; "
+                    "loaded = sorted("
+                    "  name for name in sys.modules"
+                    "  if name.startswith('cortex_backend.execution.')"
+                    "); "
+                    "assert loaded == ['cortex_backend.execution.code_execution'], loaded"
                 ),
             ],
             cwd=REPOSITORY_ROOT,

@@ -7,13 +7,15 @@ from pathlib import Path
 import pytest
 
 import cortex_backend.execution.artifact_boundary as boundary_module
-from cortex_backend.execution import (
+from cortex_backend.execution.artifact_boundary import (
     ArtifactBoundary,
     ArtifactBoundaryError,
     ArtifactSourceGrant,
+    OutputClaim,
+)
+from cortex_backend.execution.repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
-    OutputClaim,
 )
 from cortex_backend.execution.artifact_boundary import sniff_artifact_mime
 

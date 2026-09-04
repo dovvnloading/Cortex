@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from cortex_backend.api import build_demo_dependencies, create_app
-from cortex_backend.execution import ExecutionRepository, build_execution_lifecycle
+from cortex_backend.execution.qualification import build_execution_lifecycle
+from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.execution.scratch_compute import (
     ScratchComputeError,
     evaluate_scratch_expression,

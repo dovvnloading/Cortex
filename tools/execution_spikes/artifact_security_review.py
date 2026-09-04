@@ -21,13 +21,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 import cortex_backend.execution.artifact_boundary as boundary_module  # noqa: E402
-from cortex_backend.execution import (  # noqa: E402
+from cortex_backend.execution.artifact_boundary import (  # noqa: E402
     ArtifactBoundary,
     ArtifactBoundaryError,
     ArtifactSourceGrant,
+    OutputClaim,
+)
+from cortex_backend.execution.repository import (  # noqa: E402
     ExecutionRepository,
     ExecutionRepositoryError,
-    OutputClaim,
 )
 
 

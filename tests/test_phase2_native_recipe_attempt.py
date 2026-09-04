@@ -12,14 +12,14 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cortex_backend.execution import (
+from cortex_backend.execution.bundle_installer import SignedBundleInstaller
+from cortex_backend.execution.manifest import TrustedRecipeKeys
+from cortex_backend.execution.native_launcher import (
     BrokerWorkerBinding,
-    NativeRecipeWorkerAttemptFactory,
     NativeWorkerLaunchPlan,
     NativeWorkerPolicy,
-    SignedBundleInstaller,
-    TrustedRecipeKeys,
 )
+from cortex_backend.execution.native_recipe_attempt import NativeRecipeWorkerAttemptFactory
 from cortex_backend.execution.models import ExecutionJob
 
 
