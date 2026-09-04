@@ -189,8 +189,7 @@ tests/                    Python API, lifecycle, worker, and migration tests
 
 The supported source runtime is Windows. User data stays under
 `%APPDATA%\ChatLLM\ChatLLM-Assistant` unless an explicit `--data-dir` is supplied.
-Semantic vector storage is intentionally dormant until retrieval is integrated
-end to end; Cortex does not pull an embedding model at startup.
+Cortex does not pull an embedding model at startup and has no semantic retrieval.
 
 ## Requirements
 
@@ -291,6 +290,23 @@ The result is written to `dist/Cortex/Cortex.exe`. The package contains the
 frontend, prompt assets, Python runtime, pywebview bridge, and the signed
 Evergreen WebView2 bootstrapper. A packaged launch does not require Node.js, a
 global Python installation, or an installed browser.
+
+## Upgrading and recovery
+
+Back up `%APPDATA%\ChatLLM\ChatLLM-Assistant` before installing a new release.
+Cortex keeps reading legacy SQLite, JSON chat, permanent-memory, and Windows
+registry settings, and both the chat and settings databases carry verified
+backups. Those backups and the untouched legacy settings source are the
+rollback path; an untested in-place downgrade is not.
+
+## Troubleshooting
+
+- If Cortex reports Ollama unavailable, verify the Ollama service and endpoint.
+- If no models appear, run `ollama list` and install a generation model.
+- If the native window does not open from source, reinstall `requirements.txt`
+  and verify that the Microsoft Edge WebView2 Runtime is installed.
+- If a previous Cortex instance is already running, launching Cortex again
+  restores its native window rather than starting a second server.
 
 ## Privacy and security
 

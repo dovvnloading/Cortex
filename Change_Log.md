@@ -1,3 +1,37 @@
+### **Reliability, Performance, and Structure Pass**
+
+**Date:** 2026-09-04
+**Version:** Quality pass
+
+* The settings database now runs in WAL mode. It had `synchronous = NORMAL`
+  under a rollback journal, the one pairing SQLite does not make crash-safe.
+  Backups checkpoint the write-ahead log before copying, and recovery drops
+  sidecars belonging to the database it replaced.
+* `range(0)` is accepted by the code-execution validator instead of being
+  rejected as unbounded, and the durable store and the resource governor now
+  share one profile-name pattern rather than two that had drifted apart.
+* The execution event stream no longer runs synchronous SQLite on the event
+  loop, and no longer closes after six seconds of silence -- which had been
+  dropping the connection during the approval wait it exists to report on.
+* The transcript no longer re-renders on every streamed frame, history
+  selection renders incrementally rather than rebuilding the whole transcript
+  per stored message, and a turn no longer loads a full thread three times to
+  read a title or a revision.
+* A worker that survives terminate and kill is reported rather than silently
+  leaked.
+* Removed: unused memory scaffolding, the unused execution re-export barrel,
+  the dead `suggestions` setting (existing workspaces still load), a vestigial
+  second entry point, and the fake model gateway that shipped inside the
+  packaged application.
+* One version string, read from `cortex_backend.__version__`, and a release
+  workflow that refuses to build when a tag disagrees with it.
+* `scripts/check.ps1` now runs the dependency lockfile check that CI enforces
+  and verifies the installed environment against the declared pins.
+* The 53 API routes moved from a single 1,592-line function into one module per
+  resource, with no change to the generated contract.
+
+---
+
 ### **Cortex Native Web Shell & Self-Bootstrapping Package**
 
 **Date:** 2026-07-20
