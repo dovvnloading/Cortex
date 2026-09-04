@@ -1,6 +1,12 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { normalizeApiBaseUrl } from "./src/api/baseUrl";
+
+// This config is ESM, so __dirname does not exist here.
+const frontendRoot = dirname(fileURLToPath(import.meta.url));
 
 function cortexDevIdentityPlugin(nonce: string | undefined): Plugin {
   return {
@@ -30,7 +36,13 @@ export default defineConfig(({ mode }) => {
           target: `http://127.0.0.1:${process.env.CORTEX_BACKEND_PORT ?? 8765}`,
         },
       },
-      fs: { allow: [".."] },
+      // Setting `allow` replaces Vite's defaults, so the frontend root has to
+      // be listed explicitly -- without it the dev server refuses to serve the
+      // app's own modules. The only thing needed from outside it is the
+      // generated API contract; the rest of the repository (local databases,
+      // the packaging runtime, .env files) has no business being served, even
+      // on loopback, which `[".."]` previously allowed.
+      fs: { allow: [frontendRoot, resolve(frontendRoot, "..", "contracts")] },
     },
     build: {
       outDir: "dist",

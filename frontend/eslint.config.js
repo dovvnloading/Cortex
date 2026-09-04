@@ -12,7 +12,11 @@ export default tseslint.config(
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
       ecmaVersion: "latest",
-      globals: { ...globals.browser, ...globals.node, ...globals.vitest },
+      // Application source ships to a browser. Node and Vitest globals were
+      // declared here too, which made `process`, `require`, `__dirname` and
+      // `describe` look defined inside components -- so a Node-only API
+      // leaking into the bundle read as ordinary code.
+      globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
     plugins: {
@@ -26,6 +30,18 @@ export default tseslint.config(
         { allowConstantExport: true },
       ],
       "@typescript-eslint/no-explicit-any": "error",
+    },
+  },
+  {
+    // Tests and tooling legitimately run under Node and Vitest.
+    files: [
+      "**/*.{test,spec}.{ts,tsx}",
+      "src/test/**/*.{ts,tsx}",
+      "e2e/**/*.{ts,tsx}",
+      "*.config.{ts,js}",
+    ],
+    languageOptions: {
+      globals: { ...globals.browser, ...globals.node, ...globals.vitest },
     },
   },
 );

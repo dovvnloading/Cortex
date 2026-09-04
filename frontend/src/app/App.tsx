@@ -12,6 +12,7 @@ const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").th
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
+import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore, type ModelProgress } from "../stores/useModelStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
@@ -19,6 +20,9 @@ import { useToast } from "./ToastProvider";
 import { resolveRuntimeAvailability } from "./runtimeAvailability";
 
 type Props = { api?: CortexApi };
+
+/** Statuses an execution task never leaves, so nothing more will change. */
+const EXECUTION_TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
 const UNAVAILABLE_MODELS: ModelResponse = {
   required_models: [],
@@ -42,40 +46,50 @@ const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
 
 type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
 
+/** Read the launcher's one-time credentials. Pure: the URL is not touched. */
 function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
   const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
-  const searchToken = search.get("bootstrap");
-  const token = searchToken || hash.get("bootstrap") || "";
-  const handoffSecret = search.get("handoff") || hash.get("handoff") || "";
+  return {
+    bootstrapToken: search.get("bootstrap") || hash.get("bootstrap") || "",
+    handoffSecret: search.get("handoff") || hash.get("handoff") || "",
+  };
+}
 
-  // Handoff credentials are valid only for this one exchange. Remove them
-  // from the visible URL before rendering either onboarding or the workspace,
-  // while preserving unrelated query/hash state for the surrounding shell.
+/**
+ * Remove the launcher credentials from the visible URL.
+ *
+ * Separated from the read above because it mutates history, and the read runs
+ * from a `useState` initialiser. React documents initialisers as pure and
+ * StrictMode double-invokes them in development specifically to surface
+ * impure ones; doing the scrub there worked only because React happens to
+ * retain the first call's result. Idempotent, so the effect running twice
+ * under StrictMode is a no-op the second time.
+ *
+ * Unrelated query and hash state is preserved for the surrounding shell.
+ */
+function scrubLauncherCredentials(): void {
+  const url = new URL(window.location.href);
+  const search = url.searchParams;
+  const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+
   let changed = false;
-  if (search.has("bootstrap")) {
-    search.delete("bootstrap");
-    changed = true;
+  for (const key of ["bootstrap", "handoff"]) {
+    if (search.has(key)) {
+      search.delete(key);
+      changed = true;
+    }
+    if (hash.has(key)) {
+      hash.delete(key);
+      changed = true;
+    }
   }
-  if (hash.has("bootstrap")) {
-    hash.delete("bootstrap");
-    changed = true;
-  }
-  if (search.has("handoff")) {
-    search.delete("handoff");
-    changed = true;
-  }
-  if (hash.has("handoff")) {
-    hash.delete("handoff");
-    changed = true;
-  }
-  if (changed) {
-    const nextHash = hash.toString();
-    url.hash = nextHash ? `#${nextHash}` : "";
-    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-  }
-  return { bootstrapToken: token, handoffSecret };
+  if (!changed) return;
+
+  const nextHash = hash.toString();
+  url.hash = nextHash ? `#${nextHash}` : "";
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 export function App({ api: providedApi }: Props) {
@@ -83,6 +97,8 @@ export function App({ api: providedApi }: Props) {
   const [sessionReady, setSessionReady] = useState(api.hasSession);
   const [sessionEpoch, setSessionEpoch] = useState(0);
   const [launcherCredentials] = useState(readLauncherCredentials);
+  // The read above is pure; the URL scrub is a side effect and belongs here.
+  useEffect(() => scrubLauncherCredentials(), []);
   const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
   const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
@@ -341,27 +357,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     return refresh;
   }, [api, onSessionExpired]);
 
-  useEffect(() => {
-    if (!system?.execution_preview_available) {
-      return undefined;
-    }
-    void refreshExecutionTasks();
-    // Skip ticks while the window/tab is hidden -- this is a desktop app that
-    // also runs a local model, and there's no reason to keep polling every
-    // second when it's minimized or backgrounded. A visibilitychange listener
-    // fires an immediate refresh on return so the tray doesn't sit stale.
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshExecutionTasks();
-    }, 1000);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") void refreshExecutionTasks();
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [refreshExecutionTasks, system?.execution_preview_available]);
+  // A second is the right cadence while something is actually running or
+  // waiting on approval. With nothing in flight it was still a SQLite query
+  // every second for the life of the app, so back off -- slowly enough that a
+  // task started elsewhere still appears promptly.
+  const hasActiveExecutionTask = executionTasks.some(
+    (task) => !EXECUTION_TERMINAL_STATUSES.has(task.status),
+  );
+  useVisiblePolling(
+    refreshExecutionTasks,
+    hasActiveExecutionTask ? 1000 : 5000,
+    Boolean(system?.execution_preview_available),
+  );
 
   // Only poll the local llama.cpp runtime state while a GGUF model is
   // actually selected -- Ollama users never spend cycles on this. A GGUF
@@ -369,33 +376,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // what lets the composer show live "loaded" / "starting" state instead
   // of only ever reflecting whatever was true at the last full page load.
   const selectedModelIsGGUF = isGGUFModel(settings?.models?.chat ?? null);
-  useEffect(() => {
-    if (!selectedModelIsGGUF) return undefined;
-    let disposed = false;
-    const refresh = async () => {
-      try {
-        const response = await api.system();
-        if (!disposed) setLlamacppStatus(response.llamacpp ?? null);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      }
-    };
-    void refresh();
-    // Same visibility gate as the execution-task poll above: don't spend
-    // cycles asking about llama.cpp state while the window is backgrounded.
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refresh();
-    }, 2000);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [api, onSessionExpired, selectedModelIsGGUF, setLlamacppStatus]);
+  const refreshLlamacppStatus = useCallback(async () => {
+    try {
+      const response = await api.system();
+      setLlamacppStatus(response.llamacpp ?? null);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+    }
+  }, [api, onSessionExpired, setLlamacppStatus]);
+  useVisiblePolling(refreshLlamacppStatus, 2000, selectedModelIsGGUF);
 
   const visibleExecutionTasks = system?.execution_preview_available
     ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
