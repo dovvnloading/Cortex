@@ -1,9 +1,10 @@
-"""Build the local Cortex FastAPI application and its durable dependencies.
+"""Build the Cortex application and its durable dependencies.
 
-This module is the composition root. It has no entry point of its own:
-``main.py`` calls :func:`build_preview_app` and owns the process --
-instance lock, frontend build, WebView2 runtime, handoff secret, signal
-handling, and startup diagnostics.
+This is the composition root: it wires the chat store, settings, permanent
+memory, model catalog, llama.cpp runtime, and execution lifecycle into one
+FastAPI app. It has no entry point of its own -- ``main.py`` calls
+:func:`build_app` and owns the process (instance lock, frontend build, WebView2
+runtime, handoff secret, signal handling, startup diagnostics).
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from cortex_backend.services.model_catalog import CombinedModelCatalog  # noqa: 
 from cortex_backend.services.models import ModelService  # noqa: E402
 
 
-def build_preview_app(
+def build_app(
     *,
     data_dir: Path | None = None,
     frontend_dist: Path | None = None,

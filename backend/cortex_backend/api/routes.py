@@ -116,7 +116,7 @@ EXECUTION_STREAM_HEARTBEAT_SECONDS = 15.0
 # JobRegistry.shutdown (api/jobs.py) awaits it unboundedly. Left unbounded,
 # a hung or very slow local model would block app shutdown for as long as
 # the model runtime's own HTTP read timeout (600s -- see the
-# ``httpx.Timeout`` construction in Cortex_Preview.py and
+# ``httpx.Timeout`` construction in app_factory.py and
 # llamacpp/chat_client.py). Bound the call ourselves, well short of that,
 # so a hung title model degrades to the existing best-effort fallback
 # instead of stalling shutdown.
