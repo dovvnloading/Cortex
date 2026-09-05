@@ -1536,15 +1536,26 @@ def _last_event_cursor(request: Request, value: str | None = None) -> int:
 
 
 def _poll_execution_stream(repository, job_id: str, owner: str, after_sequence: int):
-    """Read new events and the current job in one trip off the event loop.
+    """Read the current job and its new events in one trip off the event loop.
 
     Both calls are synchronous SQLite. Pairing them here means the SSE stream
-    pays one thread hop per tick instead of two, and sees an event batch and a
-    job status read taken at the same point in time.
+    pays one thread hop per tick instead of two.
+
+    The job is read FIRST, and the order is load-bearing. The two reads open
+    separate connections, and the consumer stops as soon as the job row is
+    terminal -- so with the events read first, a transition committing between
+    them yields the pre-transition batch alongside a terminal job, and the
+    terminal event is never delivered. The client just sees the stream close.
+
+    ``transition()`` writes the status update and its event inside one
+    BEGIN IMMEDIATE transaction, so they become visible together. Reading the
+    job first therefore makes the pair safe in both directions: a terminal job
+    read guarantees the event read that follows can see the terminal event,
+    and a non-terminal read simply polls again.
     """
 
-    events = repository.events(job_id, after_sequence=after_sequence)
-    return events, repository.get_job(job_id, owner=owner)
+    job = repository.get_job(job_id, owner=owner)
+    return repository.events(job_id, after_sequence=after_sequence), job
 
 
 def _execution_sse_line(event: ExecutionEvent) -> str:
