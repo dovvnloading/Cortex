@@ -1177,3 +1177,63 @@ describe("ChatPage composer integration", () => {
     expect(api.generate).not.toHaveBeenCalled();
   });
 });
+
+describe("ChatPage reload failure recovery", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    useChatStore.setState({ generationOptionsByThread: {} });
+  });
+
+  it("does not strand the transcript on the spinner when a resumed generation's reload fails", async () => {
+    // Reachable by leaving the chat while it generates and coming back: the
+    // route load is still in flight when the resumed stream reports
+    // completion. reconcileChat bumps the shared request version -- which
+    // makes that pending load return early as stale -- and if its own fetch
+    // then fails without settling the load state, nothing ever does. The
+    // loading branch renders before the error branch, so the user is left on
+    // "Loading conversation..." with no Retry.
+    window.sessionStorage.setItem(
+      "cortex.active.generation",
+      JSON.stringify({ jobId: "job-resumed", threadId: "thread-a", lastEventId: 0 }),
+    );
+
+    let releasePendingLoad: (() => void) | null = null;
+    let calls = 0;
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => {
+        calls += 1;
+        if (calls === 1) {
+          // The route load that is still in flight when completion arrives.
+          await new Promise<void>((resolve) => {
+            releasePendingLoad = resolve;
+          });
+          return emptyChat(id);
+        }
+        // reconcileChat's own fetch, failing the way a transient error would.
+        throw new ApiError(503, "Service Unavailable");
+      }),
+      streamGeneration: vi.fn(async (_jobId, onEvent) => {
+        (onEvent as (event: unknown) => void)({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: "job-resumed",
+          thread_id: "thread-a",
+          data: {},
+        });
+      }),
+    });
+
+    renderChat(api);
+
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+    await act(async () => {
+      releasePendingLoad?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+    });
+  });
+});
