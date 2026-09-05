@@ -1468,6 +1468,17 @@ class ExecutionRepository:
                         "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
                         (artifact_id,),
                     )
+                # Artifacts live one directory per job, and removing the last
+                # file left the directory itself behind forever. Every
+                # attachment and every execution added one, so a long-lived
+                # workspace accumulates empty directories without bound.
+                # rmdir only succeeds when it is genuinely empty, so a job
+                # with artifacts still retained keeps its directory.
+                for directory in (path.parent, quarantine.parent):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
         return removed
 
     @staticmethod
