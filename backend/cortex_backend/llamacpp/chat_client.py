@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import queue
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -204,24 +203,23 @@ class LlamaCppChatClient:
         cancellation_event: Event,
         api_key: str | None,
     ) -> dict:
-        """Streamed request whose consumption is checked against
-        cancellation_event between chunks, so closing the response (which
-        releases llama-server's slot) happens promptly on Stop instead of
-        only after the model finishes on its own."""
+        """Streamed request that stops promptly when the caller asks to stop.
+
+        The stream is consumed on this thread. A single watcher thread does
+        nothing but close the response when cancellation fires, because
+        closing is what unblocks a read already in flight -- waiting for the
+        next chunk to arrive would make Stop as slow as the model.
+        """
         body = _build_request_body(messages, options, stream=True)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         usage: dict | None = None
         timings: dict | None = None
         self._begin_http_request()
-        reader: Thread | None = None
-        # Set once the consumer below is finished reading, by any exit path
-        # ([DONE], a raised error, or cancellation). Without this, a producer
-        # that finishes after the consumer has already returned retries
-        # `lines.put(...)` against a queue nobody drains until
-        # cancellation_event -- a shared, per-turn flag that a normal
-        # successful completion never sets -- forever.
-        reader_done = Event()
+        watcher: Thread | None = None
+        # Set on every exit path so the watcher retires immediately after a
+        # normal completion instead of lingering until the next cancellation.
+        finished = Event()
         try:
             with self._http.stream(
                 "POST",
@@ -237,58 +235,25 @@ class LlamaCppChatClient:
                         _server_error_detail(exc.response),
                         status_code=exc.response.status_code,
                     ) from exc
-                lines: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
-                done = object()
 
-                def stopped() -> bool:
-                    return cancellation_event.is_set() or reader_done.is_set()
+                def close_on_cancel() -> None:
+                    while not finished.is_set():
+                        if cancellation_event.wait(0.05):
+                            # Releases llama-server's slot and unblocks the
+                            # read below, whether or not a token ever arrived.
+                            response.close()
+                            return
 
-                def read_lines() -> None:
-                    try:
-                        for line in response.iter_lines():
-                            if stopped():
-                                return
-                            while not stopped():
-                                try:
-                                    lines.put(("line", line), timeout=0.05)
-                                    break
-                                except queue.Full:
-                                    continue
-                    except BaseException as exc:  # noqa: BLE001 - pass transport errors to caller
-                        while not stopped():
-                            try:
-                                lines.put(("error", exc), timeout=0.05)
-                                break
-                            except queue.Full:
-                                continue
-                    finally:
-                        while not stopped():
-                            try:
-                                lines.put(("done", done), timeout=0.05)
-                                break
-                            except queue.Full:
-                                continue
-
-                reader = Thread(target=read_lines, name="llama-chat-reader", daemon=True)
-                reader.start()
+                watcher = Thread(
+                    target=close_on_cancel,
+                    name="llama-chat-cancel-watch",
+                    daemon=True,
+                )
+                watcher.start()
                 try:
-                    while not cancellation_event.is_set():
-                        try:
-                            kind, payload = lines.get(timeout=0.05)
-                        except queue.Empty:
-                            continue
-                        if kind == "error":
-                            if isinstance(payload, httpx.TransportError):
-                                raise payload
-                            cause = payload if isinstance(payload, BaseException) else None
-                            raise RuntimeError(
-                                "The llama.cpp response reader failed."
-                            ) from cause
-                        if kind == "done":
+                    for line in response.iter_lines():
+                        if cancellation_event.is_set():
                             break
-                        if not isinstance(payload, str):
-                            continue
-                        line = payload
                         if not line or not line.startswith("data:"):
                             continue
                         payload = line[len("data:"):].strip()
@@ -314,13 +279,15 @@ class LlamaCppChatClient:
                             usage = chunk["usage"]
                         if chunk.get("timings"):
                             timings = chunk["timings"]
+                except Exception:
+                    # Closing the response mid-read is how cancellation works,
+                    # and the read reports that however the transport chooses.
+                    # Anything raised after the caller asked to stop is that,
+                    # not a failure worth surfacing.
+                    if not cancellation_event.is_set():
+                        raise
                 finally:
-                    # Tell the producer to stop retrying now, before this
-                    # `with` block's __exit__ closes the response below --
-                    # closing is what actually unblocks a read in flight, so
-                    # the reader is joined only after that has happened (see
-                    # the outer `finally`), never here.
-                    reader_done.set()
+                    finished.set()
         except httpx.TransportError as exc:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."
@@ -332,8 +299,9 @@ class LlamaCppChatClient:
                 "The local llama.cpp chat client is unavailable; restart Cortex."
             ) from exc
         finally:
-            if reader is not None:
-                reader.join(timeout=2.0)
+            finished.set()
+            if watcher is not None:
+                watcher.join(timeout=2.0)
             self._end_http_request()
         # Reuse the existing non-streamed adapter by handing it a payload
         # shaped the same way -- accumulated deltas standing in for the
