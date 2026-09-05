@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -37,6 +38,7 @@ DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
+_LOGGER = logging.getLogger("cortex.execution.repository")
 _SCHEMA_LOCK = RLock()
 
 
@@ -153,8 +155,56 @@ class ExecutionRepository:
         self.quarantine_root.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(self.quarantine_root) or _has_reparse_parent(self.quarantine_root):
             raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+        self._rebuild_if_damaged()
         with _SCHEMA_LOCK:
             self._ensure_schema_locked()
+
+    def _rebuild_if_damaged(self) -> None:
+        """Replace an unreadable execution store instead of refusing to start.
+
+        This database holds only transient bookkeeping -- jobs, events, leases
+        and artifact rows -- and it is written on every job, every event and
+        every lease renewal, so it is the store most exposed to an unclean
+        shutdown. It is also the first dependency the app builds, and unlike
+        the chat and settings stores it has no backup and no recovery. A torn
+        page therefore took the whole application down: no chat, no settings,
+        nothing, over disposable state.
+
+        Nothing here is authored by the user, so rebuilding is both the
+        cheapest and the most correct answer. The damaged file is kept beside
+        the new one for inspection rather than deleted.
+        """
+        if not self.db_path.exists():
+            return
+        try:
+            connection = sqlite3.connect(self.db_path)
+            try:
+                result = connection.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                connection.close()
+            if result is not None and str(result[0]).lower() == "ok":
+                return
+        except sqlite3.Error:
+            pass  # Unreadable at all: the same answer.
+
+        damaged = self.db_path.with_name(f"{self.db_path.name}.damaged-{uuid4().hex}")
+        try:
+            os.replace(self.db_path, damaged)
+        except OSError as exc:
+            raise ExecutionRepositoryError(
+                "The execution store is damaged and could not be replaced."
+            ) from exc
+        for suffix in ("-wal", "-shm"):
+            # They describe the file just moved aside, so SQLite must not
+            # replay them onto the empty replacement.
+            try:
+                self.db_path.with_name(f"{self.db_path.name}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
+        _LOGGER.error(
+            "The execution store was unreadable and has been rebuilt. "
+            "In-flight job state was lost; the damaged file was kept for inspection."
+        )
 
     def _ensure_schema_locked(self) -> None:
         with self.connect() as connection:
