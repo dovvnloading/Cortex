@@ -36,6 +36,7 @@ from .recipes import ImageTransformPlan, RecipeValidationError, parse_image_tran
 from .repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
+    ExecutionTransitionConflict,
     LeaseConflict,
 )
 
@@ -533,14 +534,24 @@ class RecipeExecutionCoordinator:
                 self._delete_published(published)
                 published = ()
                 raise RecipeExecutionError("cancelled")
-            self.repository.transition(
-                job_id,
-                status="succeeded",
-                event="completed",
-                phase="completed",
-                data={"message": "Image recipe completed."},
-                result=self._result(output, published[0], request.plan),
-            )
+            try:
+                self.repository.transition(
+                    job_id,
+                    status="succeeded",
+                    event="completed",
+                    phase="completed",
+                    data={"message": "Image recipe completed."},
+                    result=self._result(output, published[0], request.plan),
+                    # The check above is a read. A Stop committing between it
+                    # and this write would otherwise be overwritten, leaving
+                    # the user told that cancelled work succeeded -- with an
+                    # artifact they never accepted still published.
+                    expected_status="running",
+                )
+            except ExecutionTransitionConflict:
+                self._delete_published(published)
+                published = ()
+                raise RecipeExecutionError("cancelled") from None
         except RecipeExecutionError as execution_error:
             failure_code = execution_error.code
             if published:
