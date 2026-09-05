@@ -41,6 +41,35 @@ class SessionPrincipal:
     issued_at: datetime
 
 
+_BRACKETED_AUTHORITY = re.compile(r"^\[(?P<address>[^\[\]]*)\](?::\d{1,5})?$")
+
+
+def _parse_host_header(raw_host: str) -> str:
+    """Return the lowercase hostname, or "" when the header is malformed.
+
+    Not urlsplit alone, for two reasons. It raises on an unbalanced bracket
+    ("[::1", "["), and this runs before any credential is examined on every
+    route -- so an uncaught error there is an unauthenticated 500 rather than
+    the 400 the allowed-hosts check below is written to produce.
+
+    And it disagrees with itself across versions. On 3.12+ "[::1]evil.com"
+    raises; on 3.10 and 3.11 -- including the 3.11 this ships on -- it returns
+    "::1", so trailing junk after a bracketed literal silently passed the host
+    allowlist. A bracketed authority is validated here instead, identically on
+    every supported version: after the closing bracket only an optional :port
+    may follow.
+    """
+    if raw_host.startswith("[") or raw_host.endswith("]"):
+        match = _BRACKETED_AUTHORITY.match(raw_host)
+        if match is None:
+            return ""
+        return match.group("address").lower()
+    try:
+        return (urlsplit(f"//{raw_host}").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 class SessionManager:
     """Issue one-time bootstrap exchanges and short-lived bearer sessions."""
 
@@ -178,8 +207,7 @@ class SessionManager:
         return len(expired)
 
     def validate_request_context(self, request: Request) -> None:
-        raw_host = request.headers.get("host") or ""
-        host = (urlsplit(f"//{raw_host}").hostname or "").lower()
+        host = _parse_host_header(request.headers.get("host") or "")
         if host not in self._allowed_hosts:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

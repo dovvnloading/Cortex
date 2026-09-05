@@ -99,6 +99,10 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
     ) -> MemoryResponse:
         try:
             return MemoryResponse(memos=deps.memories.add_memo(payload.memo))
+        except ValueError as exc:
+            # Reaching the memory limit is an expected outcome the user can
+            # act on, not a server fault. Report it as one, with the reason.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("save memory", exc)
 
@@ -111,6 +115,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
     ) -> MemoryResponse:
         try:
             return MemoryResponse(memos=deps.memories.replace_memos(payload.memos))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("replace memories", exc)
 

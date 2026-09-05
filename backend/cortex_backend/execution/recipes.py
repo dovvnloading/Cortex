@@ -19,6 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 MAX_IMAGE_STEPS = 8
 MAX_IMAGE_DIMENSION = 16_384
+# The provider's own ceiling (recipe_provider.MAX_PIXELS). Duplicated as a
+# plain constant so parsing a plan does not import the imaging stack.
+MAX_PIXELS = 64 * 1024 * 1024
 MAX_RECIPE_PAYLOAD_BYTES = 64 * 1024
 MAX_DECIMAL_ABS = Decimal("1e12")
 MAX_RESULT_ABS = Decimal("1e24")
@@ -151,11 +154,29 @@ class CropStep(_StrictModel):
     width: Annotated[int, Field(strict=True, ge=1, le=MAX_IMAGE_DIMENSION)]
     height: Annotated[int, Field(strict=True, ge=1, le=MAX_IMAGE_DIMENSION)]
 
+    @model_validator(mode="after")
+    def _bound_the_pixel_count(self) -> CropStep:
+        """Same budget as resize; a crop region is allocated the same way."""
+        if self.width * self.height > MAX_PIXELS:
+            raise ValueError("crop region exceeds the supported pixel budget")
+        return self
+
 
 class ResizeStep(_StrictModel):
     op: Literal["resize"]
     width: Annotated[int, Field(strict=True, ge=1, le=MAX_IMAGE_DIMENSION)]
     height: Annotated[int, Field(strict=True, ge=1, le=MAX_IMAGE_DIMENSION)]
+
+    @model_validator(mode="after")
+    def _bound_the_pixel_count(self) -> ResizeStep:
+        # Each side was bounded and their product was not, so a few hundred
+        # bytes of JSON asking for 16384x16384 made a worker allocate about
+        # 2.2 GB before failing. The provider already enforces MAX_PIXELS; a
+        # plan that cannot possibly satisfy it should be refused at parse
+        # time rather than after the memory is spent.
+        if self.width * self.height > MAX_PIXELS:
+            raise ValueError("resize target exceeds the supported pixel budget")
+        return self
 
 
 class RotateStep(_StrictModel):
