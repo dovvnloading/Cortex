@@ -209,7 +209,17 @@ class LocalExecutionCoordinator:
                 or self._canonical_payload(job.payload) != self._canonical_payload(payload)
             ):
                 raise CodeExecutionError("request_conflict")
-            if job.status not in TerminalExecutionStatus and job.status != "cancelling":
+            if (
+                job.status not in TerminalExecutionStatus
+                and job.status != "cancelling"
+                # The approval row is written in a second transaction, so a
+                # duplicate landing in that gap sees the job but not yet its
+                # approval. Launching then would run a worker that finds no
+                # approval and fails the whole job "approval_required" --
+                # killing the original submission the user is waiting on.
+                # The creating call launches it itself once the row commits.
+                and job.approval_state != "not_required"
+            ):
                 self._launch_code(job.job_id)
             return job
         try:
@@ -350,6 +360,12 @@ class LocalExecutionCoordinator:
         self.repository.claim_supervisor_lease(
             lease_owner=self._supervisor_owner,
             ttl_seconds=self.supervisor_lease_seconds,
+            # A lease left behind by a killed process would otherwise block
+            # every execution capability for the rest of its 60s TTL, so
+            # reopening Cortex after a crash silently lost safe compute, code
+            # execution and image recipes. The launcher's instance lock means
+            # no live process can be holding this one.
+            reclaim_stale=True,
         )
         self._supervisor_lease_active = True
         try:
