@@ -827,14 +827,21 @@ class LocalExecutionCoordinator:
             current = self.repository.get_job(job_id)
             if cancel_event.is_set() or (current is not None and current.status == "cancelling"):
                 raise ScratchComputeError("cancelled")
-            self.repository.transition(
-                job_id,
-                status="succeeded",
-                event="completed",
-                phase="completed",
-                data={"message": "Safe computation completed."},
-                result=scratch_result_payload(result.value),
-            )
+            try:
+                self.repository.transition(
+                    job_id,
+                    status="succeeded",
+                    event="completed",
+                    phase="completed",
+                    data={"message": "Safe computation completed."},
+                    result=scratch_result_payload(result.value),
+                    # The check above is a read; a Stop committing between it
+                    # and this write would otherwise be overwritten, and the
+                    # user would be told the work they cancelled succeeded.
+                    expected_status="running",
+                )
+            except ExecutionTransitionConflict:
+                raise ScratchComputeError("cancelled") from None
         except ScratchComputeError as exc:
             self._finish_scratch_failure(job_id, cancel_event, exc.code)
         except LeaseConflict:
