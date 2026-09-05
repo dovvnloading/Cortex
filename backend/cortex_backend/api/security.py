@@ -179,7 +179,15 @@ class SessionManager:
 
     def validate_request_context(self, request: Request) -> None:
         raw_host = request.headers.get("host") or ""
-        host = (urlsplit(f"//{raw_host}").hostname or "").lower()
+        try:
+            host = (urlsplit(f"//{raw_host}").hostname or "").lower()
+        except ValueError:
+            # An unbalanced IPv6 bracket ("[::1", "[") makes urlsplit raise.
+            # This runs before any credential check, on every route, so an
+            # uncaught error here is an unauthenticated 500. Treat it as no
+            # host: the allowed-hosts check below turns it into the 400 it
+            # was always meant to be.
+            host = ""
         if host not in self._allowed_hosts:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

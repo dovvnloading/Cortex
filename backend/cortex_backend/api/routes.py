@@ -1529,6 +1529,9 @@ def _code_job_fields(job: ExecutionJob, *, include_result: bool = False) -> dict
     return fields
 
 
+_MAX_SQLITE_INTEGER = 2**63 - 1
+
+
 def _last_event_cursor(request: Request, value: str | None = None) -> int:
     raw = request.headers.get("last-event-id", "0") if value is None else value
     try:
@@ -1537,6 +1540,13 @@ def _last_event_cursor(request: Request, value: str | None = None) -> int:
         raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer.") from exc
     if cursor < 0:
         raise HTTPException(status_code=400, detail="Last-Event-ID must be non-negative.")
+    if cursor > _MAX_SQLITE_INTEGER:
+        # Binding a larger value raises OverflowError inside the streaming
+        # generator -- after the 200 and its headers are already on the wire,
+        # so the client sees a successful response with a truncated body that
+        # never terminates. Refuse it while a real status code is still
+        # possible.
+        raise HTTPException(status_code=400, detail="Last-Event-ID is out of range.")
     return cursor
 
 

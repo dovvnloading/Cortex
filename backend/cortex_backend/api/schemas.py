@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from unicodedata import category
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -277,7 +277,10 @@ class AddMemoryRequest(APIModel):
 
 
 class ReplaceMemoryRequest(APIModel):
-    memos: list[str] = Field(max_length=100)
+    # Same per-item bound as AddMemoryRequest.memo above. Without it an
+    # oversized entry reached the store, which raises, and the route reported
+    # a 500 for input its POST sibling rejects cleanly with a 422.
+    memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
 
 
 class ClearMemoryRequest(APIModel):
