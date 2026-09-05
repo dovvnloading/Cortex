@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from bisect import bisect_right
+from itertools import count
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 import json
@@ -35,6 +36,10 @@ TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
 # in the event object and the job snapshot even when an event payload is
 # compacted.
 DEFAULT_MAX_EVENT_COUNT = 256
+# How far past the normal retention limit the buffer may grow to keep an
+# attached reader whole. Beyond this a reader is not keeping up, and the
+# documented "lower bound, not a replay promise" contract applies again.
+LIVE_READER_EVENT_HEADROOM = 8
 DEFAULT_MAX_EVENT_BYTES = 1_048_576
 _EVENT_DATA_TRUNCATED = "Event data omitted because it exceeded the retention limit."
 
@@ -121,6 +126,10 @@ class _JobRecord:
     result: Mapping[str, Any] | None = None
     events: list[JobEvent] = field(default_factory=list)
     event_bytes: int = 0
+    # Sequence already delivered to each attached reader, keyed by an id
+    # unique to that reader. Retention exists to bound memory for a client
+    # that reconnects, not to drop events from one that is still attached.
+    live_cursors: dict[int, int] = field(default_factory=dict)
     task: asyncio.Task[Any] | None = None
 
 
@@ -245,6 +254,8 @@ class JobRegistry:
         self._max_terminal_jobs = max_terminal_jobs
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._max_event_count = max_event_count
+        self._reader_ids = count(1)
+        self._max_live_reader_events = max_event_count * LIVE_READER_EVENT_HEADROOM
         self._max_event_bytes = max_event_bytes
         self._records: dict[str, _JobRecord] = {}
         self._active: dict[JobKind, str] = {}
@@ -561,6 +572,17 @@ class JobRegistry:
             raise ValueError("after_sequence must be non-negative")
         record = self._owned_record(job_id, owner)
         cursor = after_sequence
+        reader_id = next(self._reader_ids)
+        with self._lock:
+            record.live_cursors[reader_id] = cursor
+        try:
+            async for event in self._drain(record, reader_id, cursor):
+                yield event
+        finally:
+            with self._lock:
+                record.live_cursors.pop(reader_id, None)
+
+    async def _drain(self, record, reader_id: int, cursor: int):
         while True:
             with self._lock:
                 # record.events is appended in sequence order and evicted from
@@ -576,6 +598,11 @@ class JobRegistry:
                 for event in pending:
                     cursor = event.sequence
                     yield event
+                with self._lock:
+                    # Publish progress so eviction knows how far this reader
+                    # has actually got, not just where it started.
+                    if reader_id in record.live_cursors:
+                        record.live_cursors[reader_id] = cursor
                 continue
             if terminal:
                 return
@@ -799,6 +826,18 @@ class JobRegistry:
         )
         record.events.append(event)
         record.event_bytes += retained_bytes
+        # A producer can publish a long run of deltas without ever yielding to
+        # the event loop, so an attached reader parked in its poll sleep could
+        # have the events it had not read yet evicted out from under it -- on a
+        # connection that never dropped. Hold the line at the slowest attached
+        # reader, but only up to a ceiling: a reader that falls this far behind
+        # is not keeping up, and memory matters more than its replay.
+        slowest = min(record.live_cursors.values(), default=None)
+        protected_from = (
+            bisect_right(record.events, slowest, key=lambda item: item.sequence)
+            if slowest is not None
+            else len(record.events)
+        )
         while (
             len(record.events) > self._max_event_count
             or record.event_bytes > self._max_event_bytes
@@ -808,7 +847,12 @@ class JobRegistry:
             # terminal event survives aggressive retention settings.
             if len(record.events) == 1:
                 break
+            if protected_from <= 0 and len(record.events) <= self._max_live_reader_events:
+                # Everything left is still unread by an attached reader, and
+                # the buffer is inside its headroom. Keep it.
+                break
             evicted = record.events.pop(0)
+            protected_from = max(0, protected_from - 1)
             record.event_bytes -= _event_data_bytes(evicted.data) or 0
         return event
 
