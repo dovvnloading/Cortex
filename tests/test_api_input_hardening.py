@@ -73,6 +73,29 @@ def client():
         yield c
 
 
+@pytest.mark.parametrize(
+    ("raw_host", "expected"),
+    [
+        ("[::1", ""),
+        ("[", ""),
+        ("[:evil.com", ""),
+        # urlsplit raises on this from 3.12, but returns "::1" on 3.10 and
+        # 3.11 -- including the 3.11 this ships on -- so trailing junk after a
+        # bracketed literal used to pass the host allowlist. CI caught the
+        # difference; the parser no longer depends on the interpreter version.
+        ("[::1]evil.com", ""),
+        ("[::1]", "::1"),
+        ("[::1]:8080", "::1"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("localhost:5173", "localhost"),
+    ],
+)
+def test_the_host_parser_agrees_on_every_python_version(raw_host: str, expected: str) -> None:
+    from cortex_backend.api.security import _parse_host_header
+
+    assert _parse_host_header(raw_host) == expected
+
+
 @pytest.mark.parametrize("raw_host", ["[::1", "[", "[:evil.com", "[::1]evil.com"])
 def test_a_malformed_host_header_is_a_400_not_a_500(client, raw_host: str) -> None:
     """urlsplit raises on an unbalanced bracket.
