@@ -175,4 +175,7 @@ def test_combined_catalog_merges_ollama_and_gguf(tmp_path: Path) -> None:
     assert set(catalog.list_installed()) == names
 
     assert catalog.model_supports_vision("qwen3:8b") is True
-    assert catalog.model_supports_vision("gguf:local.gguf") is None
+    # False, not None: every gate that reads this tests `is False`, so
+    # None meant an attached image was accepted, announced in the prompt,
+    # and then stripped before the request reached the model.
+    assert catalog.model_supports_vision("gguf:local.gguf") is False
