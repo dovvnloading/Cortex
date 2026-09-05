@@ -10,6 +10,21 @@ import { useModelStore } from "../stores/useModelStore";
 import { ToastProvider } from "./ToastProvider";
 
 describe("App", () => {
+  /**
+   * Open Settings and wait for its lazily-imported panel.
+   *
+   * SettingsPanel is a React.lazy dynamic import, so the first click renders a
+   * Suspense fallback while vitest resolves and transforms the module. Under a
+   * full 31-file run that resolution can outlast findBy's 1s default, which
+   * made this an intermittent "Unable to find role=button name=AI Model".
+   */
+  const openModelSettings = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(
+      await screen.findByRole("button", { name: "AI Model" }, { timeout: 10_000 }),
+    );
+  };
+
   afterEach(() => {
     useModelStore.getState().setLlamacppStatus(null);
     window.sessionStorage.clear();
@@ -176,8 +191,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     const user = userEvent.setup();
-    await user.click(screen.getByRole("link", { name: "Settings" }));
-    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await openModelSettings(user);
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));
 
     expect(await screen.findByRole("heading", { name: "Start local workspace" })).toBeVisible();
@@ -273,8 +287,7 @@ describe("App", () => {
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     const user = userEvent.setup();
-    await user.click(screen.getByRole("link", { name: "Settings" }));
-    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await openModelSettings(user);
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));
     await waitFor(() => expect(useModelStore.getState().models?.installed_models).toEqual(["rescanned-model"]));
 
@@ -743,8 +756,7 @@ describe("App", () => {
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     const user = userEvent.setup();
-    await user.click(screen.getByRole("link", { name: "Settings" }));
-    await user.click(await screen.findByRole("button", { name: "AI Model" }));
+    await openModelSettings(user);
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));
 
     expect(await screen.findByText((content) => content.includes(expected))).toBeVisible();
