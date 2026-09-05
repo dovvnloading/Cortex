@@ -548,7 +548,7 @@ def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) 
     renewal_seen = Event()
     claim_count = 0
 
-    def observed_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+    def observed_claim(*, lease_owner: str, ttl_seconds: float = 30.0, **_kwargs) -> str:
         nonlocal claim_count
         # The coordinator's 0.06s lease keeps the heartbeat fast (~20ms) so the
         # renewal is observed quickly, but a lease that short also expires
@@ -585,7 +585,7 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     release_renewal = Event()
     claim_count = 0
 
-    def blocked_claim(*, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+    def blocked_claim(*, lease_owner: str, ttl_seconds: float = 30.0, **_kwargs) -> str:
         nonlocal claim_count
         claim_count += 1
         if claim_count == 2:

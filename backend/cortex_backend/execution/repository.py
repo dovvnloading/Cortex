@@ -840,7 +840,23 @@ class ExecutionRepository:
                 expired.append(job_id)
         return expired
 
-    def claim_supervisor_lease(self, *, lease_owner: str, ttl_seconds: float = 30.0) -> str:
+    def claim_supervisor_lease(
+        self,
+        *,
+        lease_owner: str,
+        ttl_seconds: float = 30.0,
+        reclaim_stale: bool = False,
+    ) -> str:
+        """Claim the single recovery-supervisor lease.
+
+        ``reclaim_stale`` takes a lease still held by a different owner. Only
+        a process starting up may pass it, and only because the launcher holds
+        an OS-level per-profile instance lock for its whole lifetime: a second
+        Cortex cannot reach this code against the same data directory while
+        the first is alive. An unexpired lease with a foreign owner at startup
+        therefore belongs to a process that is already gone, and refusing it
+        would block every execution capability until the TTL ran out.
+        """
         if not lease_owner:
             raise ValueError("lease_owner must be non-empty")
         if ttl_seconds <= 0:
@@ -852,7 +868,12 @@ class ExecutionRepository:
             row = connection.execute(
                 "SELECT lease_owner, lease_expires_at FROM execution_supervisor_leases WHERE id = 1"
             ).fetchone()
-            if row is not None and datetime.fromisoformat(row["lease_expires_at"]) > now and row["lease_owner"] != lease_owner:
+            if (
+                row is not None
+                and not reclaim_stale
+                and datetime.fromisoformat(row["lease_expires_at"]) > now
+                and row["lease_owner"] != lease_owner
+            ):
                 raise LeaseConflict("Execution recovery supervisor is already running.")
             connection.execute(
                 """
