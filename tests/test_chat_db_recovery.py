@@ -6,6 +6,8 @@ store.
 """
 
 from pathlib import Path
+import shutil
+import sqlite3
 
 import pytest
 
@@ -124,3 +126,80 @@ def test_recovery_falls_back_to_older_verified_backup_generation(tmp_path: Path)
 
     assert recovered.load_chat("thread-1") == original
     assert recovered.load_chat("thread-1")["title"] == "Original title"
+
+
+def _abandon_an_uncheckpointed_write(manager: DatabaseManager, tmp_path: Path) -> tuple[Path, Path]:
+    """Capture a real -wal holding a committed frame, the way a crash leaves one.
+
+    Writing through a raw connection and copying the sidecar before closing
+    reproduces an unclean exit: the frame is committed to the log but not yet
+    folded back into the primary.
+    """
+    raw = sqlite3.connect(manager.db_path)
+    try:
+        raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("UPDATE threads SET title = 'written just before the crash' WHERE id = 'thread-1'")
+        raw.commit()
+        saved_wal = tmp_path / "captured.wal"
+        saved_shm = tmp_path / "captured.shm"
+        shutil.copy2(f"{manager.db_path}-wal", saved_wal)
+        shm = Path(f"{manager.db_path}-shm")
+        if shm.exists():
+            shutil.copy2(shm, saved_shm)
+    finally:
+        raw.close()
+    return saved_wal, saved_shm
+
+
+def test_recovery_discards_the_crashed_databases_write_ahead_log(tmp_path: Path) -> None:
+    """A restored primary must not inherit the dead database's write-ahead log.
+
+    The event that corrupts the primary -- a crash, a power loss, a forced
+    reboot -- is the same event that leaves an uncheckpointed -wal behind.
+    Once recovery replaces the primary with a verified backup, that log
+    describes a database that no longer exists. SQLite has no way to know
+    that, so the next connection replays it straight onto the replacement and
+    silently overwrites recovered rows with content from the file that was
+    just declared corrupt.
+
+    sqlite_settings.py discards the sidecars on this exact path and explains
+    why; this store copied the backup rotation without that step.
+    """
+    manager, original = _manager_with_data(tmp_path)
+    saved_wal, saved_shm = _abandon_an_uncheckpointed_write(manager, tmp_path)
+
+    # The crash itself: a torn primary, with the pre-crash log still on disk.
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    shutil.copy2(saved_wal, f"{manager.db_path}-wal")
+    if saved_shm.exists():
+        shutil.copy2(saved_shm, f"{manager.db_path}-shm")
+
+    recovered = DatabaseManager(
+        db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir
+    )
+
+    assert recovered.load_chat("thread-1") == original
+    assert not Path(f"{manager.db_path}-wal").exists()
+    assert not Path(f"{manager.db_path}-shm").exists()
+
+
+def test_a_failed_recovery_keeps_the_original_sidecars(tmp_path: Path) -> None:
+    """Rollback must be a true rollback.
+
+    When no backup is usable the corrupt primary is put back, so its sidecars
+    still describe it. Discarding them on that path would throw away the only
+    remaining copy of the most recent writes.
+    """
+    manager, _ = _manager_with_data(tmp_path)
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    Path(manager.backup_path).write_bytes(b"corrupt-backup")
+    Path(manager.previous_backup_path).write_bytes(b"corrupt-previous")
+    wal = Path(f"{manager.db_path}-wal")
+    wal.write_bytes(b"still describes the primary")
+
+    with pytest.raises(PersistenceError):
+        DatabaseManager(
+            db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir
+        )
+
+    assert wal.exists()
