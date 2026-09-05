@@ -62,7 +62,20 @@ def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: A
 
 
 class GenerationEngine(Protocol):
-    """Model-facing operations required by the generation use case."""
+    """Model-facing operations required by the generation use case.
+
+    This is the whole surface the use case calls, and both implementations --
+    the production SynthesisAgent and the deterministic test double -- provide
+    all of it. The service used to probe several of these members with
+    ``getattr`` for the benefit of "older adapters" that have never existed in
+    this repository; declaring them here is what let those probes go.
+    """
+
+    last_code_proposal: CodeExecutionProposal | None
+    last_code_rejection: CodeProposalRejection | None
+
+    def set_status_callback(self, callback: Callable[[str], None]) -> None:
+        """Receive startup progress while ``generate`` blocks."""
 
     def fit_memories_to_context(
         self,
@@ -73,6 +86,7 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
     ) -> list[str]:
         """Fit permanent memories into the configured context budget."""
 
@@ -87,9 +101,38 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
         attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         """Format the retained history for the model prompt."""
+
+    def fit_history(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        query: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
+        attachments: Sequence[GenerationAttachment] = (),
+    ) -> tuple[str, Sequence[Mapping[str, Any]]]:
+        """Return the flattened transcript and the structured history together.
+
+        One call returns both renderings because choosing which exchanges fit
+        is the expensive part and must not be done twice.
+        """
+
+    def generate_chat_title(
+        self,
+        chat_history: str,
+        *,
+        options: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Title a thread using the chat model's own context sizing."""
 
     def fit_attachments_to_context(
         self,
@@ -117,6 +160,8 @@ class GenerationEngine(Protocol):
         options: dict[str, Any],
         attachments: Sequence[GenerationAttachment] = (),
         cancellation_event: Event | None = None,
+        history_messages: Sequence[Mapping[str, Any]] | None = None,
+        host_observations: Sequence[Any] = (),
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """Generate a response and validated memory command."""
 
@@ -180,15 +225,9 @@ class GenerationService:
         num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
         self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
         engine = self._engine_factory(snapshot)
-        # ``fit_history`` marks an engine that understands the newer prompt
-        # shape, which is also the one that renders host observations. Older
-        # engines neither accept nor render them, so the extra argument is
-        # withheld rather than probed for.
-        observation_kwargs: dict[str, Any] = (
-            {"host_observations": snapshot.host_observations}
-            if callable(getattr(engine, "fit_history", None))
-            else {}
-        )
+        observation_kwargs: dict[str, Any] = {
+            "host_observations": snapshot.host_observations
+        }
         if snapshot.memories_enabled:
             permanent_memories = engine.fit_memories_to_context(
                 permanent_memories,
@@ -200,15 +239,12 @@ class GenerationService:
                 **observation_kwargs,
             )
 
-        # Optional: lets an engine (e.g. one backed by a locally-managed
-        # llama.cpp runtime) report its own startup progress -- binary
-        # download, model load -- while generate() below blocks. Most
-        # engines don't need this and simply won't define the setter.
-        status_setter = getattr(engine, "set_status_callback", None)
-        if callable(status_setter):
-            status_setter(
-                lambda message: self._publish(sink, snapshot, "loading_model", message)
-            )
+        # Lets an engine backed by a locally-managed llama.cpp runtime report
+        # its own startup progress -- binary download, model load -- while
+        # generate() below blocks.
+        engine.set_status_callback(
+            lambda message: self._publish(sink, snapshot, "loading_model", message)
+        )
 
         self._check_cancelled(cancellation_event)
         loaded_history = (
@@ -228,9 +264,8 @@ class GenerationService:
         # against the real, now-correctly-sized chat_history -- this pass
         # only determines how much room history should leave.
         reserved_attachments: Sequence[GenerationAttachment] = ()
-        fit_attachments = getattr(engine, "fit_attachments_to_context", None)
-        if snapshot.attachments and callable(fit_attachments):
-            reserved_attachments = fit_attachments(
+        if snapshot.attachments:
+            reserved_attachments = engine.fit_attachments_to_context(
                 snapshot.attachments,
                 query=snapshot.user_input,
                 chat_history="No history available.",
@@ -262,16 +297,9 @@ class GenerationService:
         # part and must not be done twice. Engines that do not offer it (the
         # narrower fakes in the test suite, and any older adapter) keep the
         # flattened transcript.
-        structured_history: Sequence[Mapping[str, Any]] | None = None
-        fit_history = getattr(engine, "fit_history", None)
-        if callable(fit_history):
-            chat_history, structured_history = fit_history(
-                working_history, **history_kwargs
-            )
-        else:
-            chat_history = engine.fit_history_to_context(
-                working_history, **history_kwargs
-            )
+        chat_history, structured_history = engine.fit_history(
+            working_history, **history_kwargs
+        )
 
         self._check_cancelled(cancellation_event)
         generate_kwargs: dict[str, Any] = {
@@ -290,15 +318,7 @@ class GenerationService:
             generate_kwargs["attachments"] = snapshot.attachments
         if cancellation_event is not None:
             generate_kwargs["cancellation_event"] = cancellation_event
-        if structured_history is not None:
-            # Safe to pass unguarded: the two are one capability on the engine.
-            # An engine that can select structured history is by construction
-            # one whose generate() accepts it, so there is no signature to
-            # probe -- and retrying on TypeError would be actively harmful,
-            # because a TypeError raised from *inside* a working generate()
-            # would be indistinguishable from a signature mismatch and would
-            # silently run the model a second time.
-            generate_kwargs["history_messages"] = structured_history
+        generate_kwargs["history_messages"] = structured_history
         response, thoughts, memory_command, stats = engine.generate(
             **generate_kwargs,
         )
@@ -310,12 +330,12 @@ class GenerationService:
         if not snapshot.memories_enabled:
             memory_command = MemoryCommand()
 
-        proposal = getattr(engine, "last_code_proposal", None)
+        proposal = engine.last_code_proposal
         if not snapshot.code_execution_eligible or not isinstance(
             proposal, CodeExecutionProposal
         ):
             proposal = None
-        rejection = getattr(engine, "last_code_rejection", None)
+        rejection = engine.last_code_rejection
         if not isinstance(rejection, CodeProposalRejection) or proposal is not None:
             rejection = None
 
@@ -369,19 +389,13 @@ class GenerationService:
         stall or invalidate an otherwise successful response.
         """
         engine = self._engine_factory(snapshot)
-        title_generator = getattr(engine, "generate_chat_title", None)
-        if not callable(title_generator):
-            return None
         try:
-            return _call_with_optional_kwargs(
-                title_generator,
+            return engine.generate_chat_title(
                 self._title_history(snapshot.user_input, response),
                 # The title reuses the chat model, so it must also reuse the
                 # chat's context sizing -- otherwise the runtime is asked for
                 # a differently-configured copy of a model it already has
-                # loaded, and reloads it. An engine predating the options
-                # parameter (older adapters, and the narrower fakes in the
-                # test suite) still titles correctly, without it.
+                # loaded, and reloads it.
                 options=dict(snapshot.model_options),
             )
         except Exception as exc:  # defensive boundary for optional work

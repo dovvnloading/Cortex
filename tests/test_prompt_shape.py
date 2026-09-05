@@ -458,27 +458,53 @@ def test_the_real_engine_reaches_the_runtime_as_a_conversation() -> None:
     assert "## CONVERSATION HISTORY" not in client.messages[-1]["content"]
 
 
-def test_an_engine_without_structured_history_still_gets_a_transcript() -> None:
-    """Backward compatibility: the flattened path must keep working."""
+def test_the_service_uses_both_renderings_the_engine_returns() -> None:
+    """``fit_history`` returns the flattened and structured forms together.
 
-    class _LegacyEngine:
+    This replaces a test that built a "legacy engine" without structured
+    history to prove a fallback path still worked. No such engine has ever
+    existed here -- there are two, and both return both forms -- so the
+    fallback was dead code guarded by a double of nothing.
+    """
+
+    transcript = "User: earlier" + chr(10) + "AI: reply"
+
+    class _RecordingEngine:
         def __init__(self) -> None:
             self.chat_history: str | None = None
+            self.history_messages = None
+            self.last_code_proposal = None
+            self.last_code_rejection = None
+
+        def set_status_callback(self, callback):
+            del callback
 
         def fit_memories_to_context(self, memories, **kwargs):
+            del kwargs
             return list(memories)
 
         def fit_history_to_context(self, messages, **kwargs):
-            return "User: earlier\nAI: reply"
+            del messages, kwargs
+            return transcript
+
+        def fit_history(self, messages, **kwargs):
+            return self.fit_history_to_context(messages, **kwargs), list(messages)
+
+        def fit_attachments_to_context(self, attachments, **kwargs):
+            del kwargs
+            return tuple(attachments)
 
         def generate(self, *, query, chat_history, permanent_memories, memories_enabled,
                      user_system_instructions, options, **kwargs):
+            del query, permanent_memories, memories_enabled
+            del user_system_instructions, options
             self.chat_history = chat_history
+            self.history_messages = kwargs.get("history_messages")
             from cortex_backend.core.generation import MemoryCommand
 
             return "ok", None, MemoryCommand(), None
 
-    engine = _LegacyEngine()
+    engine = _RecordingEngine()
     service = GenerationService(
         history_loader=lambda _thread_id: _HISTORY,
         memory_loader=list,
@@ -488,7 +514,9 @@ def test_an_engine_without_structured_history_still_gets_a_transcript() -> None:
     result = service.generate(_snapshot())
 
     assert result.response == "ok"
-    assert engine.chat_history == "User: earlier\nAI: reply"
+    assert engine.chat_history == transcript
+    # The structured form reaches generate as well, not just the transcript.
+    assert engine.history_messages is not None
 
 
 def test_a_tight_context_drops_the_same_oldest_turns_from_both_forms() -> None:

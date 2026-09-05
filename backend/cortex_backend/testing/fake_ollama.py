@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from threading import Event
 from dataclasses import dataclass, field
 import json
@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from cortex_backend.core.generation import (
+    CodeExecutionProposal,
+    CodeProposalRejection,
     GenerationAttachment,
     GenerationStats,
     MemoryCommand,
@@ -114,13 +116,21 @@ class FakeOllamaGateway:
 
 
 class FakeGenerationEngine:
-    """Small deterministic generation engine matching the headless protocol."""
+    """Small deterministic generation engine implementing GenerationEngine.
+
+    It implements the protocol in full, on purpose. When it did not, the
+    generation service had to probe for the missing members with ``getattr``
+    at runtime -- and a deterministic double is exactly the thing that should
+    never need probing.
+    """
 
     def __init__(self, state: FakeOllamaState | None = None):
         self.state = state or FakeOllamaState()
-        self._status_callback = None
+        self._status_callback: Callable[[str], None] | None = None
+        self.last_code_proposal: CodeExecutionProposal | None = None
+        self.last_code_rejection: CodeProposalRejection | None = None
 
-    def set_status_callback(self, callback) -> None:
+    def set_status_callback(self, callback: Callable[[str], None]) -> None:
         self._status_callback = callback
 
     def fit_memories_to_context(
@@ -132,8 +142,10 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
     ) -> list[str]:
         del query, user_system_instructions, code_execution_eligible, bypass_system_prompt
+        del host_observations
         budget = max(1, num_ctx // 4)
         retained: list[str] = []
         used = 0
@@ -181,6 +193,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
         attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         del (
@@ -191,12 +204,43 @@ class FakeGenerationEngine:
             num_ctx,
             code_execution_eligible,
             bypass_system_prompt,
+            host_observations,
             attachments,
         )
         return "\n".join(
             f"{message.get('role', 'unknown')}: {message.get('content', '')}"
             for message in messages
         )
+
+    def fit_history(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        query: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None = None,
+        bypass_system_prompt: bool = False,
+        host_observations: Sequence[Any] = (),
+        attachments: Sequence[GenerationAttachment] = (),
+    ) -> tuple[str, Sequence[Mapping[str, Any]]]:
+        """Return the flattened transcript and the messages that produced it."""
+
+        flattened = self.fit_history_to_context(
+            messages,
+            query=query,
+            permanent_memories=permanent_memories,
+            memories_enabled=memories_enabled,
+            user_system_instructions=user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            attachments=attachments,
+        )
+        return flattened, list(messages)
 
     def generate(
         self,
@@ -209,6 +253,8 @@ class FakeGenerationEngine:
         options: dict[str, Any],
         attachments: Sequence[GenerationAttachment] = (),
         cancellation_event: Event | None = None,
+        history_messages: Sequence[Mapping[str, Any]] | None = None,
+        host_observations: Sequence[Any] = (),
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del (
             chat_history,
@@ -245,8 +291,13 @@ class FakeGenerationEngine:
             )
         return TranslationResult.succeeded(f"[{target_language}] {text}")
 
-    def generate_chat_title(self, chat_history: str) -> str | None:
-        del chat_history
+    def generate_chat_title(
+        self,
+        chat_history: str,
+        *,
+        options: dict[str, Any] | None = None,
+    ) -> str | None:
+        del chat_history, options
         return self.state.title_response
 
 
