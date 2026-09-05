@@ -819,7 +819,14 @@ class LlamaServerManager:
                     base_url is not None
                     and api_key is not None
                     and model_path is not None
-                    and self._probe_health(base_url, api_key=api_key, model_path=model_path)
+                    and self._probe_health(
+                        base_url,
+                        api_key=api_key,
+                        model_path=model_path,
+                        # The constant existed but the probe hardcoded 1.0,
+                        # so a briefly slow but live server was called dead.
+                        timeout=_HEALTH_RETRY_TIMEOUT_SECONDS,
+                    )
                 ):
                     return True, None
             except (httpx.TransportError, ValueError):
@@ -1021,12 +1028,18 @@ class LlamaServerManager:
                 handle = self._start_with_backend(
                     model_path, num_ctx, backend, on_status, cancellation_event
                 )
-            except ServerLaunchError as exc:
+            except (ServerLaunchError, BinaryVerificationError, OSError) as exc:
+                # Not just launch failures. A backend whose archive fails its
+                # pinned checksum, or cannot be unpacked at all (full disk, a
+                # DLL locked by antivirus), is equally unusable -- and equally
+                # no reason to refuse a backend that is already verified and
+                # cached. Cancellation raises a plain LlamaCppError and still
+                # propagates.
                 last_exc = exc
                 if backend == "vulkan":
                     vulkan_launch_failed = True
                 logger.warning(
-                    "llama-server failed to launch with backend '%s' (%s); trying the next option.",
+                    "llama-server backend '%s' is unusable (%s); trying the next option.",
                     backend,
                     type(exc).__name__,
                 )
@@ -1283,9 +1296,16 @@ class LlamaServerManager:
         ):
             raise LlamaCppError("The local model runtime startup was cancelled.")
 
-    def _probe_health(self, base_url: str, *, api_key: str, model_path: Path) -> bool:
+    def _probe_health(
+        self,
+        base_url: str,
+        *,
+        api_key: str,
+        model_path: Path,
+        timeout: float = 1.0,
+    ) -> bool:
         try:
-            response = self._http.get(f"{base_url}/health", timeout=1.0)
+            response = self._http.get(f"{base_url}/health", timeout=timeout)
             if response.status_code != 200:
                 return False
             health = response.json()
@@ -1299,7 +1319,7 @@ class LlamaServerManager:
             response = self._http.get(
                 f"{base_url}/props",
                 headers={"Authorization": f"Bearer {api_key}"},
-                timeout=1.0,
+                timeout=timeout,
             )
             if response.status_code != 200:
                 return False

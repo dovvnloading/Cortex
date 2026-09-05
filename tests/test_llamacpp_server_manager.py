@@ -6,6 +6,7 @@ no real subprocess is ever spawned and no real network call is ever made.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -1447,3 +1448,117 @@ def test_default_launcher_is_a_job_object_launcher():
 
     assert isinstance(default_launcher, _JobObjectLauncher)
     assert callable(default_launcher)
+
+
+class _VulkanUnusableFetcher(_FakeFetcher):
+    """Vulkan cannot be verified or unpacked; CPU is already cached and fine.
+
+    A mis-pinned asset hash, a re-uploaded release, a proxy rewriting the
+    archive, or antivirus quarantining one ggml DLL all land here.
+    """
+
+    def __init__(self, failure: Exception) -> None:
+        super().__init__()
+        self._failure = failure
+        self._cached.add("cpu")
+
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None):
+        if backend == "vulkan":
+            raise self._failure
+        return super().ensure_binary(release, backend, cancellation_event=cancellation_event)
+
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
+        if backend == "vulkan":
+            return False
+        return super().is_cached(release, backend, cancellation_event=cancellation_event)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        BinaryVerificationError("Downloaded llama.cpp archive failed checksum verification."),
+        OSError("[Errno 28] No space left on device"),
+    ],
+    ids=["checksum", "unpack"],
+)
+def test_an_unusable_gpu_backend_does_not_block_the_cached_cpu_build(
+    tmp_path: Path, failure: Exception
+) -> None:
+    """A backend that cannot be fetched must not stop the next one being tried.
+
+    The loop only caught ServerLaunchError, so a Vulkan archive failing its
+    pinned checksum -- or one that could not be unpacked at all, on a full
+    disk or with a DLL locked by antivirus -- escaped as a fatal error. GGUF
+    chat stopped working entirely even though the verified CPU build was
+    already on disk.
+    """
+    fetcher = _VulkanUnusableFetcher(failure)
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend="auto",
+        health_timeout_seconds=0.2,
+    )
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"fake")
+
+    with contextlib.suppress(LlamaCppError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+    manager.close()
+
+    # The point of the fix: vulkan being unusable must not end the attempt.
+    assert fetcher.ensure_binary_calls == ["cpu"], (
+        f"expected the cpu backend to be tried after vulkan failed, got "
+        f"{fetcher.ensure_binary_calls!r}"
+    )
+
+
+def test_the_health_probe_accepts_a_caller_supplied_timeout(tmp_path: Path) -> None:
+    """_HEALTH_RETRY_TIMEOUT_SECONDS was declared but never reached the probe.
+
+    Both HTTP calls hardcoded 1.0s, so the retry path -- which exists for a
+    server that is alive but briefly slow, a large model still settling --
+    gave it a second less than the constant says.
+    """
+    from cortex_backend.llamacpp import server_manager as module
+
+    seen: list[float | None] = []
+
+    class _RecordingClient(_AlwaysHealthyClient):
+        def get(self, url: str, timeout=None, headers=None):
+            seen.append(timeout)
+            return super().get(url, timeout=timeout, headers=headers)
+
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_RecordingClient(),
+    )
+
+    manager._probe_health(
+        "http://127.0.0.1:1",
+        api_key="k",
+        model_path=tmp_path / "model.gguf",
+        timeout=module._HEALTH_RETRY_TIMEOUT_SECONDS,
+    )
+    manager.close()
+
+    assert seen and all(t == module._HEALTH_RETRY_TIMEOUT_SECONDS for t in seen), (
+        f"probe used {seen!r} instead of the declared "
+        f"{module._HEALTH_RETRY_TIMEOUT_SECONDS}s"
+    )
+
+
+def test_the_warm_health_retry_passes_the_declared_timeout(tmp_path: Path) -> None:
+    """And the retry path actually asks for it."""
+    import inspect
+    from cortex_backend.llamacpp import server_manager as module
+
+    source = inspect.getsource(module.LlamaServerManager._probe_health_with_retries)
+    assert "_HEALTH_RETRY_TIMEOUT_SECONDS" in source, (
+        "the retry path must pass the timeout it declares"
+    )
