@@ -123,6 +123,9 @@ export function ChatPage({
   const messageListRef = useRef<MessageListHandle>(null);
   const isNearTranscriptEnd = useRef(true);
   const viewThreadIdRef = useRef<string | null>(threadId);
+  // Read inside async callbacks, which would otherwise close over a stale
+  // `chat` from the render that created them.
+  const chatRef = useRef<ChatResponse | null>(null);
   const chatRequestVersionsRef = useRef(new Map<string | null, number>());
   const initialMountRef = useRef(true);
   const draftsRef = useRef(drafts);
@@ -173,6 +176,10 @@ export function ChatPage({
   }, [api, threadId]);
 
   useEffect(() => stop, [stop]);
+
+  useEffect(() => {
+    chatRef.current = chat;
+  }, [chat]);
 
   const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
 
@@ -239,6 +246,26 @@ export function ChatPage({
     } catch {
       if (!isLatestRequest()) return;
       setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
+      if (viewThreadIdRef.current !== id) return;
+      // This call bumped the shared request version, so any route load still
+      // in flight for this thread has already returned early as stale. If we
+      // do not settle the load state here too, nothing ever will: the page
+      // stays on "Loading conversation..." forever, and that branch renders
+      // before the error branch, so there is not even a Retry button.
+      setChatLoad((current) => {
+        if (current.threadId !== id) return current;
+        // The transcript we already have is stale but readable, so keep
+        // showing it with the banner. With nothing to show, surface the
+        // failure so Retry is reachable.
+        if (!current.loading && !current.error) return current;
+        return chatRef.current
+          ? { threadId: id, loading: false, error: null }
+          : {
+              threadId: id,
+              loading: false,
+              error: "Could not reload this chat after the generation finished.",
+            };
+      });
     }
   }, [api, onChatChanged]);
 
