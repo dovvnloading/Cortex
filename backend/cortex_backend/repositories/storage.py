@@ -197,6 +197,31 @@ class DatabaseManager:
                         cause=exc,
                     ) from exc
 
+    def _sidecar_paths(self) -> tuple[Path, ...]:
+        """The WAL sidecars SQLite keeps beside the primary database file."""
+        return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
+
+    def _discard_sidecars(self) -> None:
+        """Drop the write-ahead log left behind by the database we replaced.
+
+        The crash that corrupts the primary is the same event that leaves an
+        uncheckpointed -wal beside it. After recovery that log describes a
+        file that no longer exists, and SQLite cannot tell -- it would replay
+        the frames onto the restored backup and overwrite recovered rows with
+        content from the database just declared corrupt.
+
+        Only safe once the replacement is committed. On the rollback path the
+        original primary is put back, so its sidecars still describe it and
+        must survive.
+        """
+        for sidecar in self._sidecar_paths():
+            try:
+                sidecar.unlink(missing_ok=True)
+            except OSError:
+                # A locked sidecar is not worth failing recovery over; SQLite
+                # validates the log against the database header before replay.
+                logging.warning("Could not remove a stale chat database sidecar.")
+
     def _prepare_primary(self) -> None:
         """Validate the primary before backup rotation, recovering if needed.
 
@@ -223,6 +248,7 @@ class DatabaseManager:
                 ) from exc
             try:
                 self._atomic_copy_database(candidate, self.db_path)
+                self._discard_sidecars()
             except PersistenceError:
                 try:
                     os.replace(corrupt_path, self.db_path)
