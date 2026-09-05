@@ -76,6 +76,22 @@ MAX_LEGACY_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _LEGACY_ATTACHMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _LEGACY_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
+def _discard_sidecars_for(database_path: str | Path) -> None:
+    """Remove the -wal/-shm SQLite leaves beside a database file.
+
+    Validating a copy means opening it, which creates them. Whoever moves or
+    deletes the file has to take them too, because their names are derived
+    from a path that will not exist afterwards.
+    """
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            # Best effort: a locked sidecar is stale clutter, never a reason
+            # to fail a backup that has already been written correctly.
+            logging.warning("Could not remove a temporary database sidecar.")
+
+
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
     SCHEMA_VERSION = 4
@@ -181,6 +197,12 @@ class DatabaseManager:
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
             os.replace(temporary_path, destination)
+            # _database_is_valid opened the copy, so SQLite created
+            # "<temp>-wal" and "<temp>-shm" beside it. os.replace moves only
+            # the file itself, leaving those two behind under a name nothing
+            # will ever reference again. Every startup rotates the backup, so
+            # without this the data directory grows by two dead files a launch.
+            _discard_sidecars_for(temporary_path)
             temporary_path = None
         except (OSError, shutil.Error) as exc:
             raise PersistenceError(
@@ -188,6 +210,7 @@ class DatabaseManager:
             ) from exc
         finally:
             if temporary_path is not None:
+                _discard_sidecars_for(temporary_path)
                 try:
                     os.unlink(temporary_path)
                 except OSError as exc:

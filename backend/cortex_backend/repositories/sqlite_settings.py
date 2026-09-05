@@ -282,6 +282,10 @@ class SQLiteSettingsRepository:
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
             os.replace(temporary_path, destination)
+            # Validating the copy opened it, so SQLite made "<temp>-wal" and
+            # "<temp>-shm". os.replace moves only the file itself.
+            for suffix in ("-wal", "-shm"):
+                Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
             temporary_path = None
         except (OSError, shutil.Error) as exc:
             raise SettingsRepositoryError("Could not copy the settings database safely.") from exc
