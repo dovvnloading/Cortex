@@ -93,6 +93,17 @@ class OllamaChatClient:
         options = _without_llamacpp_only_options(options)
         if cancellation_event is None:
             return self._client.chat(model=model, messages=messages, options=options)
+        if cancellation_event.is_set():
+            # Already cancelled, so do not open a request at all. Otherwise
+            # this waits for the model's first token before noticing -- the
+            # loop below can only check between chunks -- and on a cold or
+            # large model that is seconds of the user staring at a Stop they
+            # already pressed. LlamaCppChatClient answers the same way.
+            return {
+                "message": {"content": "", "thinking": None},
+                "done": True,
+                "done_reason": "cancelled",
+            }
         # ollama.Client(stream=True) returns a generator that owns an httpx
         # streaming response internally (see the installed ``ollama`` package's
         # Client._request: ``with self._client.stream(...) as r: ... yield``).

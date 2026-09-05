@@ -228,16 +228,24 @@ def test_ollama_chat_client_passes_through() -> None:
 
 def test_ollama_chat_client_stops_consuming_the_stream_once_cancelled() -> None:
     """A cancellation_event switches OllamaChatClient to a streamed call it
-    can abort between chunks, closing the generator (which owns the
-    underlying httpx streaming response in the real ollama package -- see
-    Client._request) rather than reading it to completion."""
+    can abort between chunks, closing the generator (which owns the underlying
+    httpx streaming response in the real ollama package -- see Client._request)
+    rather than reading it to completion.
+
+    Cancelled mid-stream, because that is where closing is the mechanism that
+    releases the connection. A turn cancelled before it starts never opens a
+    request at all -- see the test below.
+    """
     from threading import Event
 
+    cancelled = Event()
     closed = {"value": False}
 
     def chunk_generator():
         try:
             yield {"message": {"content": "Hel"}, "done": False}
+            # The user presses Stop while the model is still producing.
+            cancelled.set()
             yield {"message": {"content": "lo"}, "done": False}
             yield {"message": {}, "done": True, "prompt_eval_count": 5, "eval_count": 3}
         except GeneratorExit:
@@ -249,13 +257,13 @@ def test_ollama_chat_client_stops_consuming_the_stream_once_cancelled() -> None:
             assert stream is True
             return chunk_generator()
 
-    already_cancelled = Event()
-    already_cancelled.set()
     client = OllamaChatClient(_StubStreamingOllama())
 
-    result = client.chat(model="m", messages=[], options={}, cancellation_event=already_cancelled)
+    result = client.chat(model="m", messages=[], options={}, cancellation_event=cancelled)
 
-    assert result["message"]["content"] == ""
+    # Only what arrived before the Stop, and the generator was closed rather
+    # than drained to its final chunk.
+    assert result["message"]["content"] == "Hel"
     assert closed["value"] is True
 
 
@@ -788,3 +796,45 @@ class _FakeExc(Exception):
         super().__init__(error)
         self.status_code = status_code
         self.error = error
+
+
+def test_ollama_does_not_wait_for_the_model_when_stop_was_already_pressed() -> None:
+    """An already-cancelled turn must not open a request at all.
+
+    The streaming loop can only notice cancellation between chunks, so it used
+    to issue the request and wait for the model's first token before breaking.
+    On a cold or large model that is seconds of the user watching nothing
+    happen after a Stop they already pressed. LlamaCppChatClient answers this
+    case immediately, and now so does this one.
+    """
+    from threading import Event
+
+    class _SlowFirstToken:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, *, model, messages, options, stream=False):
+            self.calls += 1
+            if not stream:
+                time.sleep(2.0)
+                return {"message": {"content": "blocking"}}
+
+            def generate():
+                time.sleep(2.0)
+                yield {"message": {"content": "first"}, "done": True}
+
+            return generate()
+
+    backend = _SlowFirstToken()
+    cancelled = Event()
+    cancelled.set()
+
+    started = time.monotonic()
+    result = OllamaChatClient(backend).chat(
+        model="m", messages=[], options={}, cancellation_event=cancelled
+    )
+    elapsed = time.monotonic() - started
+
+    assert backend.calls == 0, "a cancelled turn still opened a request"
+    assert elapsed < 0.5, f"a cancelled turn waited {elapsed:.2f}s for the model"
+    assert result["message"]["content"] == ""
