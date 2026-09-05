@@ -88,9 +88,12 @@ class CombinedModelCatalog:
 
     def model_supports_vision(self, model: str) -> bool | None:
         if model.startswith(GGUF_PREFIX):
-            # MVP: no mmproj/vision support for GGUF models -- unknown, not
-            # false, so callers can still distinguish "no info" from a
-            # confirmed non-vision Ollama model if that distinction matters
-            # later; today both disable image attachments the same way.
-            return None
+            # There is no mmproj/vision support for GGUF models in this build,
+            # so this is False rather than unknown. It used to return None on
+            # the theory that "no info" might matter later, but every gate
+            # that consumes this tests `is False` -- so None meant an image
+            # was accepted, described to the model in the prompt, and then
+            # stripped from the request. The model answered about a picture it
+            # was told about and never received.
+            return False
         return self._ollama.model_supports_vision(model)

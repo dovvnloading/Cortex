@@ -64,6 +64,7 @@ from cortex_backend.execution.lifecycle import (
     RecipeCapable,
     ScratchCapable,
 )
+from cortex_backend.services.model_catalog import GGUF_PREFIX
 from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionError,
@@ -1326,7 +1327,11 @@ def _resolve_generation_attachments(
     contains_image = any(item.kind == "image" for item in references)
     if contains_image and model is not None:
         vision = deps.models.model_supports_vision(model)
-        if vision is False:
+        # Refuse unless vision is confirmed for a model we know cannot do it.
+        # Silently dropping the image is the worst outcome available: the
+        # prompt still announces "## ATTACHED IMAGES", so the model answers
+        # confidently about something it never received.
+        if vision is False or (vision is not True and model.startswith(GGUF_PREFIX)):
             raise ChatDomainError(
                 f"Selected model '{model}' does not support image input. Choose a vision model or remove the image."
             )

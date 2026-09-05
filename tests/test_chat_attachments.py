@@ -380,3 +380,73 @@ def test_api_accepts_images_when_ollama_advertises_vision():
         thread = client.get("/api/v1/chats/thread-a", headers=headers)
         assert thread.status_code == 200
         assert thread.json()["messages"][0]["attachments"][0]["filename"] == "photo.png"
+
+
+def test_a_local_gguf_model_refuses_an_image_instead_of_dropping_it(tmp_path):
+    """GGUF has no vision support, so an image must be refused, not discarded.
+
+    The catalog used to report None for gguf ids, and every gate that reads it
+    tests `is False`. So the request was accepted, the prompt announced
+    "## ATTACHED IMAGES" with the filename, and then _strip_unsupported_fields
+    removed the pixels before the llama-server call. The model was told an
+    image existed, never received it, and answered about it anyway -- with no
+    error in the response, the SSE stream, or the UI.
+    """
+    from cortex_backend.llamacpp.model_directory import GGUFModelDirectory
+    from cortex_backend.services.model_catalog import CombinedModelCatalog
+
+    model = tmp_path / "tiny-model.gguf"
+    model.write_bytes(b"GGUF")
+
+    state = FakeOllamaState(installed_models=set(), model_capabilities={})
+    dependencies = build_demo_dependencies(ollama_state=state)
+    catalog = CombinedModelCatalog(
+        dependencies.models, GGUFModelDirectory(lambda: tmp_path)
+    )
+    dependencies.models = catalog
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        settings = client.get("/api/v1/settings", headers=headers).json()["settings"]
+        updated = client.put(
+            "/api/v1/settings",
+            headers=headers,
+            json={
+                "settings": {
+                    **settings,
+                    "revision": settings["revision"] + 1,
+                    "models": {**settings["models"], "chat": "gguf:tiny-model.gguf"},
+                },
+                "expected_revision": settings["revision"],
+            },
+        )
+        assert updated.status_code == 200, updated.text
+
+        staged = client.post(
+            "/api/v1/attachments",
+            headers=headers,
+            json={
+                "request_id": "gguf-image-1",
+                "filename": "photo.png",
+                "content_base64": base64.b64encode(_png_bytes()).decode("ascii"),
+            },
+        )
+        assert staged.status_code == 201
+        attachment = staged.json()
+
+        blocked = client.post(
+            "/api/v1/generations",
+            headers=headers,
+            json={
+                "request_id": "gguf-image-generation-1",
+                "thread_id": "thread-gguf",
+                "user_input": "What is in this picture?",
+                "attachments": [attachment],
+            },
+        )
+
+        assert blocked.status_code == 409, (
+            f"a GGUF model accepted an image it cannot see: {blocked.status_code}"
+        )
+        assert "does not support image input" in blocked.json()["detail"]

@@ -140,7 +140,9 @@ class GGUFModelDirectory:
             size=stat.st_size,
             modified_at=modified_at,
             capabilities=(),
-            supports_vision=None,
+            # No mmproj/vision support for GGUF in this build. False,
+            # not None: the UI's attach gate tests `=== false`.
+            supports_vision=False,
             parameter_size=metadata.parameter_size_label if metadata else None,
             quantization_level=metadata.quantization_label if metadata else None,
             family=metadata.architecture if metadata else None,
