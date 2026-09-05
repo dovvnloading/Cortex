@@ -551,6 +551,11 @@ def test_llamacpp_chat_client_cancellation_does_not_wait_for_first_sse_line(tmp_
             return self
 
         def __exit__(self, *_args) -> None:
+            self.close()
+
+        def close(self) -> None:
+            # httpx.Response.close() is what actually releases a read in
+            # flight; the client cancels by calling it from its watcher.
             self.closed.set()
 
         def raise_for_status(self) -> None:
@@ -594,6 +599,76 @@ def test_llamacpp_chat_client_cancellation_does_not_wait_for_first_sse_line(tmp_
     assert result[0]["message"]["content"] == ""
 
 
+def test_llamacpp_chat_client_keeps_the_tokens_it_had_when_cancelled_mid_stream(
+    tmp_path: Path,
+) -> None:
+    """Stop after tokens have arrived keeps them instead of discarding them.
+
+    Cancellation works by closing the response from a watcher thread, which
+    makes the read in flight fail however the transport chooses. That failure
+    must not surface as an error and must not throw away what already
+    streamed -- the user asked to stop, and what they can see on screen is
+    what gets persisted.
+    """
+    from threading import Event
+
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    cancellation = Event()
+
+    def _chunk(text: str) -> str:
+        return 'data: {"choices":[{"delta":{"content":"' + text + '"}}]}'
+
+    class PartialStreamResponse:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.closed = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.close()
+
+        def close(self) -> None:
+            self.closed.set()
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_lines(self):
+            yield _chunk("Hel")
+            yield _chunk("lo")
+            # The caller presses Stop here; the watcher closes the response
+            # and the transport reports the interrupted read as an error.
+            cancellation.set()
+            self.closed.wait(2.0)
+            raise OSError("read on a closed stream")
+
+    response = PartialStreamResponse()
+
+    class PartialStreamClient:
+        def stream(self, *_args, **_kwargs):
+            return response
+
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=PartialStreamClient(),  # type: ignore[arg-type]
+    )
+
+    result = client.chat(
+        model=f"gguf:{model_path.name}",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=cancellation,
+    )
+
+    assert result["message"]["content"] == "Hello"
+    assert response.closed.is_set()
+
+
 def test_llamacpp_chat_client_streams_the_full_response_when_not_cancelled(tmp_path: Path) -> None:
     """The streamed (cancellation_event given) and blocking (not given)
     paths must produce the same adapted result when nothing is cancelled --
@@ -623,11 +698,15 @@ def test_llamacpp_chat_client_streams_the_full_response_when_not_cancelled(tmp_p
     assert response["eval_count"] == 48
 
 
-def test_llamacpp_chat_client_does_not_leak_its_reader_thread_after_completion(tmp_path: Path) -> None:
-    """Regression guard: the streamed path's reader thread used to retry
-    pushing a "done" sentinel into an undrained queue forever once a normal
-    completion had already returned, because its only exit condition was the
-    per-turn cancellation_event -- which a successful turn never sets."""
+def test_llamacpp_chat_client_does_not_leak_its_helper_thread_after_completion(tmp_path: Path) -> None:
+    """Regression guard: the streamed path must not leave a thread running.
+
+    The original failure was a reader thread retrying a "done" sentinel into
+    an undrained queue forever, because its only exit condition was the
+    per-turn cancellation_event -- which a successful turn never sets. The
+    reader is gone; the cancel watcher that replaced it has the same hazard
+    and the same answer, so the guard now names it.
+    """
     import threading
 
     model_path = tmp_path / "tiny.gguf"
@@ -649,10 +728,11 @@ def test_llamacpp_chat_client_does_not_leak_its_reader_thread_after_completion(t
 
     assert response["message"]["content"] == "short reply"
     leaked = [
-        t for t in threading.enumerate()
-        if t.ident not in before and t.name == "llama-chat-reader"
+        t.name
+        for t in threading.enumerate()
+        if t.ident not in before and t.name.startswith("llama-chat-")
     ]
-    assert leaked == [], "reader thread(s) still alive after chat() returned"
+    assert leaked == [], f"helper thread(s) still alive after chat() returned: {leaked}"
 
 
 def test_llamacpp_chat_client_raises_on_a_mid_stream_error_chunk(tmp_path: Path) -> None:
