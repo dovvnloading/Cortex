@@ -529,7 +529,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const previous = useChatStore.getState().chats.find((chat) => chat.id === threadId)?.group_id ?? null;
     setChatGroup(threadId, groupId);
     void api.moveChatToGroup(threadId, groupId).catch((error) => {
-      setChatGroup(threadId, previous);
+      // Only undo our own optimistic write. A second move issued while this
+      // one was in flight may have already landed, and rolling back blindly
+      // would drag the chat out of the group the user just watched it reach.
+      const current = useChatStore.getState().chats.find((chat) => chat.id === threadId);
+      if (current !== undefined && current.group_id === groupId) {
+        setChatGroup(threadId, previous);
+      }
       notify(apiMessage(error, "Could not move chat."), "error");
     });
   };

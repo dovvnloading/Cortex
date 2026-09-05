@@ -496,11 +496,16 @@ export class CortexApi {
   }
 
   async downloadExecutionArtifact(artifactId: string): Promise<Response> {
+    // Same guard request() uses: a 401 answering a request sent under an
+    // older token says nothing about the token in hand now. Without it a
+    // slow download could arrive after a re-exchange and sign the user out
+    // of a session that was working.
+    const sessionAtRequest = this.sessionToken;
     const response = await this.fetcher(
       `${this.baseUrl}/execution/artifacts/${encodeURIComponent(artifactId)}`,
       { headers: this.authHeaders() },
     );
-    if (response.status === 401) this.clearSession();
+    if (response.status === 401 && this.sessionToken === sessionAtRequest) this.clearSession();
     if (!response.ok) throw new ApiError(response.status, await this.errorDetail(response));
     return response;
   }

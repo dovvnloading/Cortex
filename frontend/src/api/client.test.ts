@@ -398,3 +398,40 @@ describe("CortexApi", () => {
     );
   });
 });
+
+describe("session invalidation guards", () => {
+  it("does not clear a session that was re-exchanged while a download was in flight", async () => {
+    // A 401 answering a request sent under an older token says nothing about
+    // the token in hand now. request() already guards this; the artifact
+    // download did not, so a slow download could sign the user out of a
+    // session that was working.
+    let releaseDownload: (() => void) | null = null;
+    let exchanges = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/session/exchange")) {
+        exchanges += 1;
+        return new Response(
+          JSON.stringify({ session_token: `token-${exchanges}`, expires_at: "2099-01-01T00:00:00Z" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      await new Promise<void>((resolve) => {
+        releaseDownload = resolve;
+      });
+      return new Response(JSON.stringify({ detail: "expired" }), { status: 401 });
+    });
+    const api = new CortexApi("/api/v1", fetcher);
+    await api.exchangeBootstrapToken("bootstrap-1");
+    expect(api.hasSession).toBe(true);
+
+    const pending = api.downloadExecutionArtifact("artifact-1").catch(() => undefined);
+    await vi.waitFor(() => expect(releaseDownload).not.toBeNull());
+    // The user re-exchanges while that download is still open.
+    await api.exchangeBootstrapToken("bootstrap-2");
+    releaseDownload!();
+    await pending;
+
+    expect(api.hasSession).toBe(true);
+  });
+});
