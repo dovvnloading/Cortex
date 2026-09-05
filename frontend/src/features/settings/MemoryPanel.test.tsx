@@ -126,3 +126,39 @@ describe("MemoryPanel", () => {
     expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Edited");
   });
 });
+
+describe("MemoryPanel server reconciliation", () => {
+  it("drops rows the server normalized away", async () => {
+    // The draft was seeded from `memos` once and never re-derived, so an
+    // entry the server rejected -- trimmed to nothing, or a case-insensitive
+    // duplicate -- stayed on screen looking saved.
+    const { useState } = await import("react");
+    const { waitFor } = await import("@testing-library/react");
+
+    function Harness() {
+      const [memos, setMemos] = useState<string[]>(["kept", "duplicate"]);
+      return (
+        <>
+          <button onClick={() => setMemos(["kept"])}>server responded</button>
+          <MemoryPanel
+            memos={memos}
+            busy={false}
+            onAdd={vi.fn().mockResolvedValue(undefined)}
+            onReplace={vi.fn().mockResolvedValue(undefined)}
+            onClear={vi.fn().mockResolvedValue(undefined)}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+
+    expect(screen.getByDisplayValue("duplicate")).toBeInTheDocument();
+
+    screen.getByRole("button", { name: "server responded" }).click();
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue("duplicate")).not.toBeInTheDocument();
+    });
+    expect(screen.getByDisplayValue("kept")).toBeInTheDocument();
+  });
+});

@@ -1,5 +1,5 @@
 import { Eraser, Plus, Trash2, Save } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 type Props = {
   memos: string[];
@@ -12,6 +12,21 @@ type Props = {
 export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
   const [memo, setMemo] = useState("");
   const [draft, setDraft] = useState(() => memos.map((value, id) => ({ id, value })));
+
+  // `memos` is the authoritative list the server returned. The draft was
+  // seeded from it once and never re-derived, so an entry the server
+  // normalized away -- trimmed to nothing, or a case-insensitive duplicate --
+  // stayed on screen looking saved. Re-seed whenever the server's answer
+  // actually changes, which leaves in-progress edits alone between saves.
+  const lastServerMemos = useRef(memos);
+  useEffect(() => {
+    const previous = lastServerMemos.current;
+    const changed =
+      previous.length !== memos.length || previous.some((value, index) => value !== memos[index]);
+    if (!changed) return;
+    lastServerMemos.current = memos;
+    setDraft(memos.map((value, id) => ({ id, value })));
+  }, [memos]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
