@@ -387,6 +387,7 @@ def _validate_gguf_file(path: Path) -> None:
                 raise GGUFDownloadError("The downloaded file has an invalid GGUF alignment.")
 
             tensor_offsets: list[int] = []
+            tensor_ends: list[int] = []
             for _ in range(tensor_count):
                 name = _read_gguf_string(handle, size, max_bytes=64)
                 try:
@@ -396,11 +397,17 @@ def _validate_gguf_file(path: Path) -> None:
                 dimensions = _read_gguf_uint(handle, size, "<I")
                 if dimensions > _GGUF_MAX_TENSOR_DIMENSIONS:
                     raise GGUFDownloadError("The downloaded file has invalid GGUF tensor dimensions.")
-                _read_gguf_exact(handle, dimensions * 8, size)
+                shape = struct.unpack(
+                    f"<{dimensions}Q", _read_gguf_exact(handle, dimensions * 8, size)
+                )
                 tensor_type = _read_gguf_uint(handle, size, "<I")
                 if tensor_type >= _GGUF_MAX_TENSOR_TYPES:
                     raise GGUFDownloadError("The downloaded file has an invalid GGUF tensor type.")
-                tensor_offsets.append(_read_gguf_uint(handle, size, "<Q"))
+                tensor_offset = _read_gguf_uint(handle, size, "<Q")
+                tensor_offsets.append(tensor_offset)
+                tensor_bytes = _tensor_byte_length(tensor_type, shape)
+                if tensor_bytes is not None:
+                    tensor_ends.append(tensor_offset + tensor_bytes)
 
             descriptor_end = handle.tell()
             data_offset = (descriptor_end + alignment - 1) // alignment * alignment
@@ -411,10 +418,45 @@ def _validate_gguf_file(path: Path) -> None:
             for tensor_offset in tensor_offsets:
                 if tensor_offset % alignment or data_offset + tensor_offset >= size:
                     raise GGUFDownloadError("The downloaded file has an invalid GGUF tensor offset.")
+            # Each tensor's *start* was inside the file; that says nothing
+            # about whether its bytes are. A body cut anywhere past
+            # ``data_offset`` -- a dropped connection on a response framed
+            # without a Content-Length, so the completed-vs-advertised check
+            # was skipped too -- otherwise passed every check here and was
+            # published into the models folder as a usable model.
+            if tensor_ends and data_offset + max(tensor_ends) > size:
+                raise GGUFDownloadError(
+                    "The downloaded file is truncated inside its GGUF tensor data."
+                )
     except GGUFDownloadError:
         raise
     except (OSError, struct.error) as exc:
         raise GGUFDownloadError("The downloaded file is not a valid GGUF model.") from exc
+
+
+def _tensor_byte_length(tensor_type: int, shape: tuple[int, ...]) -> int | None:
+    """Return how many bytes one tensor occupies, or ``None`` if unknowable.
+
+    ``gguf`` ships the block/type sizes llama.cpp itself uses, so this needs
+    no quantisation table of its own. A type this build of ``gguf`` does not
+    recognise is *not* grounds for rejecting a model -- new quantisation
+    types appear -- so it only skips that one tensor's length check and
+    leaves the offset checks in place.
+    """
+    try:
+        import gguf  # local import: keep the dependency off the import path
+    except ImportError:  # pragma: no cover - gguf is a hard dependency
+        return None
+    try:
+        block_size, type_size = gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType(tensor_type)]
+    except (KeyError, ValueError):
+        return None
+    if block_size <= 0:
+        return None
+    elements = 1
+    for extent in shape:
+        elements *= extent
+    return elements // block_size * type_size
 
 
 def _read_gguf_exact(handle, count: int, file_size: int) -> bytes:

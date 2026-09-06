@@ -393,6 +393,57 @@ def test_download_gguf_rejects_truncated_or_malformed_structure(
     assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
 
 
+def test_download_gguf_rejects_a_body_cut_inside_tensor_data(tmp_path: Path) -> None:
+    """A partial download must not land in the models folder as a usable model.
+
+    Validation only checked that each tensor's *start* offset was inside the
+    file, never that its bytes were, so a body cut anywhere past the start of
+    the tensor data passed every check. Nothing else caught it either: a
+    response framed without a Content-Length (chunked, or an HTTP/1.0 mirror)
+    makes ``total`` None, which also skips the completed-vs-advertised check.
+    The file was then hard-linked into the models folder, listed in the model
+    picker, and only failed when llama-server tried to load it.
+    """
+    content = _valid_gguf_content(tmp_path)
+    # The fixture is 256 bytes: tensor data starts at 224, its single 2x2
+    # float32 tensor occupies 16 bytes, and the writer pads the last 16. Cut
+    # 24 so the file ends *inside* the tensor rather than inside the padding.
+    truncated = content[:-24]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=iter([truncated]))
+
+    with pytest.raises(GGUFDownloadError, match="truncated inside its GGUF tensor data"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert not (tmp_path / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+def test_download_gguf_accepts_a_complete_body_without_a_content_length(tmp_path: Path) -> None:
+    """The tensor-length check must not reject an intact chunked download."""
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=iter([content]))
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert destination.read_bytes() == content
+
+
 def test_download_gguf_refuses_to_overwrite_existing_model(tmp_path: Path) -> None:
     destination = tmp_path / "model.gguf"
     original = _valid_gguf_content(tmp_path)
