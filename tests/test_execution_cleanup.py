@@ -80,6 +80,43 @@ def test_safe_cleanup_keeps_fresh_retained_artifact_and_removes_expired_rows(tmp
     assert not Path(artifact.path).exists()
 
 
+def test_cleanup_keeps_the_quarantine_root_it_needs_for_the_next_artifact(tmp_path):
+    """The empty-directory sweep must not sweep the shared quarantine root.
+
+    Every tombstone is a file directly inside a single ``.quarantine``
+    directory, created once when the repository is opened. Unlinking the last
+    tombstone leaves it empty by design, so including it in the sweep removed
+    it on the very first expiry -- and the next artifact's
+    ``path.replace(quarantine)`` then had no parent to move into, raising
+    ``ExecutionRepositoryError`` and wedging retention for good. Nothing
+    downstream retries: the supervisor records the failure and moves on, so
+    expired artifacts simply accumulate on disk from then on.
+    """
+    repository = _repository(tmp_path)
+    future = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+
+    for index in range(2):
+        job = _terminal_job(repository, f"expired-{index}")
+        artifact = repository.publish_artifact(
+            job.job_id,
+            name=f"expired-{index}.txt",
+            content=b"remove",
+            mime_type="text/plain",
+            retention_seconds=1,
+        )
+
+        result = repository.cleanup_expired(
+            now=future, terminal_job_retention_seconds=0, limit=10
+        )
+
+        assert result.artifacts == 1
+        assert repository.get_artifact(artifact.artifact_id) is None
+        assert not Path(artifact.path).exists()
+        # The per-job directory is still swept -- that part is the point.
+        assert not Path(artifact.path).parent.exists()
+        assert repository.quarantine_root.is_dir()
+
+
 def test_cleanup_keeps_a_recent_terminal_job_without_an_artifact(tmp_path):
     repository = _repository(tmp_path)
     job = _terminal_job(repository, "recent-no-artifact")

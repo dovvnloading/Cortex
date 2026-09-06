@@ -1524,12 +1524,30 @@ class ExecutionRepository:
                 # workspace accumulates empty directories without bound.
                 # rmdir only succeeds when it is genuinely empty, so a job
                 # with artifacts still retained keeps its directory.
-                for directory in (path.parent, quarantine.parent):
-                    try:
-                        directory.rmdir()
-                    except OSError:
-                        pass
+                #
+                # The artifact's own directory, and never a root. Every
+                # tombstone is a file directly inside the single quarantine
+                # directory created when the repository was opened, so it is
+                # empty by design the moment the last one is unlinked --
+                # sweeping it here deleted it on the very first expiry and
+                # left every later quarantine hop with no parent to move
+                # into.
+                self._remove_empty_artifact_directory(path.parent)
         return removed
+
+    def _remove_empty_artifact_directory(self, directory: Path) -> None:
+        """Remove one artifact's now-empty job directory, never a root."""
+
+        try:
+            resolved = directory.resolve()
+        except (OSError, RuntimeError):
+            return
+        if resolved in {self.artifact_root.resolve(), self.quarantine_root.resolve()}:
+            return
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:
