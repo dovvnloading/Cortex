@@ -86,7 +86,7 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
     ) -> list[str]:
         """Fit permanent memories into the configured context budget."""
 
@@ -101,7 +101,7 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         """Format the retained history for the model prompt."""
@@ -117,7 +117,7 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the structured history together.
@@ -146,6 +146,7 @@ class GenerationEngine(Protocol):
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Bound attachment reference text to fit the configured context."""
 
@@ -161,7 +162,7 @@ class GenerationEngine(Protocol):
         attachments: Sequence[GenerationAttachment] = (),
         cancellation_event: Event | None = None,
         history_messages: Sequence[Mapping[str, Any]] | None = None,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """Generate a response and validated memory command."""
 
@@ -225,9 +226,6 @@ class GenerationService:
         num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
         self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
         engine = self._engine_factory(snapshot)
-        observation_kwargs: dict[str, Any] = {
-            "host_observations": snapshot.host_observations
-        }
         if snapshot.memories_enabled:
             permanent_memories = engine.fit_memories_to_context(
                 permanent_memories,
@@ -236,7 +234,7 @@ class GenerationService:
                 num_ctx=num_ctx,
                 code_execution_eligible=snapshot.code_execution_eligible,
                 bypass_system_prompt=snapshot.bypass_system_prompt,
-                **observation_kwargs,
+                host_observations=snapshot.host_observations,
             )
 
         # Lets an engine backed by a locally-managed llama.cpp runtime report
@@ -275,7 +273,7 @@ class GenerationService:
                 num_ctx=num_ctx,
                 code_execution_eligible=snapshot.code_execution_eligible,
                 bypass_system_prompt=snapshot.bypass_system_prompt,
-                **observation_kwargs,
+                host_observations=snapshot.host_observations,
             )
 
         history_kwargs: dict[str, Any] = {
@@ -286,7 +284,7 @@ class GenerationService:
             "num_ctx": num_ctx,
             "code_execution_eligible": snapshot.code_execution_eligible,
             "bypass_system_prompt": snapshot.bypass_system_prompt,
-            **observation_kwargs,
+            "host_observations": snapshot.host_observations,
         }
         if reserved_attachments:
             history_kwargs["attachments"] = reserved_attachments
@@ -309,7 +307,7 @@ class GenerationService:
             "memories_enabled": snapshot.memories_enabled,
             "user_system_instructions": snapshot.user_system_instructions,
             "options": dict(snapshot.model_options),
-            **observation_kwargs,
+            "host_observations": snapshot.host_observations,
         }
         # Keep the legacy headless engine protocol compatible for callers that
         # do not use attachments or cancellation; real engines receive the

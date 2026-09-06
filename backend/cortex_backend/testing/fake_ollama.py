@@ -142,7 +142,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
     ) -> list[str]:
         del query, user_system_instructions, code_execution_eligible, bypass_system_prompt
         del host_observations
@@ -169,6 +169,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Keep every attachment; the fake has no real context pressure.
 
@@ -179,7 +180,7 @@ class FakeGenerationEngine:
 
         del query, chat_history, permanent_memories, memories_enabled
         del user_system_instructions, num_ctx, code_execution_eligible
-        del bypass_system_prompt
+        del bypass_system_prompt, host_observations
         return tuple(attachments)
 
     def fit_history_to_context(
@@ -193,7 +194,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
     ) -> str:
         del (
@@ -223,7 +224,7 @@ class FakeGenerationEngine:
         num_ctx: int,
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the messages that produced it."""
@@ -254,7 +255,7 @@ class FakeGenerationEngine:
         attachments: Sequence[GenerationAttachment] = (),
         cancellation_event: Event | None = None,
         history_messages: Sequence[Mapping[str, Any]] | None = None,
-        host_observations: Sequence[Any] = (),
+        host_observations: str | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del (
             chat_history,

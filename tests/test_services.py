@@ -21,6 +21,7 @@ from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.services.models import ModelService
 from cortex_backend.services.progress import ProgressEvent
+from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
 
 
 class _ProgressRecorder:
@@ -201,6 +202,41 @@ def _snapshot(**overrides) -> GenerationSnapshot:
 
 
 class GenerationServiceTests(unittest.TestCase):
+    def test_an_attachment_works_with_the_shipped_double_that_declares_the_protocol(self):
+        """FakeGenerationEngine is wired as the GenerationEngine for the
+        Playwright e2e backend and the screenshot servers, so the service must
+        be able to call every member the protocol declares.
+
+        ``fit_attachments_to_context`` was the one method the protocol did not
+        give a ``host_observations`` parameter, while the service passed it to
+        all five. The mismatch was invisible to mypy because the argument was
+        splatted from a ``dict[str, Any]``; it surfaced only as a TypeError the
+        first time anyone attached a file.
+        """
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: FakeGenerationEngine(FakeOllamaState()),
+        )
+        attachment = GenerationAttachment(
+            attachment_id="attachment-1",
+            filename="notes.txt",
+            mime_type="text/plain",
+            kind="document",
+            text_content="a document the user attached",
+        )
+
+        result = service.generate(
+            _snapshot(
+                memories_enabled=False,
+                translation_enabled=False,
+                attachments=(attachment,),
+                host_observations="a verified computation",
+            )
+        )
+
+        self.assertTrue(result.response)
+
     def test_generation_is_headless_and_emits_owned_typed_progress(self):
         engine = _FakeEngine()
         recorder = _ProgressRecorder()
