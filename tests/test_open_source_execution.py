@@ -17,6 +17,7 @@ from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.execution.scratch_compute import (
     ScratchComputeError,
     evaluate_scratch_expression,
+    extract_automatic_expression,
     scratch_worker_main,
 )
 from cortex_backend.services.generation import GenerationService
@@ -125,6 +126,43 @@ def test_safe_expression_language_rejects_python_and_host_capabilities():
         except ScratchComputeError:
             continue
         raise AssertionError(f"unsafe expression was accepted: {expression}")
+
+
+def test_automatic_compute_prefix_does_not_backtrack_on_a_second_line():
+    """The auto-compute prefix runs on the event loop, against the raw message.
+
+    Its tail used to be ``(.+?)\s*[?.!]*\s*$`` -- three quantifiers that
+    could each claim the same run of trailing whitespace, plus a ``.`` that
+    could claim it too. Any prompt whose match had to fail made the engine try
+    every division of that run; because ``.`` cannot cross a newline, an
+    ordinary two-line message was enough. Cost grew with roughly the cube of
+    the whitespace length: 2,400 spaces took 32 seconds, during which no other
+    request, SSE stream or status poll could be served.
+    """
+    prompt = "what is 2+2" + " " * 2400 + "\nthanks!"
+
+    started = time.perf_counter()
+    assert extract_automatic_expression(prompt) is None
+    elapsed = time.perf_counter() - started
+
+    # Now well under a millisecond. The bound is deliberately loose so a
+    # loaded CI runner cannot make this flaky, and still fails by ~16x
+    # against the unfixed expression.
+    assert elapsed < 2.0
+
+
+def test_automatic_compute_prefix_still_reads_the_requests_it_should():
+    """Removing the ambiguous tail must not change which prompts are accepted."""
+    assert extract_automatic_expression("what is 2+2") == "2+2"
+    assert extract_automatic_expression("what is 2+2?") == "2+2"
+    assert extract_automatic_expression("compute 2+2 ?  ") == "2+2"
+    assert extract_automatic_expression("  solve   10 / 4  ") == "10 / 4"
+    assert extract_automatic_expression("Compute 1+1.") == "1+1"
+    assert extract_automatic_expression("how much is 2**8") == "2**8"
+    # Prose, an incomplete request, and a second line stay ordinary chat.
+    assert extract_automatic_expression("what is the weather") is None
+    assert extract_automatic_expression("compute") is None
+    assert extract_automatic_expression("compute 2+2\nand also 3+3") is None
 
 
 def test_local_profile_runs_scratch_and_fixed_image_recipe_end_to_end(tmp_path):
