@@ -148,16 +148,37 @@ def _pillow_health() -> tuple[bool, str, str]:
         # inside the low-capability worker. Load only the fixed formats.
         for plugin in ("PngImagePlugin", "JpegImagePlugin", "WebPImagePlugin"):
             import_module(f"PIL.{plugin}")
-        # The explicit imports populate the extension table. Mark Pillow's
-        # plugin registry initialized so Image.open() cannot fall back to its
-        # broad optional-plugin scan during the first request.
+        # The explicit imports populate the extension table. Reading it is all
+        # this probe does -- see pin_plugin_registry for why it must not also
+        # mark the registry initialized.
         supported = set(Image.EXTENSION.values())
-        Image._initialized = 2
     except Exception:
         return False, "recipe_codec_unavailable", "The required image codecs are unavailable."
     if not {"PNG", "JPEG", "WEBP"}.issubset(supported):
         return False, "recipe_codec_unavailable", "The required image codecs are unavailable."
     return True, "ready", f"Fixed-function image provider is ready (Pillow {PIL.__version__})."
+
+
+def pin_plugin_registry() -> None:
+    """Stop Image.open falling back to Pillow's broad optional-plugin scan.
+
+    Process-global and one-way, so **only the recipe worker child may call
+    it**. That process owns its whole interpreter, handles nothing but the
+    three fixed formats, and must not import heavyweight optional codecs on
+    its first request.
+
+    The backend process is the opposite case: it decodes chat attachments in
+    formats the recipe provider deliberately does not support (GIF, BMP,
+    TIFF). Pinning there left only PNG/JPEG/WebP registered, so
+    ``Image.open`` raised ``UnidentifiedImageError`` for a perfectly valid
+    GIF and the attachment was refused as ``attachment_image_invalid``. The
+    capability probe runs at startup, before any upload, so it always won
+    that race.
+    """
+
+    if Image is None:
+        return
+    Image._initialized = 2
 
 
 @contextmanager
@@ -469,4 +490,5 @@ __all__ = [
     "RecipeProviderError",
     "RecipeProviderLimits",
     "RecipeProviderResult",
+    "pin_plugin_registry",
 ]

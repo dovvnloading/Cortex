@@ -7,6 +7,11 @@ from io import BytesIO
 import time
 from types import SimpleNamespace
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -191,6 +196,87 @@ def test_local_profile_runs_scratch_and_fixed_image_recipe_end_to_end(tmp_path):
         assert download.status_code == 200
         assert download.headers["content-type"].startswith("image/png")
         assert download.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+# A 2x2 GIF and a 2x2 BMP, written out as literals so building them cannot
+# itself initialise Pillow's plugin registry and mask what is being tested.
+_GIF_BYTES = bytes.fromhex(
+    "47494638396102000200800000000000ffffff21f9040100000000"
+    "2c00000000020002000002028401003b"
+)
+_BMP_BYTES = bytes.fromhex(
+    "424d3a0000000000000036000000280000000200000002000000010018000000"
+    "000004000000130b0000130b00000000000000000000ffffffffffff0000ffff"
+    "ffffffff0000"
+)
+
+
+def test_image_capability_probe_leaves_chat_attachment_codecs_alone():
+    """Probing the image provider must not narrow Pillow for the whole process.
+
+    The probe imports PNG/JPEG/WebP explicitly and used to also set
+    ``Image._initialized = 2``, which makes ``Image.init()`` a no-op for the
+    rest of the interpreter. In the recipe worker child that is deliberate.
+    In the backend process it left GIF, BMP and TIFF permanently unregistered,
+    so ``Image.open`` raised ``UnidentifiedImageError`` and a valid GIF
+    attachment was refused as ``attachment_image_invalid``.
+
+    Run in a fresh interpreter: the flag is process-global and one-way, so any
+    earlier test that decoded an image would register everything and hide the
+    defect.
+    """
+    repository_root = Path(__file__).parents[1]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repository_root / "backend")
+    program = (
+        # Exactly the real startup order: the local profile builds its
+        # coordinator, which probes the image provider, before any upload.
+        "from cortex_backend.execution.recipe_provider import _pillow_health;"
+        "available, code, _ = _pillow_health();"
+        "assert available, code;"
+        "from cortex_backend.services.attachments import _validate_image;"
+        f"assert _validate_image({_GIF_BYTES!r}) == ('image/gif', 'gif');"
+        f"assert _validate_image({_BMP_BYTES!r}) == ('image/bmp', 'bmp')"
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=repository_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert process.returncode == 0, process.stderr
+
+
+def test_the_recipe_worker_still_pins_its_plugin_registry():
+    """The worker child keeps the protection the probe gave up.
+
+    It handles only the three fixed formats and must not let Image.open fall
+    back to Pillow's broad optional-codec scan, so the pin moved there rather
+    than being dropped.
+    """
+    repository_root = Path(__file__).parents[1]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repository_root / "backend")
+    program = (
+        "from PIL import Image;"
+        "from cortex_backend.execution.recipe_provider import pin_plugin_registry;"
+        "assert Image._initialized != 2;"
+        "pin_plugin_registry();"
+        "assert Image._initialized == 2"
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=repository_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert process.returncode == 0, process.stderr
 
 
 def test_explicit_math_request_adds_a_verified_local_observation_to_generation():
