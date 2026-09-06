@@ -1023,38 +1023,6 @@ class LlamaServerManager:
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
         vulkan_launch_failed = False
-        for backend in self._backend_order(requested_backend, model_path, num_ctx):
-            try:
-                handle = self._start_with_backend(
-                    model_path, num_ctx, backend, on_status, cancellation_event
-                )
-            except (ServerLaunchError, BinaryVerificationError, OSError) as exc:
-                # Not just launch failures. A backend whose archive fails its
-                # pinned checksum, or cannot be unpacked at all (full disk, a
-                # DLL locked by antivirus), is equally unusable -- and equally
-                # no reason to refuse a backend that is already verified and
-                # cached. Cancellation raises a plain LlamaCppError and still
-                # propagates.
-                last_exc = exc
-                if backend == "vulkan":
-                    vulkan_launch_failed = True
-                logger.warning(
-                    "llama-server backend '%s' is unusable (%s); trying the next option.",
-                    backend,
-                    type(exc).__name__,
-                )
-                continue
-            if vulkan_launch_failed and backend != "vulkan":
-                # Vulkan exited before becoming healthy, but the identical
-                # model/context/args just succeeded on another backend --
-                # that is real evidence the GPU backend itself is what
-                # can't run here. Without this comparison a failure common
-                # to every backend alike (a corrupt model file, a bad
-                # argument) would wrongly blame vulkan and strand the user
-                # on cpu for 24h for a problem that has nothing to do with
-                # the GPU backend.
-                self._mark_backend_bad("vulkan", model_path, num_ctx)
-            return handle
         # ServerLaunchError may originate from the child process and include
         # arbitrary stderr.  Keep status/API diagnostics stable and classify
         # the failure by exception type instead of relaying that text.
@@ -1062,10 +1030,73 @@ class LlamaServerManager:
             "The local model runtime could not start. "
             "Check System settings and try again."
         )
+        try:
+            for backend in self._backend_order(requested_backend, model_path, num_ctx):
+                try:
+                    handle = self._start_with_backend(
+                        model_path, num_ctx, backend, on_status, cancellation_event
+                    )
+                except (ServerLaunchError, BinaryVerificationError, OSError) as exc:
+                    # Not just launch failures. A backend whose archive fails its
+                    # pinned checksum, or cannot be unpacked at all (full disk, a
+                    # DLL locked by antivirus), is equally unusable -- and equally
+                    # no reason to refuse a backend that is already verified and
+                    # cached. Cancellation raises a plain LlamaCppError and still
+                    # propagates.
+                    last_exc = exc
+                    if backend == "vulkan":
+                        vulkan_launch_failed = True
+                    logger.warning(
+                        "llama-server backend '%s' is unusable (%s); trying the next option.",
+                        backend,
+                        type(exc).__name__,
+                    )
+                    continue
+                if vulkan_launch_failed and backend != "vulkan":
+                    # Vulkan exited before becoming healthy, but the identical
+                    # model/context/args just succeeded on another backend --
+                    # that is real evidence the GPU backend itself is what
+                    # can't run here. Without this comparison a failure common
+                    # to every backend alike (a corrupt model file, a bad
+                    # argument) would wrongly blame vulkan and strand the user
+                    # on cpu for 24h for a problem that has nothing to do with
+                    # the GPU backend.
+                    self._mark_backend_bad("vulkan", model_path, num_ctx)
+                return handle
+        except BaseException:
+            # Only the exceptions handled above are retried on another
+            # backend; everything else leaves the loop straight away. The
+            # states _start_with_backend publishes as it works
+            # ("downloading_binary", then "starting") describe a start that
+            # is still happening, so an exception that skips the terminal
+            # publication below leaves the runtime advertising progress
+            # forever -- most visibly a ServerStartTimeoutError, which is
+            # deliberately not a ServerLaunchError so that a slow model load
+            # never triggers the CPU fallback.
+            #
+            # A caller-initiated cancellation is not a failure: ensure_ready
+            # returns the manager to idle for that case, and it can only do
+            # so while the state still says a start is in progress.
+            if not cancellation_event.is_set():
+                self._publish_start_failure(message)
+            raise
         with self._state_lock:
             self._state = "failed"
             self._last_error = message
         raise last_exc or LlamaCppError(message)
+
+    def _publish_start_failure(self, message: str) -> None:
+        """Replace an in-progress start state with a terminal, reported one.
+
+        Deliberately narrow. ``_start_with_backend``'s ``finally`` clause can
+        leave ``stopping`` behind with a more specific message when a child
+        will not exit, and a concurrent caller may already have reached
+        ``ready``; neither should be overwritten by this generic text.
+        """
+        with self._state_lock:
+            if self._state in {"downloading_binary", "starting"}:
+                self._state = "failed"
+                self._last_error = message
 
     def _backend_order(
         self, requested: GpuBackendSetting, model_path: Path, num_ctx: int

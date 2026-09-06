@@ -417,7 +417,9 @@ def test_start_rejects_a_runtime_serving_the_wrong_model(tmp_path: Path) -> None
         manager.ensure_ready(model_path, num_ctx=4096)
 
     assert len(client.calls) >= 2
-    assert manager.status.state == "starting"
+    # The attestation failure exhausts the health deadline, so this ends as a
+    # start that timed out -- reported terminally rather than left "starting".
+    assert manager.status.state == "failed"
 
 
 def test_status_reports_which_backend_actually_launched(tmp_path: Path) -> None:
@@ -617,6 +619,31 @@ def test_slow_but_alive_process_times_out_without_gpu_fallback(tmp_path: Path) -
     # A timeout (process alive, just slow) must NOT be recorded as a known-bad
     # backend -- only an early process exit means "this backend can't launch here".
     assert not (tmp_path / "preferred_gpu_backend.json").exists()
+
+
+def test_start_timeout_reports_a_terminal_state_instead_of_starting(tmp_path: Path) -> None:
+    """A launch that times out has stopped happening, and status must say so.
+
+    ``ServerStartTimeoutError`` is deliberately not a ``ServerLaunchError`` --
+    a slow model load must not trigger the CPU fallback -- so it was the one
+    launch failure that left ``_start`` without publishing a terminal state.
+    The runtime went on advertising ``starting`` with no error for the rest of
+    the session, and the System card showed a start that had already given up.
+    """
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen(exit_immediately=False)]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+
+    with pytest.raises(ServerStartTimeoutError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    status = manager.status
+    assert status.state == "failed"
+    assert status.last_error is not None
 
 
 def test_start_timeout_kills_and_reaps_process_that_ignores_terminate(tmp_path: Path) -> None:
