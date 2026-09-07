@@ -333,7 +333,17 @@ class ModelService:
             else tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
         )
         details = get("details", {}) or {}
-        model_info = get("model_info", {}) or {}
+        # ``model_info`` is only the wire name. The real ``ollama`` client
+        # returns a pydantic model whose *field* is ``modelinfo``, with
+        # ``model_info`` as its serialization alias -- so neither attribute
+        # access nor that model's own ``get`` finds it under the wire name,
+        # and every Ollama model reported no context length at all. A plain
+        # mapping (a raw JSON response, the in-process double) still uses the
+        # wire name, so try that first and fall back to the field name.
+        model_info = get("model_info", None)
+        if model_info is None:
+            model_info = get("modelinfo", None)
+        model_info = model_info or {}
         details_get = details.get if isinstance(details, Mapping) else lambda key, default=None: getattr(details, key, default)
         family = details_get("family")
         family = str(family).strip() or None if family else None
