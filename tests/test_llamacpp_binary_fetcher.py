@@ -315,3 +315,79 @@ def test_download_rejects_insufficient_free_disk_space(tmp_path: Path, monkeypat
 
     assert not any(tmp_path.rglob("llama-server.exe"))
     assert not any(p.name.startswith(".download-") for p in tmp_path.iterdir())
+
+
+class _RecordingClient:
+    """Delegates to a real mock-transport client while noting the timeout used."""
+
+    def __init__(self, inner: httpx.Client) -> None:
+        self._inner = inner
+        self.timeouts: list[httpx.Timeout] = []
+
+    def stream(self, *args, **kwargs):
+        self.timeouts.append(kwargs.get("timeout"))
+        return self._inner.stream(*args, **kwargs)
+
+
+def test_a_cancellable_download_tolerates_an_ordinary_network_stall(tmp_path: Path) -> None:
+    """The cancellable read timeout must outlast a routine hiccup.
+
+    It is an inactivity timeout, chosen so a stalled socket cannot delay
+    cancellation for the full ordinary timeout -- the token is only checked
+    between chunks. At one second it did that far too literally: shorter than
+    a single TCP retransmission backoff, so the most routine network event
+    there is aborted the entire hundred-plus-megabyte transfer, and nothing
+    here retries or resumes.
+
+    Measured against a local server that pauses once mid-body, a 1.5s stall
+    failed the download in 1.38s with a token and succeeded without one.
+    """
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=archive_bytes)
+
+    client = _RecordingClient(httpx.Client(transport=httpx.MockTransport(handler)))
+    fetcher = BinaryFetcher(tmp_path, http_client=client)
+
+    fetcher.ensure_binary(release, "cpu", cancellation_event=SimpleNamespace(is_set=lambda: False))
+
+    used = client.timeouts[0]
+    assert used is not None
+    # Comfortably past retransmission backoff...
+    assert used.read >= 10.0
+    # ...while still far tighter than the non-cancellable budget, which is the
+    # whole reason a separate timeout exists.
+    assert used.read < binary_fetcher_module._DOWNLOAD_TIMEOUT.read
+
+
+def test_a_stall_after_cancellation_is_reported_as_cancellation(tmp_path: Path) -> None:
+    """A socket that goes silent once the user has stopped is not a network fault.
+
+    The in-loop token check only runs between chunks, so when no further chunk
+    arrives the request leaves through the read timeout instead. Reporting
+    "check your network connection" for a stop the caller asked for would be
+    actively misleading.
+    """
+    release = _release_for(_build_archive())
+    # Unset until the request is in flight -- ensure_binary refuses an
+    # already-cancelled call up front, which would not exercise this path.
+    stopped = {"value": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        stopped["value"] = True
+        raise httpx.ReadTimeout("the socket went quiet")
+
+    fetcher = BinaryFetcher(
+        tmp_path, http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    with pytest.raises(BinaryVerificationError, match="cancelled"):
+        fetcher.ensure_binary(
+            release,
+            "cpu",
+            cancellation_event=SimpleNamespace(is_set=lambda: stopped["value"]),
+        )

@@ -29,7 +29,19 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 # A cancellable startup must not sit in one socket read for the full ordinary
 # download timeout. This is an inactivity timeout, not a total-download cap.
-_CANCELLABLE_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=1.0, write=30.0, pool=10.0)
+#
+# It bounds how long cancellation can be delayed by a silent socket, because
+# the token is checked between chunks. One second did that far too literally:
+# it is shorter than a single TCP retransmission backoff, so the most routine
+# network hiccup there is aborted the whole hundred-plus-megabyte transfer --
+# and nothing here retries or resumes. Measured against a server that pauses
+# once mid-body, a 1.5s stall failed the download in 1.38s.
+#
+# Fifteen seconds sits well above ordinary retransmission while still keeping
+# cancellation eight times more responsive than the ordinary timeout below.
+# For scale, download.py streams multi-gigabyte GGUF models with read=60.0
+# and stays cancellable through exactly the same in-loop token check.
+_CANCELLABLE_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=30.0, pool=10.0)
 # Real llama.cpp Windows release archives (a tiny stub exe plus bundled
 # ggml-*.dll backend libraries) have run well under 200MB. 2 GiB is a
 # generous-but-bounded ceiling: it will not reject any real release, but it
@@ -328,6 +340,15 @@ class BinaryFetcher:
                         completed += len(chunk)
         except httpx.HTTPError as exc:
             destination.unlink(missing_ok=True)
+            # A socket that goes silent after the user asked to stop reaches
+            # here as a read timeout, not through the in-loop token check --
+            # that check only runs between chunks, and no further chunk ever
+            # arrives. Reporting a network problem for a cancellation the
+            # caller requested would be actively misleading.
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise BinaryVerificationError(
+                    "Local model runtime startup was cancelled."
+                ) from exc
             raise BinaryVerificationError(
                 "Could not download the local model runtime. Check your network connection and try again."
             ) from exc
