@@ -28,8 +28,18 @@ MAX_RESULT_ABS = Decimal("1e18")
 MAX_DECIMAL_SCALE = 18
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+# The trailing punctuation this prefix is willing to ignore ("what is 2+2?").
+_AUTO_TRAILING_PUNCTUATION = "?.!"
+# Deliberately no trailing quantifiers after the capture. A lazy ``(.+?)``
+# followed by ``\s*[?.!]*\s*$`` gave three quantifiers that could all claim the
+# same run of trailing whitespace -- and ``.`` could claim it too -- so a
+# prompt whose match had to fail (any second line, since ``.`` cannot cross a
+# newline) made the engine try every way of dividing that run. Cost grew
+# roughly with the cube of the whitespace length. Capturing greedily to the
+# end of the line leaves nothing to redistribute, and the trailing punctuation
+# is removed afterwards in plain code.
 _AUTO_PREFIX = re.compile(
-    r"^\s*(?:calculate|compute|evaluate|solve|what\s+is|what['’]s|how\s+much\s+is)\s+(.+?)\s*[?.!]*\s*$",
+    r"^\s*(?:calculate|compute|evaluate|solve|what\s+is|what['’]s|how\s+much\s+is)\s+(.+)$",
     re.IGNORECASE,
 )
 
@@ -320,7 +330,7 @@ def extract_automatic_expression(prompt: str) -> str | None:
     match = _AUTO_PREFIX.match(prompt)
     if match is None:
         return None
-    candidate = match.group(1).strip()
+    candidate = match.group(1).strip().rstrip(_AUTO_TRAILING_PUNCTUATION).strip()
     try:
         validate_scratch_expression(candidate)
     except ScratchComputeError:
