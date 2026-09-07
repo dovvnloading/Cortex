@@ -182,6 +182,56 @@ class PersistenceTests(unittest.TestCase):
             self.assertTrue((legacy / "quarantine" / "oversized.json").exists())
             self.assertIsNotNone(manager.load_chat("valid"))
 
+    def test_a_corrupt_memory_file_with_no_backup_can_still_be_repaired(self):
+        """A damaged file must not make the memory panel permanently dead.
+
+        The save path refuses to rotate a corrupt primary over a good backup,
+        which is right. When there was no valid backup either it refused the
+        whole save -- so every write failed, including Clear, which would have
+        replaced the damaged file outright. The only repair was deleting the
+        file by hand from the data directory.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "permanent_memory.json"
+            memory_path.write_text('{"memos": ["remember tea"]}', encoding="utf-8")
+            PermanentMemoryManager(memory_file_path=str(memory_path))
+            # A truncated write: unreadable, and no backup was ever rotated.
+            memory_path.write_text('{"memos": ["remember te', encoding="utf-8")
+            self.assertFalse(Path(f"{memory_path}.bak").exists())
+
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("a fresh memory")
+
+            self.assertEqual(manager.get_memos(), ["a fresh memory"])
+            reopened = PermanentMemoryManager(memory_file_path=str(memory_path))
+            self.assertEqual(reopened.get_memos(), ["a fresh memory"])
+            # The damaged bytes are set aside, not destroyed.
+            self.assertEqual(
+                Path(f"{memory_path}.corrupt").read_text(encoding="utf-8"),
+                '{"memos": ["remember te',
+            )
+
+    def test_a_corrupt_memory_file_still_recovers_from_a_good_backup(self):
+        """The protection this guard exists for must survive the repair path."""
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "permanent_memory.json"
+            backup_path = Path(f"{memory_path}.bak")
+            good = '{"memos": ["remember tea"]}'
+            memory_path.write_text(good, encoding="utf-8")
+            backup_path.write_text(good, encoding="utf-8")
+            memory_path.write_text('{"memos": ["remember te', encoding="utf-8")
+
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            self.assertEqual(manager.get_memos(), ["remember tea"])
+
+            manager.add_memo("second memory")
+
+            self.assertEqual(manager.get_memos(), ["remember tea", "second memory"])
+            # Recovered from the backup rather than set aside, so nothing was
+            # quarantined and the backup was never overwritten by corruption.
+            self.assertFalse(Path(f"{memory_path}.corrupt").exists())
+            self.assertIn("remember tea", backup_path.read_text(encoding="utf-8"))
+
     def test_permanent_memory_add_memo_is_safe_across_threads(self):
         with tempfile.TemporaryDirectory() as directory:
             memory_path = Path(directory) / "memory_bank.json"

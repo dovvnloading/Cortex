@@ -1229,13 +1229,43 @@ class PermanentMemoryManager:
 
         try:
             self._read_memos(self.backup_file_path)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            raise PersistenceError(
-                "Cannot save permanent memory because the existing file is corrupt and no valid backup is available.",
-                operation="save_permanent_memory",
-                cause=primary_error,
-            ) from exc
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            # Nothing left to protect: the primary is unreadable and so is the
+            # backup. Refusing the save here made the corruption permanent --
+            # every write failed, including the Clear that would have replaced
+            # the damaged file outright, so the only repair was deleting the
+            # file by hand from the data directory. Set the damaged bytes
+            # aside instead, so they stay recoverable, and let the new
+            # already-validated content be written over the gap.
+            self._set_aside_corrupt_memory_file(primary_error)
+            return
         self._atomic_copy_memos(self.backup_file_path, self.memory_file_path)
+
+    def _set_aside_corrupt_memory_file(self, cause: BaseException) -> None:
+        """Move an unrecoverable memory file out of the way of a fresh save.
+
+        Moving rather than deleting: the damaged bytes may still be readable
+        by a person even when this parser gives up on them. A single fixed
+        name is used on purpose -- an unbounded ``.corrupt.1``, ``.corrupt.2``
+        series would be its own slow leak in the data directory.
+        """
+        damaged_path = f"{self.memory_file_path}.corrupt"
+        try:
+            os.replace(self.memory_file_path, damaged_path)
+        except OSError as exc:
+            # Usually a lock. The save that follows would fail on the same
+            # file anyway, so report the condition rather than pressing on.
+            raise PersistenceError(
+                "Cannot save permanent memory because the existing file is corrupt "
+                "and could not be set aside.",
+                operation="save_permanent_memory",
+                cause=cause,
+            ) from exc
+        logging.warning(
+            "The permanent memory file was unreadable (%s) and no valid backup "
+            "existed; it was moved aside and a new file was written.",
+            type(cause).__name__,
+        )
 
     def _save_memos(self):
         """Validate and atomically replace the memory file, retaining a backup."""
