@@ -355,4 +355,102 @@ describe("SettingsPanel", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Save the folder setting before downloading");
     expect(onDownloadGGUF).not.toHaveBeenCalled();
   });
+  it("does not read a cleared number field as zero", async () => {
+    // Number("") is 0. Clearing a field to retype it wrote a real zero into
+    // the draft: below the server's minimum for the context window, and for
+    // the seed a *valid* value that silently turned "-1, keep replies varied"
+    // into a pinned seed.
+    const user = userEvent.setup();
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    const settings: CortexSettings = {
+      models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" },
+      generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "", bypass_system_prompt: false },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: ["local-chat:7b"],
+      models: [{ name: "local-chat:7b" }],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={onSave}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /AI Model/ }));
+    await user.clear(screen.getByLabelText("Context window"));
+    await user.clear(screen.getByLabelText("Seed"));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ num_ctx: 4096, seed: -1 }),
+    }));
+  });
+
+  it("still accepts a retyped number", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    const settings: CortexSettings = {
+      models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" },
+      generation: { temperature: 0.7, num_ctx: 4096, seed: -1, system_instructions: "", bypass_system_prompt: false },
+    };
+    const models: ModelResponse = {
+      required_models: [],
+      optional_models: [],
+      installed_models: ["local-chat:7b"],
+      models: [{ name: "local-chat:7b" }],
+      connection: { success: true, status: "connected", message: "Connected." },
+    };
+    render(
+      <SettingsPanel
+        settings={settings}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={onSave}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /AI Model/ }));
+    const seed = screen.getByLabelText("Seed");
+    await user.clear(seed);
+    await user.type(seed, "42");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ seed: 42 }),
+    }));
+  });
 });
