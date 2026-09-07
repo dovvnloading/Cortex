@@ -87,6 +87,23 @@ const sections: { id: SettingsSection; label: string; detail: string }[] = [
   { id: "system", label: "System", detail: "Runtime and installed models" },
 ];
 
+type NumericField = "num_ctx" | "seed";
+
+/**
+ * Read a number input, or null when it holds nothing usable.
+ *
+ * `Number("")` is 0, so clearing a field to retype it used to write a real
+ * zero into the draft. For the context window that is below the server's
+ * minimum and the save was rejected; for the seed it is a *valid* value, so
+ * it silently turned "-1, keep replies varied" into a pinned seed. An empty
+ * field means the user is mid-edit, not that they chose zero.
+ */
+function readNumericInput(raw: string): number | null {
+  if (raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 export function SettingsPanel({
   settings,
   memos,
@@ -131,6 +148,29 @@ export function SettingsPanel({
     : "";
 
   const update = (next: Partial<CortexSettings>) => setDraft((current) => ({ ...current, ...next }));
+
+  // What the user has literally typed into a number field, while they are
+  // typing it. The saved settings hold numbers, so a field bound straight to
+  // them can never be empty -- clearing it to retype snapped the old value
+  // back and the new digits appended to it ("-1" + "42" = -142). Keeping the
+  // raw text lets the box be empty mid-edit without ever writing a number
+  // nobody chose; `commitNumber` drops the override on blur so the field
+  // re-syncs to whatever was actually saved.
+  const [numericInputs, setNumericInputs] = useState<Partial<Record<NumericField, string>>>({});
+
+  const editNumber = (field: NumericField, raw: string, commit: (value: number) => void) => {
+    setNumericInputs((current) => ({ ...current, [field]: raw }));
+    const value = readNumericInput(raw);
+    if (value !== null) commit(value);
+  };
+
+  const commitNumber = (field: NumericField) =>
+    setNumericInputs((current) => {
+      if (current[field] === undefined) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
 
   const chooseChatModel = (chat: string) => update({ models: { ...modelSettings, chat, title: null } });
 
@@ -268,10 +308,27 @@ export function SettingsPanel({
                 </div>
                 <div className="settings-field-row">
                   <label className="field-label" htmlFor="num-ctx">Context window
-                    <input id="num-ctx" type="number" min="2048" max="65536" step="1024" value={generation.num_ctx ?? 8192} onChange={(event) => update({ generation: { ...generation, num_ctx: Number(event.target.value) } })} />
+                    <input
+                      id="num-ctx"
+                      type="number"
+                      min="2048"
+                      max="65536"
+                      step="1024"
+                      value={numericInputs.num_ctx ?? String(generation.num_ctx ?? 8192)}
+                      onChange={(event) => editNumber("num_ctx", event.target.value, (num_ctx) => update({ generation: { ...generation, num_ctx } }))}
+                      onBlur={() => commitNumber("num_ctx")}
+                    />
                   </label>
                   <label className="field-label" htmlFor="seed">Seed
-                    <input id="seed" type="number" min="-1" max="2147483647" value={generation.seed ?? -1} onChange={(event) => update({ generation: { ...generation, seed: Number(event.target.value) } })} />
+                    <input
+                      id="seed"
+                      type="number"
+                      min="-1"
+                      max="2147483647"
+                      value={numericInputs.seed ?? String(generation.seed ?? -1)}
+                      onChange={(event) => editNumber("seed", event.target.value, (seed) => update({ generation: { ...generation, seed } }))}
+                      onBlur={() => commitNumber("seed")}
+                    />
                   </label>
                 </div>
 
