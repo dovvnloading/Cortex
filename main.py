@@ -255,9 +255,30 @@ def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
 
 
 def _install_shutdown_signals(server: uvicorn.Server) -> None:
-    """Translate console interrupts into the same owned graceful shutdown."""
+    """Translate console interrupts into the same owned graceful shutdown.
+
+    These are the only handlers the process gets. Uvicorn installs its own in
+    ``capture_signals``, but that returns immediately when it is not on the
+    main thread -- and ``ServerSupervisor`` runs the server in a worker thread
+    -- so uvicorn's escalation never exists here and has to be carried by this
+    handler instead.
+
+    Escalation is not a nicety. Graceful shutdown waits on
+    ``while self.server_state.connections and not self.force_exit``, with
+    ``timeout_graceful_shutdown`` left at its default of ``None``, so one
+    still-open SSE stream holds the process open indefinitely. Uvicorn logs
+    "Waiting for connections to close. (CTRL+C to force quit)" while it waits;
+    without this, that instruction is untrue and the only way out is killing
+    the process.
+    """
     def request_shutdown(_signum: int, _frame: object) -> None:
-        server.should_exit = True
+        # Matches uvicorn's own handle_exit: the first interrupt asks, a
+        # repeat insists. Either handled signal may escalate, so Ctrl+Break
+        # after Ctrl+C works as well as pressing Ctrl+C twice.
+        if server.should_exit:
+            server.force_exit = True
+        else:
+            server.should_exit = True
 
     signal.signal(signal.SIGINT, request_shutdown)
     sigbreak = getattr(signal, "SIGBREAK", None)
