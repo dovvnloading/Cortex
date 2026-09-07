@@ -100,32 +100,20 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+/**
+ * Wait before retrying a dropped stream.
+ *
+ * Deliberately does not consult `navigator.onLine`. That flag reports whether
+ * the machine has *network* connectivity, and the Cortex backend is not on the
+ * network: `normalizeApiBaseUrl` refuses anything but a same-origin path or a
+ * loopback host in production. Treating "no Wi-Fi" as "cannot reach the
+ * backend" parked a dropped stream on "Waiting for network..." with no timer
+ * and no retry, so a laptop with its adapter off -- a plane, a dead router --
+ * lost the rest of a generation that was still running perfectly one process
+ * away. Offline is the normal case for a local-first app, not a fault.
+ */
 function waitForReconnect(jobId: string, attempt: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
-  if (!window.navigator.onLine) {
-    useChatStore.getState().setStatusText(jobId, "Connection paused while offline. Waiting for network...");
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = (completed: boolean) => {
-        if (settled) return;
-        settled = true;
-        window.removeEventListener("online", onOnline);
-        signal.removeEventListener("abort", onAbort);
-        resolve(completed);
-      };
-      const onOnline = () => {
-        useChatStore.getState().setStatusText(jobId, "Connection restored. Reconnecting...");
-        finish(true);
-      };
-      const onAbort = () => {
-        finish(false);
-      };
-      window.addEventListener("online", onOnline);
-      signal.addEventListener("abort", onAbort, { once: true });
-      if (signal.aborted) onAbort();
-      else if (window.navigator.onLine) onOnline();
-    });
-  }
   const milliseconds = reconnectDelay(attempt);
   useChatStore.getState().setStatusText(
     jobId,

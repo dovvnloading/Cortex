@@ -521,7 +521,12 @@ describe("useGenerationStream", () => {
     expect(reconnectDelay(100, () => 1)).toBe(30_000);
   });
 
-  it("pauses reconnects while offline and resumes when the browser comes online", async () => {
+  it("keeps retrying a dropped stream while the machine is offline", async () => {
+    // The backend is loopback-only -- normalizeApiBaseUrl refuses anything else
+    // in production -- so navigator.onLine says nothing about reaching it.
+    // Gating reconnects on it parked a dropped stream on "Waiting for
+    // network..." with no timer and no retry, and a laptop with its adapter
+    // off lost the rest of a generation that was still running locally.
     const hadOwnOnlineProperty = Object.prototype.hasOwnProperty.call(window.navigator, "onLine");
     const onlineDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "onLine");
     Object.defineProperty(window.navigator, "onLine", { configurable: true, value: false });
@@ -535,12 +540,12 @@ describe("useGenerationStream", () => {
       act(() => {
         void result.current.consume({ jobId: "job-offline", threadId: "thread-offline", lastEventId: 0 }, vi.fn().mockResolvedValue(undefined), vi.fn());
       });
-      await waitFor(() => expect(useChatStore.getState().generation.statusText).toContain("paused while offline"));
-      expect(streamGeneration).toHaveBeenCalledTimes(1);
 
-      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
-      act(() => window.dispatchEvent(new Event("online")));
+      // No "online" event is ever dispatched: the machine stays offline
+      // throughout, and the retry has to happen anyway.
       await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2));
+      expect(useChatStore.getState().generation.statusText).toContain("Retrying in");
+      expect(useChatStore.getState().generation.statusText).not.toContain("offline");
       act(() => result.current.stop());
     } finally {
       if (onlineDescriptor) Object.defineProperty(window.navigator, "onLine", onlineDescriptor);
