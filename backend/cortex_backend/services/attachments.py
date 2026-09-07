@@ -49,6 +49,7 @@ DEFAULT_CHAT_ATTACHMENT_RETENTION_SECONDS = 30 * 86_400
 MAX_CHAT_ATTACHMENT_RETENTION_SECONDS = 30 * 86_400
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 _CONTROL = frozenset(range(0, 9)) | frozenset(range(11, 13)) | frozenset(range(14, 32))
 _IMAGE_SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
@@ -170,7 +171,18 @@ def _safe_filename(value: str) -> str:
 
 
 def _decode_text(content: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+    # UTF-16 is offered only when the file says so with a byte-order mark.
+    # The UTF-16 codecs are close to unfalsifiable -- almost any even-length
+    # byte string decodes to *something* -- so trying them unconditionally
+    # meant an ordinary Latin-1 or Shift-JIS document, which UTF-8 correctly
+    # rejects, was reinterpreted as CJK noise. The control-character check
+    # below catches some of that and not all of it, and what it missed was
+    # handed to the model as though it were the document. A BOM is exactly
+    # the evidence that distinguishes a real UTF-16 file (what Notepad and
+    # PowerShell write) from a guess, and the ``utf-16`` codec reads both
+    # byte orders from it, so the unanchored variants are redundant.
+    encodings = ("utf-8-sig", "utf-16") if content[:2] in _UTF16_BOMS else ("utf-8-sig",)
+    for encoding in encodings:
         try:
             text = content.decode(encoding)
         except UnicodeDecodeError:

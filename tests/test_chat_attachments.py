@@ -206,6 +206,53 @@ def test_text_encoding_and_limits_are_checked_before_persistence():
     assert conflict.value.code == "attachment_request_conflict"
 
 
+def test_a_document_in_an_unsupported_encoding_is_refused_not_reinterpreted():
+    """Guessing UTF-16 turned ordinary documents into CJK noise.
+
+    The UTF-16 codecs accept almost any even-length byte string, so a file
+    UTF-8 correctly rejects -- a Latin-1 CSV, a Shift-JIS note -- was
+    reinterpreted rather than refused. The control-character check caught some
+    of that and not all of it: this CSV decoded to
+    ``'\\u6162\\u656d,\\u6976...'`` and was accepted, so the model was handed
+    noise and answered questions about a document nobody had actually read.
+
+    Refusing is the honest outcome: the user can re-save as UTF-8, which they
+    cannot do about an answer that silently described gibberish.
+    """
+    service = ChatAttachmentService()
+
+    for request_id, content in (
+        ("latin1-csv", "name,ville\nRené,Orléans\nZoé,Nîmes\n".encode("latin-1")),
+        ("shift-jis", "こんにちは世界".encode("shift_jis")),
+    ):
+        with pytest.raises(ChatAttachmentError) as refused:
+            service.stage(
+                owner="installation-encoding",
+                request_id=request_id,
+                filename=f"{request_id}.txt",
+                content=content,
+            )
+        assert refused.value.code == "attachment_not_text"
+
+
+def test_a_utf16_document_is_still_read_in_either_byte_order():
+    """A byte-order mark is real evidence, and both orders must keep working."""
+    service = ChatAttachmentService()
+
+    for request_id, content in (
+        ("utf16-le", b"\xff\xfe" + "Cortex document, café".encode("utf-16-le")),
+        ("utf16-be", b"\xfe\xff" + "Cortex document, café".encode("utf-16-be")),
+    ):
+        descriptor = service.stage(
+            owner="installation-bom",
+            request_id=request_id,
+            filename=f"{request_id}.txt",
+            content=content,
+        )
+        resolved = service.resolve(owner="installation-bom", descriptor=descriptor)
+        assert resolved.text_content == "Cortex document, café"
+
+
 def test_in_memory_staging_is_idempotent_under_concurrent_requests():
     service = ChatAttachmentService()
     workers = 8
