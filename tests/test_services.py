@@ -545,6 +545,46 @@ class ModelServiceTests(unittest.TestCase):
         self.assertEqual(inventory[0].family, "qwen3")
         self.assertEqual(inventory[0].context_length, 40960)
 
+    def test_inventory_reads_context_length_from_a_real_ollama_show_response(self):
+        """The dict above is the wire shape; the client returns a model.
+
+        ``ollama``'s ``ShowResponse`` names the field ``modelinfo`` and keeps
+        ``model_info`` only as its serialization alias, so neither attribute
+        access nor that model's own ``get`` finds it under the wire name. Every
+        Ollama model therefore reported no context length, and the Models panel
+        showed a context window for local GGUF models but never for Ollama
+        ones. Only a double built from a plain dict hid it.
+        """
+        from ollama._types import ShowResponse
+
+        response = ShowResponse.model_validate(
+            {
+                "capabilities": ["completion"],
+                "details": {
+                    "family": "qwen3",
+                    "parameter_size": "8.0B",
+                    "quantization_level": "Q4_K_M",
+                },
+                "model_info": {"qwen3.context_length": 40960},
+            }
+        )
+
+        class RealShapeGateway:
+            def list(self):
+                return {"models": [{"name": "qwen3:8b"}]}
+
+            def show(self, model: str):
+                return response
+
+        inventory, _ = ModelService(RealShapeGateway()).inventory()
+
+        self.assertEqual(inventory[0].context_length, 40960)
+        # The neighbouring fields already worked -- their field names match the
+        # wire names -- and must keep working.
+        self.assertEqual(inventory[0].family, "qwen3")
+        self.assertEqual(inventory[0].parameter_size, "8.0B")
+        self.assertEqual(inventory[0].capabilities, ("completion",))
+
     def test_show_details_tolerates_a_response_missing_details_and_model_info(self):
         class MinimalGateway:
             def list(self):
