@@ -20,7 +20,7 @@ from .local_process import (
 )
 from .models import ExecutionJob
 from .recipe_coordinator import RecipeExecutionError, RecipeWorkerOutput
-from .recipe_provider import RecipeImageProvider, RecipeProviderError
+from .recipe_provider import RecipeImageProvider, RecipeProviderError, pin_plugin_registry
 from .recipes import RecipeValidationError, parse_image_transform
 
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
@@ -44,6 +44,11 @@ def _recipe_worker_main(
         if not health.available:
             connection.send({"ok": False, "code": _RECIPE_PROCESS_ERROR})
             return
+        # This child handles nothing but the three fixed formats, so freeze
+        # the plugin table now that they are loaded. Safe here and only here:
+        # the flag is process-global, and the backend process needs the wider
+        # set for chat attachments.
+        pin_plugin_registry()
         plan = parse_image_transform(plan_payload)
         result = provider.transform(
             plan,
