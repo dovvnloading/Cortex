@@ -838,3 +838,51 @@ def test_the_clamp_ceiling_stays_an_integer():
 
     assert type(int(MAX_CODE_TIMEOUT_SECONDS * 1_000)) is int
     assert type(min(int(MAX_CODE_TIMEOUT_SECONDS * 1_000), 1)) is int
+
+
+def test_a_network_get_actually_dials_the_vetted_address(monkeypatch) -> None:
+    """The pin has to be wired in, not merely implemented.
+
+    The sibling test above proves ``_pinned_connection_classes`` dials the
+    vetted address, but it builds that class by hand. The opener that serves a
+    real ``net.get`` was assembled with ``build_opener``, which installs
+    urllib's stock HTTPHandler/HTTPSHandler and only drops one when a supplied
+    handler is a *subclass* of it. The pinned handlers derive from
+    AbstractHTTPHandler -- HTTPHandler's own base, not HTTPHandler -- so
+    neither stock handler was dropped, both sorted ahead of the pinned pair,
+    and every request went through them. The socket re-resolved the hostname
+    and the rebinding window was wide open; the pinned classes were never
+    even constructed.
+    """
+    answers = [
+        [(0, 0, 0, "", ("93.184.216.34", 80))],  # vetted: public
+        [(0, 0, 0, "", ("127.0.0.1", 80))],      # rebound: loopback
+    ]
+
+    def rebinding_getaddrinfo(host, port, *args, **kwargs):
+        del host, port, args, kwargs
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    dialed: list[tuple[str, int]] = []
+
+    def fake_create_connection(address, timeout=None, source_address=None):
+        del timeout, source_address
+        dialed.append(address)
+        raise OSError("connection not actually made in this test")
+
+    monkeypatch.setattr(code_execution.socket, "getaddrinfo", rebinding_getaddrinfo)
+    monkeypatch.setattr(
+        code_execution.socket, "create_connection", fake_create_connection
+    )
+
+    capability = code_execution._NetworkCapability(
+        True, code_execution._CapabilityBudget()
+    )
+
+    with pytest.raises(code_execution.CodeExecutionError):
+        capability.get("http://rebind.test/status")
+
+    assert dialed, "the request never reached a socket at all"
+    assert dialed == [("93.184.216.34", 80)], (
+        "the request re-resolved the hostname instead of dialing the vetted address"
+    )
