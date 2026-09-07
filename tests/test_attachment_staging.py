@@ -128,3 +128,35 @@ def test_stage_bytes_duplicate_terminal_result_is_revalidated(tmp_path: Path):
     with pytest.raises(AttachmentStagingError) as error:
         service.stage(owner=OWNER, request_id="attach-integrity", content=_image_bytes())
     assert error.value.code in {"attachment_artifact_unavailable", "attachment_artifact_invalid"}
+
+
+def test_a_disk_failure_fails_the_job_instead_of_escaping(tmp_path: Path, monkeypatch):
+    """A full disk must produce a stable code and a terminal job.
+
+    `publish_artifact` removes its partial files and then re-raises the
+    original exception, so an OSError -- a full disk, a permission error, an
+    antivirus lock -- reached `_publish_bytes` unwrapped. That method caught
+    only `ExecutionRepositoryError`, so the exception escaped the boundary
+    entirely: the caller's `except ArtifactBoundaryError` missed it, `_fail`
+    never ran, the job stayed non-terminal for the rest of the installation's
+    life, and the route answered HTTP 500 rather than a stable code.
+
+    `publish_outputs` in the same class already treats both the same way.
+    """
+    repository, service = _service(tmp_path)
+
+    def full_disk(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ExecutionRepository, "publish_artifact", full_disk)
+
+    with pytest.raises(AttachmentStagingError):
+        service.stage(owner=OWNER, request_id="attach-disk-full", content=_image_bytes())
+
+    with repository.connect() as connection:
+        statuses = [
+            str(row["status"])
+            for row in connection.execute("SELECT status FROM execution_jobs").fetchall()
+        ]
+
+    assert statuses == ["failed"], "the staging job was left non-terminal"
