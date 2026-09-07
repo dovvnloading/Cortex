@@ -303,6 +303,59 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(seen["model"], "translategemma:4b")
         self.assertIs(seen["cancellation_event"], event)
 
+    def test_the_status_callback_does_not_outlive_its_turn(self):
+        """A per-turn callback must not stay on the process-wide chat client.
+
+        `SynthesisAgent.set_status_callback` forwards to the chat client, which
+        is built once for the process while the engine is built per turn. The
+        callback closes over the snapshot -- attachments and all -- so leaving
+        it installed kept that turn alive for the life of the process, and any
+        later status message reached a finished turn: `generate_chat_title`
+        builds a fresh engine and installs no callback of its own, so a model
+        load during titling published "loading_model" against a job that had
+        already completed.
+        """
+        installed: list[object] = []
+
+        class _SharedClientEngine(_FakeEngine):
+            def set_status_callback(self, callback) -> None:
+                installed.append(callback)
+
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _SharedClientEngine(),
+        )
+
+        service.generate(_snapshot(memories_enabled=False, translation_enabled=False))
+
+        self.assertTrue(installed, "a callback was never installed at all")
+        self.assertIsNone(installed[-1], "the turn's callback was left on the shared client")
+
+    def test_the_status_callback_is_detached_even_when_the_turn_fails(self):
+        """The failure path is the one that matters most: it leaves a
+        half-finished turn behind, and that is exactly when a stale callback
+        would misattribute the next runtime message."""
+        installed: list[object] = []
+
+        class _FailingEngine(_FakeEngine):
+            def set_status_callback(self, callback) -> None:
+                installed.append(callback)
+
+            def generate(self, **kwargs):
+                raise ModelOperationError("the model fell over", operation="generation")
+
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _FailingEngine(),
+        )
+
+        with self.assertRaises(ModelOperationError):
+            service.generate(_snapshot(memories_enabled=False, translation_enabled=False))
+
+        self.assertIsNone(installed[-1], "a failed turn left its callback installed")
+
     def test_generation_is_headless_and_emits_owned_typed_progress(self):
         engine = _FakeEngine()
         recorder = _ProgressRecorder()

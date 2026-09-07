@@ -130,7 +130,7 @@ class FakeGenerationEngine:
         self.last_code_proposal: CodeExecutionProposal | None = None
         self.last_code_rejection: CodeProposalRejection | None = None
 
-    def set_status_callback(self, callback: Callable[[str], None]) -> None:
+    def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
         self._status_callback = callback
 
     def fit_memories_to_context(

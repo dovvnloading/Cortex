@@ -74,8 +74,13 @@ class GenerationEngine(Protocol):
     last_code_proposal: CodeExecutionProposal | None
     last_code_rejection: CodeProposalRejection | None
 
-    def set_status_callback(self, callback: Callable[[str], None]) -> None:
-        """Receive startup progress while ``generate`` blocks."""
+    def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Receive startup progress while ``generate`` blocks.
+
+        ``None`` detaches it. The chat client behind a real engine is
+        process-wide, so a callback left installed keeps the turn that made it
+        -- and everything its closure holds -- alive past that turn's end.
+        """
 
     def fit_memories_to_context(
         self,
@@ -255,137 +260,148 @@ class GenerationService:
         engine.set_status_callback(
             lambda message: self._publish(sink, snapshot, "loading_model", message)
         )
+        try:
 
-        self._check_cancelled(cancellation_event)
-        loaded_history = (
-            history_messages
-            if history_messages is not None
-            else self._history_loader(snapshot.thread_id)
-        )
-        working_history = [dict(message) for message in loaded_history]
-        if working_history and working_history[-1].get("role") == "user":
-            working_history.pop()
-
-        # Reserve room for attachments *before* history claims the whole
-        # budget: fit them first against a placeholder (history is not known
-        # yet), giving an attached document priority over old chat turns,
-        # then let history size itself around that reservation below. The
-        # attachments passed to engine.generate() further down are re-fit
-        # against the real, now-correctly-sized chat_history -- this pass
-        # only determines how much room history should leave.
-        reserved_attachments: Sequence[GenerationAttachment] = ()
-        if snapshot.attachments:
-            reserved_attachments = engine.fit_attachments_to_context(
-                snapshot.attachments,
-                query=snapshot.user_input,
-                chat_history="No history available.",
-                permanent_memories=permanent_memories,
-                memories_enabled=snapshot.memories_enabled,
-                user_system_instructions=snapshot.user_system_instructions,
-                num_ctx=num_ctx,
-                code_execution_eligible=snapshot.code_execution_eligible,
-                bypass_system_prompt=snapshot.bypass_system_prompt,
-                host_observations=snapshot.host_observations,
-            )
-
-        history_kwargs: dict[str, Any] = {
-            "query": snapshot.user_input,
-            "permanent_memories": permanent_memories,
-            "memories_enabled": snapshot.memories_enabled,
-            "user_system_instructions": snapshot.user_system_instructions,
-            "num_ctx": num_ctx,
-            "code_execution_eligible": snapshot.code_execution_eligible,
-            "bypass_system_prompt": snapshot.bypass_system_prompt,
-            "host_observations": snapshot.host_observations,
-        }
-        if reserved_attachments:
-            history_kwargs["attachments"] = reserved_attachments
-        # Preferred shape: the same retained exchanges as real user/assistant
-        # turns, which is what a chat-tuned model's template expects and what
-        # lets a local runtime reuse its cache across turns. One call returns
-        # both renderings because choosing which exchanges fit is the expensive
-        # part and must not be done twice. Engines that do not offer it (the
-        # narrower fakes in the test suite, and any older adapter) keep the
-        # flattened transcript.
-        chat_history, structured_history = engine.fit_history(
-            working_history, **history_kwargs
-        )
-
-        self._check_cancelled(cancellation_event)
-        generate_kwargs: dict[str, Any] = {
-            "query": snapshot.user_input,
-            "chat_history": chat_history,
-            "permanent_memories": permanent_memories,
-            "memories_enabled": snapshot.memories_enabled,
-            "user_system_instructions": snapshot.user_system_instructions,
-            "options": dict(snapshot.model_options),
-            "host_observations": snapshot.host_observations,
-        }
-        # Keep the legacy headless engine protocol compatible for callers that
-        # do not use attachments or cancellation; real engines receive the
-        # resolved payload.
-        if snapshot.attachments:
-            generate_kwargs["attachments"] = snapshot.attachments
-        if cancellation_event is not None:
-            generate_kwargs["cancellation_event"] = cancellation_event
-        generate_kwargs["history_messages"] = structured_history
-        response, thoughts, memory_command, stats = engine.generate(
-            **generate_kwargs,
-        )
-        if not isinstance(memory_command, MemoryCommand):
-            raise ModelOperationError(
-                "Generation returned an invalid memory command.",
-                operation="generation",
-            )
-        if not snapshot.memories_enabled:
-            memory_command = MemoryCommand()
-
-        proposal = engine.last_code_proposal
-        if not snapshot.code_execution_eligible or not isinstance(
-            proposal, CodeExecutionProposal
-        ):
-            proposal = None
-        rejection = engine.last_code_rejection
-        if not isinstance(rejection, CodeProposalRejection) or proposal is not None:
-            rejection = None
-
-        if snapshot.translation_enabled:
             self._check_cancelled(cancellation_event)
-            self._publish(
-                sink,
-                snapshot,
-                "translation",
-                f"Translating to {snapshot.target_language}...",
+            loaded_history = (
+                history_messages
+                if history_messages is not None
+                else self._history_loader(snapshot.thread_id)
             )
-            translation_result = _call_with_optional_kwargs(
-                engine.translate_text,
-                response,
-                snapshot.target_language,
-                options=dict(snapshot.model_options),
-                cancellation_event=cancellation_event,
+            working_history = [dict(message) for message in loaded_history]
+            if working_history and working_history[-1].get("role") == "user":
+                working_history.pop()
+
+            # Reserve room for attachments *before* history claims the whole
+            # budget: fit them first against a placeholder (history is not known
+            # yet), giving an attached document priority over old chat turns,
+            # then let history size itself around that reservation below. The
+            # attachments passed to engine.generate() further down are re-fit
+            # against the real, now-correctly-sized chat_history -- this pass
+            # only determines how much room history should leave.
+            reserved_attachments: Sequence[GenerationAttachment] = ()
+            if snapshot.attachments:
+                reserved_attachments = engine.fit_attachments_to_context(
+                    snapshot.attachments,
+                    query=snapshot.user_input,
+                    chat_history="No history available.",
+                    permanent_memories=permanent_memories,
+                    memories_enabled=snapshot.memories_enabled,
+                    user_system_instructions=snapshot.user_system_instructions,
+                    num_ctx=num_ctx,
+                    code_execution_eligible=snapshot.code_execution_eligible,
+                    bypass_system_prompt=snapshot.bypass_system_prompt,
+                    host_observations=snapshot.host_observations,
+                )
+
+            history_kwargs: dict[str, Any] = {
+                "query": snapshot.user_input,
+                "permanent_memories": permanent_memories,
+                "memories_enabled": snapshot.memories_enabled,
+                "user_system_instructions": snapshot.user_system_instructions,
+                "num_ctx": num_ctx,
+                "code_execution_eligible": snapshot.code_execution_eligible,
+                "bypass_system_prompt": snapshot.bypass_system_prompt,
+                "host_observations": snapshot.host_observations,
+            }
+            if reserved_attachments:
+                history_kwargs["attachments"] = reserved_attachments
+            # Preferred shape: the same retained exchanges as real user/assistant
+            # turns, which is what a chat-tuned model's template expects and what
+            # lets a local runtime reuse its cache across turns. One call returns
+            # both renderings because choosing which exchanges fit is the expensive
+            # part and must not be done twice. Engines that do not offer it (the
+            # narrower fakes in the test suite, and any older adapter) keep the
+            # flattened transcript.
+            chat_history, structured_history = engine.fit_history(
+                working_history, **history_kwargs
             )
-            if not isinstance(translation_result, TranslationResult):
-                raise ModelOperationError(
-                    "Translation returned an invalid result.",
-                    operation="translation",
-                )
-            if not translation_result.success:
-                raise ModelOperationError(
-                    translation_result.error or "Translation failed. Please try again.",
-                    operation="translation",
-                )
-            response = translation_result.text or ""
 
-        self._check_cancelled(cancellation_event)
+            self._check_cancelled(cancellation_event)
+            generate_kwargs: dict[str, Any] = {
+                "query": snapshot.user_input,
+                "chat_history": chat_history,
+                "permanent_memories": permanent_memories,
+                "memories_enabled": snapshot.memories_enabled,
+                "user_system_instructions": snapshot.user_system_instructions,
+                "options": dict(snapshot.model_options),
+                "host_observations": snapshot.host_observations,
+            }
+            # Keep the legacy headless engine protocol compatible for callers that
+            # do not use attachments or cancellation; real engines receive the
+            # resolved payload.
+            if snapshot.attachments:
+                generate_kwargs["attachments"] = snapshot.attachments
+            if cancellation_event is not None:
+                generate_kwargs["cancellation_event"] = cancellation_event
+            generate_kwargs["history_messages"] = structured_history
+            response, thoughts, memory_command, stats = engine.generate(
+                **generate_kwargs,
+            )
+            if not isinstance(memory_command, MemoryCommand):
+                raise ModelOperationError(
+                    "Generation returned an invalid memory command.",
+                    operation="generation",
+                )
+            if not snapshot.memories_enabled:
+                memory_command = MemoryCommand()
 
-        return GenerationServiceResult(
-            response=response,
-            thoughts=thoughts,
-            memory_command=memory_command,
-            code_execution_proposal=proposal,
-            code_execution_rejection=rejection,
-            stats=stats,
-        )
+            proposal = engine.last_code_proposal
+            if not snapshot.code_execution_eligible or not isinstance(
+                proposal, CodeExecutionProposal
+            ):
+                proposal = None
+            rejection = engine.last_code_rejection
+            if not isinstance(rejection, CodeProposalRejection) or proposal is not None:
+                rejection = None
+
+            if snapshot.translation_enabled:
+                self._check_cancelled(cancellation_event)
+                self._publish(
+                    sink,
+                    snapshot,
+                    "translation",
+                    f"Translating to {snapshot.target_language}...",
+                )
+                translation_result = _call_with_optional_kwargs(
+                    engine.translate_text,
+                    response,
+                    snapshot.target_language,
+                    options=dict(snapshot.model_options),
+                    cancellation_event=cancellation_event,
+                )
+                if not isinstance(translation_result, TranslationResult):
+                    raise ModelOperationError(
+                        "Translation returned an invalid result.",
+                        operation="translation",
+                    )
+                if not translation_result.success:
+                    raise ModelOperationError(
+                        translation_result.error or "Translation failed. Please try again.",
+                        operation="translation",
+                    )
+                response = translation_result.text or ""
+
+            self._check_cancelled(cancellation_event)
+
+            return GenerationServiceResult(
+                response=response,
+                thoughts=thoughts,
+                memory_command=memory_command,
+                code_execution_proposal=proposal,
+                code_execution_rejection=rejection,
+                stats=stats,
+            )
+        finally:
+            # The chat client is process-wide while the engine is built per
+            # turn, so this callback outlived the turn that installed it. It
+            # closes over the snapshot -- attachments included -- which stayed
+            # referenced for the life of the process, and any later status
+            # message reached a finished turn: generate_chat_title builds a
+            # fresh engine and installs no callback of its own, so a model
+            # load during titling published "loading_model" against the job
+            # that had already completed.
+            engine.set_status_callback(None)
 
     def generate_chat_title(
         self,
