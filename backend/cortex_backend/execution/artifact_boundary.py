@@ -354,7 +354,15 @@ class ArtifactBoundary:
                 mime_type=mime_type,
                 retention_seconds=retention_seconds,
             )
-        except ExecutionRepositoryError:
+        except (ExecutionRepositoryError, OSError):
+            # OSError as well, because publish_artifact re-raises it: its own
+            # handler removes the partial files and then `raise`s the original,
+            # so a full disk, a permission error or an antivirus lock arrives
+            # here unwrapped. Without this the exception escaped the boundary
+            # entirely -- the caller's `except ArtifactBoundaryError` missed
+            # it, so the staging job was never failed and stayed non-terminal
+            # for good, and the route answered 500 instead of a stable code.
+            # publish_outputs below already treats both the same way.
             raise ArtifactBoundaryError("artifact_publish_failed") from None
 
     def stage_bytes(
