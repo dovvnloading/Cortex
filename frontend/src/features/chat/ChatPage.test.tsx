@@ -1265,6 +1265,73 @@ describe("ChatPage composer integration", () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
+  it("clears the composer when a retry succeeds", async () => {
+    // A failed send deliberately keeps the text in the box ("Your message is
+    // still here"). Retry then sent it without clearing, so the message was
+    // in the transcript and back in the composer, one Enter from going twice.
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(503, "The response could not be started."))
+      .mockResolvedValueOnce({
+        job_id: "job-retry",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-user-1",
+      });
+    const api = chatApi({
+      generate,
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      streamGeneration: vi.fn(() => new Promise<void>(() => undefined)),
+    });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Send me once");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The failed send keeps the text, which is the behaviour being built on.
+    await screen.findByRole("button", { name: "Retry last message" });
+    expect(composer).toHaveValue("Send me once");
+
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByLabelText("Message Cortex")).toHaveValue(""));
+  });
+
+  it("leaves a draft the user has rewritten since the failure alone", async () => {
+    // Only the draft that is still the message being retried is cleared.
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(503, "The response could not be started."))
+      .mockResolvedValueOnce({
+        job_id: "job-retry-2",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-user-2",
+      });
+    const api = chatApi({
+      generate,
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      streamGeneration: vi.fn(() => new Promise<void>(() => undefined)),
+    });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Send me once");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+
+    await user.clear(composer);
+    await user.type(composer, "Actually, something else");
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("Actually, something else");
+  });
+
   it("explains the image capability mismatch before a generation request is made", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {

@@ -481,15 +481,19 @@ export function ChatPage({
     }
   };
 
-  const submitDraft = async (): Promise<boolean> => {
-    const submittedDraft = draft;
-    const submittedAttachments = attachments;
-    const submittedScope = draftScope;
-    const submittedAttachmentScope = attachmentScope;
-    const submittedThreadId = threadId;
-    const started = await startGeneration(submittedDraft, undefined, submittedAttachments);
-    if (!started) return false;
-
+  // Everything the composer has to let go of once a message is genuinely on
+  // its way: the draft text, its attachments, and -- for a first message --
+  // the migration of both from the "new chat" placeholder scope to the real
+  // thread. Retry sends a message too, and used to skip all of it, leaving
+  // the text it had just sent sitting in the box ready to be sent twice.
+  const settleComposerAfterSend = (
+    started: StartedGeneration,
+    submittedDraft: string,
+    submittedAttachments: readonly ChatAttachment[],
+    submittedScope: string,
+    submittedAttachmentScope: string,
+    submittedThreadId: string | null,
+  ) => {
     const destinationThreadId = submittedThreadId ?? started.threadId;
     const destinationDraftScope = composerDraftKey(destinationThreadId);
     const destinationAttachmentScope = composerAttachmentKey(destinationThreadId);
@@ -554,6 +558,25 @@ export function ChatPage({
       }
       writeComposerAttachments(destinationThreadId, retainedAttachments);
     }
+  };
+
+  const submitDraft = async (): Promise<boolean> => {
+    const submittedDraft = draft;
+    const submittedAttachments = attachments;
+    const submittedScope = draftScope;
+    const submittedAttachmentScope = attachmentScope;
+    const submittedThreadId = threadId;
+    const started = await startGeneration(submittedDraft, undefined, submittedAttachments);
+    if (!started) return false;
+
+    settleComposerAfterSend(
+      started,
+      submittedDraft,
+      submittedAttachments,
+      submittedScope,
+      submittedAttachmentScope,
+      submittedThreadId,
+    );
     if (!submittedThreadId) onThreadCreated(started.threadId);
     return true;
   };
@@ -593,6 +616,26 @@ export function ChatPage({
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
+    // A failed send deliberately leaves the text in the composer ("Your
+    // message is still here"), so a retry that succeeds has to clear it the
+    // way a submit does -- otherwise the message is both in the transcript
+    // and back in the box, one Enter away from being sent twice.
+    //
+    // `lastPrompt` is the trimmed input, so compare on that: only the draft
+    // that is still the message being retried is cleared, and a draft the
+    // user has since started rewriting is left alone.
+    const submittedDraft = draft.trim() === lastPrompt ? draft : "";
+    const submittedScope = draftScope;
+    const submittedAttachmentScope = attachmentScope;
+    const submittedThreadId = threadId;
+    const settle = (started: StartedGeneration) => settleComposerAfterSend(
+      started,
+      submittedDraft,
+      lastAttachments,
+      submittedScope,
+      submittedAttachmentScope,
+      submittedThreadId,
+    );
     // A stream-level failure after the user's message was already durably
     // admitted leaves that message as the thread's last one with no reply.
     // Retrying must regenerate a reply for it, not resubmit the same text
@@ -604,6 +647,7 @@ export function ChatPage({
     const danglingUserMessageId = lastMessage?.role === "user" ? lastMessage.id ?? undefined : undefined;
     if (danglingUserMessageId) {
       const started = await startGeneration(lastPrompt, danglingUserMessageId, lastAttachments);
+      if (started) settle(started);
       if (started && !threadId) onThreadCreated(started.threadId);
       return Boolean(started);
     }
@@ -618,6 +662,7 @@ export function ChatPage({
       pendingAdmission?.requestId,
       pendingAdmission ?? undefined,
     );
+    if (started) settle(started);
     if (started && !threadId) onThreadCreated(started.threadId);
     return Boolean(started);
   };
