@@ -9,15 +9,30 @@ type Props = {
   onClear: () => Promise<void>;
 };
 
+type DraftRow = {
+  id: number;
+  value: string;
+  // The server value this row was last seeded from. An edited row no longer
+  // equals it, which is exactly why reconciliation cannot match on `value`.
+  origin: string;
+};
+
 export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
   const [memo, setMemo] = useState("");
-  const [draft, setDraft] = useState(() => memos.map((value, id) => ({ id, value })));
+  const [draft, setDraft] = useState<DraftRow[]>(
+    () => memos.map((value, id) => ({ id, value, origin: value })),
+  );
 
   // `memos` is the authoritative list the server returned. The draft was
   // seeded from it once and never re-derived, so an entry the server
   // normalized away -- trimmed to nothing, or a case-insensitive duplicate --
-  // stayed on screen looking saved. Re-seed whenever the server's answer
-  // actually changes, which leaves in-progress edits alone between saves.
+  // stayed on screen looking saved.
+  //
+  // Re-seeding wholesale fixed that and broke something else: adding a memory
+  // also changes the server's answer, so every *other* row the user had edited
+  // and not yet saved silently reverted. Reconcile instead -- carry each
+  // surviving row's in-progress value across by matching on the server value
+  // it came from, and build a fresh row only for genuinely new entries.
   const lastServerMemos = useRef(memos);
   useEffect(() => {
     const previous = lastServerMemos.current;
@@ -25,7 +40,22 @@ export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
       previous.length !== memos.length || previous.some((value, index) => value !== memos[index]);
     if (!changed) return;
     lastServerMemos.current = memos;
-    setDraft(memos.map((value, id) => ({ id, value })));
+    setDraft((current) => {
+      const byOrigin = new Map<string, DraftRow[]>();
+      for (const row of current) {
+        const bucket = byOrigin.get(row.origin);
+        if (bucket) bucket.push(row);
+        else byOrigin.set(row.origin, [row]);
+      }
+      let nextId = current.reduce((highest, row) => Math.max(highest, row.id), -1) + 1;
+      return memos.map((value) => {
+        // shift(), so duplicate server values claim distinct rows.
+        const existing = byOrigin.get(value)?.shift();
+        return existing
+          ? { ...existing, origin: value }
+          : { id: nextId++, value, origin: value };
+      });
+    });
   }, [memos]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -36,7 +66,7 @@ export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
       setDraft((current) => {
         if (current.some((item) => item.value.toLocaleLowerCase() === value.toLocaleLowerCase())) return current;
         const id = current.reduce((highest, item) => Math.max(highest, item.id), -1) + 1;
-        return [...current, { id, value }];
+        return [...current, { id, value, origin: value }];
       });
       setMemo("");
     }).catch(() => undefined);

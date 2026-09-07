@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryPanel } from "./MemoryPanel";
 
@@ -22,6 +23,39 @@ describe("MemoryPanel", () => {
 
     expect(input).toHaveValue("Original fact updated");
     expect(input).toHaveFocus();
+  });
+
+  it("keeps unsaved edits to other rows when a memory is added", async () => {
+    // Adding a memory changes the server list, which re-seeded the whole
+    // draft. Every other row the user had edited but not yet saved silently
+    // reverted to the server's copy.
+    const user = userEvent.setup();
+    const onReplace = vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue();
+
+    function Host() {
+      const [memos, setMemos] = useState(["First", "Second"]);
+      return (
+        <MemoryPanel
+          memos={memos}
+          busy={false}
+          onAdd={async (memo: string) => { setMemos((current) => [...current, memo]); }}
+          onReplace={onReplace}
+          onClear={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        />
+      );
+    }
+    render(<Host />);
+
+    await user.clear(screen.getByRole("textbox", { name: "Memory 2" }));
+    await user.type(screen.getByRole("textbox", { name: "Memory 2" }), "Edited");
+
+    await user.type(screen.getByRole("textbox", { name: "New memory" }), "Third");
+    await user.click(screen.getByRole("button", { name: "Add memory" }));
+    await screen.findByRole("textbox", { name: "Memory 3" });
+
+    expect(screen.getByRole("textbox", { name: "Memory 2" })).toHaveValue("Edited");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onReplace).toHaveBeenCalledWith(["First", "Edited", "Third"]);
   });
 
   it("preserves edited rows when removing a neighboring row", async () => {
@@ -160,5 +194,39 @@ describe("MemoryPanel server reconciliation", () => {
       expect(screen.queryByDisplayValue("duplicate")).not.toBeInTheDocument();
     });
     expect(screen.getByDisplayValue("kept")).toBeInTheDocument();
+  });
+
+  it("drops a normalized-away row without discarding an edit to a surviving one", async () => {
+    // Both halves at once: reconciliation must not be satisfied by simply
+    // preferring the draft (which would keep the rejected row on screen) or
+    // by simply preferring the server (the original defect).
+    const user = userEvent.setup();
+    const { waitFor } = await import("@testing-library/react");
+
+    function Harness() {
+      const [memos, setMemos] = useState<string[]>(["kept", "duplicate"]);
+      return (
+        <>
+          <button onClick={() => setMemos(["kept"])}>server responded</button>
+          <MemoryPanel
+            memos={memos}
+            busy={false}
+            onAdd={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+            onReplace={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+            onClear={vi.fn<() => Promise<void>>().mockResolvedValue()}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+
+    await user.clear(screen.getByRole("textbox", { name: "Memory 1" }));
+    await user.type(screen.getByRole("textbox", { name: "Memory 1" }), "kept and edited");
+    await user.click(screen.getByRole("button", { name: "server responded" }));
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue("duplicate")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("kept and edited");
   });
 });
