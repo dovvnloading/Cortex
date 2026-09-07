@@ -52,3 +52,23 @@ class ServerStartTimeoutError(LlamaCppError):
     still alive but slow to finish loading a large model must not be treated
     as a GPU-backend failure and must not trigger a CPU fallback.
     """
+
+
+class CrashLoopError(LlamaCppError):
+    """Raised when a model has repeatedly failed to start in a short window.
+
+    Its message is guidance Cortex wrote itself, naming the failure count and
+    what to change. ``services/llm.py``'s ``_generation_failure_message``
+    classifies a runtime's raw text by keyword, which is right for text that
+    came from Ollama or llama-server and wrong for this: the guidance says to
+    *lower* the context window, the classifier matched "context window", and
+    the user was told to raise it instead -- the one change guaranteed to
+    reproduce the crash.
+
+    ``is_user_guidance`` marks a message that is already user-facing and must
+    be passed through unchanged. It is read with ``getattr`` for the same
+    reason ``backend`` is: that module must not import this one.
+    """
+
+    is_user_guidance = True
+    guidance_code = "llamacpp_crash_loop"
