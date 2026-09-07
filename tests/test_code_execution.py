@@ -886,3 +886,49 @@ def test_a_network_get_actually_dials_the_vetted_address(monkeypatch) -> None:
     assert dialed == [("93.184.216.34", 80)], (
         "the request re-resolved the hostname instead of dialing the vetted address"
     )
+
+
+class _LongRepr:
+    """An object whose rendered form overflows the 1000-character cap."""
+
+    def __str__(self) -> str:
+        return "y" * 2000
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("more items than the element cap", list(range(150))),
+        ("more entries than the element cap", {f"k{index}": index for index in range(150)}),
+        ("keys that collide once shortened", {"x" * 100 + "A": 1, "x" * 100 + "B": 2}),
+        ("nesting past the depth cap", {"a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}),
+        ("a rendered value past the length cap", {"k": _LongRepr()}),
+    ],
+)
+def test_a_result_that_lost_data_reports_itself_as_truncated(label: str, value: object) -> None:
+    """Every bound in _json_safe drops data; none of them used to say so.
+
+    ``_bounded_json_value`` only reported ``truncated`` for a whole value that
+    failed to encode or blew the byte ceiling. Element, key-length and depth
+    caps all trimmed the result and still returned ``truncated=False``, so the
+    execution tray's "Output truncated" badge stayed off and the user was
+    shown 100 items of a 150-item list as though that were the answer. Two
+    keys alike for their first 100 characters were worse: one silently
+    replaced the other.
+    """
+    del label
+    _safe, truncated = code_execution._bounded_json_value(value)
+
+    assert truncated is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [list(range(10)), {"a": 1, "b": 2}, "plain text", 42, None, {"a": {"b": {"c": 1}}}],
+)
+def test_a_complete_result_is_not_reported_as_truncated(value: object) -> None:
+    """The flag has to stay meaningful, or the badge becomes noise."""
+    safe, truncated = code_execution._bounded_json_value(value)
+
+    assert truncated is False
+    assert safe == value

@@ -1272,8 +1272,22 @@ class _NetworkCapability:
             raise CodeExecutionError("network_request_failed") from None
 
 
-def _json_safe(value: Any, *, depth: int = 0) -> Any:
+def _json_safe(value: Any, *, depth: int = 0, elided: list[str] | None = None) -> Any:
+    """Render a value as JSON-safe data, recording anything it has to drop.
+
+    The bounds here are all necessary, but each one loses data silently. Pass
+    ``elided`` to find out whether that happened: every element, key or level
+    this discards appends a note. Without it the caller cannot tell a complete
+    result from a trimmed one, and the execution tray's "Output truncated"
+    badge stayed off while the user was shown 100 items of a 150-item list.
+    """
+
+    def note(reason: str) -> None:
+        if elided is not None:
+            elided.append(reason)
+
     if depth > 4:
+        note("values nested deeper than the supported level")
         return "[truncated]"
     if value is None or isinstance(value, (str, int, bool)):
         return value
@@ -1283,28 +1297,39 @@ def _json_safe(value: Any, *, depth: int = 0) -> Any:
         result: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
             if index >= 100:
+                note("entries beyond the supported count")
                 break
-            result[str(key)[:100]] = _json_safe(item, depth=depth + 1)
+            safe_key = str(key)[:100]
+            # Two keys alike for their first 100 characters collapse onto one
+            # another here, so the second silently replaces the first.
+            if safe_key in result:
+                note("entries whose keys are identical once shortened")
+            result[safe_key] = _json_safe(item, depth=depth + 1, elided=elided)
         return result
     if isinstance(value, (list, tuple, set)):
         items: list[Any] = []
         for index, item in enumerate(value):
             if index >= 100:
+                note("items beyond the supported count")
                 break
-            items.append(_json_safe(item, depth=depth + 1))
+            items.append(_json_safe(item, depth=depth + 1, elided=elided))
         return items
-    return str(value)[:1000]
+    rendered = str(value)
+    if len(rendered) > 1000:
+        note("a rendered value longer than the supported length")
+    return rendered[:1000]
 
 
 def _bounded_json_value(value: Any) -> tuple[Any, bool]:
-    safe = _json_safe(value)
+    elided: list[str] = []
+    safe = _json_safe(value, elided=elided)
     try:
         encoded = json.dumps(safe, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (TypeError, ValueError, OverflowError):
         return "[unavailable]", True
     if len(encoded.encode("utf-8")) > MAX_CODE_VALUE_BYTES:
         return "[truncated]", True
-    return safe, False
+    return safe, bool(elided)
 
 
 def _bounded_text(value: str) -> tuple[str, bool]:
