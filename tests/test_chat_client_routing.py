@@ -838,3 +838,49 @@ def test_ollama_does_not_wait_for_the_model_when_stop_was_already_pressed() -> N
     assert backend.calls == 0, "a cancelled turn still opened a request"
     assert elapsed < 0.5, f"a cancelled turn waited {elapsed:.2f}s for the model"
     assert result["message"]["content"] == ""
+
+
+def test_crash_loop_guidance_is_not_rewritten_into_its_opposite() -> None:
+    """Cortex's own guidance must reach the user as written.
+
+    The crash-loop guard tells the user the runtime has died repeatedly and to
+    *lower* the context window. `_generation_failure_message` classifies a
+    runtime's raw text by keyword, matched "context window", and replaced the
+    whole thing with "raise the context limit in Settings" -- the one change
+    guaranteed to reproduce the crash -- while discarding the failure count.
+    """
+    from cortex_backend.llamacpp.errors import CrashLoopError
+    from cortex_backend.services.llm import _generation_failure_message
+
+    guidance = (
+        "The local model runtime failed 3 times in the last few minutes "
+        "(most recently: the runtime exited before it became ready). It likely "
+        "does not fit in available memory. Choose a smaller model or "
+        "quantization, or lower the context window in Settings, and Cortex "
+        "will try again."
+    )
+
+    message, details = _generation_failure_message(CrashLoopError(guidance))
+
+    assert message == guidance
+    assert details == "llamacpp_crash_loop"
+    assert "raise the context limit" not in message
+
+
+def test_the_runtimes_own_context_error_is_still_classified() -> None:
+    """Passing Cortex's guidance through must not disable keyword classification.
+
+    llama-server's own wording is exactly the case the classifier is for, and
+    "raise the context limit" is the right advice for it.
+    """
+    from cortex_backend.llamacpp.errors import ServerLaunchError
+    from cortex_backend.services.llm import _generation_failure_message
+
+    message, details = _generation_failure_message(
+        ServerLaunchError(
+            "the request exceeds the available context size. try increasing the context size"
+        )
+    )
+
+    assert details == "context_limit"
+    assert "raise the context limit" in message

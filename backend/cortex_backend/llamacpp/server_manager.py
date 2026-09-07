@@ -40,7 +40,13 @@ import httpx
 
 from .binary_fetcher import BinaryFetcher
 from .binary_release import GpuBackend, PinnedRelease
-from .errors import BinaryVerificationError, LlamaCppError, ServerLaunchError, ServerStartTimeoutError
+from .errors import (
+    BinaryVerificationError,
+    CrashLoopError,
+    LlamaCppError,
+    ServerLaunchError,
+    ServerStartTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -933,7 +939,7 @@ class LlamaServerManager:
             else:
                 self._state = "stopping"
                 self._last_error = "The local model runtime did not exit cleanly; restart Cortex before trying again."
-        raise LlamaCppError(message)
+        raise CrashLoopError(message)
 
     def _terminate_and_reset(self) -> bool:
         with self._state_lock:

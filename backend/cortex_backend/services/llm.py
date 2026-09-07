@@ -108,6 +108,18 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
     runtime_name_title = "Ollama" if backend == "ollama" else "The local model runtime"
     error_prefix = "ollama" if backend == "ollama" else "llamacpp"
 
+    # Keyword classification below exists for a runtime's *own* text, which
+    # Cortex does not control. A message Cortex wrote is already specific and
+    # actionable, and running it through those keywords actively corrupts it:
+    # the crash-loop guidance asks the user to lower the context window, and
+    # "context window" matched the rule that tells them to raise it.
+    if getattr(exc, "is_user_guidance", False) and isinstance(provider_error, str):
+        guidance = provider_error.strip()
+        if guidance:
+            return guidance, str(
+                getattr(exc, "guidance_code", f"{error_prefix}_guidance")
+            )
+
     if status == 404 or "model not found" in text or "not found" in text:
         return (
             "The selected local model is no longer installed. Choose an installed model and try again.",
