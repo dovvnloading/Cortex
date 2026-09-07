@@ -1155,6 +1155,66 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("button", { name: "Remove next.md" })).toBeInTheDocument();
   });
 
+  it("keeps the files that uploaded when a later one in the batch fails", async () => {
+    // Each staged file is already uploaded and already holding backend
+    // retention. Committing the batch only after the whole loop meant one bad
+    // file discarded every good one before it, orphaning those artifacts and
+    // making the user re-add the rest by hand.
+    const user = userEvent.setup();
+    const uploaded: ChatAttachment = {
+      attachment_id: "doc-good",
+      filename: "good.md",
+      mime_type: "text/markdown",
+      size: 4,
+      sha256: "a".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const api = chatApi({
+      stageChatAttachment: vi.fn()
+        .mockResolvedValueOnce(uploaded)
+        .mockRejectedValueOnce(new Error("the second file could not be staged")),
+    });
+    renderChat(api);
+
+    const attachmentInput = await screen.findByLabelText("Attach images or documents");
+    await user.upload(attachmentInput, [
+      new File(["good"], "good.md", { type: "text/markdown" }),
+      new File(["bad"], "bad.md", { type: "text/markdown" }),
+    ]);
+
+    await waitFor(() => expect(api.stageChatAttachment).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: "Remove good.md" })).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Files attached before it were kept.");
+  });
+
+  it("says so when more files are chosen than a message can carry", async () => {
+    // Silently dropping the overflow looked exactly like attaching it.
+    const user = userEvent.setup();
+    const api = chatApi({
+      stageChatAttachment: vi.fn(async (request: { filename: string }) => ({
+        attachment_id: `id-${request.filename}`,
+        filename: request.filename,
+        mime_type: "text/markdown",
+        size: 4,
+        sha256: "b".repeat(64),
+        kind: "document" as const,
+        expires_at: "2099-01-01T00:00:00Z",
+      })),
+    });
+    renderChat(api);
+
+    const attachmentInput = await screen.findByLabelText("Attach images or documents");
+    await user.upload(
+      attachmentInput,
+      Array.from({ length: 9 }, (_unused, index) =>
+        new File([`f${index}`], `file-${index}.md`, { type: "text/markdown" })),
+    );
+
+    await waitFor(() => expect(api.stageChatAttachment).toHaveBeenCalledTimes(8));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Only 8 of 9 files were attached");
+  });
+
   it("explains the image capability mismatch before a generation request is made", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {

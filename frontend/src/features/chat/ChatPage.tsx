@@ -637,27 +637,14 @@ export function ChatPage({
     attachmentDraftTargetsRef.current.add(target);
     setAttachmentsBusy(true);
     setAttachmentError(null);
-    try {
-      const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - attachments.length);
-      if (!remaining) throw new Error("A message can include at most eight attachments.");
-      let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
-      const staged: ChatAttachment[] = [];
-      for (const file of files.slice(0, remaining)) {
-        if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-          throw new Error(`${file.name} is empty or larger than 10 MB.`);
-        }
-        if (totalBytes + file.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
-          throw new Error("The combined attachment size is too large for one message.");
-        }
-        const contentBase64 = await fileToBase64(file);
-        const attachment = await api.stageChatAttachment({
-          request_id: createRequestId(),
-          filename: file.name,
-          content_base64: contentBase64,
-        });
-        staged.push(attachment);
-        totalBytes += attachment.size;
-      }
+    // Each staged file is already uploaded and already holding backend
+    // retention, so it belongs in the composer whether or not a later file in
+    // the same batch fails. Committing only after the whole loop meant one bad
+    // file discarded every good one before it -- leaving those artifacts
+    // orphaned on the backend and making the user re-add the rest by hand.
+    const staged: ChatAttachment[] = [];
+    const commitStaged = () => {
+      if (!staged.length) return;
       // The generation request and attachment staging can finish in either
       // order. Merge into the latest scoped draft instead of the render-time
       // `attachments` snapshot, which may contain files that were submitted
@@ -673,8 +660,39 @@ export function ChatPage({
       attachmentDraftsRef.current = nextAttachments;
       setAttachmentDrafts(nextAttachments);
       writeComposerAttachments(target.threadId, next);
+    };
+    try {
+      const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - attachments.length);
+      if (!remaining) throw new Error(`A message can include at most ${MAX_CHAT_ATTACHMENTS} attachments.`);
+      let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+      const accepted = files.slice(0, remaining);
+      for (const file of accepted) {
+        if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+          throw new Error(`${file.name} is empty or larger than 10 MB.`);
+        }
+        if (totalBytes + file.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+          throw new Error("The combined attachment size is too large for one message.");
+        }
+        const contentBase64 = await fileToBase64(file);
+        const attachment = await api.stageChatAttachment({
+          request_id: createRequestId(),
+          filename: file.name,
+          content_base64: contentBase64,
+        });
+        staged.push(attachment);
+        totalBytes += attachment.size;
+      }
+      commitStaged();
+      if (accepted.length < files.length) {
+        // Dropping the overflow silently looked exactly like attaching it.
+        setAttachmentError(
+          `Only ${accepted.length} of ${files.length} files were attached; a message can include at most ${MAX_CHAT_ATTACHMENTS}.`,
+        );
+      }
     } catch (error) {
-      setAttachmentError(error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "The attachment could not be uploaded.");
+      commitStaged();
+      const detail = error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "The attachment could not be uploaded.";
+      setAttachmentError(staged.length ? `${detail} Files attached before it were kept.` : detail);
     } finally {
       attachmentDraftTargetsRef.current.delete(target);
       setAttachmentsBusy(false);
