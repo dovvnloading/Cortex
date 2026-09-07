@@ -44,6 +44,12 @@ type Props = {
 type ScopedError = {
   message: string;
   threadId: string | null;
+  // Whether resending the last prompt is the remedy for this error. The
+  // banner offers one Retry button for every failure it can show, and most
+  // of them are not generation failures at all -- a failed fork, a failed
+  // stop, a reload that failed after the answer was already saved. Retrying
+  // the prompt there resubmits a turn the thread has already answered.
+  retryable: boolean;
 };
 
 type ChatLoadState = {
@@ -140,7 +146,7 @@ export function ChatPage({
   const handledClearRequestsRef = useRef(new Set<string>());
 
   const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
-    setGenerationError({ threadId: failedThreadId, message });
+    setGenerationError({ threadId: failedThreadId, message, retryable: true });
   }, []);
 
   const loadChat = useCallback(async ({ preserveCurrent = false }: { preserveCurrent?: boolean } = {}) => {
@@ -214,9 +220,10 @@ export function ChatPage({
   const displayedThreadId = threadId ?? resolvedThreadId;
   const activeJobForCurrentThread = Boolean(generation.jobId && generation.threadId === displayedThreadId);
   const generationElsewhere = Boolean(generation.jobId && !activeJobForCurrentThread);
-  const visibleGenerationError = generationError && generationError.threadId === displayedThreadId
-    ? generationError.message
+  const visibleError = generationError && generationError.threadId === displayedThreadId
+    ? generationError
     : null;
+  const visibleGenerationError = visibleError?.message ?? null;
   const composerPhase: ComposerPhase = !runtimeReady
     ? "unavailable"
     : generation.phase === "stopping"
@@ -245,7 +252,9 @@ export function ChatPage({
       }
     } catch {
       if (!isLatestRequest()) return;
-      setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded." });
+      // The generation succeeded; only the reload failed. Resending would
+      // ask for a second answer to a question already answered.
+      setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded.", retryable: false });
       if (viewThreadIdRef.current !== id) return;
       // This call bumped the shared request version, so any route load still
       // in flight for this thread has already returned early as stale. If we
@@ -368,6 +377,7 @@ export function ChatPage({
       setGenerationError({
         threadId,
         message: runtimeMessage ?? "The local runtime is unavailable. Rescan local models after it is running.",
+        retryable: true,
       });
       return null;
     }
@@ -462,6 +472,7 @@ export function ChatPage({
       setGenerationError({
         threadId,
         message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
+        retryable: true,
       });
       return null;
     } finally {
@@ -568,9 +579,12 @@ export function ChatPage({
       }
     } catch (requestError) {
       useChatStore.getState().revertStopping(jobId);
+      // Stop failed, so the response is still running. Sending the prompt
+      // again would start a second one alongside it.
       setGenerationError({
         threadId: jobThreadId,
         message: requestError instanceof ApiError ? requestError.detail : "Could not stop the response.",
+        retryable: false,
       });
     } finally {
       stoppingRef.current = false;
@@ -615,9 +629,11 @@ export function ChatPage({
       const forked = await api.forkChat(threadId, message.id);
       onForked(forked);
     } catch (requestError) {
+      // Forking is not a generation. The thread is answered and unchanged.
       setGenerationError({
         threadId,
         message: requestError instanceof ApiError ? requestError.detail : "Could not fork this chat.",
+        retryable: false,
       });
     } finally {
       setForkingMessage(null);
@@ -788,7 +804,7 @@ export function ChatPage({
           onStop={cancel}
           onSelectModel={onSelectModel}
           onRescanModels={onRescanModels}
-          onRetry={lastPrompt ? retryLastPrompt : undefined}
+          onRetry={lastPrompt && visibleError?.retryable ? retryLastPrompt : undefined}
           onDismissError={() => setGenerationError(null)}
           generationOptions={threadOptions}
           generationDefaults={generationDefaults}

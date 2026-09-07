@@ -1215,6 +1215,56 @@ describe("ChatPage composer integration", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Only 8 of 9 files were attached");
   });
 
+  it("does not offer to resend the prompt when forking fails", async () => {
+    // The banner shows one Retry for every failure it can display, and a fork
+    // is not a generation. With a prompt already sent and answered this
+    // session, the fork failure offered Retry, which resent a turn the model
+    // had already replied to.
+    const user = userEvent.setup();
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | undefined;
+    const generate = vi.fn().mockResolvedValue({
+      job_id: "job-fork",
+      kind: "generation",
+      status: "queued",
+      thread_id: "thread-a",
+      user_message_id: "message-user-1",
+    });
+    const api = chatApi({
+      generate,
+      forkChat: vi.fn().mockRejectedValue(new Error("fork exploded")),
+      chat: vi.fn(async (id: string) => ({
+        ...emptyChat(id),
+        messages: [
+          { id: "message-user-1", role: "user" as const, content: "Answered already" },
+          { id: "message-assistant-1", role: "assistant" as const, content: "Here you go." },
+        ],
+      })),
+      streamGeneration: vi.fn((_jobId, onEvent) => new Promise<void>((resolve) => {
+        resolveStream = resolve;
+        emit = (event) => (onEvent as (event: unknown) => void)(event);
+      })),
+    });
+    renderChat(api);
+
+    // Send a turn so `lastPrompt` is set -- without one the banner offers no
+    // Retry at all and the check below would pass vacuously.
+    await user.type(await screen.findByLabelText("Message Cortex"), "Answered already");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({ event_id: 1, event: "generation.completed", job_id: "job-fork", thread_id: "thread-a", data: {} });
+      resolveStream?.();
+    });
+    await screen.findByText("Here you go.");
+
+    await user.click((await screen.findAllByRole("button", { name: "Fork chat from this message" }))[0]);
+
+    expect(await screen.findByText("Could not fork this chat.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry last message" })).not.toBeInTheDocument();
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
   it("explains the image capability mismatch before a generation request is made", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {
