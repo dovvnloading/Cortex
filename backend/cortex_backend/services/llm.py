@@ -1241,7 +1241,12 @@ class SynthesisAgent:
         return options
 
     def translate_text(
-        self, text: str, target_language: str, *, options: dict | None = None
+        self,
+        text: str,
+        target_language: str,
+        *,
+        options: dict | None = None,
+        cancellation_event: Event | None = None,
     ) -> TranslationResult:
         """
         Translates the given text into the target language using the configured translation model.
@@ -1261,11 +1266,17 @@ class SynthesisAgent:
         prompt = f"Translate the following text into {target_language}. Provide only the translation, no introductory or concluding remarks.\n\nText:\n{text}"
         
         try:
-            response = self.chat_client.chat(
-                model=self.translation_model,
-                messages=[{'role': 'user', 'content': prompt}],
-                options=self._auxiliary_options(options, temperature=0.1),
-            )
+            chat_kwargs: dict[str, Any] = {
+                "model": self.translation_model,
+                "messages": [{'role': 'user', 'content': prompt}],
+                "options": self._auxiliary_options(options, temperature=0.1),
+            }
+            # Forwarded only when set, the same way ``generate`` and the
+            # proposal-repair call do it, so a ChatClient double written
+            # against the original three-argument call keeps working.
+            if cancellation_event is not None:
+                chat_kwargs["cancellation_event"] = cancellation_event
+            response = self.chat_client.chat(**chat_kwargs)
             translated_text = response.get('message', {}).get('content', '')
             if translated_text:
                 return TranslationResult.succeeded(self._format_response(translated_text))

@@ -166,8 +166,20 @@ class GenerationEngine(Protocol):
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """Generate a response and validated memory command."""
 
-    def translate_text(self, text: str, target_language: str) -> TranslationResult:
-        """Translate a generated response when requested."""
+    def translate_text(
+        self,
+        text: str,
+        target_language: str,
+        *,
+        options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
+    ) -> TranslationResult:
+        """Translate a generated response when requested.
+
+        ``cancellation_event`` matters as much here as it does for ``generate``:
+        translation is a second full model call, and without it Stop cannot be
+        observed until the model finishes on its own.
+        """
 
 HistoryLoader = Callable[[str], Sequence[Mapping[str, Any]]]
 MemoryLoader = Callable[[], Sequence[str]]
@@ -350,6 +362,7 @@ class GenerationService:
                 response,
                 snapshot.target_language,
                 options=dict(snapshot.model_options),
+                cancellation_event=cancellation_event,
             )
             if not isinstance(translation_result, TranslationResult):
                 raise ModelOperationError(

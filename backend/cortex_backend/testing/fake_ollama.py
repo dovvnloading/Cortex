@@ -284,7 +284,19 @@ class FakeGenerationEngine:
         response = self.state.generation_response or f"Echo: {query}"
         return response, self.state.generation_thoughts, MemoryCommand(), FAKE_GENERATION_STATS
 
-    def translate_text(self, text: str, target_language: str) -> TranslationResult:
+    def translate_text(
+        self,
+        text: str,
+        target_language: str,
+        *,
+        options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
+    ) -> TranslationResult:
+        del options
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise ModelOperationError(
+                "Generation was cancelled.", operation="translation"
+            )
         if self.state.fail_translation or target_language == "!fail":
             return TranslationResult.failed(
                 "Translation failed. Please try again.",

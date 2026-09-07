@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from threading import Event
 import unittest
 
 from cortex_backend.core.generation import (
@@ -171,6 +172,21 @@ class _CrashingDuringTitleEngine(_FakeEngine):
         raise TypeError("boom: bad response shape mid-title-generation")
 
 
+class _RecordingTranslationEngine(_FakeEngine):
+    """Records what the service hands to the translation call."""
+
+    def __init__(self):
+        super().__init__()
+        self.translation_cancellation: object = "never called"
+
+    def translate_text(
+        self, text: str, target_language: str, *, options=None, cancellation_event=None
+    ) -> TranslationResult:
+        del text, target_language, options
+        self.translation_cancellation = cancellation_event
+        return TranslationResult.succeeded("translated")
+
+
 class _FakeGateway:
     def __init__(self, listings: list[dict]):
         self.listings = iter(listings)
@@ -236,6 +252,56 @@ class GenerationServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(result.response)
+
+    def test_the_translation_call_is_given_the_turn_s_cancellation_event(self):
+        """Translation is a second full model call and must honour Stop.
+
+        Every other model call on this path already receives the event; this
+        one did not, so pressing Stop while the status read
+        "Translating to French..." did nothing until the translation model
+        finished on its own. The service checks cancellation immediately before
+        and after the call, which is exactly why the gap was invisible: the
+        turn does end as cancelled, only after paying for a translation whose
+        result is then thrown away.
+        """
+        event = Event()
+        engine = _RecordingTranslationEngine()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(memories_enabled=False), cancellation_event=event)
+
+        self.assertIs(engine.translation_cancellation, event)
+
+    def test_translate_text_forwards_cancellation_to_the_chat_client(self):
+        """The other half of the chain: the engine must pass it on.
+
+        ``ChatClient.chat`` has always accepted ``cancellation_event`` and both
+        implementations act on it, so once the service forwards the event the
+        translation call becomes interruptible for free.
+        """
+        seen: dict = {}
+
+        class _Client:
+            def chat(self, *, model, messages, options, cancellation_event=None):
+                del messages, options
+                seen["model"] = model
+                seen["cancellation_event"] = cancellation_event
+                return {"message": {"content": "bonjour"}}
+
+        event = Event()
+        agent = SynthesisAgent(
+            "qwen3:8b", "granite4:tiny-h", "translategemma:4b", _Client()
+        )
+
+        result = agent.translate_text("hello", "French", cancellation_event=event)
+
+        self.assertTrue(result.success)
+        self.assertEqual(seen["model"], "translategemma:4b")
+        self.assertIs(seen["cancellation_event"], event)
 
     def test_generation_is_headless_and_emits_owned_typed_progress(self):
         engine = _FakeEngine()
