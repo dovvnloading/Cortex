@@ -34,10 +34,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import (
     AbstractHTTPHandler,
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
     HTTPRedirectHandler,
+    OpenerDirector,
     Request as UrlRequest,
-    build_opener,
     ProxyHandler,
+    UnknownHandler,
 )
 
 
@@ -1224,12 +1227,30 @@ class _NetworkCapability:
 
             return factory
 
-        opener = build_opener(
+        # Assembled by hand rather than with build_opener. build_opener
+        # installs urllib's stock HTTPHandler/HTTPSHandler and only drops one
+        # when a supplied handler is a *subclass* of it -- these derive from
+        # AbstractHTTPHandler, which is HTTPHandler's own base, so neither was
+        # dropped. Both stock handlers were then registered ahead of the
+        # pinned pair for http_open/https_open, served every request, and the
+        # socket re-resolved the hostname: the rebinding window this whole
+        # dance exists to close was wide open, and the pinned classes were
+        # never constructed at all.
+        #
+        # Naming the handlers explicitly also keeps urllib's file://, ftp://
+        # and data:// handlers out of a sandboxed network capability, which
+        # has no business reaching them.
+        opener = OpenerDirector()
+        for handler in (
+            ProxyHandler({}),
             _PinnedHTTPHandler(connection_factory(secure=False)),
             _PinnedHTTPSHandler(connection_factory(secure=True)),
             _SafeRedirectHandler(rebind),
-            ProxyHandler({}),
-        )
+            HTTPDefaultErrorHandler(),
+            HTTPErrorProcessor(),
+            UnknownHandler(),
+        ):
+            opener.add_handler(handler)
         request = UrlRequest(safe_url, headers={"User-Agent": "Cortex-local-code/1"})
         try:
             with opener.open(request, timeout=timeout) as response:
