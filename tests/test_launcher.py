@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import signal
 import socket
 from types import SimpleNamespace
 
@@ -1186,3 +1187,38 @@ def test_handoff_rejects_non_ascii_header_with_a_clean_unauthorized():
             headers={b"X-Cortex-Handoff": "café-token".encode("latin-1")},
         )
         assert response.status_code == 401
+
+
+def test_a_repeated_interrupt_can_force_quit_a_stuck_graceful_shutdown():
+    """Ctrl+C twice must escalate, because nothing else in the process can.
+
+    Uvicorn arms its own handlers in ``capture_signals``, which returns
+    immediately off the main thread -- and ``ServerSupervisor`` runs the server
+    in a worker thread -- so the launcher's handler is the only one installed
+    and previously did nothing but set ``should_exit``.
+
+    That matters because uvicorn's graceful shutdown loops on
+    ``while self.server_state.connections and not self.force_exit`` with
+    ``timeout_graceful_shutdown`` at its default of ``None``. One still-open
+    SSE stream held the process open forever while uvicorn logged
+    "Waiting for connections to close. (CTRL+C to force quit)" -- advice that
+    could not work.
+    """
+    server = SimpleNamespace(should_exit=False, force_exit=False)
+    saved = {signal.SIGINT: signal.getsignal(signal.SIGINT)}
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        saved[sigbreak] = signal.getsignal(sigbreak)
+    try:
+        launcher_main._install_shutdown_signals(server)
+        handler = signal.getsignal(signal.SIGINT)
+
+        handler(signal.SIGINT, None)
+        assert server.should_exit is True
+        assert server.force_exit is False, "the first interrupt must stay graceful"
+
+        handler(signal.SIGINT, None)
+        assert server.force_exit is True
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
