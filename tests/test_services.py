@@ -970,8 +970,12 @@ class StreamingGenerationTests(unittest.TestCase):
             [],
         )
 
-    def test_an_engine_that_streams_only_whitespace_is_not_called_streamed(self):
+    def test_an_engine_that_streams_only_empty_text_is_not_called_streamed(self):
         """An empty delta must not suppress the replay.
+
+        Note the boundary: an empty string is nothing and leaves streamed
+        false, but a delta of actual whitespace is real text the model wrote
+        and does stream.
 
         streamed is what tells the API it may skip the replay, so a delta that
         carries no text has to leave it false -- otherwise a turn that emitted

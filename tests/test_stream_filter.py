@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from cortex_backend.services.chat_client import OllamaChatClient
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.services.stream_filter import EnvelopeStreamFilter
 
@@ -148,3 +149,75 @@ def test_an_inline_reasoning_trace_never_reaches_the_answer_bubble() -> None:
     )
     assert "gentle" not in _stream(list(reply))
     assert _stream(list(reply)).strip() == "Here is the answer."
+
+
+class _ChunkedOllama:
+    """A fake ollama client that streams a reply in small pieces."""
+
+    def __init__(self, reply: str, piece: int = 7) -> None:
+        self._reply = reply
+        self._piece = piece
+
+    def chat(self, *, model, messages, options, stream=False):
+        del model, messages, options, stream
+
+        def chunks():
+            for start in range(0, len(self._reply), self._piece):
+                yield {"message": {"content": self._reply[start : start + self._piece]}}
+            yield {"message": {"content": ""}, "done": True, "eval_count": 1}
+
+        return chunks()
+
+
+@pytest.mark.parametrize("reply", _CLEANED_REPLIES)
+def test_the_filter_is_actually_wired_into_the_agent(reply: str) -> None:
+    """The filter working is not the same as the filter being used.
+
+    Every other test here exercises EnvelopeStreamFilter directly, so removing
+    the wiring in SynthesisAgent.generate -- passing the raw callback straight
+    to the chat client -- leaves them all green while every envelope reaches
+    the user. This drives the real agent over the real Ollama client and
+    asserts on what a user would have watched.
+    """
+    seen: list[tuple[str, str]] = []
+    agent = SynthesisAgent("chat", "title", "translate", OllamaChatClient(_ChunkedOllama(reply)))
+
+    answer, _thoughts, _command, _stats = agent.generate(
+        query="hi",
+        chat_history="",
+        permanent_memories=[],
+        memories_enabled=True,
+        user_system_instructions=None,
+        options={},
+        on_delta=lambda kind, text: seen.append((kind, text)),
+    )
+
+    streamed = "".join(text for kind, text in seen if kind == "content")
+    assert streamed.strip() == answer.strip(), (
+        "the user saw text the finished answer does not contain"
+    )
+
+
+def test_a_reasoning_trace_streamed_as_content_never_reaches_the_answer() -> None:
+    """The worst case, end to end through the agent rather than the filter alone."""
+    reply = (
+        "Thinking...\nthey are wrong but I will be gentle."
+        "\n...done thinking.\nHere is the answer."
+    )
+    seen: list[tuple[str, str]] = []
+    agent = SynthesisAgent("chat", "title", "translate", OllamaChatClient(_ChunkedOllama(reply)))
+
+    answer, thoughts, _command, _stats = agent.generate(
+        query="hi",
+        chat_history="",
+        permanent_memories=[],
+        memories_enabled=True,
+        user_system_instructions=None,
+        options={},
+        on_delta=lambda kind, text: seen.append((kind, text)),
+    )
+
+    streamed = "".join(text for kind, text in seen if kind == "content")
+    assert "gentle" not in streamed
+    assert streamed.strip() == answer.strip() == "Here is the answer."
+    assert thoughts == "they are wrong but I will be gentle."
