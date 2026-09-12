@@ -568,6 +568,11 @@ async def _start_generation_job(
                 "clear_requested": result.memory_command.clear_requested,
                 "code_execution_job_id": code_execution_job_id,
                 "code_execution_rejection": code_execution_rejection,
+                # Present only when translation was requested and failed. The
+                # answer above is then the untranslated one, so the client can
+                # say so instead of silently showing a language the user did
+                # not ask for.
+                "translation_error": getattr(result, "translation_error", None),
                 "stats": stats_payload,
             }
 
@@ -837,6 +842,7 @@ def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str
         "thinking_delta": "generation.thinking_delta",
         "content_delta": "generation.content_delta",
         "translation": "generation.translation_started",
+        "translation_failed": "generation.translation_failed",
         "persisting": "generation.persisting",
         "loading_model": "generation.loading_model",
     }.get(phase or "", "generation.status")

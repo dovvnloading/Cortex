@@ -11,6 +11,10 @@ ProgressPhase = Literal[
     "thoughts",
     "loading_model",
     "translation",
+    # Translation is a post-process over an answer that already exists, so a
+    # failure there is reported rather than raised: the answer is kept and the
+    # user is told it was not translated.
+    "translation_failed",
 ]
 
 

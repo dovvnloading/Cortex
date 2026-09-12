@@ -539,23 +539,47 @@ class GenerationServiceTests(unittest.TestCase):
 
         self.assertIsNone(engine.title_history)
 
-    def test_failed_translation_is_a_safe_model_operation_error(self):
+    def test_a_failed_translation_keeps_the_untranslated_answer(self):
+        """A post-process failure must not discard work the model already did.
+
+        The assistant turn is persisted only after generate() returns, so
+        raising here threw away a finished answer and left the user with
+        "Translation failed. Please try again." and nothing else. On a machine
+        near its memory limit, loading the translation model is the call most
+        likely to fail -- precisely when the answer is most expensive to lose.
+        """
+        engine = _FakeEngine(
+            translation=TranslationResult.failed(
+                "Translation failed. Please try again.",
+                error_details="transport",
+            )
+        )
+        recorder = _ProgressRecorder()
         service = GenerationService(
             history_loader=lambda thread_id: [],
             memory_loader=lambda: [],
-            engine_factory=lambda snapshot: _FakeEngine(
-                translation=TranslationResult.failed(
-                    "Translation failed. Please try again.",
-                    error_details="transport",
-                )
-            ),
+            engine_factory=lambda snapshot: engine,
         )
 
-        with self.assertRaisesRegex(ModelOperationError, "Translation failed") as raised:
-            service.generate(_snapshot())
+        result = service.generate(_snapshot(), progress_sink=recorder)
 
-        self.assertEqual(raised.exception.operation, "translation")
-        self.assertEqual(raised.exception.error_details, None)
+        self.assertEqual(result.response, "response")
+        self.assertIsNotNone(result.translation_error)
+        self.assertIn("Translation failed", result.translation_error)
+        self.assertIn("translation_failed", [event.phase for event in recorder.events])
+
+    def test_an_invalid_translation_result_keeps_the_answer_too(self):
+        engine = _FakeEngine(translation="not a TranslationResult")
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot())
+
+        self.assertEqual(result.response, "response")
+        self.assertIsNotNone(result.translation_error)
 
     def test_translation_type_error_from_inside_the_call_is_not_retried(self):
         """Regression guard: a TypeError raised by translate_text() itself,
