@@ -1,6 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
-import { CortexApi, ApiError } from "../api/client";
+import {
+  CortexApi,
+  ApiError,
+  persistHandoffSecret,
+  readPersistedHandoffSecret,
+} from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
 import { CommandPalette } from "../features/command-palette/CommandPalette";
@@ -46,14 +51,25 @@ const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
 
 type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
 
-/** Read the launcher's one-time credentials. Pure: the URL is not touched. */
+/** Read the launcher's one-time credentials. Pure: the URL is not touched.
+ *
+ * The bootstrap token is single-use, so it is only ever read from the URL. The
+ * handoff secret is not: it stays valid for the life of the backend process
+ * and is the only way to re-exchange an expired session. Falling back to the
+ * persisted copy is what makes a reload survivable -- without it, pressing the
+ * error boundary's own "Reload workspace" button (or F5) scrubbed the secret,
+ * and the next session expiry an hour later left onboarding with no retry at
+ * all, so the user had to quit and relaunch Cortex.
+ */
 function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
   const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+  const handoffFromUrl = search.get("handoff") || hash.get("handoff") || "";
+  if (handoffFromUrl) persistHandoffSecret(handoffFromUrl);
   return {
     bootstrapToken: search.get("bootstrap") || hash.get("bootstrap") || "",
-    handoffSecret: search.get("handoff") || hash.get("handoff") || "",
+    handoffSecret: handoffFromUrl || readPersistedHandoffSecret(),
   };
 }
 
