@@ -1,3 +1,24 @@
+### **Real Token Streaming**
+
+**Date:** 2026-09-12
+**Version:** Streaming pass
+
+* Responses now stream as the model writes them. Both local runtimes already
+  produced a token stream; Cortex joined it, returned the finished answer, and
+  only then replayed it to the interface in fixed slices, so a local model at a
+  few tokens a second meant a spinner for the whole generation and then the
+  answer all at once.
+* Reasoning streams into the reasoning pane on the same path, so a thinking
+  model shows progress instead of silence.
+* Control blocks a reply may contain -- a memory proposal, a code-execution
+  request, a legacy tag, or an inline reasoning trace -- are withheld from the
+  live view, because the finished answer does not contain them. They no longer
+  appear mid-answer and then vanish.
+* Title and translation calls are unchanged: they produce nothing to watch and
+  still run as a single request.
+
+---
+
 ### **Correctness Pass: Cancellation, Consent, Time, and Startup**
 
 **Date:** 2026-09-12
