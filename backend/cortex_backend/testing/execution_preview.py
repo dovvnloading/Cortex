@@ -15,7 +15,11 @@ from collections.abc import Mapping
 from uuid import uuid4
 
 from cortex_backend.execution.models import ExecutionJob, TerminalExecutionStatus
-from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
+from cortex_backend.execution.repository import (
+    ExecutionRepository,
+    ExecutionTransitionConflict,
+    LeaseConflict,
+)
 
 from .fake_execution import (
     FakeExecutionCancelled,
@@ -271,6 +275,19 @@ class DurableFakeCoordinator:
                 phase="recovery",
                 data={"message": "Execution lease unavailable."},
                 error=str(exc),
+            )
+        except ExecutionTransitionConflict:
+            # A cancellation committed while this run was still publishing
+            # progress, and the store refuses a "running" write once Stop has
+            # been recorded. Finish as cancelled, which is what the user asked
+            # for, rather than reporting a coordinator failure.
+            self.repository.transition(
+                job_id,
+                status="cancelled",
+                event="cancelled",
+                phase="cancelled",
+                data={"message": "Execution cancelled."},
+                error="Execution cancelled.",
             )
         except Exception as exc:
             self.repository.transition(

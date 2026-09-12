@@ -574,6 +574,22 @@ class RecipeExecutionCoordinator:
                 pass
         except LeaseConflict:
             self._fail_recovery(job_id, "lease_unavailable")
+        except ExecutionTransitionConflict:
+            # Cancellation committed while this attempt was starting, so the
+            # store refused the "running" write (see _run_code in
+            # local_runtime.py). Nothing is published this early, so finishing
+            # as cancelled is all that is required.
+            try:
+                self.repository.transition(
+                    job_id,
+                    status="cancelled",
+                    event="cancelled",
+                    phase="cancelled",
+                    data={"message": "Image recipe was cancelled."},
+                    error="cancelled",
+                )
+            except Exception:
+                pass
         except Exception:
             current = self.repository.get_job(job_id)
             cancelled = cancel_event.is_set() or (current is not None and current.status == "cancelling")

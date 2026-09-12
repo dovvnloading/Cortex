@@ -637,6 +637,12 @@ class LocalExecutionCoordinator:
             # Another live coordinator owns this exact attempt. It is not a job
             # failure and must not overwrite that coordinator's eventual result.
             return
+        except ExecutionTransitionConflict:
+            # A cancellation committed while this attempt was starting, so the
+            # store refused the "running" write. Finish as cancelled rather
+            # than reporting a coordinator fault: the user asked to stop and
+            # the program has not produced a result.
+            self._finish_code_failure(job_id, cancel_event, "cancelled")
         except Exception:
             self._finish_code_failure(job_id, cancel_event, "coordinator_failed")
         finally:
@@ -846,6 +852,10 @@ class LocalExecutionCoordinator:
             self._finish_scratch_failure(job_id, cancel_event, exc.code)
         except LeaseConflict:
             self._fail_scratch_recovery(job_id, "lease_unavailable")
+        except ExecutionTransitionConflict:
+            # Cancellation committed while this attempt was starting; the store
+            # refused the "running" write. See _run_code for the reasoning.
+            self._finish_scratch_failure(job_id, cancel_event, "cancelled")
         except Exception:
             self._finish_scratch_failure(job_id, cancel_event, "coordinator_failed")
         finally:

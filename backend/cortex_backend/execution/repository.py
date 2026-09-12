@@ -40,6 +40,10 @@ _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
 _SCHEMA_LOCK = RLock()
+# The only statuses a job may reach once cancellation has been committed.
+# "cancelled" is the ordinary outcome; "failed" is allowed so a worker that is
+# already unwinding for an unrelated reason can still record why.
+_CANCELLING_EXITS = frozenset({"cancelled", "failed"})
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -584,6 +588,20 @@ class ExecutionRepository:
                 if expected_status is not None and row["status"] != expected_status:
                     raise ExecutionTransitionConflict(
                         f"Execution job is {row['status']}, not {expected_status}."
+                    )
+                if row["status"] == "cancelling" and status not in _CANCELLING_EXITS:
+                    # Cancellation is one-way. A committed "cancelling" row
+                    # means the user pressed Stop and the API has already told
+                    # them so; only a terminal status may follow it. Without
+                    # this, a worker that read the job just before the cancel
+                    # committed overwrote it with "running" -- an unguarded
+                    # write, since "cancelling" is not terminal -- and the
+                    # stopped program ran to completion and was recorded as
+                    # succeeded. Keeping the invariant here rather than in each
+                    # coordinator means every profile, and every capability
+                    # added later, inherits it.
+                    raise ExecutionTransitionConflict(
+                        f"Execution job is cancelling and cannot become {status}."
                     )
                 approval = connection.execute(
                     "SELECT state FROM execution_approvals WHERE job_id = ?",

@@ -17,8 +17,12 @@ import time
 
 import pytest
 
+from cortex_backend.execution.code_execution import CodeExecutionRequest
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
-from cortex_backend.execution.repository import ExecutionRepository
+from cortex_backend.execution.repository import (
+    ExecutionRepository,
+    ExecutionTransitionConflict,
+)
 from cortex_backend.execution.scratch_compute import ScratchComputeRequest
 
 
@@ -74,4 +78,91 @@ def test_a_scratch_result_cannot_overwrite_a_committed_cancellation(repository) 
     assert final.status != "succeeded", (
         "a cancelled computation reported success; the terminal write "
         "overwrote the cancellation the API had already acknowledged"
+    )
+
+
+def test_the_store_refuses_a_running_write_once_cancellation_is_committed(
+    repository,
+) -> None:
+    """The pre-run writes were unguarded, so Stop could be silently undone.
+
+    Only the terminal writes carried expected_status. The two "running"
+    transitions a code job makes on its way to the worker did not, and
+    transition() refused only *terminal* rows -- "cancelling" is not terminal.
+    A worker that read the job just before the cancel committed therefore
+    overwrote it, and the stopped program ran to completion and was recorded
+    as succeeded.
+
+    The invariant now lives in the store, so every profile and every
+    capability added later inherits it.
+    """
+    owner = repository.installation_principal_id
+    repository.create_job(
+        job_id="cancelled-before-running",
+        owner=owner,
+        request_id="stop-then-run",
+        profile="code.exec.v1",
+        payload={
+            "schema_version": 1,
+            "language": "python",
+            "source": "_result = 1",
+            "intent_summary": "probe",
+            "capabilities": {"filesystem": False, "process": False, "network": False},
+            "source_digest": "unused",
+        },
+    )
+    repository.request_cancel("cancelled-before-running")
+    assert repository.get_job("cancelled-before-running").status == "cancelling"
+
+    with pytest.raises(ExecutionTransitionConflict):
+        repository.transition(
+            "cancelled-before-running",
+            status="running",
+            event="code.started",
+            phase="prepare",
+            data={"message": "should never be recorded"},
+        )
+    assert repository.get_job("cancelled-before-running").status == "cancelling"
+
+    # A terminal status is still reachable, or the job could never finish.
+    repository.transition(
+        "cancelled-before-running",
+        status="cancelled",
+        event="code.cancelled",
+        phase="cancelled",
+        data={"message": "Local code execution was cancelled."},
+        error="cancelled",
+    )
+    assert repository.get_job("cancelled-before-running").status == "cancelled"
+
+
+def test_a_code_job_cancelled_outside_the_coordinator_never_runs(repository) -> None:
+    """A cancel that does not set the in-process event must still stop the job.
+
+    Another process, a recovery pass, or a direct request_cancel all reach the
+    store without touching the coordinator's Event, which is what made this
+    failure invisible: every in-process check passed and the program ran.
+    """
+    coordinator = LocalExecutionCoordinator(repository)
+    owner = repository.installation_principal_id
+    try:
+        job = coordinator.start_code(
+            CodeExecutionRequest(
+                owner=owner,
+                request_id="outside-cancel",
+                source="_result = 40 + 2",
+                intent_summary="add two numbers",
+            )
+        )
+        repository.decide_approval(job.job_id, owner=owner, decision="approved")
+        repository.request_cancel(job.job_id)
+
+        final = coordinator.wait(job.job_id, timeout=10.0)
+    finally:
+        coordinator.shutdown()
+
+    assert final.status == "cancelled"
+    events = [event.event for event in repository.events(job.job_id)]
+    assert "code.completed" not in events, (
+        f"a cancelled program ran to completion: {events}"
     )
