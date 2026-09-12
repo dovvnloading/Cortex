@@ -24,10 +24,22 @@ _PYTHON_OUTPUT_RE = re.compile(
 _COMPUTATION_RE = re.compile(
     r"\b(?:calculate|compute)\b.*\b(?:python|script|code|data|csv|json|spreadsheet|file|attachment)\b"
 )
+# The verb has to sit close to a concrete artefact, and the artefact has to be
+# something that actually lives on disk or on the wire. The previous pattern
+# allowed any distance between the two (".*") and counted "data", "document",
+# "request" and "network" as artefacts, so ordinary prose matched: "write a
+# blog post about data science trends", "help me write a cover letter for a
+# data analyst job" and "write a haiku about the network" all took the code
+# path -- paying for the ~1k-token contract and switching sampling to the
+# coding profile.
+_ARTEFACT = (
+    r"(?:files?|folders?|director(?:y|ies)|attachments?|csv|json|xml|ya?ml|"
+    r"spreadsheets?|workbooks?|scripts?|programs?|logs?|urls?|endpoints?|api)"
+)
 _LOCAL_TASK_RE = re.compile(
-    r"\b(?:process|transform|automate|analyze|inspect|fetch|download|read|write|"
-    r"modify|create|generate)\b.*\b(?:file|folder|directory|attachment|data|csv|json|"
-    r"spreadsheet|document|url|network|request|api|process|command)\b"
+    r"\b(?:process|transform|automate|analyze|analyse|inspect|fetch|download|"
+    r"parse|convert|rename|read|write|modify|edit|create|generate|save)\b"
+    r"(?:\s+\S+){0,3}\s+\b" + _ARTEFACT + r"\b"
 )
 _CODE_TARGET_RE = re.compile(
     r"\b(?:python|script|code|program|command|shell|test|tests|file|folder|directory|"
@@ -56,6 +68,11 @@ def should_offer_code_execution(query: str) -> bool:
         return False
     if _NEGATED_EXECUTION_RE.search(normalized):
         return False
+    # This has to come before the positive branches. It used to sit after all
+    # of them, where every path had already returned, so it could never change
+    # the outcome: "Explain how to read a CSV file in Python" was admitted.
+    if _EXPLANATION_ONLY_RE.search(normalized):
+        return False
 
     direct_execution = bool(
         _REFERENTIAL_EXECUTION_RE.search(normalized)
@@ -74,9 +91,4 @@ def should_offer_code_execution(query: str) -> bool:
         return True
     if _LOCAL_TASK_RE.search(normalized):
         return True
-
-    # A purely educational request should not pay for the execution contract,
-    # even when it mentions Python or a code sample.
-    if _EXPLANATION_ONLY_RE.search(normalized):
-        return False
     return False
