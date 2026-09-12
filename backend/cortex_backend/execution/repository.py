@@ -41,9 +41,11 @@ _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$"
 _LOGGER = logging.getLogger("cortex.execution.repository")
 _SCHEMA_LOCK = RLock()
 # The only statuses a job may reach once cancellation has been committed.
-# "cancelled" is the ordinary outcome; "failed" is allowed so a worker that is
-# already unwinding for an unrelated reason can still record why.
-_CANCELLING_EXITS = frozenset({"cancelled", "failed"})
+# "cancelled" is the ordinary outcome; "failed" is allowed so a worker already
+# unwinding for an unrelated reason can still record why; "cancelling" is
+# allowed because cancelling twice must stay idempotent -- pressing Stop a
+# second time, or a recovery pass re-requesting a cancel, is not an error.
+_CANCELLING_EXITS = frozenset({"cancelling", "cancelled", "failed"})
 
 
 def _is_reparse_point(path: Path) -> bool:

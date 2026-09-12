@@ -409,12 +409,13 @@ class GenerationService:
                         "Showing the original answer.",
                     )
 
-            # Cancellation during translation must not discard the answer
-            # either: the generation itself already finished, so a Stop pressed
-            # in the post-process returns what was produced rather than
-            # throwing it away.
-            if translation_error is None:
-                self._check_cancelled(cancellation_event)
+            # A Stop pressed during translation still cancels the turn, as it
+            # does everywhere else. Keeping a finished answer across a
+            # cancellation is a separate, larger change: the API runner
+            # discards the result whenever the cancel event is set (see
+            # _start_generation_job), so it has to be fixed there and in the
+            # persistence path, not here.
+            self._check_cancelled(cancellation_event)
 
             return GenerationServiceResult(
                 response=response,

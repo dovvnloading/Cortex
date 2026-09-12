@@ -51,7 +51,7 @@ const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
 
 type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
 
-/** Read the launcher's one-time credentials. Pure: the URL is not touched.
+/** Read the launcher's one-time credentials. Pure: nothing is written here.
  *
  * The bootstrap token is single-use, so it is only ever read from the URL. The
  * handoff secret is not: it stays valid for the life of the backend process
@@ -60,16 +60,18 @@ type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
  * error boundary's own "Reload workspace" button (or F5) scrubbed the secret,
  * and the next session expiry an hour later left onboarding with no retry at
  * all, so the user had to quit and relaunch Cortex.
+ *
+ * Storing the secret is a side effect, so it happens in the same effect that
+ * scrubs the URL -- see below for why an initialiser must stay pure.
  */
 function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
   const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
-  const handoffFromUrl = search.get("handoff") || hash.get("handoff") || "";
-  if (handoffFromUrl) persistHandoffSecret(handoffFromUrl);
   return {
     bootstrapToken: search.get("bootstrap") || hash.get("bootstrap") || "",
-    handoffSecret: handoffFromUrl || readPersistedHandoffSecret(),
+    handoffSecret:
+      search.get("handoff") || hash.get("handoff") || readPersistedHandoffSecret(),
   };
 }
 
@@ -114,7 +116,12 @@ export function App({ api: providedApi }: Props) {
   const [sessionEpoch, setSessionEpoch] = useState(0);
   const [launcherCredentials] = useState(readLauncherCredentials);
   // The read above is pure; the URL scrub is a side effect and belongs here.
-  useEffect(() => scrubLauncherCredentials(), []);
+  useEffect(() => {
+    // Both are side effects and both are idempotent, so StrictMode's second
+    // invocation is a no-op.
+    persistHandoffSecret(launcherCredentials.handoffSecret);
+    scrubLauncherCredentials();
+  }, [launcherCredentials.handoffSecret]);
   const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
   const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
