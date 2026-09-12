@@ -535,7 +535,14 @@ def validate_code_source(source: str) -> str:
         raise CodeExecutionError("source_too_complex")
     try:
         tree = ast.parse(source, mode="exec")
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        # MemoryError and RecursionError are parser outcomes here, not genuine
+        # resource exhaustion: the input is a single string already bounded by
+        # MAX_CODE_SOURCE_BYTES above, and CPython raises MemoryError ("Parser
+        # stack overflowed") for deeply nested expressions well inside that
+        # bound. Letting either escape turned a malformed proposal into an
+        # unhandled 500 at the API and an unhandled error mid-turn in the
+        # model-proposal path, instead of the fail-closed code both expect.
         raise CodeExecutionError("syntax_invalid") from None
     _CodeValidator().visit(tree)
     return source

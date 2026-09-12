@@ -101,6 +101,27 @@ def test_code_source_requires_bounded_constructs_and_explicit_capabilities() -> 
     assert isinstance(allowed.value, list)
 
 
+@pytest.mark.parametrize("shape", ["unary", "parentheses"])
+def test_source_the_parser_cannot_handle_fails_closed(shape: str) -> None:
+    """A program too deeply nested to parse is invalid source, not a crash.
+
+    CPython raises MemoryError ("Parser stack overflowed") rather than
+    SyntaxError for these, well inside MAX_CODE_SOURCE_BYTES. Before this was
+    caught it escaped as an unhandled 500 from POST /execution/code and as an
+    unhandled error in the middle of a streaming turn, because a local model
+    can generate such a program itself.
+    """
+    if shape == "unary":
+        source = "x = " + "not " * 10_000 + "1"
+    else:
+        source = "x = " + "(" * 2_000 + "1" + ")" * 2_000
+    assert len(source.encode("utf-8")) < code_execution.MAX_CODE_SOURCE_BYTES
+    with pytest.raises(CodeExecutionError, match="syntax_invalid"):
+        code_execution.validate_code_source(source)
+    with pytest.raises(CodeExecutionError, match="syntax_invalid"):
+        code_execution.capabilities_required_by_source(source)
+
+
 def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_path: Path) -> None:
     class _Connection:
         def __init__(self) -> None:
