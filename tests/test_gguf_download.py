@@ -307,7 +307,7 @@ def test_download_gguf_rejects_advertised_size_over_limit(tmp_path: Path) -> Non
             headers={"Content-Length": "65"},
         )
 
-    with pytest.raises(GGUFDownloadError, match="configured byte ceiling"):
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
         download_gguf(
             "https://example.com/model.gguf",
             "model.gguf",
@@ -328,7 +328,7 @@ def test_download_gguf_rejects_chunked_body_over_limit(tmp_path: Path) -> None:
         del request
         return httpx.Response(200, content=content)
 
-    with pytest.raises(GGUFDownloadError, match="configured byte ceiling"):
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
         download_gguf(
             "https://example.com/model.gguf",
             "model.gguf",
@@ -712,3 +712,44 @@ def test_huggingface_file_listing_rejects_malformed_siblings_shape(siblings) -> 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face"):
             list_huggingface_gguf_files("owner/model", http_client=client)
+
+
+def test_the_default_ceiling_admits_models_larger_than_eight_gibibytes(tmp_path: Path) -> None:
+    """A 9 GiB model must not be refused before the first byte is fetched.
+
+    The default ceiling was 8 GiB, which is below most current mid-size
+    quantizations -- a 14B at Q8_0 is about 15.7 GB, a 27B at Q4_K_M about
+    17 GB -- so the "bring your own GGUF" feature rejected them outright,
+    naming a limit the user had no way to change. Free space, checked before
+    the first byte and again on every chunk, is the guard that actually
+    protects the disk.
+    """
+    advertised = 9 * 1024 * 1024 * 1024
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            content=b"GGUF",
+            headers={"Content-Length": str(advertised)},
+        )
+
+    # Report plenty of room so the size check is the only thing under test.
+    original = download_module.shutil.disk_usage
+    download_module.shutil.disk_usage = lambda _path: SimpleNamespace(
+        total=0, used=0, free=advertised * 4
+    )
+    try:
+        with pytest.raises(GGUFDownloadError) as raised:
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            )
+    finally:
+        download_module.shutil.disk_usage = original
+
+    assert "larger than the" not in str(raised.value), (
+        f"a 9 GiB model was refused by the size ceiling: {raised.value}"
+    )
