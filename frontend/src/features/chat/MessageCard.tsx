@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide-react";
 import type { ChatAttachment, ChatMessage, GenerationStats } from "../../../../contracts/cortex-api";
+import { formatMessageTime } from "../../lib/messageTime";
 import { MessageStats } from "./MessageStats";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
 
@@ -66,11 +67,4 @@ function MessageMeta({ timestamp, stats }: { timestamp?: string | null; stats?: 
   const displayTime = formatMessageTime(timestamp);
   if (!displayTime && !stats?.tokens_per_second) return null;
   return <div className="message-meta">{displayTime && <time dateTime={timestamp ?? undefined}>{displayTime}</time>}<MessageStats stats={stats} /></div>;
-}
-
-function formatMessageTime(value?: string | null): string | null {
-  if (!value) return null;
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) return null;
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(timestamp);
 }
