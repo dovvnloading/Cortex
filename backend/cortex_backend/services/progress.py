@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 ProgressPhase = Literal[
@@ -15,6 +16,11 @@ ProgressPhase = Literal[
     # failure there is reported rather than raised: the answer is kept and the
     # user is told it was not translated.
     "translation_failed",
+    # Live model output, published as it arrives. api/routes.py maps these to
+    # generation.content_delta / generation.thinking_delta, the event names the
+    # frontend already renders incrementally.
+    "content_delta",
+    "thinking_delta",
 ]
 
 
@@ -26,6 +32,10 @@ class ProgressEvent:
     thread_id: str
     phase: ProgressPhase
     message: str
+    # Structured payload for phases that carry more than a status line -- the
+    # token deltas above put their text here. Kept out of ``message`` so the
+    # human-readable status and the machine-readable content stay separate.
+    data: Mapping[str, Any] | None = None
 
 
 @runtime_checkable

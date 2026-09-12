@@ -1,11 +1,12 @@
 """Adapts a locally-managed llama-server to the ``ChatClient`` seam.
 
-Talks to llama-server's OpenAI-compatible ``/v1/chat/completions`` endpoint
-with ``stream: false`` -- Cortex never actually streams tokens from the
-model runtime itself (Ollama calls are non-streamed too; the SSE "typing"
-effect is Cortex chunking the already-complete response after the fact, see
-``api/routes.py``'s generation job runner), so a single blocking HTTP call is
-sufficient and keeps this adapter simple.
+Talks to llama-server's OpenAI-compatible ``/v1/chat/completions`` endpoint.
+A call that needs neither cancellation nor live output takes the single
+blocking request in ``_chat_blocking`` -- title and translation calls, which
+have nothing to show until they finish. Everything else streams, in
+``_chat_abortable``: reading the response incrementally is what lets Stop
+interrupt a turn promptly, and the same loop hands each token to ``on_delta``
+so the user sees the answer as the model writes it.
 """
 
 from __future__ import annotations
@@ -117,6 +118,7 @@ class LlamaCppChatClient:
         messages: list[dict],
         options: dict,
         cancellation_event: Event | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> dict:
         self._ensure_open()
         model_path = resolve_gguf_path(self._models_directory(), model)
@@ -155,9 +157,21 @@ class LlamaCppChatClient:
                 cancellation_event=cancellation_event,
             )
         started = time.monotonic()
-        if cancellation_event is None:
+        if cancellation_event is None and on_delta is None:
             return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
-        return self._chat_abortable(handle.base_url, messages, options, started, cancellation_event, handle.api_key)
+        # Streaming serves both features: the abortable path is what reads the
+        # response incrementally, which is also what makes live deltas
+        # possible. A caller that wants deltas but has no cancellation of its
+        # own gets an event nothing ever sets.
+        return self._chat_abortable(
+            handle.base_url,
+            messages,
+            options,
+            started,
+            cancellation_event if cancellation_event is not None else Event(),
+            handle.api_key,
+            on_delta=on_delta,
+        )
 
     def _chat_blocking(
         self, base_url: str, messages: list[dict], options: dict, started: float, api_key: str | None
@@ -202,6 +216,7 @@ class LlamaCppChatClient:
         started: float,
         cancellation_event: Event,
         api_key: str | None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> dict:
         """Streamed request that stops promptly when the caller asks to stop.
 
@@ -272,9 +287,13 @@ class LlamaCppChatClient:
                             content_piece = delta.get("content")
                             if content_piece:
                                 content_parts.append(content_piece)
+                                if on_delta is not None:
+                                    on_delta("content", content_piece)
                             reasoning_piece = delta.get("reasoning_content")
                             if reasoning_piece:
                                 reasoning_parts.append(reasoning_piece)
+                                if on_delta is not None:
+                                    on_delta("thinking", reasoning_piece)
                         if chunk.get("usage"):
                             usage = chunk["usage"]
                         if chunk.get("timings"):

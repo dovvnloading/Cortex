@@ -256,7 +256,13 @@ class FakeGenerationEngine:
         cancellation_event: Event | None = None,
         history_messages: Sequence[Mapping[str, Any]] | None = None,
         host_observations: str | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
+        # Accepted and deliberately unused: this double returns a complete
+        # answer rather than a token stream, which keeps the API's replay path
+        # -- the one every non-streaming engine takes -- exercised by the
+        # tests that use it. Streaming behaviour is covered separately, with a
+        # double that does call on_delta.
         del (
             chat_history,
             permanent_memories,
@@ -265,6 +271,7 @@ class FakeGenerationEngine:
             options,
             attachments,
             cancellation_event,
+            on_delta,
         )
         if self.state.status_updates and self._status_callback is not None:
             for message in self.state.status_updates:

@@ -17,6 +17,7 @@ unconditionally without having to know which runtime will serve the call.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import Event
 from typing import Any, Protocol
 
@@ -61,6 +62,13 @@ class ChatClient(Protocol):
     ``OllamaChatClient``). It is optional and only meaningful to real
     implementations -- callers that never set it keep today's simple
     single-shot request.
+
+    ``on_delta``, when given, is called with ``(kind, text)`` for each piece
+    of output as it arrives, where ``kind`` is ``"content"`` or
+    ``"thinking"``. Both runtimes already consume a token stream internally;
+    this is what lets a caller see it rather than only the joined result. The
+    return value is unchanged either way, so a caller that passes nothing
+    behaves exactly as before.
     """
 
     def chat(
@@ -70,6 +78,7 @@ class ChatClient(Protocol):
         messages: list[dict],
         options: dict,
         cancellation_event: Event | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> dict:
         ...
 
@@ -87,13 +96,14 @@ class OllamaChatClient:
         messages: list[dict],
         options: dict,
         cancellation_event: Event | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> dict:
         # Rebound once up front so both the streaming and non-streaming
         # branches below are guaranteed to send the filtered mapping.
         options = _without_llamacpp_only_options(options)
-        if cancellation_event is None:
+        if cancellation_event is None and on_delta is None:
             return self._client.chat(model=model, messages=messages, options=options)
-        if cancellation_event.is_set():
+        if cancellation_event is not None and cancellation_event.is_set():
             # Already cancelled, so do not open a request at all. Otherwise
             # this waits for the model's first token before noticing -- the
             # loop below can only check between chunks -- and on a cold or
@@ -117,15 +127,19 @@ class OllamaChatClient:
         final: dict = {}
         try:
             for chunk in chunks:
-                if cancellation_event.is_set():
+                if cancellation_event is not None and cancellation_event.is_set():
                     break
                 message = chunk.get("message") or {}
                 content_piece = message.get("content")
                 if content_piece:
                     content_parts.append(content_piece)
+                    if on_delta is not None:
+                        on_delta("content", content_piece)
                 thinking_piece = message.get("thinking")
                 if thinking_piece:
                     thinking_parts.append(thinking_piece)
+                    if on_delta is not None:
+                        on_delta("thinking", thinking_piece)
                 if chunk.get("done"):
                     final = dict(chunk)
         finally:
@@ -160,14 +174,18 @@ class RoutingChatClient:
         messages: list[dict],
         options: dict,
         cancellation_event: Event | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> dict:
         target = self._llamacpp if model.startswith(GGUF_PREFIX) else self._ollama
-        # Only forward cancellation_event when it is actually set, so test
-        # doubles and any future ChatClient implementation that predates this
-        # parameter keep working against their original 3-argument call.
+        # Only forward the optional keywords when they are actually set, so
+        # test doubles and any future ChatClient implementation that predates
+        # one of them keep working against their original call shape.
+        extra: dict[str, Any] = {}
         if cancellation_event is not None:
-            return target.chat(model=model, messages=messages, options=options, cancellation_event=cancellation_event)
-        return target.chat(model=model, messages=messages, options=options)
+            extra["cancellation_event"] = cancellation_event
+        if on_delta is not None:
+            extra["on_delta"] = on_delta
+        return target.chat(model=model, messages=messages, options=options, **extra)
 
     def set_status_callback(self, callback: Any) -> None:
         """Forward to whichever underlying client supports it (today, only

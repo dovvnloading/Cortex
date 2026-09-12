@@ -108,6 +108,7 @@ class _FakeEngine:
         cancellation_event=None,
         history_messages=None,
         host_observations=(),
+        on_delta=None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         del attachments, cancellation_event, history_messages, host_observations
         self.options = options
@@ -395,8 +396,8 @@ class GenerationServiceTests(unittest.TestCase):
             def __init__(self):
                 self.last_messages: list[dict] | None = None
 
-            def chat(self, *, model, messages, options):
-                del model, options
+            def chat(self, *, model, messages, options, on_delta=None, cancellation_event=None):
+                del model, options, on_delta, cancellation_event
                 self.last_messages = messages
                 return {"message": {"content": "ok", "thinking": None}}
 
@@ -841,3 +842,241 @@ class ModelServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamingGenerationTests(unittest.TestCase):
+    """The user sees the answer as the model writes it, not after."""
+
+    class _StreamingEngine(_FakeEngine):
+        """An engine that produces its answer a piece at a time."""
+
+        def __init__(self, pieces, **kwargs):
+            super().__init__(**kwargs)
+            self._pieces = pieces
+
+        def generate(
+            self,
+            *,
+            query,
+            chat_history,
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            options,
+            attachments=(),
+            cancellation_event=None,
+            history_messages=None,
+            host_observations=(),
+            on_delta=None,
+        ):
+            del (
+                query,
+                chat_history,
+                permanent_memories,
+                memories_enabled,
+                user_system_instructions,
+                options,
+                attachments,
+                cancellation_event,
+                history_messages,
+                host_observations,
+            )
+            if on_delta is not None:
+                for kind, text in self._pieces:
+                    on_delta(kind, text)
+            answer = "".join(text for kind, text in self._pieces if kind == "content")
+            stats = GenerationStats(eval_count=3, eval_duration_ms=10.0, tokens_per_second=300.0)
+            return answer, "thoughts", MemoryCommand((), False), stats
+
+    def test_live_deltas_reach_the_sink_and_mark_the_result_streamed(self):
+        recorder = _ProgressRecorder()
+        engine = self._StreamingEngine(
+            [("thinking", "hmm"), ("content", "Hello "), ("content", "world")]
+        )
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        # Assert on the reassembled stream, not on delta boundaries: adjacent
+        # pieces are coalesced, so where one event ends and the next begins is
+        # an implementation detail the user never sees.
+        def joined(phase: str) -> str:
+            return "".join(
+                (event.data or {}).get("delta", "")
+                for event in recorder.events
+                if event.phase == phase
+            )
+
+        self.assertEqual(joined("thinking_delta"), "hmm")
+        self.assertEqual(joined("content_delta"), "Hello world")
+        self.assertLess(
+            len([e for e in recorder.events if e.phase == "content_delta"]),
+            3,
+            "adjacent content pieces should coalesce into fewer events",
+        )
+        self.assertTrue(
+            result.streamed,
+            "the API replays the finished answer unless the engine says it streamed",
+        )
+
+    def test_a_translated_turn_streams_the_original_then_replaces_it(self):
+        """Deliberate: live feedback beats a spinner, even when it is replaced.
+
+        Translation runs after the answer exists, so what streams is the
+        original. The completed event carries the translated text and the
+        client swaps it in atomically. Translation is off by default; when it
+        is on, watching the model work is still better than watching nothing.
+        """
+        recorder = _ProgressRecorder()
+        engine = self._StreamingEngine([("content", "Hello world")])
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        streamed_text = "".join(
+            (event.data or {}).get("delta", "")
+            for event in recorder.events
+            if event.phase == "content_delta"
+        )
+        self.assertEqual(streamed_text, "Hello world")
+        self.assertEqual(result.response, "translated")
+
+    def test_a_non_streaming_engine_leaves_the_replay_to_the_api(self):
+        """The deterministic double returns a whole answer, as before.
+
+        Its turns must still be marked un-streamed, or the API would skip the
+        replay and the client would receive no content at all.
+        """
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _FakeEngine(),
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        self.assertFalse(result.streamed)
+        self.assertEqual(
+            [e for e in recorder.events if e.phase in {"content_delta", "thinking_delta"}],
+            [],
+        )
+
+    def test_an_engine_that_streams_only_whitespace_is_not_called_streamed(self):
+        """An empty delta must not suppress the replay.
+
+        streamed is what tells the API it may skip the replay, so a delta that
+        carries no text has to leave it false -- otherwise a turn that emitted
+        nothing would reach the client with an empty transcript.
+        """
+        engine = self._StreamingEngine([("content", "")])
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+        self.assertFalse(result.streamed)
+
+    def test_an_unknown_delta_kind_is_ignored_rather_than_guessed_at(self):
+        engine = self._StreamingEngine([("audio", "beep"), ("content", "hi")])
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(), progress_sink=recorder)
+
+        phases = [event.phase for event in recorder.events]
+        self.assertIn("content_delta", phases)
+        self.assertNotIn("audio", phases)
+
+    def test_a_fast_stream_is_coalesced_instead_of_flooding_the_event_log(self):
+        """One SSE event per token would outgrow the job's retained window.
+
+        The registry keeps a bounded number of events per job, so a long answer
+        streamed token by token would push its own earlier deltas out of the
+        window a reconnecting client still needs. Adjacent pieces are therefore
+        merged; the text the user ends up with is unchanged.
+        """
+        pieces = [("content", "tok ")] * 200
+        engine = self._StreamingEngine(pieces)
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(), progress_sink=recorder)
+
+        events = [e for e in recorder.events if e.phase == "content_delta"]
+        self.assertLess(
+            len(events),
+            len(pieces) // 4,
+            f"{len(events)} events for {len(pieces)} tokens is not coalescing",
+        )
+        self.assertEqual(
+            "".join((e.data or {}).get("delta", "") for e in events),
+            "".join(text for _, text in pieces),
+            "coalescing must not lose or reorder a single character",
+        )
+
+    def test_buffered_text_is_flushed_even_when_the_engine_raises(self):
+        """A partial answer the user already watched arrive is not swallowed."""
+
+        class _FailsAfterStreaming(self._StreamingEngine):
+            def generate(self, **kwargs):
+                on_delta = kwargs.get("on_delta")
+                if on_delta is not None:
+                    on_delta("content", "partial")
+                raise ModelOperationError("boom", operation="generation")
+
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _FailsAfterStreaming([]),
+        )
+
+        with self.assertRaises(ModelOperationError):
+            service.generate(_snapshot(), progress_sink=recorder)
+
+        self.assertEqual(
+            "".join(
+                (e.data or {}).get("delta", "")
+                for e in recorder.events
+                if e.phase == "content_delta"
+            ),
+            "partial",
+        )
+
+    def test_an_engine_that_emits_only_unknown_kinds_is_not_called_streamed(self):
+        """streamed must mean "the user saw something", not "a hook fired".
+
+        It is what tells the API it may skip replaying the finished answer, so
+        a kind the publisher drops has to leave it false -- otherwise the
+        replay is skipped having shown the user nothing at all.
+        """
+        engine = self._StreamingEngine([("audio", "beep")])
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+        self.assertFalse(result.streamed)

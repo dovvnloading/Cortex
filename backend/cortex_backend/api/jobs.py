@@ -141,7 +141,7 @@ class JobProgressSink:
         self._record = record
 
     def publish(self, event: ProgressEvent) -> None:
-        self.publish_progress(event.phase, event.message)
+        self.publish_progress(event.phase, event.message, data=event.data)
 
     def publish_progress(
         self,

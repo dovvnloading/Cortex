@@ -435,23 +435,30 @@ async def _start_generation_job(
             # cancellable until begin_commit atomically seals the durable result.
             if cancel_event.is_set():
                 return {"cancelled": True}
-            if result.thoughts:
-                for delta in _chunks(result.thoughts):
+            # A streaming engine already published this answer token by token
+            # while it was being produced. Replaying the finished text on top
+            # of that would show the user every word twice. The replay stays
+            # for engines that cannot stream -- the deterministic test double,
+            # and any runtime whose client returns only a completed response --
+            # so the client-side rendering is identical either way.
+            if not result.streamed:
+                if result.thoughts:
+                    for delta in _chunks(result.thoughts):
+                        if cancel_event.is_set():
+                            return {"cancelled": True}
+                        sink.publish_progress(
+                            "thinking_delta",
+                            "Reasoning available.",
+                            data={"delta": delta},
+                        )
+                for delta in _chunks(result.response):
                     if cancel_event.is_set():
                         return {"cancelled": True}
                     sink.publish_progress(
-                        "thinking_delta",
-                        "Reasoning available.",
+                        "content_delta",
+                        "Response content available.",
                         data={"delta": delta},
                     )
-            for delta in _chunks(result.response):
-                if cancel_event.is_set():
-                    return {"cancelled": True}
-                sink.publish_progress(
-                    "content_delta",
-                    "Response content available.",
-                    data={"delta": delta},
-                )
 
             if not sink.begin_commit("persisting", "Saving the response."):
                 return {"cancelled": True}
