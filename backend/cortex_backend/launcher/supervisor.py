@@ -13,10 +13,20 @@ from typing import Any
 from collections.abc import Callable
 from collections.abc import Mapping
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 DEV_SERVER_ID_HEADER = "X-Cortex-Dev-Server"
+
+# Cortex only ever probes its own loopback sockets, and a proxy can never reach
+# them. urlopen() uses the default opener, whose ProxyHandler consults the
+# WinINET registry settings and the HTTP_PROXY environment; CPython's registry
+# bypass exempts a host only when "." not in host, so "127.0.0.1" is *not*
+# bypassed. On any machine with a manual proxy configured -- corporate, VPN,
+# school -- every readiness probe was sent to the proxy, and Cortex failed to
+# start with "did not become ready within 30 seconds" and no hint why. An
+# opener built with an empty ProxyHandler ignores both sources.
+_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
 
 
 def wait_for_http(
@@ -32,7 +42,7 @@ def wait_for_http(
             return False
         try:
             request = Request(url, headers={"Host": "127.0.0.1"})
-            with urlopen(request, timeout=1.0) as response:
+            with _LOOPBACK_OPENER.open(request, timeout=1.0) as response:
                 headers_match = all(
                     response.headers.get(name) == value
                     for name, value in (expected_headers or {}).items()

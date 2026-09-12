@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import signal
 import socket
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -138,7 +139,13 @@ def test_dev_server_readiness_requires_the_owned_identity_header(
             return False
 
     alive = iter((True, False))
-    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+    # Loopback probes go through a proxy-free opener, so that is what a
+    # readiness double has to stand in for.
+    monkeypatch.setattr(
+        supervisor_module._LOOPBACK_OPENER,
+        "open",
+        lambda *_args, **_kwargs: Response(),
+    )
 
     assert supervisor_module.wait_for_http(
         "http://127.0.0.1:5173",
@@ -161,7 +168,13 @@ def test_dev_server_readiness_accepts_matching_identity_header(
         def __exit__(self, *_args):
             return False
 
-    monkeypatch.setattr(supervisor_module, "urlopen", lambda *_args, **_kwargs: Response())
+    # Loopback probes go through a proxy-free opener, so that is what a
+    # readiness double has to stand in for.
+    monkeypatch.setattr(
+        supervisor_module._LOOPBACK_OPENER,
+        "open",
+        lambda *_args, **_kwargs: Response(),
+    )
 
     assert supervisor_module.wait_for_http(
         "http://127.0.0.1:5173",
@@ -1222,3 +1235,46 @@ def test_a_repeated_interrupt_can_force_quit_a_stuck_graceful_shutdown():
     finally:
         for number, previous in saved.items():
             signal.signal(number, previous)
+
+
+def test_wait_for_http_ignores_system_and_environment_proxies(monkeypatch) -> None:
+    """Loopback readiness must not be routed through a configured proxy.
+
+    urlopen() uses the default opener, whose ProxyHandler reads the WinINET
+    registry settings and the HTTP_PROXY environment. CPython's registry
+    bypass exempts a host only when "." not in host, so "127.0.0.1" is not
+    bypassed: on any machine with a manual proxy -- corporate, VPN, school --
+    every probe went to the proxy, which cannot reach the launcher's own
+    socket, and Cortex failed to start with "did not become ready within 30
+    seconds" and nothing explaining why.
+    """
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    # A proxy on a closed port: anything that honours it cannot connect.
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    try:
+        assert supervisor_module.wait_for_http(
+            f"http://127.0.0.1:{port}/api/v1/health/ready", timeout=5.0
+        ) is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
