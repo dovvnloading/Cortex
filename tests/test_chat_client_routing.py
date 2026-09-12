@@ -884,3 +884,112 @@ def test_the_runtimes_own_context_error_is_still_classified() -> None:
 
     assert details == "context_limit"
     assert "raise the context limit" in message
+
+
+class _GatedOllamaStream:
+    """A fake ollama client whose stream stalls until the test releases it.
+
+    The gate is what makes "arrived early" provable: if the deltas are only a
+    replay of the finished text, nothing can be observed before the last chunk
+    is yielded.
+    """
+
+    def __init__(self, gate: Event) -> None:
+        self._gate = gate
+        self.streamed: bool | None = None
+
+    def chat(self, *, model, messages, options, stream=False):
+        del model, messages, options
+        self.streamed = stream
+
+        def chunks():
+            yield {"message": {"thinking": "weighing it up"}}
+            yield {"message": {"content": "Hello "}}
+            yield {"message": {"content": "world"}}
+            self._gate.wait(5)
+            yield {"message": {"content": "!"}, "done": True, "eval_count": 3}
+
+        return chunks()
+
+
+def test_ollama_reports_deltas_before_the_model_finishes() -> None:
+    """Tokens must reach the caller while the model is still generating.
+
+    Both runtimes already consumed a token stream and joined it, so the user
+    waited out the whole generation and then saw the answer appear at once.
+    On a local model at a few tokens a second that is the difference between
+    the app looking hung and looking alive.
+    """
+    gate = Event()
+    fake = _GatedOllamaStream(gate)
+    client = OllamaChatClient(fake)
+    seen: list[tuple[str, str]] = []
+    result: dict = {}
+
+    def run() -> None:
+        result["response"] = client.chat(
+            model="chat-model",
+            messages=[],
+            options={},
+            on_delta=lambda kind, text: seen.append((kind, text)),
+        )
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while len(seen) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert seen == [
+        ("thinking", "weighing it up"),
+        ("content", "Hello "),
+        ("content", "world"),
+    ], "deltas did not arrive before the model's final chunk"
+
+    gate.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    # The joined return value is unchanged, so nothing downstream has to care
+    # whether the caller watched it arrive.
+    assert result["response"]["message"]["content"] == "Hello world!"
+    assert result["response"]["message"]["thinking"] == "weighing it up"
+    assert fake.streamed is True
+
+
+def test_ollama_stays_single_shot_when_nobody_is_watching() -> None:
+    """Title and translation calls have nothing to show until they finish."""
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.stream: bool | None = None
+
+        def chat(self, *, model, messages, options, stream=False):
+            del model, messages, options
+            self.stream = stream
+            return {"message": {"content": "done", "thinking": None}}
+
+    recording = _Recording()
+    OllamaChatClient(recording).chat(model="m", messages=[], options={})
+    assert recording.stream is False
+
+
+def test_routing_forwards_on_delta_to_the_selected_backend() -> None:
+    class _Recording:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.saw_on_delta = False
+
+        def chat(self, *, model, messages, options, on_delta=None, cancellation_event=None):
+            del model, messages, options, cancellation_event
+            self.saw_on_delta = on_delta is not None
+            return {"message": {"content": self.name, "thinking": None}}
+
+    ollama, llamacpp = _Recording("ollama"), _Recording("llamacpp")
+    router = RoutingChatClient(ollama, llamacpp)
+
+    router.chat(model="qwen3:8b", messages=[], options={}, on_delta=lambda *_: None)
+    assert ollama.saw_on_delta is True
+    assert llamacpp.saw_on_delta is False
+
+    router.chat(model="gguf:model.gguf", messages=[], options={}, on_delta=lambda *_: None)
+    assert llamacpp.saw_on_delta is True

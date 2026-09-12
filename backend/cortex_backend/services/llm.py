@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from threading import Event
 from typing import Any
 
@@ -40,6 +40,7 @@ from cortex_backend.services.code_feedback import (
     describe_rejection,
     repair_prompt,
 )
+from cortex_backend.services.stream_filter import EnvelopeStreamFilter
 from cortex_backend.services.code_prompt import should_offer_code_execution
 
 
@@ -978,6 +979,7 @@ class SynthesisAgent:
         cancellation_event: Event | None = None,
         history_messages: Sequence[Mapping[str, Any]] | None = None,
         host_observations: str | None = None,
+        on_delta: Callable[[str, str], None] | None = None,
     ) -> tuple[str, str | None, MemoryCommand, GenerationStats | None]:
         """
         Generates a synthesized response and extracts thoughts and commands.
@@ -1066,7 +1068,34 @@ class SynthesisAgent:
             }
             if cancellation_event is not None:
                 chat_kwargs["cancellation_event"] = cancellation_event
-            response = self.chat_client.chat(**chat_kwargs)
+            # Only this call -- the user-visible turn -- streams. The repair,
+            # translation and title calls below produce nothing the user reads
+            # as it arrives, and streaming them would interleave foreign text
+            # into the answer.
+            #
+            # The engine is what knows which control envelopes it strips from
+            # the finished reply, so it is also what decides which tokens are
+            # safe to show early. Without the filter the user would watch a
+            # <memory_command> block type itself out and then vanish when the
+            # cleaned answer replaced it.
+            content_filter: EnvelopeStreamFilter | None = None
+            if on_delta is not None:
+                content_filter = EnvelopeStreamFilter(
+                    lambda text: on_delta("content", text)
+                )
+
+                def _relay(kind: str, text: str) -> None:
+                    if kind == "content":
+                        content_filter.feed(text)
+                    else:
+                        on_delta(kind, text)
+
+                chat_kwargs["on_delta"] = _relay
+            try:
+                response = self.chat_client.chat(**chat_kwargs)
+            finally:
+                if content_filter is not None:
+                    content_filter.close()
             message_obj = response.get('message', {})
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')

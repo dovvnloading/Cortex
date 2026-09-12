@@ -606,3 +606,62 @@ def test_fork_and_regeneration_use_message_ids_and_preserve_original_until_succe
         ).json()
         assert len(after["messages"]) == 2
         assert after["messages"][-1]["id"] == assistant_id
+
+
+def test_a_streaming_engine_is_not_replayed_on_top_of_its_own_deltas():
+    """The API replays a finished answer only when nothing streamed it.
+
+    Before real streaming existed the runner always sliced the completed text
+    into deltas. Leaving that in place for an engine that already published
+    its own would show the user every word twice.
+    """
+    from cortex_backend.testing import build_demo_dependencies
+
+    class _StreamingEngine:
+        """Wraps the deterministic double and adds live output."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def generate(self, *, on_delta=None, **kwargs):
+            answer, thoughts, command, stats = self._inner.generate(**kwargs)
+            if on_delta is not None:
+                for piece in answer.split(" "):
+                    on_delta("content", piece + " ")
+            return answer, thoughts, command, stats
+
+    dependencies = build_demo_dependencies()
+    inner_factory = dependencies.generation._engine_factory
+    dependencies.generation._engine_factory = lambda snapshot: _StreamingEngine(
+        inner_factory(snapshot)
+    )
+
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        payload = client.post(
+            "/api/v1/generations",
+            json={"request_id": "stream-1", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET",
+            f"/api/v1/generations/{payload['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+    deltas = [
+        event["data"]["delta"]
+        for event in events
+        if event["event"] == "generation.content_delta"
+    ]
+    assert deltas, "a streaming engine still has to produce content deltas"
+    completed = events[-1]
+    assert completed["event"] == "generation.completed"
+    # Every delta together must reconstruct the answer exactly once. A replay
+    # on top of the live stream would make this twice the answer.
+    assert "".join(deltas).strip() == completed["data"]["response"].strip()
