@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -395,3 +396,79 @@ class PersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimestampZoneTests(unittest.TestCase):
+    """Stored timestamps must say what zone they are in.
+
+    They were written naive (no offset). ECMAScript parses a zone-less
+    date-time as local time, so the WebView rendered every message footer
+    shifted by the viewer's UTC offset -- and because the optimistic message
+    the UI creates carries a "Z", the displayed time visibly jumped once the
+    chat reloaded.
+    """
+
+    def _manager(self, root: Path) -> DatabaseManager:
+        return DatabaseManager(
+            db_path=str(root / "chat.sqlite"),
+            legacy_history_dir=str(root / "legacy"),
+        )
+
+    def test_message_and_thread_timestamps_carry_an_explicit_utc_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(Path(directory))
+            manager.add_message("thread-1", "user", "hello", thread_title="Greeting")
+
+            chat = manager.load_chat("thread-1")
+            self.assertIsNotNone(chat)
+            stamps = [chat["timestamp"], chat["messages"][0]["timestamp"]]
+            summary = manager.get_all_chats_summary()[0]
+            stamps.append(summary["timestamp"])
+
+            for stamp in stamps:
+                parsed = datetime.fromisoformat(stamp)
+                self.assertIsNotNone(
+                    parsed.tzinfo,
+                    f"{stamp!r} has no offset, so a browser reads it as local time",
+                )
+                self.assertEqual(parsed.utcoffset(), timedelta(0))
+
+    def test_naive_timestamps_from_older_builds_are_read_back_as_utc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(Path(directory))
+            manager.add_message("thread-1", "user", "hello", thread_title="Greeting")
+
+            # Rewrite the rows the way an older build stored them.
+            with manager.connect() as connection:
+                connection.execute(
+                    "UPDATE messages SET timestamp = ? WHERE thread_id = ?",
+                    ("2026-01-01T12:00:00", "thread-1"),
+                )
+                connection.execute(
+                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    ("2026-01-01T12:00:00", "thread-1"),
+                )
+
+            chat = manager.load_chat("thread-1")
+            self.assertEqual(chat["messages"][0]["timestamp"], "2026-01-01T12:00:00+00:00")
+            self.assertEqual(chat["timestamp"], "2026-01-01T12:00:00+00:00")
+
+    def test_forking_keeps_each_message_timestamp(self):
+        """A fork used to stamp every copied turn with the moment of forking."""
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(Path(directory))
+            manager.add_message("thread-1", "user", "first", thread_title="Source")
+            manager.add_message("thread-1", "assistant", "second")
+            source = manager.load_chat("thread-1")["messages"]
+
+            manager.create_chat_from_messages("fork-1", "Fork", source)
+
+            forked = manager.load_chat("fork-1")["messages"]
+            self.assertEqual(
+                [message["timestamp"] for message in forked],
+                [message["timestamp"] for message in source],
+            )
+            self.assertEqual(
+                [message["content"] for message in forked],
+                ["first", "second"],
+            )

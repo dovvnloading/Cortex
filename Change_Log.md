@@ -1,3 +1,43 @@
+### **Correctness Pass: Cancellation, Consent, Time, and Startup**
+
+**Date:** 2026-09-12
+**Version:** Bug-fix pass
+
+* A cancelled code task can no longer run to completion. Only the terminal
+  writes were guarded, so a worker that read the job just before Stop
+  committed overwrote the cancellation and the program finished and reported
+  success. Cancellation is now one-way in the execution store, which also
+  makes the suite's one intermittent failure deterministic.
+* The brokered network capability refuses every non-global address. Python
+  3.13 reclassified 100.64.0.0/10 -- Tailscale's range, and common
+  carrier-grade NAT -- as neither private nor reserved, so it had silently
+  become reachable from an approved program.
+* Source too deeply nested for the parser is reported as invalid rather than
+  escaping as an unhandled error, which had produced a 500 from the execution
+  route and could interrupt a streaming turn.
+* A failed translation keeps the answer. The turn is persisted only after
+  translation, so a failure there discarded a generation the user had already
+  waited for; the untranslated answer is now returned with the reason beside
+  it.
+* Ordinary writing turns no longer receive the code-execution contract. The
+  admission gate matched prose such as "write a blog post about data science
+  trends", which cost tokens and switched sampling to the coding profile, and
+  its own explanation guard could never run.
+* Message timestamps record their UTC offset, so times no longer display
+  shifted by the viewer's time zone and no longer jump when a chat reloads.
+  Existing conversations are read back correctly without a migration, and
+  forking a chat keeps each message's original time.
+* GGUF downloads are no longer capped at 8 GiB, which had refused most current
+  mid-size models; free space remains the real limit.
+* Startup readiness probes ignore the system and environment proxy settings.
+  A configured proxy cannot reach Cortex's own loopback socket, so Cortex
+  failed to start on proxied machines with no explanation.
+* The launcher handoff secret survives a reload, so an expired session can
+  still be re-exchanged instead of stranding the workspace on a retry that
+  could never succeed.
+
+---
+
 ### **Reliability, Performance, and Structure Pass**
 
 **Date:** 2026-09-04

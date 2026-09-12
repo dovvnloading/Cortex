@@ -38,7 +38,15 @@ GGUF_MAGIC = b"GGUF"
 _GGUF_HEADER_BYTES = 24
 # Hard safety limits for callers that do not provide a deployment-specific
 # value.  The keyword arguments on ``download_gguf`` allow tighter limits.
-MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024 * 1024
+#
+# This ceiling is a sanity bound, not the real guard: what protects the disk is
+# the free-space reserve, which is checked before the first byte and again on
+# every chunk. At 8 GiB it was instead refusing ordinary models -- a 14B at
+# Q8_0 is about 15.7 GB, a 27B at Q4_K_M about 17 GB, and every 30B-and-up
+# quantization is larger still -- so the headline "bring your own GGUF"
+# feature rejected them with a message naming a limit the user could not
+# change. No single-file GGUF approaches 256 GiB.
+MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024 * 1024
 MIN_FREE_SPACE_BYTES = 128 * 1024 * 1024
 _GGUF_DEFAULT_ALIGNMENT = 32
 _GGUF_MAX_METADATA_ENTRIES = 100_000
@@ -99,6 +107,17 @@ class DownloadSource:
     url: str | None = None
     repo_id: str | None = None
     filename: str | None = None
+
+
+def _format_byte_limit(value: int) -> str:
+    """Render a byte limit the way the user would say it."""
+
+    for unit, size in (("GiB", 1024 ** 3), ("MiB", 1024 ** 2), ("KiB", 1024)):
+        if value >= size:
+            scaled = value / size
+            rendered = f"{scaled:.0f}" if scaled >= 10 or scaled == int(scaled) else f"{scaled:.1f}"
+            return f"{rendered} {unit}"
+    return f"{value} bytes"
 
 
 def _contains_control_character(value: str) -> bool:
@@ -242,7 +261,10 @@ def download_gguf(
                     if total <= 0:
                         raise GGUFDownloadError("The download advertised an invalid size.")
                     if total > maximum:
-                        raise GGUFDownloadError("The download exceeds the configured byte ceiling.")
+                        raise GGUFDownloadError(
+                            "This file is larger than the "
+                            f"{_format_byte_limit(maximum)} download limit."
+                        )
                     _require_free_space(directory, total, reserve)
                 completed = 0
                 saw_data = False
@@ -262,7 +284,10 @@ def download_gguf(
                                     "view it on."
                                 )
                         if completed + len(chunk) > maximum:
-                            raise GGUFDownloadError("The download exceeds the configured byte ceiling.")
+                            raise GGUFDownloadError(
+                            "This file is larger than the "
+                            f"{_format_byte_limit(maximum)} download limit."
+                        )
                         _require_free_space(directory, len(chunk), reserve)
                         handle.write(chunk)
                         completed += len(chunk)

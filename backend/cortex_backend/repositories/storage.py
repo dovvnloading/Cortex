@@ -33,6 +33,37 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO string that says it is UTC.
+
+    Timestamps used to be written naive (no offset). ECMAScript parses a
+    zone-less date-time as *local* time, so the WebView rendered every
+    message footer shifted by the viewer's UTC offset -- and because the
+    optimistic message the UI creates does carry a "Z", the time visibly
+    jumped once the chat reloaded.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _as_utc_iso(value: object) -> object:
+    """Tag a stored timestamp as UTC when it does not say so already.
+
+    Rows written by earlier builds are naive. Normalising on read fixes those
+    without a migration: a naive string is a strict prefix of the same instant
+    with "+00:00" appended, so ORDER BY keeps old and new rows in the right
+    order either way.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        return value
+    return parsed.replace(tzinfo=timezone.utc).isoformat()
+
+
 class PersistenceError(RuntimeError):
     """Raised when local chat or permanent-memory persistence fails."""
 
@@ -507,7 +538,7 @@ class DatabaseManager:
         return {
             'id': thread_id,
             'title': str(chat_data.get('title') or 'Untitled Chat'),
-            'timestamp': str(chat_data.get('timestamp') or _utc_now().isoformat()),
+            'timestamp': str(chat_data.get('timestamp') or _utc_now_iso()),
             'messages': normalized_messages,
         }
 
@@ -633,7 +664,7 @@ class DatabaseManager:
             with self.connect() as conn:
                 conn.execute(
                     "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, _utc_now().isoformat())
+                    (thread_id, title, _utc_now_iso())
                 )
         except PersistenceError as exc:
             raise PersistenceError(
@@ -649,13 +680,21 @@ class DatabaseManager:
                 # 1. Create the new thread entry
                 conn.execute(
                     "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, _utc_now().isoformat())
+                    (thread_id, title, _utc_now_iso())
                 )
                 
                 # 2. Prepare and insert all messages for the new thread
                 messages_to_insert = []
+                forked_at = datetime.now(timezone.utc)
                 for i, msg in enumerate(messages):
-                    msg_timestamp = _utc_now().replace(microsecond=i).isoformat()
+                    # Keep each message's own time. Stamping them all with
+                    # "now" made a fork claim every historical turn was sent at
+                    # the moment of forking. The offset fallback only orders
+                    # messages that never had a timestamp; replace(microsecond=i)
+                    # also raised once i reached 1_000_000.
+                    msg_timestamp = _as_utc_iso(msg.get("timestamp")) or (
+                        forked_at + timedelta(microseconds=i)
+                    ).isoformat(timespec="microseconds")
                     messages_to_insert.append((
                         thread_id,
                         msg.get('role'),
@@ -701,7 +740,7 @@ class DatabaseManager:
                 if thread_title is not None:
                     conn.execute(
                         "INSERT OR IGNORE INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                        (thread_id, thread_title, _utc_now().isoformat()),
+                        (thread_id, thread_title, _utc_now_iso()),
                     )
                 self._check_chat_revision(conn, thread_id, expected_revision)
                 conn.execute("""
@@ -715,12 +754,12 @@ class DatabaseManager:
                     thoughts,
                     json.dumps(attachments) if attachments else None,
                     json.dumps(stats) if stats else None,
-                    _utc_now().isoformat()
+                    _utc_now_iso()
                 ))
                 # Update the thread's main timestamp to reflect recent activity
                 conn.execute(
                     "UPDATE threads SET timestamp = ? WHERE id = ?",
-                    (_utc_now().isoformat(), thread_id)
+                    (_utc_now_iso(), thread_id)
                 )
                 return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         except PersistenceError as exc:
@@ -771,6 +810,8 @@ class DatabaseManager:
                 if not row:
                     return None
                 overview = dict(row)
+                if "timestamp" in overview:
+                    overview["timestamp"] = _as_utc_iso(overview["timestamp"])
                 overview["revision"] = int(
                     conn.execute(
                         "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
@@ -799,6 +840,8 @@ class DatabaseManager:
                     return None
                 
                 chat_data = dict(thread_row)
+                if 'timestamp' in chat_data:
+                    chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
                 
                 cursor.execute(
                     "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp FROM messages "
@@ -808,6 +851,7 @@ class DatabaseManager:
                 messages = []
                 for msg_row in cursor.fetchall():
                     msg_dict = dict(msg_row)
+                    msg_dict['timestamp'] = _as_utc_iso(msg_dict.get('timestamp'))
                     if msg_dict.get('sources'):
                         msg_dict['sources'] = json.loads(msg_dict['sources'])
                     if msg_dict.get('attachments'):
@@ -900,7 +944,7 @@ class DatabaseManager:
                     json.dumps(sources) if sources else None,
                     thoughts,
                     json.dumps(stats) if stats else None,
-                    _utc_now().isoformat(),
+                    _utc_now_iso(),
                 ]
                 if attachments is not None:
                     set_clauses.append("attachments = ?")
@@ -921,7 +965,7 @@ class DatabaseManager:
                     )
                 conn.execute(
                     "UPDATE threads SET timestamp = ? WHERE id = ?",
-                    (_utc_now().isoformat(), thread_id),
+                    (_utc_now_iso(), thread_id),
                 )
         except PersistenceError as exc:
             if exc.operation == "chat_revision_conflict":
@@ -953,7 +997,10 @@ class DatabaseManager:
                 cursor.execute(
                     "SELECT id, title, timestamp, group_id FROM threads ORDER BY timestamp DESC"
                 )
-                return [dict(row) for row in cursor.fetchall()]
+                return [
+                    {**dict(row), "timestamp": _as_utc_iso(row["timestamp"])}
+                    for row in cursor.fetchall()
+                ]
         except PersistenceError as exc:
             raise PersistenceError(
                 "Failed to get chat summaries.",
@@ -972,7 +1019,11 @@ class DatabaseManager:
                     "ORDER BY position ASC, timestamp ASC"
                 )
                 return [
-                    {**dict(row), "collapsed": bool(row["collapsed"])}
+                    {
+                        **dict(row),
+                        "collapsed": bool(row["collapsed"]),
+                        "timestamp": _as_utc_iso(row["timestamp"]),
+                    }
                     for row in cursor.fetchall()
                 ]
         except PersistenceError as exc:
@@ -990,7 +1041,7 @@ class DatabaseManager:
                 conn.execute(
                     "INSERT INTO chat_groups (id, name, position, collapsed, timestamp) "
                     "VALUES (?, ?, ?, 0, ?)",
-                    (group_id, name, next_position, _utc_now().isoformat()),
+                    (group_id, name, next_position, _utc_now_iso()),
                 )
         except PersistenceError as exc:
             raise PersistenceError(

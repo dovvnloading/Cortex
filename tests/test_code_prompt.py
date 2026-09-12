@@ -237,3 +237,64 @@ def test_agent_defaults_to_fail_closed_for_code_proposals() -> None:
     assert "code_execution_request" not in visible
     assert agent.last_code_rejection is not None
     assert agent.last_code_rejection.code == "not_offered"
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Write a blog post about data science trends",
+        "Help me write a cover letter for a data analyst job",
+        "Can you read this document and summarize it?",
+        "Write a haiku about the network",
+        "Summarise the attached document",
+        "Write a short story about a request for help",
+        "Analyze this poem about data",
+    ),
+)
+def test_writing_and_summarising_turns_do_not_get_the_contract(query: str) -> None:
+    """Ordinary prose must not take the code path.
+
+    The local-task pattern allowed any distance between its verb and its
+    noun and counted "data", "document", "request" and "network" as local
+    artefacts, so these all matched. That cost the turn ~1k tokens of
+    execution contract and, worse, switched sampling to the coding profile
+    (temperature capped at 0.3, repeat_penalty 1.0) -- flat, repetitive
+    output for creative writing. Small models also answered "read this
+    document" with a code-execution envelope instead of reading the
+    attachment already in the prompt.
+    """
+    assert should_offer_code_execution(query) is False
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Explain how to read a CSV file in Python",
+        "What is a JSON file?",
+        "Describe how to download a file",
+        "How do I parse a spreadsheet?",
+    ),
+)
+def test_the_explanation_guard_is_reachable(query: str) -> None:
+    """Purely educational requests are refused by a guard that now runs.
+
+    The explanation check sat after every positive branch had already
+    returned, so it could never change the outcome -- the comment above it
+    described behaviour that did not exist.
+    """
+    assert should_offer_code_execution(query) is False
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Read the file report.csv and total column 3",
+        "Download the csv from that url and parse it",
+        "Process the json file in my folder",
+        "Write a file called notes.txt",
+        "Parse the attached spreadsheet",
+        "Fetch that url and save the json",
+    ),
+)
+def test_real_local_tasks_still_receive_the_contract(query: str) -> None:
+    assert should_offer_code_execution(query) is True

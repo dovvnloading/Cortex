@@ -535,7 +535,14 @@ def validate_code_source(source: str) -> str:
         raise CodeExecutionError("source_too_complex")
     try:
         tree = ast.parse(source, mode="exec")
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        # MemoryError and RecursionError are parser outcomes here, not genuine
+        # resource exhaustion: the input is a single string already bounded by
+        # MAX_CODE_SOURCE_BYTES above, and CPython raises MemoryError ("Parser
+        # stack overflowed") for deeply nested expressions well inside that
+        # bound. Letting either escape turned a malformed proposal into an
+        # unhandled 500 at the API and an unhandled error mid-turn in the
+        # model-proposal path, instead of the fail-closed code both expect.
         raise CodeExecutionError("syntax_invalid") from None
     _CodeValidator().visit(tree)
     return source
@@ -1092,8 +1099,17 @@ def _validate_network_url(url: str) -> tuple[str, str]:
             resolved = ipaddress.ip_address(address[4][0])
         except (ValueError, IndexError):
             raise CodeExecutionError("network_host_unavailable") from None
+        # ``is_global`` is the primary gate, not a sum of the specific flags.
+        # Checking only is_private/is_reserved/... leaves gaps whenever the
+        # interpreter's address registry changes underneath us: Python 3.13
+        # reclassified 100.64.0.0/10 (RFC 6598 shared address space, which is
+        # also Tailscale's entire range and common carrier-grade NAT) as
+        # neither private nor reserved, so it silently became reachable. The
+        # explicit checks are retained below because they are cheap and keep
+        # the intent readable, but nothing depends on them being exhaustive.
         if (
-            resolved.is_private
+            not resolved.is_global
+            or resolved.is_private
             or resolved.is_loopback
             or resolved.is_link_local
             or resolved.is_multicast

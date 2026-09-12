@@ -204,6 +204,10 @@ class GenerationServiceResult:
     # the user with a silently missing task.
     code_execution_rejection: CodeProposalRejection | None = None
     stats: GenerationStats | None = None
+    # Set when translation was requested and did not produce a usable result.
+    # The answer in ``response`` is then the untranslated one: the turn still
+    # succeeded, and the API reports the post-process failure beside it.
+    translation_error: str | None = None
 
 
 class GenerationService:
@@ -355,6 +359,7 @@ class GenerationService:
             if not isinstance(rejection, CodeProposalRejection) or proposal is not None:
                 rejection = None
 
+            translation_error: str | None = None
             if snapshot.translation_enabled:
                 self._check_cancelled(cancellation_event)
                 self._publish(
@@ -363,26 +368,53 @@ class GenerationService:
                     "translation",
                     f"Translating to {snapshot.target_language}...",
                 )
-                translation_result = _call_with_optional_kwargs(
-                    engine.translate_text,
-                    response,
-                    snapshot.target_language,
-                    options=dict(snapshot.model_options),
-                    cancellation_event=cancellation_event,
-                )
-                if not isinstance(translation_result, TranslationResult):
-                    raise ModelOperationError(
-                        "Translation returned an invalid result.",
-                        operation="translation",
+                # Translation is a post-process over an answer that already
+                # exists. Raising here discarded it: the turn is only persisted
+                # after generate() returns, so the user paid for a full
+                # generation and got "Translation failed. Please try again."
+                # with no answer at all -- and on a machine near its memory
+                # limit, loading the second model is the call most likely to
+                # fail. Keep the untranslated answer and report the failure
+                # beside it.
+                try:
+                    translation_result = _call_with_optional_kwargs(
+                        engine.translate_text,
+                        response,
+                        snapshot.target_language,
+                        options=dict(snapshot.model_options),
+                        cancellation_event=cancellation_event,
                     )
-                if not translation_result.success:
-                    raise ModelOperationError(
-                        translation_result.error or "Translation failed. Please try again.",
-                        operation="translation",
+                except ModelOperationError as exc:
+                    translation_error = str(exc)
+                    translation_result = None
+                if translation_error is not None:
+                    pass
+                elif not isinstance(translation_result, TranslationResult):
+                    translation_error = "Translation returned an invalid result."
+                elif not translation_result.success:
+                    translation_error = (
+                        translation_result.error or "Translation failed. Please try again."
                     )
-                response = translation_result.text or ""
+                elif not (translation_result.text or "").strip():
+                    translation_error = "Translation returned an empty result."
+                else:
+                    response = translation_result.text or ""
 
-            self._check_cancelled(cancellation_event)
+                if translation_error is not None:
+                    self._publish(
+                        sink,
+                        snapshot,
+                        "translation_failed",
+                        f"Could not translate to {snapshot.target_language}. "
+                        "Showing the original answer.",
+                    )
+
+            # Cancellation during translation must not discard the answer
+            # either: the generation itself already finished, so a Stop pressed
+            # in the post-process returns what was produced rather than
+            # throwing it away.
+            if translation_error is None:
+                self._check_cancelled(cancellation_event)
 
             return GenerationServiceResult(
                 response=response,
@@ -391,6 +423,7 @@ class GenerationService:
                 code_execution_proposal=proposal,
                 code_execution_rejection=rejection,
                 stats=stats,
+                translation_error=translation_error,
             )
         finally:
             # The chat client is process-wide while the engine is built per
