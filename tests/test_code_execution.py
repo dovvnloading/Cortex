@@ -234,6 +234,42 @@ def test_network_broker_rejects_private_targets() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "100.64.0.1",  # RFC 6598 shared address space: Tailscale, carrier NAT
+        "100.127.255.254",  # the far end of the same range
+        "192.0.2.1",  # TEST-NET-1
+        "198.18.0.1",  # benchmarking range
+        "192.168.1.1",
+        "10.0.0.1",
+        "169.254.169.254",  # link-local metadata endpoint
+        "127.0.0.1",
+        "0.0.0.0",
+        "[::1]",
+        "[fd00::1]",
+        "[::ffff:10.0.0.1]",  # IPv4-mapped private address
+    ],
+)
+def test_network_broker_refuses_every_non_global_address(address: str) -> None:
+    """Non-global addresses stay unreachable even when no specific flag names them.
+
+    100.64.0.0/10 is the case that motivated this: Python 3.13 reclassified it
+    as neither private nor reserved, so a deny-list built only from those flags
+    silently began admitting every Tailscale and carrier-NAT peer. The gate is
+    ``is_global`` for exactly that reason, and this table is what keeps a future
+    reclassification from reopening the hole unnoticed.
+    """
+    with pytest.raises(PermissionError):
+        code_execution._validate_network_url(f"http://{address}/probe")
+
+
+def test_network_broker_still_allows_a_public_address() -> None:
+    url, pinned = code_execution._validate_network_url("http://8.8.8.8/probe")
+    assert url == "http://8.8.8.8/probe"
+    assert pinned == "8.8.8.8"
+
+
 def test_network_validation_returns_the_address_it_vetted(monkeypatch) -> None:
     """The vetted address must come back so the caller can dial it directly.
 
