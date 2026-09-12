@@ -166,3 +166,52 @@ def test_a_code_job_cancelled_outside_the_coordinator_never_runs(repository) -> 
     assert "code.completed" not in events, (
         f"a cancelled program ran to completion: {events}"
     )
+
+
+def test_cancelling_twice_is_idempotent(repository) -> None:
+    """Pressing Stop again must not be an error.
+
+    Making "cancelling" a one-way state has to keep it reachable from itself:
+    request_cancel() writes status="cancelling", so a second Stop -- or a
+    recovery pass re-requesting one -- would otherwise raise a transition
+    conflict, which the execution router reports to the user as "Execution job
+    not found".
+    """
+    owner = repository.installation_principal_id
+    repository.create_job(
+        job_id="cancel-twice",
+        owner=owner,
+        request_id="stop-stop",
+        profile="code.exec.v1",
+        payload={
+            "schema_version": 1,
+            "language": "python",
+            "source": "_result = 1",
+            "intent_summary": "probe",
+            "capabilities": {"filesystem": False, "process": False, "network": False},
+            "source_digest": "unused",
+        },
+    )
+
+    assert repository.request_cancel("cancel-twice").status == "cancelling"
+    assert repository.request_cancel("cancel-twice").status == "cancelling"
+
+    # Still one-way, and still able to finish.
+    with pytest.raises(ExecutionTransitionConflict):
+        repository.transition(
+            "cancel-twice",
+            status="running",
+            event="code.started",
+            phase="prepare",
+            data={},
+        )
+    repository.transition(
+        "cancel-twice",
+        status="cancelled",
+        event="code.cancelled",
+        phase="cancelled",
+        data={},
+        error="cancelled",
+    )
+    # A cancel after the job is terminal stays idempotent too.
+    assert repository.request_cancel("cancel-twice").status == "cancelled"

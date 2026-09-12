@@ -28,11 +28,6 @@ from uuid import uuid4
 from cortex_backend.core.paths import AppPaths
 
 
-def _utc_now() -> datetime:
-    """Return a naive UTC datetime for compatibility with existing ISO data."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO string that says it is UTC.
 
@@ -618,7 +613,11 @@ class DatabaseManager:
                                 chat_data['timestamp'].replace('Z', '+00:00')
                             )
                         except ValueError:
-                            base_timestamp = _utc_now()
+                            # Aware, so migrated rows carry an offset like
+                            # every other write path. A legacy file whose own
+                            # timestamp is naive still parses above and is
+                            # normalised on read.
+                            base_timestamp = datetime.now(timezone.utc)
                         for index, message in enumerate(chat_data['messages']):
                             message_timestamp = (base_timestamp + timedelta(microseconds=index)).isoformat()
                             conn.execute(
