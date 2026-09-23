@@ -1,3 +1,24 @@
+### **GGUF Model Discovery**
+
+**Date:** 2026-09-22
+**Version:** Model-scan pass
+
+* Models kept in subfolders are found. The scan looked in exactly one folder,
+  which is not how any tool stores models -- each download lands in its own
+  folder per repository -- so pointing Cortex at a models root showed only
+  files loose at the top level, and pointing it at one model's folder showed
+  that model alone. It now walks a bounded few levels, and a model's id
+  carries its path.
+* Companion files are no longer offered as models. A multimodal projector and
+  the later slices of a split model cannot be loaded on their own; selecting
+  one used to fail much later as an unexplained restart loop.
+* The model list appears promptly. Reading the four details shown for each
+  model used to parse the entire file including its tokenizer vocabulary,
+  around eleven seconds per model; it now reads just the header block, so a
+  folder of models lists in well under a second.
+
+---
+
 ### **Real Token Streaming**
 
 **Date:** 2026-09-12
