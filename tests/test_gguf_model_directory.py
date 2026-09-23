@@ -18,6 +18,7 @@ from cortex_backend.llamacpp.model_directory import (  # noqa: E402
     GGUFModelDirectory,
     InvalidGGUFModelId,
     resolve_configured_directory,
+    MAX_SCAN_DEPTH,
     resolve_gguf_path,
     to_model_id,
 )
@@ -92,21 +93,53 @@ def test_scan_cache_is_invalidated_by_mtime_and_size(tmp_path: Path) -> None:
     assert second[0].context_length == 16384
 
 
-def test_resolve_gguf_path_rejects_traversal_and_missing_files(tmp_path: Path) -> None:
+def test_resolve_gguf_path_accepts_a_subfolder_and_rejects_escapes(tmp_path: Path) -> None:
+    """Ids name a path under the folder, because that is how models are stored.
+
+    Every downloader writes one folder per repository, so refusing a separator
+    meant a model in a subfolder could be listed but never opened. Leaving the
+    configured folder is still refused, and containment is checked after
+    resolving so a link cannot be used to step outside it.
+    """
     path = tmp_path / "model.gguf"
     _write_gguf(path)
+    nested = tmp_path / "Repo-Name-gguf" / "nested.gguf"
+    nested.parent.mkdir()
+    _write_gguf(nested)
 
-    resolved = resolve_gguf_path(tmp_path, to_model_id("model.gguf"))
-    assert resolved == path.resolve()
+    assert resolve_gguf_path(tmp_path, to_model_id("model.gguf")) == path.resolve()
+    assert resolve_gguf_path(tmp_path, "gguf:Repo-Name-gguf/nested.gguf") == nested.resolve()
+    # Windows spells its separators differently; the id must mean the same thing.
+    assert resolve_gguf_path(tmp_path, r"gguf:Repo-Name-gguf\nested.gguf") == nested.resolve()
+
+    for bad in (
+        "not-a-gguf-id",
+        "gguf:",
+        "gguf:../escape.gguf",
+        "gguf:Repo-Name-gguf/../../escape.gguf",
+        "gguf:/etc/passwd",
+        r"gguf:C:\Windows\System32\drivers\etc\hosts",
+        "gguf:missing.gguf",
+        "gguf:Repo-Name-gguf/missing.gguf",
+    ):
+        with pytest.raises(InvalidGGUFModelId):
+            resolve_gguf_path(tmp_path, bad)
+
+
+def test_resolve_gguf_path_refuses_a_link_that_leaves_the_folder(tmp_path: Path) -> None:
+    """Containment is proven after resolving, not by inspecting the text."""
+    root = tmp_path / "models"
+    root.mkdir()
+    outside = tmp_path / "outside.gguf"
+    _write_gguf(outside)
+    link = root / "link.gguf"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):  # pragma: no cover - needs privilege on Windows
+        pytest.skip("this host cannot create symlinks")
 
     with pytest.raises(InvalidGGUFModelId):
-        resolve_gguf_path(tmp_path, "not-a-gguf-id")
-    with pytest.raises(InvalidGGUFModelId):
-        resolve_gguf_path(tmp_path, "gguf:../escape.gguf")
-    with pytest.raises(InvalidGGUFModelId):
-        resolve_gguf_path(tmp_path, "gguf:sub/dir.gguf")
-    with pytest.raises(InvalidGGUFModelId):
-        resolve_gguf_path(tmp_path, "gguf:missing.gguf")
+        resolve_gguf_path(root, "gguf:link.gguf")
 
 
 def test_resolve_configured_directory_prefers_explicit_setting(tmp_path: Path) -> None:
@@ -179,3 +212,92 @@ def test_combined_catalog_merges_ollama_and_gguf(tmp_path: Path) -> None:
     # None meant an attached image was accepted, announced in the prompt,
     # and then stripped before the request reached the model.
     assert catalog.model_supports_vision("gguf:local.gguf") is False
+
+
+def test_the_scan_finds_models_in_subfolders(tmp_path: Path) -> None:
+    """The layout every downloader actually produces: one folder per repository.
+
+    The scan used to glob a single directory, so pointing it at a models root
+    showed only whatever was loose at the top level, and pointing it at one
+    model's folder showed that model alone -- there was no setting that
+    revealed both.
+    """
+    _write_gguf(tmp_path / "loose.gguf")
+    (tmp_path / "Repo-One-gguf").mkdir()
+    _write_gguf(tmp_path / "Repo-One-gguf" / "one.gguf")
+    (tmp_path / "Repo-Two-gguf" / "nested").mkdir(parents=True)
+    _write_gguf(tmp_path / "Repo-Two-gguf" / "nested" / "two.gguf")
+
+    models = GGUFModelDirectory(lambda: tmp_path).list_installed_details()
+
+    assert {model.name for model in models} == {
+        "gguf:loose.gguf",
+        "gguf:Repo-One-gguf/one.gguf",
+        "gguf:Repo-Two-gguf/nested/two.gguf",
+    }
+    # Every id has to open the file it names, or a listed model cannot be used.
+    for model in models:
+        assert resolve_gguf_path(tmp_path, model.name) == Path(model.path).resolve()
+
+
+def test_the_scan_stops_descending_at_the_depth_bound(tmp_path: Path) -> None:
+    """A bounded walk, so a models folder nested inside a large tree cannot stall."""
+    deep = tmp_path
+    for level in range(MAX_SCAN_DEPTH + 2):
+        deep = deep / f"level{level}"
+    deep.mkdir(parents=True)
+    _write_gguf(deep / "too-deep.gguf")
+    reachable = tmp_path / "level0" / "shallow.gguf"
+    _write_gguf(reachable)
+
+    names = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert "gguf:level0/shallow.gguf" in names
+    assert not any("too-deep" in name for name in names)
+
+
+def test_companion_files_are_not_offered_as_models(tmp_path: Path) -> None:
+    """A projector and a shard slice cannot be loaded on their own.
+
+    Listing them invites the user to pick something llama-server will refuse,
+    which surfaces much later as an unexplained crash-loop. Recursion makes
+    this matter: these files sit beside the model in its own folder.
+    """
+    _write_gguf(tmp_path / "model.gguf")
+    _write_gguf(tmp_path / "mmproj-model-f16.gguf")
+    _write_gguf(tmp_path / "big-00001-of-00003.gguf")
+    _write_gguf(tmp_path / "big-00002-of-00003.gguf")
+    _write_gguf(tmp_path / "big-00003-of-00003.gguf")
+
+    names = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert names == {"gguf:model.gguf", "gguf:big-00001-of-00003.gguf"}, (
+        "only the model and the first shard of the set should be offered"
+    )
+
+
+def test_a_projector_is_dropped_even_when_its_name_does_not_say_so(tmp_path: Path) -> None:
+    """The architecture inside the file is what actually settles it."""
+    writer = gguf.GGUFWriter(str(tmp_path / "vision-tower.gguf"), "clip")
+    writer.add_name("vision-tower")
+    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    _write_gguf(tmp_path / "real.gguf")
+
+    names = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert names == {"gguf:real.gguf"}
+
+
+def test_an_unreadable_subfolder_costs_only_that_subfolder(tmp_path: Path) -> None:
+    _write_gguf(tmp_path / "good.gguf")
+    missing = tmp_path / "vanished"
+    missing.mkdir()
+    directory = GGUFModelDirectory(lambda: tmp_path)
+    missing.rmdir()
+
+    names = {model.name for model in directory.list_installed_details()}
+    assert names == {"gguf:good.gguf"}
