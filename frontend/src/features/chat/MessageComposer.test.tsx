@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment } from "../../../../contracts/cortex-api";
+import { useModelStore } from "../../stores/useModelStore";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 
 function deferred<T>() {
@@ -228,11 +229,71 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   });
 
+  it("marks only the focus-driven keyboard hint as droppable", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ComposerHarness />);
+
+    await user.click(screen.getByRole("textbox", { name: "Message Cortex" }));
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Enter to send · Shift+Enter for a new line");
+    expect(status).toHaveClass("composer-status-hint");
+
+    // Phase messages don't follow focus, so they never move the toolbar
+    // mid-click and must stay visible at every width.
+    rerender(<ComposerHarness phase="unavailable" />);
+    expect(screen.getByRole("status")).not.toHaveClass("composer-status-hint");
+  });
+
   it("keeps coding requests in the normal chat flow instead of exposing an editor", () => {
     render(<ComposerHarness />);
 
     expect(screen.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Open code workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Code workspace" })).not.toBeInTheDocument();
+  });
+  describe("local runtime status", () => {
+    afterEach(() => useModelStore.setState({ llamacppStatus: null }));
+
+    function renderWithRuntime(state: "idle" | "starting" | "ready" | "failed", extra: { last_error?: string | null } = {}) {
+      useModelStore.setState({
+        llamacppStatus: {
+          state,
+          binary_present: true,
+          loaded_model: state === "ready" ? "gguf:demo.gguf" : null,
+          active_backend: state === "ready" ? "vulkan" : null,
+          last_error: extra.last_error ?? null,
+          models_directory: "",
+        },
+      });
+      return render(
+        <MessageComposer
+          value=""
+          phase="ready"
+          selectedModel="gguf:demo.gguf"
+          localModels={["gguf:demo.gguf"]}
+          onValueChange={vi.fn()}
+          onSubmit={vi.fn().mockResolvedValue(true)}
+          onStop={vi.fn()}
+          onSelectModel={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+    }
+
+    it("keeps settled runtime states on the picker's dot instead of in toolbar text", () => {
+      const { container } = renderWithRuntime("ready");
+
+      expect(screen.queryByText(/^Loaded/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Selected local model: demo.gguf" })).toHaveAttribute("title", "Loaded · GPU");
+      expect(container.querySelector(".model-picker-status-ready")).toBeInTheDocument();
+    });
+
+    it("spells out a runtime that is starting or has failed", () => {
+      const { unmount } = renderWithRuntime("starting");
+      expect(screen.getByText("Starting…")).toBeVisible();
+      unmount();
+
+      renderWithRuntime("failed", { last_error: "Vulkan device lost." });
+      expect(screen.getByText("Failed to start")).toHaveAttribute("title", "Vulkan device lost.");
+    });
   });
 });

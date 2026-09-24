@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CortexSettings, ModelResponse } from "../../../../contracts/cortex-api";
@@ -105,7 +105,7 @@ describe("SettingsPanel", () => {
     expect(screen.queryByRole("checkbox", { name: /follow-up suggestions/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "AI Model" }));
 
-    expect(screen.getByText(/Cortex lists models installed through Ollama and local \.gguf files/)).toBeVisible();
+    expect(screen.getByText(/Models installed through Ollama and local \.gguf files/)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "Chat model tag" })).not.toBeInTheDocument();
     const picker = screen.getByRole("combobox", { name: "Chat model" });
     picker.focus();
@@ -451,6 +451,128 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       generation: expect.objectContaining({ seed: 42 }),
+    }));
+  });
+  function renderModelSettings(generation: CortexSettings["generation"], models?: ModelResponse) {
+    const onSave = vi.fn<(settings: CortexSettings) => Promise<void>>().mockResolvedValue();
+    render(
+      <SettingsPanel
+        settings={{ models: { chat: "local-chat:7b", title: null, translation: "translategemma:4b" }, generation }}
+        memos={[]}
+        saving={false}
+        memoryBusy={false}
+        onSave={onSave}
+        onAddMemory={vi.fn<(memo: string) => Promise<void>>().mockResolvedValue()}
+        onReplaceMemory={vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue()}
+        onClearMemory={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        models={models ?? {
+          required_models: [],
+          optional_models: [],
+          installed_models: ["local-chat:7b"],
+          models: [{ name: "local-chat:7b" }],
+          connection: { success: true, status: "connected", message: "Connected." },
+        }}
+        modelBusy={false}
+        modelProgress={null}
+        setupUrl="https://ollama.com/download"
+        onCheckModels={vi.fn<() => Promise<void>>().mockResolvedValue()}
+        onPullModel={vi.fn<(model: string) => Promise<void>>().mockResolvedValue()}
+        llamacppStatus={{ state: "idle", binary_present: false, loaded_model: null, last_error: null, models_directory: "" }}
+        onDownloadGGUF={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+    return onSave;
+  }
+
+  it("describes each chat model with what tells it apart instead of a generic note", async () => {
+    const user = userEvent.setup();
+    renderModelSettings({}, {
+      required_models: [],
+      optional_models: [],
+      installed_models: ["local-chat:7b", "gguf:coder.Q8_0.gguf"],
+      models: [
+        { name: "local-chat:7b", parameter_size: "7B", quantization_level: "Q4_K_M", size: 4_100_000_000, supports_vision: true, source: "ollama" },
+        { name: "gguf:coder.Q8_0.gguf", quantization_level: "Q8_0", source: "gguf" },
+      ],
+      connection: { success: true, status: "connected", message: "Connected." },
+    });
+
+    await user.click(screen.getByRole("button", { name: "AI Model" }));
+    const picker = screen.getByRole("combobox", { name: "Chat model" });
+    expect(picker).toHaveTextContent("Ollama · 7B · Q4_K_M · 3.8 GB · Vision");
+    expect(screen.queryByText("Installed locally")).not.toBeInTheDocument();
+
+    await user.click(picker);
+    expect(await screen.findByRole("option", { name: "coder.Q8_0.gguf (GGUF)" })).toHaveTextContent("GGUF file · Q8_0");
+  });
+
+  it("edits generation defaults with presets, context sizes, and per-field resets", async () => {
+    const user = userEvent.setup();
+    const onSave = renderModelSettings({ temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1, num_ctx: 8192, seed: -1 });
+
+    await user.click(screen.getByRole("button", { name: "AI Model" }));
+    const style = screen.getByRole("radiogroup", { name: "Response style" });
+    expect(within(style).getByRole("radio", { name: "Balanced" })).toBeChecked();
+    expect(screen.queryByRole("button", { name: "Restore defaults" })).not.toBeInTheDocument();
+
+    await user.click(within(style).getByRole("radio", { name: "Creative" }));
+    expect(screen.getByRole("slider", { name: "Temperature" })).toHaveValue("1");
+    expect(screen.getByRole("slider", { name: "Top K" })).toHaveValue("80");
+
+    await user.click(screen.getByRole("radio", { name: "32,768 tokens" }));
+    expect(screen.getByLabelText("Context window")).toHaveValue("32,768");
+
+    // Pulling one knob off the preset reads as a custom mix, not a preset.
+    await user.click(screen.getByRole("button", { name: "Reset Temperature to 0.70" }));
+    expect(within(style).queryByRole("radio", { checked: true })).not.toBeInTheDocument();
+    expect(screen.getByText("Custom mix")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ temperature: 0.7, top_p: 0.95, top_k: 80, repeat_penalty: 1.1, num_ctx: 32768, seed: -1 }),
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Restore defaults" }));
+    expect(within(style).getByRole("radio", { name: "Balanced" })).toBeChecked();
+    expect(screen.getByLabelText("Context window")).toHaveValue("8,192");
+  });
+
+  it("clears a pinned seed back to random replies", async () => {
+    const user = userEvent.setup();
+    const onSave = renderModelSettings({ temperature: 0.7, num_ctx: 4096, seed: 42 });
+
+    await user.click(screen.getByRole("button", { name: "AI Model" }));
+    const seed = screen.getByLabelText("Seed");
+    expect(seed).toHaveValue("42");
+    await user.clear(seed);
+    await user.tab();
+    expect(seed).toHaveValue("");
+    expect(seed).toHaveAttribute("placeholder", "Random");
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ seed: -1 }),
+    }));
+  });
+
+  it("settles an out-of-range context window on the nearest legal size", async () => {
+    const user = userEvent.setup();
+    const onSave = renderModelSettings({ num_ctx: 8192 });
+
+    await user.click(screen.getByRole("button", { name: "AI Model" }));
+    const context = screen.getByLabelText("Context window");
+    await user.clear(context);
+    await user.type(context, "999999");
+    await user.tab();
+    expect(context).toHaveValue("65,536");
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ num_ctx: 65536 }),
     }));
   });
 });

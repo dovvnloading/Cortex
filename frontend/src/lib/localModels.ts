@@ -1,4 +1,4 @@
-import type { ModelResponse } from "../../../contracts/cortex-api";
+import type { InstalledModel, ModelResponse } from "../../../contracts/cortex-api";
 
 /**
  * Normalize the local model inventory returned by Cortex.
@@ -37,4 +37,21 @@ export function formatModelSize(size: number | null | undefined): string | null 
   const index = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1);
   const value = size / (1024 ** index);
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+export type ModelSource = "ollama" | "gguf";
+
+export function modelSource(name: string, detail?: Pick<InstalledModel, "source"> | null): ModelSource {
+  return detail?.source ?? (isGGUFModel(name) ? "gguf" : "ollama");
+}
+
+/** The facts that tell two local models apart at a glance: size class, quantization, disk size. */
+export function modelFacts(detail: InstalledModel | null | undefined): string[] {
+  if (!detail) return [];
+  const facts: string[] = [];
+  if (detail.parameter_size) facts.push(detail.parameter_size);
+  if (detail.quantization_level) facts.push(detail.quantization_level);
+  const size = formatModelSize(detail.size);
+  if (size) facts.push(size);
+  return facts;
 }
