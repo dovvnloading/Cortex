@@ -185,13 +185,15 @@ def test_security_rejects_non_loopback_host_and_origin():
 
 
 def test_trusted_host_middleware_accepts_ipv6_loopback_like_the_session_guard():
-    """Starlette's TrustedHostMiddleware strips a port with a naive
-    ``host.split(":")[0]``.  For the wire form of the IPv6 loopback address
-    ("[::1]" or "[::1]:PORT") that reduces to the literal "[", not "::1", so
-    the middleware used to reject every IPv6-loopback request with a 400 --
+    """Starlette's TrustedHostMiddleware reduces the IPv6 loopback Host header
+    ("[::1]" or "[::1]:PORT") to "[" before 1.7 (a naive
+    ``host.split(":")[0]``) and to "[::1]" from 1.7 (``parse_host_header``).
+    Each version once rejected every IPv6-loopback request with a 400 --
     even though SessionManager.validate_request_context (security.py)
-    parses the same header correctly with urlsplit and accepts "::1" as
-    configured. Both guards must agree on what counts as valid loopback.
+    parses the same header itself and accepts "::1" as configured. Both
+    guards must agree on what counts as valid loopback, on every Starlette
+    the requirements range admits; the compatibility matrix installs the
+    newest one, the lockfile pins an older one.
     """
     app, client = _client()
     with client:
