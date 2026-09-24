@@ -1,4 +1,4 @@
-import { Save, X } from "lucide-react";
+import { RotateCcw, Save, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   CortexSettings,
@@ -6,9 +6,16 @@ import type {
   ModelDownloadRequest,
   ModelResponse,
 } from "../../../../contracts/cortex-api";
-import { displayModelName, isGGUFModel, localModelNames } from "../../lib/localModels";
-import { RangeField } from "../../shared/ui/RangeField";
+import { GENERATION_DEFAULTS, resolveGenerationValues, type ParamKey } from "../../lib/generationParams";
+import { displayModelName, isGGUFModel, localModelNames, modelFacts, modelSource } from "../../lib/localModels";
 import { Select } from "../../shared/ui/Select";
+import {
+  ContextWindowField,
+  PresetPicker,
+  SamplingField,
+  SeedField,
+  type GenerationPatch,
+} from "../generation/GenerationControls";
 import { MemoryPanel } from "./MemoryPanel";
 import { ModelsPanel } from "../models/ModelsPanel";
 
@@ -87,23 +94,6 @@ const sections: { id: SettingsSection; label: string; detail: string }[] = [
   { id: "system", label: "System", detail: "Runtime and installed models" },
 ];
 
-type NumericField = "num_ctx" | "seed";
-
-/**
- * Read a number input, or null when it holds nothing usable.
- *
- * `Number("")` is 0, so clearing a field to retype it used to write a real
- * zero into the draft. For the context window that is below the server's
- * minimum and the save was rejected; for the seed it is a *valid* value, so
- * it silently turned "-1, keep replies varied" into a pinned seed. An empty
- * field means the user is mid-edit, not that they chose zero.
- */
-function readNumericInput(raw: string): number | null {
-  if (raw.trim() === "") return null;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
-}
-
 export function SettingsPanel({
   settings,
   memos,
@@ -149,28 +139,11 @@ export function SettingsPanel({
 
   const update = (next: Partial<CortexSettings>) => setDraft((current) => ({ ...current, ...next }));
 
-  // What the user has literally typed into a number field, while they are
-  // typing it. The saved settings hold numbers, so a field bound straight to
-  // them can never be empty -- clearing it to retype snapped the old value
-  // back and the new digits appended to it ("-1" + "42" = -142). Keeping the
-  // raw text lets the box be empty mid-edit without ever writing a number
-  // nobody chose; `commitNumber` drops the override on blur so the field
-  // re-syncs to whatever was actually saved.
-  const [numericInputs, setNumericInputs] = useState<Partial<Record<NumericField, string>>>({});
-
-  const editNumber = (field: NumericField, raw: string, commit: (value: number) => void) => {
-    setNumericInputs((current) => ({ ...current, [field]: raw }));
-    const value = readNumericInput(raw);
-    if (value !== null) commit(value);
-  };
-
-  const commitNumber = (field: NumericField) =>
-    setNumericInputs((current) => {
-      if (current[field] === undefined) return current;
-      const next = { ...current };
-      delete next[field];
-      return next;
-    });
+  const generationValues = resolveGenerationValues(generation);
+  const generationModified = (Object.keys(GENERATION_DEFAULTS) as ParamKey[])
+    .some((key) => generationValues[key] !== GENERATION_DEFAULTS[key]);
+  const setGeneration = (patch: GenerationPatch) => update({ generation: { ...generation, ...patch } });
+  const generationFieldProps = { idPrefix: "settings", values: generationValues, defaults: GENERATION_DEFAULTS, onChange: setGeneration };
 
   const chooseChatModel = (chat: string) => update({ models: { ...modelSettings, chat, title: null } });
 
@@ -184,11 +157,14 @@ export function SettingsPanel({
     });
   };
 
-  const modelOptions = installedModels.map((model) => ({
-    value: model,
-    label: isGGUFModel(model) ? `${displayModelName(model)} (GGUF)` : model,
-    detail: "Installed locally",
-  }));
+  const modelOptions = installedModels.map((model) => {
+    const detail = models.models?.find((item) => item.name === model);
+    return {
+      value: model,
+      label: isGGUFModel(model) ? `${displayModelName(model)} (GGUF)` : model,
+      detail: [modelSource(model, detail) === "gguf" ? "GGUF file" : "Ollama", ...modelFacts(detail), ...(detail?.supports_vision ? ["Vision"] : [])].join(" · "),
+    };
+  });
   const saveDraft = () => {
     const latest = mergeChangedValues(draft, baselineRef.current, settings);
     const latestModels = latest.models ?? {};
@@ -273,77 +249,68 @@ export function SettingsPanel({
             <section className="settings-section" aria-labelledby="model-settings-title">
               <div className="section-heading">
                 <p className="eyebrow">AI MODEL</p>
-                <h3 id="model-settings-title">Local model selection</h3>
+                <h3 id="model-settings-title">Model and generation</h3>
               </div>
               <div className="settings-form">
-                <p className="model-selection-note">Cortex lists models installed through Ollama and local .gguf files. Select the model to use for chat; automatic chat titles use the same local model.</p>
-                {installedModels.length > 0 ? (
-                  <div className="field-label">
-                    <span id="chat-model-label">Chat model</span>
-                    <Select id="chat-model" aria-labelledby="chat-model-label" value={selectedChatModel} options={modelOptions} onChange={chooseChatModel} />
+                <section className="settings-group" aria-labelledby="chat-model-group">
+                  <div className="settings-group-head">
+                    <span>
+                      <strong id="chat-model-group">Chat model</strong>
+                      <small>Models installed through Ollama and local .gguf files. Chat titles use the same model.</small>
+                    </span>
                   </div>
-                ) : (
-                  <div className="model-selection-empty" role="status">
-                    <strong>No local models found</strong>
-                    <span>Install a model with Ollama, or add a .gguf file to your local models folder, then rescan this workspace.</span>
-                    <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
+                  {installedModels.length > 0 ? (
+                    <Select id="chat-model" aria-labelledby="chat-model-group" value={selectedChatModel} options={modelOptions} onChange={chooseChatModel} />
+                  ) : (
+                    <div className="model-selection-empty" role="status">
+                      <strong>No local models found</strong>
+                      <span>Install a model with Ollama, or add a .gguf file to your local models folder, then rescan this workspace.</span>
+                      <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-group" aria-labelledby="generation-defaults-group">
+                  <div className="settings-group-head">
+                    <span>
+                      <strong id="generation-defaults-group">Generation defaults</strong>
+                      <small>Every chat starts from these. Parameters in the composer can adjust them for a single chat.</small>
+                    </span>
+                    {generationModified && (
+                      <button className="params-reset" type="button" onClick={() => setGeneration(GENERATION_DEFAULTS)}>
+                        <RotateCcw aria-hidden="true" size={12} />
+                        <span>Restore defaults</span>
+                      </button>
+                    )}
                   </div>
-                )}
-                <hr className="settings-divider" />
-                <div className="settings-subhead">
-                  <strong>Sampling</strong>
-                  <small>How the model picks its next token. Defaults suit most local models.</small>
-                </div>
-                <div className="settings-range-grid">
-                  <RangeField id="temperature" label="Temperature" min={0} max={2} step={0.1} value={generation.temperature ?? 0.7} format={(value) => value.toFixed(1)} onChange={(temperature) => update({ generation: { ...generation, temperature } })} />
-                  <RangeField id="top-p" label="Top P" min={0} max={1} step={0.05} value={generation.top_p ?? 0.9} format={(value) => value.toFixed(2)} onChange={(top_p) => update({ generation: { ...generation, top_p } })} />
-                  <RangeField id="top-k" label="Top K" min={0} max={200} step={1} value={generation.top_k ?? 40} onChange={(top_k) => update({ generation: { ...generation, top_k } })} />
-                  <RangeField id="repeat-penalty" label="Repeat penalty" min={0.5} max={2} step={0.05} value={generation.repeat_penalty ?? 1.1} format={(value) => value.toFixed(2)} onChange={(repeat_penalty) => update({ generation: { ...generation, repeat_penalty } })} />
-                </div>
+                  <PresetPicker idPrefix="settings" values={generationValues} onChange={setGeneration} />
+                  <div className="settings-range-grid">
+                    <SamplingField field="temperature" {...generationFieldProps} />
+                    <SamplingField field="top_p" {...generationFieldProps} />
+                    <SamplingField field="top_k" {...generationFieldProps} />
+                    <SamplingField field="repeat_penalty" {...generationFieldProps} />
+                  </div>
+                  <div className="settings-range-grid settings-range-grid-context">
+                    <ContextWindowField {...generationFieldProps} />
+                    <SeedField {...generationFieldProps} />
+                  </div>
+                </section>
 
-                <hr className="settings-divider" />
-                <div className="settings-subhead">
-                  <strong>Context</strong>
-                  <small>A larger window holds more conversation but uses more memory. Seed -1 keeps replies varied.</small>
-                </div>
-                <div className="settings-field-row">
-                  <label className="field-label" htmlFor="num-ctx">Context window
-                    <input
-                      id="num-ctx"
-                      type="number"
-                      min="2048"
-                      max="65536"
-                      step="1024"
-                      value={numericInputs.num_ctx ?? String(generation.num_ctx ?? 8192)}
-                      onChange={(event) => editNumber("num_ctx", event.target.value, (num_ctx) => update({ generation: { ...generation, num_ctx } }))}
-                      onBlur={() => commitNumber("num_ctx")}
-                    />
+                <section className="settings-group" aria-labelledby="system-prompt-group">
+                  <div className="settings-group-head">
+                    <span>
+                      <strong id="system-prompt-group">System prompt</strong>
+                      <small>Standing instructions sent with every message in every chat.</small>
+                    </span>
+                  </div>
+                  <label className="field-label" htmlFor="system-instructions">System instructions
+                    <textarea id="system-instructions" value={generation.system_instructions ?? ""} onChange={(event) => update({ generation: { ...generation, system_instructions: event.target.value } })} rows={4} />
                   </label>
-                  <label className="field-label" htmlFor="seed">Seed
-                    <input
-                      id="seed"
-                      type="number"
-                      min="-1"
-                      max="2147483647"
-                      value={numericInputs.seed ?? String(generation.seed ?? -1)}
-                      onChange={(event) => editNumber("seed", event.target.value, (seed) => update({ generation: { ...generation, seed } }))}
-                      onBlur={() => commitNumber("seed")}
-                    />
+                  <label className="toggle-row" htmlFor="bypass-system-prompt">
+                    <span><strong id="bypass-system-prompt-label">Bypass Cortex's default system prompt</strong><small id="bypass-system-prompt-description">Skip Cortex's built-in identity and safety instructions. Only your system instructions above (if any) and the conversation are sent to the model.</small></span>
+                    <input id="bypass-system-prompt" type="checkbox" aria-labelledby="bypass-system-prompt-label" aria-describedby="bypass-system-prompt-description" checked={generation.bypass_system_prompt ?? false} onChange={(event) => update({ generation: { ...generation, bypass_system_prompt: event.target.checked } })} />
                   </label>
-                </div>
-
-                <hr className="settings-divider" />
-                <div className="settings-subhead">
-                  <strong>System prompt</strong>
-                  <small>Standing instructions sent with every message in every chat.</small>
-                </div>
-                <label className="field-label" htmlFor="system-instructions">System instructions
-                  <textarea id="system-instructions" value={generation.system_instructions ?? ""} onChange={(event) => update({ generation: { ...generation, system_instructions: event.target.value } })} rows={4} />
-                </label>
-                <label className="toggle-row" htmlFor="bypass-system-prompt">
-                  <span><strong id="bypass-system-prompt-label">Bypass Cortex's default system prompt</strong><small id="bypass-system-prompt-description">Skip Cortex's built-in identity and safety instructions. Only your system instructions above (if any) and the conversation are sent to the model.</small></span>
-                  <input id="bypass-system-prompt" type="checkbox" aria-labelledby="bypass-system-prompt-label" aria-describedby="bypass-system-prompt-description" checked={generation.bypass_system_prompt ?? false} onChange={(event) => update({ generation: { ...generation, bypass_system_prompt: event.target.checked } })} />
-                </label>
+                </section>
               </div>
             </section>
           )}

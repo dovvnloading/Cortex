@@ -13,41 +13,31 @@ import {
 } from "react";
 import type { ChatAttachment, GenerationOptionsOverride, GenerationSettings } from "../../../../contracts/cortex-api";
 import { isGGUFModel } from "../../lib/localModels";
+import { GENERATION_DEFAULTS } from "../../lib/generationParams";
 import { useModelStore } from "../../stores/useModelStore";
 import { GenerationParamsPopover } from "./GenerationParamsPopover";
-import { LocalModelMenu } from "../models/LocalModelMenu";
+import { LocalModelMenu, type ModelRuntimeStatus } from "../models/LocalModelMenu";
 
-/** Only rendered for a selected GGUF model -- Ollama has no comparable
+/** Only computed for a selected GGUF model -- Ollama has no comparable
  * "is the runtime actually loaded yet" state worth surfacing here. Keeps
  * the user from wondering whether sending a message will trigger a local
  * model load, and shows the currently active state as soon as this
  * component polls it, not only when a generation is already in flight. */
-function LlamaRuntimeBadge({ selectedModel }: { selectedModel: string }) {
+function useLlamaRuntimeStatus(selectedModel: string | null): ModelRuntimeStatus | null {
   const llamacppStatus = useModelStore((state) => state.llamacppStatus);
-  if (!llamacppStatus) return null;
+  if (!llamacppStatus || !selectedModel || !isGGUFModel(selectedModel)) return null;
 
   const isThisModelLoaded = llamacppStatus.state === "ready" && llamacppStatus.loaded_model === selectedModel;
-  const isStarting = llamacppStatus.state === "starting" || llamacppStatus.state === "downloading_binary";
-  const tone = isThisModelLoaded ? "runtime-badge-ready" : llamacppStatus.state === "failed" ? "runtime-badge-failed" : isStarting ? "runtime-badge-starting" : "runtime-badge-idle";
-  const label = isThisModelLoaded
-    ? `Loaded${llamacppStatus.active_backend === "vulkan" ? " · GPU" : llamacppStatus.active_backend === "cpu" ? " · CPU" : ""}`
-    : llamacppStatus.state === "downloading_binary"
-      ? "Downloading runtime…"
-      : llamacppStatus.state === "starting"
-        ? "Starting…"
-        : llamacppStatus.state === "failed"
-          ? "Failed to start"
-          : "Not loaded yet";
-
-  return (
-    // Tooltip prefers the hard error; otherwise it explains the most recent
-    // runtime restart (model change, context increase, crash) -- a model
-    // reload costs minutes, so the reason should never be a mystery.
-    <span className={`runtime-badge ${tone}`} title={llamacppStatus.last_error ?? llamacppStatus.last_restart_reason ?? undefined}>
-      <span className="runtime-badge-dot" aria-hidden="true" />
-      {label}
-    </span>
-  );
+  const backend = llamacppStatus.active_backend === "vulkan" ? " · GPU" : llamacppStatus.active_backend === "cpu" ? " · CPU" : "";
+  // The detail prefers the hard error; otherwise it explains the most recent
+  // runtime restart (model change, context increase, crash) -- a model
+  // reload costs minutes, so the reason should never be a mystery.
+  const detail = llamacppStatus.last_error ?? llamacppStatus.last_restart_reason ?? null;
+  if (isThisModelLoaded) return { tone: "ready", label: `Loaded${backend}`, detail };
+  if (llamacppStatus.state === "downloading_binary") return { tone: "starting", label: "Downloading runtime…", detail };
+  if (llamacppStatus.state === "starting") return { tone: "starting", label: "Starting…", detail };
+  if (llamacppStatus.state === "failed") return { tone: "failed", label: "Failed to start", detail };
+  return { tone: "idle", label: "Not loaded yet", detail: "Loads when you send a message." };
 }
 
 export type ComposerPhase = "ready" | "starting" | "generating" | "stopping" | "finishing" | "unavailable";
@@ -83,14 +73,6 @@ export type MessageComposerProps = {
 const MAX_MESSAGE_LENGTH = 100_000;
 const MIN_TEXTAREA_HEIGHT = 54;
 const MAX_TEXTAREA_HEIGHT = 200;
-const FALLBACK_GENERATION_DEFAULTS: GenerationSettings = {
-  temperature: 0.7,
-  top_p: 0.9,
-  top_k: 40,
-  repeat_penalty: 1.1,
-  num_ctx: 8192,
-  seed: -1,
-};
 
 export function MessageComposer({
   value,
@@ -115,10 +97,12 @@ export function MessageComposer({
   onAddAttachments,
   onRemoveAttachment,
   generationOptions = null,
-  generationDefaults = FALLBACK_GENERATION_DEFAULTS,
+  generationDefaults = GENERATION_DEFAULTS,
   onGenerationOptionsChange,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modelDetails = useModelStore((state) => state.models?.models);
+  const runtimeStatus = useLlamaRuntimeStatus(selectedModel);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const submissionPendingRef = useRef(false);
   const stopPendingRef = useRef(false);
@@ -329,12 +313,20 @@ export function MessageComposer({
               <div className="composer-model-control">
                 <LocalModelMenu
                   models={localModels}
+                  details={modelDetails}
                   selectedModel={selectedModel}
                   onSelect={onSelectModel}
                   onRescan={onRescanModels}
                   disabled={controlsLocked || modelBusy}
+                  runtimeStatus={runtimeStatus}
                 />
-                {selectedModel && isGGUFModel(selectedModel) && <LlamaRuntimeBadge selectedModel={selectedModel} />}
+                {/* Quiet states live in the picker's dot and tooltip; only a
+                    runtime that is busy or broken earns words in the toolbar. */}
+                {(runtimeStatus?.tone === "starting" || runtimeStatus?.tone === "failed") && (
+                  <span className={`runtime-badge runtime-badge-${runtimeStatus.tone}`} title={runtimeStatus.detail ?? undefined}>
+                    {runtimeStatus.label}
+                  </span>
+                )}
               </div>
               {onGenerationOptionsChange && (
                 <GenerationParamsPopover

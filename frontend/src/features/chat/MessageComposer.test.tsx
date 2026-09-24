@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment } from "../../../../contracts/cortex-api";
+import { useModelStore } from "../../stores/useModelStore";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 
 function deferred<T>() {
@@ -249,5 +250,50 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Open code workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Code workspace" })).not.toBeInTheDocument();
+  });
+  describe("local runtime status", () => {
+    afterEach(() => useModelStore.setState({ llamacppStatus: null }));
+
+    function renderWithRuntime(state: "idle" | "starting" | "ready" | "failed", extra: { last_error?: string | null } = {}) {
+      useModelStore.setState({
+        llamacppStatus: {
+          state,
+          binary_present: true,
+          loaded_model: state === "ready" ? "gguf:demo.gguf" : null,
+          active_backend: state === "ready" ? "vulkan" : null,
+          last_error: extra.last_error ?? null,
+          models_directory: "",
+        },
+      });
+      return render(
+        <MessageComposer
+          value=""
+          phase="ready"
+          selectedModel="gguf:demo.gguf"
+          localModels={["gguf:demo.gguf"]}
+          onValueChange={vi.fn()}
+          onSubmit={vi.fn().mockResolvedValue(true)}
+          onStop={vi.fn()}
+          onSelectModel={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+    }
+
+    it("keeps settled runtime states on the picker's dot instead of in toolbar text", () => {
+      const { container } = renderWithRuntime("ready");
+
+      expect(screen.queryByText(/^Loaded/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Selected local model: demo.gguf" })).toHaveAttribute("title", "Loaded · GPU");
+      expect(container.querySelector(".model-picker-status-ready")).toBeInTheDocument();
+    });
+
+    it("spells out a runtime that is starting or has failed", () => {
+      const { unmount } = renderWithRuntime("starting");
+      expect(screen.getByText("Starting…")).toBeVisible();
+      unmount();
+
+      renderWithRuntime("failed", { last_error: "Vulkan device lost." });
+      expect(screen.getByText("Failed to start")).toHaveAttribute("title", "Vulkan device lost.");
+    });
   });
 });

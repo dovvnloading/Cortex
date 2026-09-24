@@ -75,7 +75,7 @@ test("keeps the workspace and composer picker usable when the inventory is talle
   await expect(page.getByRole("listbox", { name: "Discovered local models" })).toBeVisible();
 
   const layout = await page.evaluate(() => {
-    const listNode = document.querySelector<HTMLElement>(".local-model-menu-list");
+    const listNode = document.querySelector<HTMLElement>(".model-picker-list");
     return {
       listScrolls: Boolean(listNode && listNode.scrollHeight > listNode.clientHeight),
       listBottom: listNode?.getBoundingClientRect().bottom ?? 0,

@@ -1,6 +1,18 @@
-import { Check, ChevronDown, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { displayModelName } from "../../lib/localModels";
+import type { InstalledModel } from "../../../../contracts/cortex-api";
+import { displayModelName, modelFacts, modelSource, type ModelSource } from "../../lib/localModels";
+import { Popover, PopoverContent } from "../../shared/ui/Popover";
+
+export type ModelRuntimeTone = "ready" | "idle" | "starting" | "failed";
+
+/** Live runtime state of the selected model, for runtimes that load on demand. */
+export type ModelRuntimeStatus = {
+  tone: ModelRuntimeTone;
+  label: string;
+  /** Longer explanation, e.g. why the runtime last restarted. */
+  detail?: string | null;
+};
 
 export type LocalModelMenuProps = {
   /**
@@ -8,14 +20,25 @@ export type LocalModelMenuProps = {
    * never adds fallback or suggested model names of its own.
    */
   models: readonly string[];
+  /** Optional metadata (size, quantization, vision) for the same inventory. */
+  details?: readonly InstalledModel[];
   /** The model currently configured for this conversation. */
   selectedModel: string | null;
   /** Return `false` to leave the menu open when the selection could not be saved. */
   onSelect: (model: string) => void | boolean | Promise<void | boolean>;
-  /** Enables a compact inventory refresh action when supplied. */
+  /** Enables the inventory refresh action when supplied. */
   onRescan?: () => void | Promise<void>;
   /** Disables choosing a model and refreshing the inventory. */
   disabled?: boolean;
+  runtimeStatus?: ModelRuntimeStatus | null;
+};
+
+/** Below this many models a search box is more chrome than help. */
+const SEARCH_THRESHOLD = 7;
+
+const SOURCE_LABELS: Record<ModelSource, string> = {
+  ollama: "Ollama",
+  gguf: "GGUF files",
 };
 
 function normalizeModels(models: readonly string[]): string[] {
@@ -29,81 +52,107 @@ function normalizeModels(models: readonly string[]): string[] {
   return [...uniqueModels];
 }
 
+function matchesQuery(model: string, detail: InstalledModel | undefined, terms: readonly string[]): boolean {
+  if (!terms.length) return true;
+  const haystack = [displayModelName(model), detail?.family, detail?.parameter_size, detail?.quantization_level]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
 export function LocalModelMenu({
   models,
+  details,
   selectedModel,
   onSelect,
   onRescan,
   disabled = false,
+  runtimeStatus = null,
 }: LocalModelMenuProps) {
   const localModels = useMemo(() => normalizeModels(models), [models]);
+  const detailByName = useMemo(() => new Map((details ?? []).map((detail) => [detail.name, detail])), [details]);
   const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [selectionPending, setSelectionPending] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [rescanPending, setRescanPending] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const searchRef = useRef<HTMLInputElement>(null);
+  // Only keyboard and search moves scroll the highlight into view. A pointer
+  // hovering a half-visible row must not scroll the list out from under it.
+  const revealActiveRef = useRef(false);
+  const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
-  const selectedIndex = localModels.indexOf(selectedModel?.trim() ?? "");
-  const selected = selectedIndex >= 0 ? localModels[selectedIndex] : null;
-  const initialIndex = selectedIndex >= 0 ? selectedIndex : 0;
-  const interactionDisabled = disabled || selectionPending || rescanPending;
-  const safeActiveIndex = localModels.length ? Math.min(activeIndex, localModels.length - 1) : 0;
-  const canOpen = localModels.length > 1 && !interactionDisabled;
-  const menuOpen = open && canOpen;
+  const selected = localModels.find((model) => model === selectedModel?.trim()) ?? null;
+  const busy = pendingModel !== null || rescanPending;
+  const showSearch = localModels.length >= SEARCH_THRESHOLD;
+
+  const groups = useMemo(() => {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const bySource: Record<ModelSource, string[]> = { ollama: [], gguf: [] };
+    for (const model of localModels) {
+      const detail = detailByName.get(model);
+      if (matchesQuery(model, detail, terms)) bySource[modelSource(model, detail)].push(model);
+    }
+    return (Object.keys(bySource) as ModelSource[])
+      .map((source) => ({ source, models: bySource[source] }))
+      .filter((group) => group.models.length > 0);
+  }, [detailByName, localModels, query]);
+  // Group headings only earn their space when the machine really has both kinds.
+  const mixedSources = useMemo(
+    () => new Set(localModels.map((model) => modelSource(model, detailByName.get(model)))).size > 1,
+    [detailByName, localModels],
+  );
+  const visible = useMemo(() => groups.flatMap((group) => group.models), [groups]);
+  const activeIndex = activeModel ? visible.indexOf(activeModel) : -1;
+  const optionId = (index: number) => `${listId}-option-${index}`;
+  const activeId = activeIndex >= 0 ? optionId(activeIndex) : undefined;
 
   useEffect(() => {
-    if (!menuOpen) return undefined;
+    if (!open || !activeId || !revealActiveRef.current) return;
+    document.getElementById(activeId)?.scrollIntoView?.({ block: "nearest" });
+  }, [activeId, open]);
 
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [menuOpen]);
-
-  const closeMenu = (restoreFocus = false) => {
-    setOpen(false);
-    if (restoreFocus) {
-      window.requestAnimationFrame(() => triggerRef.current?.focus());
-    }
+  const highlight = (model: string | null) => {
+    revealActiveRef.current = true;
+    setActiveModel(model);
   };
 
-  const focusOption = (index: number) => {
-    if (!canOpen) return;
-    const nextIndex = Math.max(0, Math.min(index, localModels.length - 1));
-    setActiveIndex(nextIndex);
+  const openMenu = (start: "selected" | "last" = "selected") => {
+    setQuery("");
+    const fallback = start === "last" ? localModels[localModels.length - 1] : localModels[0];
+    highlight(start === "selected" ? selected ?? fallback ?? null : fallback ?? null);
     setOpen(true);
-    window.requestAnimationFrame(() => optionRefs.current[nextIndex]?.focus());
   };
 
-  const nextIndex = (index: number, direction: 1 | -1) => {
-    return (index + direction + localModels.length) % localModels.length;
+  const handleOpenChange = (next: boolean) => {
+    if (next) openMenu();
+    else setOpen(false);
   };
 
-  const selectModel = async (index: number) => {
-    const model = localModels[index];
-    if (!model || interactionDisabled) return;
+  const choose = async (model: string) => {
+    if (busy || disabled) return;
+    if (model === selected) {
+      setOpen(false);
+      return;
+    }
 
-    setSelectionPending(true);
+    setPendingModel(model);
     try {
       const saved = await onSelect(model);
-      if (saved !== false) closeMenu(true);
+      if (saved !== false) setOpen(false);
     } catch {
       // The parent owns the error presentation. Keep the menu available so
       // the user can retry or choose a different discovered model.
     } finally {
-      setSelectionPending(false);
+      setPendingModel(null);
     }
   };
 
   const rescan = async () => {
-    if (!onRescan || interactionDisabled) return;
+    if (!onRescan || busy || disabled) return;
 
     setRescanPending(true);
-    setOpen(false);
     try {
       await onRescan();
     } catch {
@@ -113,150 +162,205 @@ export function LocalModelMenu({
     }
   };
 
-  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (!canOpen) return;
+  const moveActive = (delta: number) => {
+    if (!visible.length) return;
+    const from = activeIndex >= 0 ? activeIndex : delta > 0 ? -1 : visible.length;
+    const next = (from + delta + visible.length) % visible.length;
+    highlight(visible[next] ?? null);
+  };
 
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      focusOption(menuOpen ? nextIndex(safeActiveIndex, 1) : initialIndex);
-      return;
-    }
-
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      focusOption(menuOpen ? nextIndex(safeActiveIndex, -1) : selectedIndex >= 0 ? nextIndex(selectedIndex, -1) : localModels.length - 1);
-      return;
-    }
-
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      if (menuOpen) closeMenu();
-      else focusOption(initialIndex);
+  const handleListKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    const inSearch = event.currentTarget === searchRef.current;
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        moveActive(1);
+        return;
+      case "ArrowUp":
+        event.preventDefault();
+        moveActive(-1);
+        return;
+      case "PageDown":
+        event.preventDefault();
+        highlight(visible[Math.min(visible.length - 1, Math.max(activeIndex, 0) + 5)] ?? null);
+        return;
+      case "PageUp":
+        event.preventDefault();
+        highlight(visible[Math.max(0, activeIndex - 5)] ?? null);
+        return;
+      case "Home":
+      case "End":
+        // In the search field these keys belong to the caret.
+        if (inSearch) return;
+        event.preventDefault();
+        highlight(visible[event.key === "Home" ? 0 : visible.length - 1] ?? null);
+        return;
+      case "Enter":
+      case " ":
+        if (event.key === " " && inSearch) return;
+        event.preventDefault();
+        if (activeModel && visible.includes(activeModel)) void choose(activeModel);
+        return;
+      default:
     }
   };
 
-  const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeMenu(true);
-      return;
-    }
-
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-      event.preventDefault();
-      focusOption(nextIndex(index, 1));
-      return;
-    }
-
-    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-      event.preventDefault();
-      focusOption(nextIndex(index, -1));
-      return;
-    }
-
-    if (event.key === "Home") {
-      event.preventDefault();
-      focusOption(0);
-      return;
-    }
-
-    if (event.key === "End") {
-      event.preventDefault();
-      focusOption(localModels.length - 1);
-      return;
-    }
-
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      void selectModel(index);
-    }
+  const updateQuery = (next: string) => {
+    setQuery(next);
+    const terms = next.toLowerCase().split(/\s+/).filter(Boolean);
+    const firstMatch = localModels.find((model) => matchesQuery(model, detailByName.get(model), terms)) ?? null;
+    // Keep the highlight on the selected model while it still matches, so
+    // Enter after a partial search doesn't silently switch models.
+    highlight(selected && matchesQuery(selected, detailByName.get(selected), terms) ? selected : firstMatch);
   };
 
-  const renderRescan = () => onRescan ? (
-    <button
-      className="local-model-menu-rescan"
-      type="button"
-      aria-label="Rescan local models"
-      title="Rescan local models"
-      disabled={interactionDisabled}
-      onClick={() => void rescan()}
-    >
-      <RefreshCw aria-hidden="true" size={15} className={rescanPending ? "local-model-menu-rescan-icon-pending" : undefined} />
-    </button>
-  ) : null;
-
-  if (localModels.length === 1) {
-    const singleModel = localModels[0];
-    const singleModelSelected = selected === singleModel;
-    return (
-      <div className="local-model-menu local-model-menu-single" aria-label={`Local model: ${displayModelName(localModels[0])}`}>
-        <button
-          className="local-model-menu-trigger local-model-menu-single-trigger"
-          type="button"
-          aria-label={singleModelSelected ? `Selected local model: ${displayModelName(singleModel)}` : `Use local model: ${displayModelName(singleModel)}`}
-          title={singleModelSelected ? displayModelName(singleModel) : `Use ${displayModelName(singleModel)} for local chat`}
-          disabled={interactionDisabled}
-          onClick={() => void selectModel(0)}
-        >
-          <span className="local-model-menu-trigger-label">
-            <span className="local-model-menu-name">{displayModelName(singleModel)}</span>
-          </span>
-        </button>
-        {renderRescan()}
-      </div>
-    );
-  }
-
-  const triggerLabel = selected ? `Selected local model: ${displayModelName(selected)}` : localModels.length ? "Select a local model" : "No local models available";
+  const triggerLabel = selected
+    ? `Selected local model: ${displayModelName(selected)}`
+    : localModels.length
+      ? "Select a local model"
+      : "No local models available";
+  const statusTitle = runtimeStatus ? [runtimeStatus.label, runtimeStatus.detail].filter(Boolean).join(" — ") : undefined;
 
   return (
-    <div className={`local-model-menu${menuOpen ? " local-model-menu-open" : ""}`} ref={rootRef} aria-busy={selectionPending || rescanPending || undefined}>
-      <button
-        ref={triggerRef}
-        className="local-model-menu-trigger"
-        type="button"
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      <Popover.Trigger
+        className="model-picker-trigger"
         aria-label={triggerLabel}
-        aria-haspopup="listbox"
-        aria-expanded={menuOpen}
-        aria-controls={listId}
-        disabled={!canOpen}
-        onPointerDown={(event) => {
-          if (event.button !== 0 || !canOpen) return;
+        title={statusTitle ?? (selected ? displayModelName(selected) : undefined)}
+        disabled={disabled}
+        onKeyDown={(event) => {
+          if (open || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
           event.preventDefault();
-          if (menuOpen) closeMenu(true);
-          else focusOption(initialIndex);
+          openMenu(event.key === "ArrowUp" && !selected ? "last" : "selected");
         }}
-        onKeyDown={handleTriggerKeyDown}
       >
-        <span className="local-model-menu-trigger-label">
-          <span className="local-model-menu-name">{selected ? displayModelName(selected) : localModels.length ? "Select model" : "No local models"}</span>
+        {runtimeStatus && <span className={`model-picker-status model-picker-status-${runtimeStatus.tone}`} aria-hidden="true" />}
+        <span className="model-picker-trigger-name">
+          {selected ? displayModelName(selected) : localModels.length ? "Select model" : "No local models"}
         </span>
-        <ChevronDown aria-hidden="true" size={15} />
-      </button>
-      {renderRescan()}
-      {menuOpen && (
-        <div id={listId} className="local-model-menu-list" role="listbox" aria-label="Discovered local models">
-          {localModels.map((model, index) => (
+        <ChevronDown className="model-picker-trigger-icon" aria-hidden="true" size={14} />
+      </Popover.Trigger>
+      <PopoverContent
+        className="model-picker"
+        aria-label="Choose a local model"
+        side="top"
+        align="start"
+        sideOffset={10}
+        initialFocus={showSearch ? searchRef : listRef}
+        aria-busy={busy || undefined}
+      >
+        {showSearch && (
+          <div className="model-picker-search">
+            <Search aria-hidden="true" size={14} />
+            <input
+              ref={searchRef}
+              type="text"
+              role="combobox"
+              aria-label="Search local models"
+              aria-expanded="true"
+              aria-autocomplete="list"
+              aria-controls={visible.length ? listId : undefined}
+              aria-activedescendant={activeId}
+              placeholder="Search models"
+              autoComplete="off"
+              spellCheck={false}
+              value={query}
+              onChange={(event) => updateQuery(event.target.value)}
+              onKeyDown={handleListKeyDown}
+            />
+          </div>
+        )}
+
+        {visible.length > 0 ? (
+          <div
+            ref={listRef}
+            id={listId}
+            className="model-picker-list"
+            role="listbox"
+            aria-label="Discovered local models"
+            aria-activedescendant={showSearch ? undefined : activeId}
+            tabIndex={showSearch ? -1 : 0}
+            onKeyDown={showSearch ? undefined : handleListKeyDown}
+          >
+            {groups.map((group) => (
+              <div key={group.source} className="model-picker-group" role="group" aria-label={mixedSources ? SOURCE_LABELS[group.source] : undefined}>
+                {mixedSources && <div className="model-picker-group-label" aria-hidden="true">{SOURCE_LABELS[group.source]}</div>}
+                {group.models.map((model) => {
+                  const index = visible.indexOf(model);
+                  const detail = detailByName.get(model);
+                  const isSelected = model === selected;
+                  const facts = modelFacts(detail);
+                  const runtimeNote = isSelected && runtimeStatus ? runtimeStatus.label : null;
+                  const meta = [...facts, ...(runtimeNote ? [runtimeNote] : [])].join(" · ");
+                  const metaId = `${optionId(index)}-meta`;
+                  return (
+                    <div
+                      key={model}
+                      id={optionId(index)}
+                      className={`model-picker-option${isSelected ? " model-picker-option-selected" : ""}`}
+                      role="option"
+                      aria-label={displayModelName(model)}
+                      aria-describedby={meta ? metaId : undefined}
+                      aria-selected={isSelected}
+                      aria-disabled={busy || undefined}
+                      data-highlighted={model === activeModel || undefined}
+                      onPointerMove={() => {
+                        if (model === activeModel) return;
+                        revealActiveRef.current = false;
+                        setActiveModel(model);
+                      }}
+                      onClick={() => void choose(model)}
+                    >
+                      <span className="model-picker-option-text">
+                        <span className="model-picker-option-name">{displayModelName(model)}</span>
+                        {meta && <span id={metaId} className="model-picker-option-meta">{meta}</span>}
+                      </span>
+                      {detail?.supports_vision && <span className="model-picker-tag">Vision</span>}
+                      <span className="model-picker-option-indicator" aria-hidden="true">
+                        {pendingModel === model
+                          ? <LoaderCircle size={15} className="composer-control-spinner" />
+                          : isSelected ? <Check size={15} /> : null}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="model-picker-empty" role="status" ref={listRef} tabIndex={-1}>
+            {localModels.length ? (
+              <>
+                <strong>No matches</strong>
+                <span>No local model matches “{query.trim()}”.</span>
+              </>
+            ) : (
+              <>
+                <strong>No local models found</strong>
+                <span>Install one with Ollama or add a .gguf file to your models folder, then rescan.</span>
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="model-picker-footer">
+          <span className="model-picker-count">
+            {localModels.length} local {localModels.length === 1 ? "model" : "models"}
+          </span>
+          {onRescan && (
             <button
-              key={model}
-              ref={(node) => { optionRefs.current[index] = node; }}
-              className={`local-model-menu-option${model === selected ? " local-model-menu-option-selected" : ""}`}
+              className="model-picker-rescan"
               type="button"
-              role="option"
-              aria-label={displayModelName(model)}
-              aria-selected={model === selected}
-              tabIndex={index === safeActiveIndex ? 0 : -1}
-              disabled={interactionDisabled}
-              onFocus={() => setActiveIndex(index)}
-              onKeyDown={(event) => handleOptionKeyDown(event, index)}
-              onClick={() => void selectModel(index)}
+              aria-label="Rescan local models"
+              disabled={busy || disabled}
+              onClick={() => void rescan()}
             >
-              <span>{displayModelName(model)}</span>
-              {model === selected && <Check aria-hidden="true" size={15} />}
+              <RefreshCw aria-hidden="true" size={13} className={rescanPending ? "composer-control-spinner" : undefined} />
+              <span>{rescanPending ? "Scanning…" : "Rescan"}</span>
             </button>
-          ))}
+          )}
         </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover.Root>
   );
 }
