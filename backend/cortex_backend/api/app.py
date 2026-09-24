@@ -230,18 +230,20 @@ def create_app(
     app.state.default_gguf_models_dir = default_gguf_models_dir or (
         Path(tempfile.gettempdir()) / "cortex-gguf-models"
     )
-    # Starlette's TrustedHostMiddleware strips a port with a naive
-    # ``headers.get("host", "").split(":")[0]`` -- for the well-formed wire
-    # form of the IPv6 loopback address ("[::1]" or "[::1]:PORT") that
-    # reduces to the literal string "[", not "::1", so the middleware would
-    # otherwise reject every IPv6-loopback request outright even though
-    # ``SessionManager.validate_request_context`` (security.py) parses the
-    # same header correctly via ``urlsplit`` and accepts "::1" as
-    # configured. Mirror Starlette's own parsing here so the two guards
-    # agree instead of disagreeing about what counts as valid loopback.
+    # TrustedHostMiddleware and ``SessionManager.validate_request_context``
+    # (security.py) must agree on what counts as valid loopback, but they
+    # reduce the IPv6 loopback Host header ("[::1]" or "[::1]:PORT")
+    # differently, and Starlette changed its answer between releases:
+    #   - before 1.7, a naive ``split(":")[0]`` yields the literal "[";
+    #   - from 1.7, ``parse_host_header`` keeps the brackets: "[::1]".
+    # The requirements range admits both, so allow both spellings. Neither
+    # widens the boundary: the session guard still parses the header itself
+    # and rejects anything that is not exactly an allowed host.
     middleware_allowed_hosts = list(allowed)
-    if "::1" in allowed and "[" not in middleware_allowed_hosts:
-        middleware_allowed_hosts.append("[")
+    if "::1" in allowed:
+        for spelling in ("[", "[::1]"):
+            if spelling not in middleware_allowed_hosts:
+                middleware_allowed_hosts.append(spelling)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=middleware_allowed_hosts,
