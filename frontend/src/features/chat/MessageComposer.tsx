@@ -239,6 +239,11 @@ export function MessageComposer({
           : focused
             ? "Enter to send · Shift+Enter for a new line"
             : "";
+  // The keyboard hint follows focus, so it appears the moment any toolbar
+  // control is pressed. Marked separately so narrow layouts can drop it: there
+  // it would claim a row mid-click and shift the control out from under the
+  // pointer before the click lands.
+  const statusIsKeyboardHint = phase === "ready" && focused;
 
   return (
     <div className="composer-area">
@@ -342,7 +347,7 @@ export function MessageComposer({
             </div>
 
             <div className="composer-toolbar-trailing">
-              <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true" title={status || undefined}>
+              <span id={statusId} className={`composer-status${status ? " composer-status-visible" : ""}${statusIsKeyboardHint ? " composer-status-hint" : ""}`} role="status" aria-live="polite" aria-atomic="true" title={status || undefined}>
                 {status}
               </span>
               {showCounter && <span id={counterId} className="composer-counter">{remaining.toLocaleString()} left</span>}

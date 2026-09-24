@@ -965,6 +965,7 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
   .composer-toolbar-leading { flex: 1 1 auto; gap: 5px; }
   .composer-toolbar-trailing { flex: 1 1 auto; min-width: 0; gap: 6px; }
   .composer-status { flex: 1 1 100%; max-width: 100%; order: -1; text-align: left; }
+  .composer-status.composer-status-hint { display: none; }
   .composer-attach-control { width: 30px; justify-content: center; padding: 0; }
   .composer-attach-control::after { display: none; }
   .composer-model-control { max-width: min(100%, 230px); }

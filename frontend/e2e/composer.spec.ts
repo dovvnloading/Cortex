@@ -248,6 +248,23 @@ test("keeps a next draft available while a response is stopped", async ({ page }
 test.describe("compact window", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
+  test("opens a toolbar popover with one click even though focus reveals the keyboard hint", async ({ page }) => {
+    // Pressing a toolbar control focuses the composer, which is what shows
+    // the "Enter to send" hint. At this width the hint used to take a row of
+    // its own on mousedown and lift the toolbar before mouseup, so the click
+    // landed on empty space and nothing opened.
+    await stubWorkspace(page, { models: ["local-chat:7b"] });
+    await page.goto("/?bootstrap=launcher-token");
+
+    const trigger = page.getByRole("button", { name: "Generation parameters for this chat" });
+    const before = await trigger.boundingBox();
+    await trigger.click();
+
+    await expect(page.getByRole("dialog", { name: "Generation parameters" })).toBeVisible();
+    const after = await trigger.boundingBox();
+    expect(after?.y).toBe(before?.y);
+  });
+
   test("keeps the composer usable without horizontal overflow", async ({ page }) => {
     await stubWorkspace(page, { models: ["local-chat:7b"] });
     await page.goto("/?bootstrap=launcher-token");

@@ -228,6 +228,21 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   });
 
+  it("marks only the focus-driven keyboard hint as droppable", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ComposerHarness />);
+
+    await user.click(screen.getByRole("textbox", { name: "Message Cortex" }));
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Enter to send · Shift+Enter for a new line");
+    expect(status).toHaveClass("composer-status-hint");
+
+    // Phase messages don't follow focus, so they never move the toolbar
+    // mid-click and must stay visible at every width.
+    rerender(<ComposerHarness phase="unavailable" />);
+    expect(screen.getByRole("status")).not.toHaveClass("composer-status-hint");
+  });
+
   it("keeps coding requests in the normal chat flow instead of exposing an editor", () => {
     render(<ComposerHarness />);
 
