@@ -7,8 +7,8 @@ running real work.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
 import time
 
 from fastapi.testclient import TestClient
@@ -419,39 +419,73 @@ def test_event_stream_survives_an_idle_approval_wait_and_stays_off_the_event_loo
 
     The same loop reads SQLite on every tick. Those reads have to happen off
     the event loop, or the stream stalls every other request while it polls.
+
+    Stream time belongs to the test, not the wall clock: each repository poll
+    advances it by a fixed step. The test used to race a 0.15 s real-time
+    cap, and on a loaded CI runner the first idle poll alone could outlast
+    it, so the stream closed before it sent a single keep-alive.
     """
 
     # The route body lives here, so this is where its module-level names are
     # looked up -- patching cortex_backend.api.routes would have no effect.
     from cortex_backend.api.routers import execution as execution_routes
 
-    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_HEARTBEAT_SECONDS", 0.0)
-    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
+    now = [0.0]
+    monkeypatch.setattr(execution_routes, "_stream_clock", lambda: now[0])
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_HEARTBEAT_SECONDS", 2.0)
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 7.5)
 
-    reader_threads: set[int] = set()
+    reads_on_event_loop: list[bool] = []
     real_poll = execution_routes._poll_execution_stream
+    # The first poll stands in for a minute of activity before the job parks,
+    # so the idle window must be measured from the last event rather than
+    # from when the stream opened. Every later poll is one second.
+    steps = iter([60.0])
 
-    def recording_poll(*args, **kwargs):
-        reader_threads.add(threading.get_ident())
+    def timed_poll(*args, **kwargs):
+        # A running loop on the reading thread means the read stalls every
+        # other request. Comparing thread ids against the test's own thread
+        # proved nothing: TestClient serves the app from a thread of its own,
+        # so that check passed even with every read inline on the loop.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            reads_on_event_loop.append(False)
+        else:
+            reads_on_event_loop.append(True)
+        if len(reads_on_event_loop) > 50:
+            raise AssertionError("the stream never closed on its idle cap")
+        now[0] += next(steps, 1.0)
         return real_poll(*args, **kwargs)
 
-    monkeypatch.setattr(execution_routes, "_poll_execution_stream", recording_poll)
+    monkeypatch.setattr(execution_routes, "_poll_execution_stream", timed_poll)
 
     app = _app(tmp_path)
     with TestClient(app) as client:
         headers = _session(client, app)
-        _pending_approval(app, owner=_owner(app, headers), job_id="idle-approval", ttl_seconds=120.0)
+        owner = _owner(app, headers)
+        repository = _pending_approval(
+            app, owner=owner, job_id="idle-approval", ttl_seconds=120.0
+        )
 
         response = client.get("/api/v1/execution/idle-approval/events", headers=headers)
 
     assert response.status_code == 200
-    # The job never reached a terminal state, so the stream closed on the idle
-    # cap rather than on completion -- and it announced itself while waiting.
-    assert ": keep-alive" in response.text
+    # The first poll (t=60) delivers the queued and approval events. Idle from
+    # then on, a keep-alive falls due every 2 s -- at t=62, 64 and 66 -- and
+    # the poll at t=68 finds 8 s of silence, past the 7.5 s cap, and closes.
+    assert "execution.queued" in response.text
+    assert response.text.count(": keep-alive") == 3
+    assert response.text.endswith(": keep-alive\n\n" * 3)
     assert "execution.completed" not in response.text
+    # Still parked on its approval, so the stream closed on the idle cap
+    # rather than on completion.
+    job = repository.get_job("idle-approval", owner=owner)
+    assert job is not None
+    assert (job.status, job.approval_state) == ("queued", "pending")
 
-    assert reader_threads, "the stream never polled the repository"
-    assert threading.get_ident() not in reader_threads, (
-        "repository reads ran on the caller's thread instead of a worker thread"
+    assert reads_on_event_loop, "the stream never polled the repository"
+    assert not any(reads_on_event_loop), (
+        "repository reads ran on the event loop instead of a worker thread"
     )
