@@ -1,3 +1,24 @@
+### **README Accuracy**
+
+**Date:** 2026-09-25
+**Version:** Documentation pass
+
+* The README's pictures of the code feature now show code Cortex can actually
+  run. They showed a program that imported a module and read a file off the
+  disk, both of which Cortex refuses. The demo is now a loan calculation, and
+  a test holds every staged demo task to the real validator and its real
+  output.
+* All eight README screenshots are retaken from the current build, including
+  the redesigned model picker and generation settings.
+* The README states plainly what the code feature can reach today: a scratch
+  folder that is emptied for each run, no other programs, and a few public web
+  requests. It no longer describes an image-transform feature that has no
+  way to be started from the app, or a setup screen the app does not show.
+* Security reports now have somewhere to go: GitHub's private vulnerability
+  reporting, which `SECURITY.md` pointed to, is switched on.
+
+---
+
 ### **Corrupt Model Files**
 
 **Date:** 2026-09-25
