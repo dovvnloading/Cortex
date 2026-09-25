@@ -1156,3 +1156,39 @@ def test_concurrent_settings_updates_have_one_winner_and_no_lost_overwrite():
         saved = client.get("/api/v1/settings", headers=headers).json()["settings"]
         assert saved["revision"] == baseline["revision"] + 1
         assert saved["appearance"]["theme"] in {"light", "system"}
+
+
+def test_every_generation_event_the_api_can_emit_is_a_schema_event_name():
+    """Three hand-kept lists meet here: the service's progress phases, the
+    API's phase-to-event mapping, and the event schema's allowed names.
+
+    A phase whose mapped name the schema did not allow ("translation_failed"
+    once) made building its event raise inside the SSE generator, killing the
+    live stream. Nothing linked the lists, so check every path out of the
+    mapping, including phases added later.
+    """
+    from typing import get_args
+
+    from cortex_backend.api.routes import (
+        _GENERATION_PHASE_EVENTS,
+        _generation_event_name,
+    )
+    from cortex_backend.api.schemas import GenerationEventName
+    from cortex_backend.services.progress import ProgressPhase
+
+    allowed = set(get_args(GenerationEventName))
+
+    unknown = set(_GENERATION_PHASE_EVENTS.values()) - allowed
+    assert not unknown, f"mapped to names the schema rejects: {sorted(unknown)}"
+
+    phases = {*get_args(ProgressPhase), *_GENERATION_PHASE_EVENTS, None}
+    emitted = {_generation_event_name("progress", "running", phase) for phase in phases}
+    emitted |= {
+        _generation_event_name("state", status, None)
+        for status in ("queued", "running", "cancelling", "cancelled")
+    }
+    emitted |= {
+        _generation_event_name("completed", "succeeded", None),
+        _generation_event_name("error", "failed", None),
+    }
+    assert emitted <= allowed, f"emits names the schema rejects: {sorted(emitted - allowed)}"

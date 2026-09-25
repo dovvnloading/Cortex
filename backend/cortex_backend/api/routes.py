@@ -832,6 +832,19 @@ def _event_cursor(request: Request, value: str | None = None) -> int:
     return cursor
 
 
+# Progress phases with an event of their own; any other phase is a plain
+# generation.status. Every value must be a GenerationEventName, or building
+# the event raises inside the live stream (tests/test_api_contract.py checks).
+_GENERATION_PHASE_EVENTS = {
+    "thinking_delta": "generation.thinking_delta",
+    "content_delta": "generation.content_delta",
+    "translation": "generation.translation_started",
+    "translation_failed": "generation.translation_failed",
+    "persisting": "generation.persisting",
+    "loading_model": "generation.loading_model",
+}
+
+
 def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str:
     if kind == "completed":
         return "generation.completed"
@@ -845,14 +858,7 @@ def _generation_event_name(kind: str, job_status: str, phase: str | None) -> str
         return "generation.queued"
     if kind == "state":
         return "generation.started"
-    return {
-        "thinking_delta": "generation.thinking_delta",
-        "content_delta": "generation.content_delta",
-        "translation": "generation.translation_started",
-        "translation_failed": "generation.translation_failed",
-        "persisting": "generation.persisting",
-        "loading_model": "generation.loading_model",
-    }.get(phase or "", "generation.status")
+    return _GENERATION_PHASE_EVENTS.get(phase or "", "generation.status")
 
 
 def _llamacpp_status(request: Request) -> LlamaCppRuntimeStatus:
