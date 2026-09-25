@@ -300,6 +300,7 @@ export interface GenerationStats {
   eval_duration_ms?: number | null;
   total_duration_ms?: number | null;
   tokens_per_second?: number | null;
+  stopped?: boolean | null;
 }
 
 export interface GrayscaleStep {

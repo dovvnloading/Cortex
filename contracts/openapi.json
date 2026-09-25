@@ -1804,6 +1804,17 @@
             ],
             "title": "Prompt Eval Duration Ms"
           },
+          "stopped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped"
+          },
           "tokens_per_second": {
             "anyOf": [
               {

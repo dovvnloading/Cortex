@@ -156,6 +156,9 @@ class GenerationStats(APIModel):
     eval_duration_ms: float | None = None
     total_duration_ms: float | None = None
     tokens_per_second: float | None = None
+    # True when the user pressed Stop and this is the part of the answer they
+    # had already seen. The model reported no usage for an unfinished turn.
+    stopped: bool | None = None
 
 
 class ChatMessage(APIModel):

@@ -20,6 +20,12 @@ describe("MessageStats", () => {
     expect(screen.getByText(/0\.6s/)).toBeInTheDocument();
   });
 
+  it("labels an answer the user stopped instead of showing usage it never had", () => {
+    render(<MessageStats stats={{ stopped: true }} />);
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText(/tok\/s/)).toBeNull();
+  });
+
   it("omits duration when total_duration_ms is absent", () => {
     render(<MessageStats stats={{ eval_count: 48, tokens_per_second: 100 }} />);
     expect(screen.getByTitle("Generation performance for this response").textContent).not.toMatch(/·\s*\d+(\.\d+)?s\b/);

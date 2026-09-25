@@ -423,18 +423,63 @@ async def _start_generation_job(
                 prepared_revision = int(overview["revision"])
             return {"user_message_id": user_message_id}
 
+        def keep_stopped_answer(shown: _ShownAnswer) -> dict[str, Any]:
+            """Save what the user already watched appear when they press Stop.
+
+            Stop used to discard the turn outright. With live streaming that
+            meant text visibly on screen vanished the moment the chat reloaded.
+            A new turn keeps exactly what was shown, marked as stopped. A
+            regeneration keeps the answer it was replacing instead, as it does
+            for any unfinished attempt; and when nothing was shown yet there is
+            nothing to keep.
+
+            This runs after cancellation, deliberately outside begin_commit:
+            the job still ends as cancelled. The registry finalizes that only
+            once this worker returns and admits no other generation until then,
+            so the save cannot race a newer turn.
+            """
+            content = shown.content
+            replacing = target_message_id is not None and not target_is_dangling_user_turn
+            if replacing or not content.strip():
+                return {"cancelled": True}
+            try:
+                assistant_message_id = deps.chats.add_message(
+                    thread_id,
+                    "assistant",
+                    content,
+                    thoughts=shown.thinking or None,
+                    stats={"stopped": True},
+                    expected_revision=prepared_revision,
+                )
+            except Exception as exc:
+                # Keeping a partial answer is a courtesy; a chat that moved on
+                # underneath it must not turn Stop into a failure.
+                logging.warning(
+                    "Cortex could not keep a stopped answer (%s).", type(exc).__name__
+                )
+                return {"cancelled": True}
+            return {"cancelled": True, "assistant_message_id": assistant_message_id}
+
         def runner(sink, cancel_event):
-            result = deps.generation.generate(
-                generation_snapshot,
-                progress_sink=sink,
-                cancellation_event=cancel_event,
-                history_messages=prepared_history,
-            )
+            shown = _ShownAnswer(sink)
+            try:
+                result = deps.generation.generate(
+                    generation_snapshot,
+                    progress_sink=shown,
+                    cancellation_event=cancel_event,
+                    history_messages=prepared_history,
+                )
+            except Exception:
+                # A stopped engine raises; which error depends on where Stop
+                # landed. When the user asked for it, keep what they saw.
+                if cancel_event.is_set():
+                    return keep_stopped_answer(shown)
+                raise
             # The generation service checks cancellation around its model work,
             # while the API owns streaming and persistence. Keep everything
             # cancellable until begin_commit atomically seals the durable result.
             if cancel_event.is_set():
-                return {"cancelled": True}
+                return keep_stopped_answer(shown)
             # A streaming engine already published this answer token by token
             # while it was being produced. Replaying the finished text on top
             # of that would show the user every word twice. The replay stays
@@ -445,23 +490,23 @@ async def _start_generation_job(
                 if result.thoughts:
                     for delta in _chunks(result.thoughts):
                         if cancel_event.is_set():
-                            return {"cancelled": True}
-                        sink.publish_progress(
+                            return keep_stopped_answer(shown)
+                        shown.publish_progress(
                             "thinking_delta",
                             "Reasoning available.",
                             data={"delta": delta},
                         )
                 for delta in _chunks(result.response):
                     if cancel_event.is_set():
-                        return {"cancelled": True}
-                    sink.publish_progress(
+                        return keep_stopped_answer(shown)
+                    shown.publish_progress(
                         "content_delta",
                         "Response content available.",
                         data={"delta": delta},
                     )
 
             if not sink.begin_commit("persisting", "Saving the response."):
-                return {"cancelled": True}
+                return keep_stopped_answer(shown)
             stats_payload = asdict(result.stats) if result.stats else None
             if target_message_id is None or target_is_dangling_user_turn:
                 assistant_message_id = deps.chats.add_message(
@@ -815,6 +860,54 @@ def _rejection_payload(result: Any) -> dict[str, Any] | None:
 def _chunks(value: str, size: int = 80):
     for start in range(0, len(value), size):
         yield value[start : start + size]
+
+
+class _ShownAnswer:
+    """Record the answer text the client has been sent, as it is sent.
+
+    Every piece of a live answer -- streamed by the engine, or replayed for an
+    engine that cannot stream -- reaches the client as a content or thinking
+    delta through this job's progress sink. Recording it at that one point
+    gives an exact copy of what the user has watched appear, which is what
+    Stop has to keep: the finished result may never exist.
+    """
+
+    def __init__(self, sink: Any) -> None:
+        self._sink = sink
+        self._content: list[str] = []
+        self._thinking: list[str] = []
+
+    @property
+    def content(self) -> str:
+        return "".join(self._content)
+
+    @property
+    def thinking(self) -> str:
+        return "".join(self._thinking)
+
+    def publish(self, event: Any) -> None:
+        # Output published after Stop is dropped by the job, so record only
+        # what was actually delivered: that is what the user saw.
+        if self._sink.deliver(event):
+            self._record(event.phase, event.data)
+
+    def publish_progress(
+        self, phase: str, message: str, *, data: Mapping[str, Any] | None = None
+    ) -> None:
+        if self._sink.deliver_progress(phase, message, data=data):
+            self._record(phase, data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sink, name)
+
+    def _record(self, phase: str, data: Mapping[str, Any] | None) -> None:
+        delta = (data or {}).get("delta")
+        if not isinstance(delta, str):
+            return
+        if phase == "content_delta":
+            self._content.append(delta)
+        elif phase == "thinking_delta":
+            self._thinking.append(delta)
 
 
 def _event_cursor(request: Request, value: str | None = None) -> int:

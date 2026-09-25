@@ -339,7 +339,8 @@ def test_generation_stats_flow_from_engine_through_sse_and_persistence():
         assert chat.status_code == 200
         assistant_message = chat.json()["messages"][-1]
         assert assistant_message["role"] == "assistant"
-        assert assistant_message["stats"] == expected_stats
+        # A finished answer is not a stopped one; the API model says so.
+        assert assistant_message["stats"] == {**expected_stats, "stopped": None}
 
 
 def test_generation_request_options_override_reaches_the_snapshot():
