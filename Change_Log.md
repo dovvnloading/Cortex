@@ -1,3 +1,19 @@
+### **Corrupt Model Files**
+
+**Date:** 2026-09-25
+**Version:** Bug-fix pass
+
+* One damaged `.gguf` file no longer hides all your other GGUF models. The
+  fast model-file reader added on 2026-09-22 could crash on a file claiming
+  an impossibly long entry. That error escaped the folder scan, and the model
+  list quietly dropped every GGUF model, so your selected model showed as
+  unavailable. A damaged file is now listed without its details, and every
+  other model is listed normally.
+* If the GGUF scan fails anyway, Cortex now logs that it did, instead of
+  showing an empty list without explanation.
+
+---
+
 ### **Translation Failures**
 
 **Date:** 2026-09-25

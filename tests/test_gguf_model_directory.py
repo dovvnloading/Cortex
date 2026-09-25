@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import time
 from pathlib import Path
 
@@ -301,3 +302,69 @@ def test_an_unreadable_subfolder_costs_only_that_subfolder(tmp_path: Path) -> No
 
     names = {model.name for model in directory.list_installed_details()}
     assert names == {"gguf:good.gguf"}
+
+
+def _corrupt_gguf(path: Path, string_length: int) -> None:
+    """A GGUF header whose one metadata string claims ``string_length`` bytes."""
+    key = b"general.junk"
+    path.write_bytes(
+        b"GGUF"
+        + struct.pack("<IQQ", 3, 0, 1)
+        + struct.pack("<Q", len(key))
+        + key
+        + struct.pack("<I", 8)
+        + struct.pack("<Q", string_length)
+    )
+
+
+@pytest.mark.parametrize("string_length", [2**63, 2**64 - 1])
+def test_one_corrupt_file_does_not_hide_the_other_models(tmp_path: Path, string_length: int) -> None:
+    """A length of 2**63 or more made the metadata reader raise, the error
+    escaped the scan, and the catalog swallowed it -- so one corrupt file
+    anywhere in the tree emptied the whole GGUF list without a word.
+    """
+    _write_gguf(tmp_path / "good.gguf", context_length=8192)
+    (tmp_path / "Broken-Repo").mkdir()
+    _corrupt_gguf(tmp_path / "Broken-Repo" / "broken.gguf", string_length)
+
+    models = {model.name: model for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert models["gguf:good.gguf"].context_length == 8192
+    # It has the GGUF magic, so it is still listed -- just without details.
+    assert models["gguf:Broken-Repo/broken.gguf"].family is None
+
+
+def test_a_reader_that_raises_costs_one_file_its_details(tmp_path: Path, monkeypatch) -> None:
+    from cortex_backend.llamacpp import model_directory
+
+    _write_gguf(tmp_path / "good.gguf", context_length=8192)
+    _write_gguf(tmp_path / "unlucky.gguf")
+    real_reader = model_directory.read_gguf_metadata
+
+    def flaky_reader(path: Path):
+        if path.name == "unlucky.gguf":
+            raise RuntimeError("an error the reader failed to contain")
+        return real_reader(path)
+
+    monkeypatch.setattr(model_directory, "read_gguf_metadata", flaky_reader)
+    models = {model.name: model for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert models["gguf:good.gguf"].context_length == 8192
+    assert models["gguf:unlucky.gguf"].context_length is None
+
+
+def test_a_failed_gguf_scan_is_logged_and_ollama_still_lists(caplog) -> None:
+    class BrokenScan:
+        def list_installed_details(self):
+            raise ValueError(r"C:\Users\someone\private\models\x.gguf")
+
+    ollama_models = (InstalledModel(name="qwen3:8b", source="ollama"),)
+    catalog = CombinedModelCatalog(_FakeOllamaCatalog(ollama_models), BrokenScan())
+
+    with caplog.at_level("WARNING", logger="cortex_backend.services.model_catalog"):
+        inventory, _connection = catalog.inventory()
+
+    assert [model.name for model in inventory] == ["qwen3:8b"]
+    assert "GGUF model scan failed (ValueError)" in caplog.text
+    # The exception message can carry private paths; it stays out of the log.
+    assert "someone" not in caplog.text

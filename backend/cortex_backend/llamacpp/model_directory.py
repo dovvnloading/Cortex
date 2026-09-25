@@ -162,7 +162,15 @@ class GGUFModelDirectory:
                     relative,
                 )
                 continue
-            model = self._build_installed_model(path, stat, relative)
+            try:
+                model = self._build_installed_model(path, stat, relative)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping '%s' in the GGUF models folder (%s).",
+                    relative,
+                    type(exc).__name__,
+                )
+                continue
             if model is None:
                 continue
             fresh_cache[relative] = (key, model)
@@ -225,7 +233,17 @@ class GGUFModelDirectory:
         """
         from datetime import datetime, timezone
 
-        metadata = read_gguf_metadata(path)
+        try:
+            metadata = read_gguf_metadata(path)
+        except Exception as exc:
+            # The reader promises not to raise; if it ever does, that costs
+            # this file its details, never the rest of the scan.
+            logger.warning(
+                "Could not read the details of '%s' (%s); listing it without them.",
+                relative,
+                type(exc).__name__,
+            )
+            metadata = None
         if metadata is not None and (metadata.architecture or "").lower() in _PROJECTOR_ARCHITECTURES:
             logger.info(
                 "Skipping '%s': its architecture is %r, a companion projector "
