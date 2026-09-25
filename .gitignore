@@ -41,3 +41,6 @@ packaging/.runtime/
 # repository.
 .codex-worktrees/
 .claude/
+
+# Azure Artifact Signing account details: local to the signing machine only.
+packaging/signing.local.json

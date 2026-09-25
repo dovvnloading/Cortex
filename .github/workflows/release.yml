@@ -8,6 +8,10 @@ name: Release
 # Nothing here publishes to an index. It builds the same one-folder Windows
 # package the heavy job already builds, verifies it starts, and attaches it to
 # a draft release for the maintainer to review and publish by hand.
+#
+# The build is unsigned. Signing needs the maintainer's Azure Artifact Signing
+# identity, which CI does not hold: packaging/sign_release.ps1 signs the
+# executable locally and replaces the archive and checksum on the draft.
 
 on:
   push:
@@ -19,7 +23,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify-version:
@@ -28,8 +32,10 @@ jobs:
     outputs:
       version: ${{ steps.declared.outputs.version }}
     steps:
-      - name: Check out repository
+      - name: Check out the tag being released
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -59,9 +65,13 @@ jobs:
     needs: verify-version
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
-      - name: Check out repository
+      - name: Check out the tag being released
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -149,6 +159,8 @@ jobs:
         run: |
           $name = "Cortex-${{ needs.verify-version.outputs.version }}-windows-x64.zip"
           Compress-Archive -Path dist/Cortex/* -DestinationPath $name
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $name).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii -NoNewline SHA256SUMS.txt
           "ARCHIVE=$name" >> $env:GITHUB_ENV
 
       - name: Create a draft release
@@ -157,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
-          gh release create $tag $env:ARCHIVE `
+          gh release create $tag $env:ARCHIVE SHA256SUMS.txt `
             --draft `
             --title "Cortex $tag" `
-            --notes "Unsigned build produced by the release workflow. Review before publishing."
+            --notes "Unsigned build produced by the release workflow. Sign it with packaging/sign_release.ps1, which replaces the archive and SHA256SUMS.txt, then review and publish."

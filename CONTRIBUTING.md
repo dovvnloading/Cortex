@@ -122,6 +122,35 @@ python tools/generate_contracts.py --write
 The repository workflow uses draft pull requests, required CI, review before
 ready status, and squash merges into `main`.
 
+## Releasing
+
+The version is written once, in `backend/cortex_backend/__init__.py`;
+`frontend/package.json` must match it (a test enforces this), and
+`python tools/generate_contracts.py --write` carries it into the API contract.
+
+1. Merge a pull request that sets the new version and adds its changelog
+   entry.
+2. Tag that commit on `main` as `v<version>` and push the tag. The release
+   workflow refuses a tag that disagrees with the declared version, builds and
+   smoke-tests the Windows package from the tag, and opens a **draft** release
+   with an unsigned archive and `SHA256SUMS.txt`.
+3. Sign it locally:
+
+   ```powershell
+   ./packaging/sign_release.ps1 -Tag v<version> -Upload `
+       -AzureCliPath <az.cmd> -DlibPath <Azure.CodeSigning.Dlib.dll> -DotNetRoot <.NET 8>
+   ```
+
+   Signing uses Azure Artifact Signing. The account, certificate profile and
+   the one allowed signer are read from `packaging/signing.local.json`, which
+   is git-ignored: copy `packaging/signing.local.example.json` and fill it in
+   on the signing machine. Account details never belong in this repository or
+   in a pull request. Azure CLI must be signed in as that dedicated signer; the
+   script refuses any other identity, checks the downloaded build against CI's
+   checksum, verifies the signature, its publisher and its timestamp, and
+   replaces the archive and checksum on the draft.
+4. Write the release notes from the changelog, review the draft, and publish.
+
 ## Code style
 
 Python should be typed and readable, with safe user-facing errors and no raw

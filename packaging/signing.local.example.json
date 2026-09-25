@@ -1,0 +1,7 @@
+{
+  "Endpoint": "https://<region>.codesigning.azure.net",
+  "CodeSigningAccountName": "<artifact-signing-account>",
+  "CertificateProfileName": "<certificate-profile>",
+  "SignerObjectId": "<object id of the dedicated signer in Entra ID>",
+  "ExpectedPublisher": "<CN on the certificate, e.g. your legal name>"
+}
