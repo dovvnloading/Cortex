@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide-react";
 import type { ChatAttachment, ChatMessage, GenerationStats } from "../../../../contracts/cortex-api";
 import { formatMessageTime } from "../../lib/messageTime";
+import { useChatStore } from "../../stores/useChatStore";
 import { MessageStats } from "./MessageStats";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
 
@@ -21,6 +22,7 @@ function AttachmentList({ attachments }: { attachments?: ChatAttachment[] | null
 
 export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onFork, forking }: { message: ChatMessage; isFinalAssistant: boolean; busy: boolean; onRegenerate: () => void; onFork: () => void; forking: boolean }) {
   const [copied, setCopied] = useState(false);
+  const untranslated = useChatStore((state) => (message.id ? state.untranslatedMessageIds[message.id] === true : false));
   const copy = async () => {
     if (!navigator.clipboard) return;
     try {
@@ -41,6 +43,7 @@ export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onF
         ) : (
           <div className="markdown-body">{message.role === "user" ? <p>{message.content}</p> : <SafeMarkdown content={message.content} />}</div>
         )}
+        {message.role === "assistant" && untranslated && <p className="muted-note" role="note">Couldn't translate this answer; showing the original.</p>}
         {message.sources && message.sources.length > 0 && <details className="sources"><summary><span>Sources</span><span className="disclosure-hint">{message.sources.length} {message.sources.length === 1 ? "item" : "items"}</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></div></div></details>}
       </div>
       {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary><span>Reasoning</span><span className="disclosure-hint">Show details</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}

@@ -212,6 +212,74 @@ describe("useGenerationStream", () => {
     expect(onCompleted).toHaveBeenCalledTimes(1);
   });
 
+  it("records an answer left untranslated when the completion carries a translation error", async () => {
+    useChatStore.setState({ untranslatedMessageIds: {} });
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+    act(() => {
+      result.current.start("job-untranslated", "thread-untranslated", onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-untranslated",
+        thread_id: "thread-untranslated",
+        data: { assistant_message_id: "assistant-7", translation_error: "Translation failed. Please try again." },
+      });
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-7": true });
+  });
+
+  it("records an untranslated answer from the status fallback, and ignores a translated one", async () => {
+    useChatStore.setState({ untranslatedMessageIds: {} });
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-untranslated-status",
+      kind: "generation",
+      status: "succeeded",
+      sequence: 2,
+      result: { assistant_message_id: "assistant-8", translation_error: "Translation returned an empty result." },
+    });
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+    act(() => {
+      result.current.start("job-untranslated-status", "thread-untranslated-status", onCompleted, vi.fn());
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-8": true });
+
+    const { streamGeneration: cleanStream, emitEvent } = terminalAwareStream();
+    const cleanApi = fakeApi({ streamGeneration: cleanStream });
+    const clean = renderHook(() => useGenerationStream(cleanApi, ignoreSessionExpiry));
+    const cleanCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => {
+      clean.result.current.start("job-translated", "thread-translated", cleanCompleted, vi.fn());
+    });
+    await waitFor(() => expect(cleanStream).toHaveBeenCalled());
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-translated",
+        thread_id: "thread-translated",
+        data: { assistant_message_id: "assistant-9", translation_error: null },
+      });
+    });
+    await waitFor(() => expect(cleanCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-8": true });
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

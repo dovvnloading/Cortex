@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from threading import Event
 import time
@@ -10,6 +11,8 @@ from fastapi.testclient import TestClient
 
 import cortex_backend.api.routes as api_routes
 from cortex_backend.api import create_app
+from cortex_backend.core.settings import CortexSettings, TranslationSettings
+from cortex_backend.repositories.settings import InMemorySettingsRepository
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 from support import session_headers as _session
@@ -665,3 +668,51 @@ def test_a_streaming_engine_is_not_replayed_on_top_of_its_own_deltas():
     # Every delta together must reconstruct the answer exactly once. A replay
     # on top of the live stream would make this twice the answer.
     assert "".join(deltas).strip() == completed["data"]["response"].strip()
+
+
+def test_a_failed_translation_keeps_the_stream_alive_and_says_so():
+    """A failed translation keeps the answer, and the stream must survive it.
+
+    The service reports the failure as a "translation_failed" progress phase
+    and keeps the untranslated answer. The API mapped that phase to an event
+    name the event schema did not allow, so building the event raised inside
+    the SSE generator: the live stream died on every attempt, reconnects
+    included, and the client only recovered through status polling.
+    """
+    deps = replace(
+        build_demo_dependencies(ollama_state=FakeOllamaState(fail_translation=True)),
+        settings=InMemorySettingsRepository(
+            CortexSettings(translation=TranslationSettings(enabled=True))
+        ),
+    )
+    app = create_app(deps, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "translation-fails", "user_input": "hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+
+        with client.stream(
+            "GET", f"/api/v1/generations/{job_id}/events", headers=headers
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        names = [event["event"] for event in events]
+        assert "generation.translation_started" in names
+        assert "generation.translation_failed" in names
+        assert names[-1] == "generation.completed"
+
+        completed = events[-1]["data"]
+        assert completed["translation_error"]
+        # The answer kept is the original, not a translation of it.
+        assert not completed["response"].startswith("[Spanish]")
+
+        # A reconnect replays the same events instead of failing again.
+        replay = client.get(
+            f"/api/v1/generations/{job_id}/events",
+            headers={**headers, "Last-Event-ID": "0"},
+        )
+        assert [event["event"] for event in _events(replay.text)] == names

@@ -713,6 +713,8 @@ GenerationEventName = Literal[
     "generation.thinking_delta",
     "generation.content_delta",
     "generation.translation_started",
+    # The answer is kept untranslated; the completion carries translation_error.
+    "generation.translation_failed",
     "generation.loading_model",
     "generation.persisting",
     "generation.completed",

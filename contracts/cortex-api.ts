@@ -257,7 +257,7 @@ export interface ForkRequest {
 
 export interface GenerationEvent {
   event_id: number;
-  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.loading_model" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelling" | "generation.cancelled";
+  event: "generation.queued" | "generation.started" | "generation.status" | "generation.thinking_delta" | "generation.content_delta" | "generation.translation_started" | "generation.translation_failed" | "generation.loading_model" | "generation.persisting" | "generation.completed" | "generation.failed" | "generation.cancelling" | "generation.cancelled";
   job_id: string;
   thread_id: string;
   timestamp: string;
