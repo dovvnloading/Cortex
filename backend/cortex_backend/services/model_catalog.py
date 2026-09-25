@@ -6,6 +6,7 @@ support either -- or both -- backends.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import logging
 from threading import Event
 from typing import Protocol
 
@@ -13,6 +14,8 @@ from cortex_backend.core.generation import ConnectionResult
 
 from .chat_client import GGUF_PREFIX
 from .models import InstalledModel, ModelPullProgress, ModelService
+
+logger = logging.getLogger(__name__)
 
 
 class GGUFModelSource(Protocol):
@@ -43,7 +46,14 @@ class CombinedModelCatalog:
         ollama_models, connection = self._ollama.inventory()
         try:
             gguf_models = self._gguf.list_installed_details()
-        except Exception:
+        except Exception as exc:
+            # The Ollama list must survive a broken scan, but an empty GGUF
+            # list with nothing in the log left the user's models simply
+            # gone. Only the exception type: its message can carry paths.
+            logger.warning(
+                "GGUF model scan failed (%s); local model files are not listed.",
+                type(exc).__name__,
+            )
             gguf_models = ()
         return ollama_models + gguf_models, connection
 

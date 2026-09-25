@@ -105,7 +105,22 @@ def _string(handle: BinaryIO, *, max_bytes: int) -> bytes:
     return _exact(handle, length)
 
 
-def _skip_value(handle: BinaryIO, value_type: int, *, depth: int = 0) -> None:
+def _skip(handle: BinaryIO, count: int, end: int) -> None:
+    """Seek ``count`` bytes forward, refusing a length the file cannot hold.
+
+    A length read from the file is only a claim. Believed, 2**63 or more made
+    ``seek`` itself raise (ValueError on a file, OverflowError in memory).
+    Comparing with the file size alone keeps this to one comparison per
+    value -- asking for the position here made a real vocabulary 2x slower --
+    and a skip that lands past the end is caught by the next read, or by the
+    final position check in _read_key_values_from.
+    """
+    if count > end:
+        raise _MalformedGGUF("length larger than the file")
+    handle.seek(count, 1)
+
+
+def _skip_value(handle: BinaryIO, value_type: int, end: int, *, depth: int = 0) -> None:
     """Seek past one value without materialising it.
 
     Seeking rather than reading is the whole point: the tokenizer vocabulary
@@ -113,10 +128,10 @@ def _skip_value(handle: BinaryIO, value_type: int, *, depth: int = 0) -> None:
     need to be read to step over it.
     """
     if value_type in _SCALAR_SIZES:
-        handle.seek(_SCALAR_SIZES[value_type], 1)
+        _skip(handle, _SCALAR_SIZES[value_type], end)
         return
     if value_type == _TYPE_STRING:
-        handle.seek(_uint(handle, "<Q"), 1)
+        _skip(handle, _uint(handle, "<Q"), end)
         return
     if value_type != _TYPE_ARRAY:
         raise _MalformedGGUF(f"unknown value type {value_type}")
@@ -128,13 +143,13 @@ def _skip_value(handle: BinaryIO, value_type: int, *, depth: int = 0) -> None:
         raise _MalformedGGUF("oversized array")
     if element_type in _SCALAR_SIZES:
         # Fixed-width elements are one seek, however many there are.
-        handle.seek(_SCALAR_SIZES[element_type] * count, 1)
+        _skip(handle, _SCALAR_SIZES[element_type] * count, end)
         return
     for _ in range(count):
-        _skip_value(handle, element_type, depth=depth + 1)
+        _skip_value(handle, element_type, end, depth=depth + 1)
 
 
-def _read_value(handle: BinaryIO, value_type: int) -> Any:
+def _read_value(handle: BinaryIO, value_type: int, end: int) -> Any:
     if value_type == _TYPE_STRING:
         return _string(handle, max_bytes=_MAX_STRING_BYTES).decode("utf-8", "replace")
     formats = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i",
@@ -143,12 +158,35 @@ def _read_value(handle: BinaryIO, value_type: int) -> Any:
         return _uint(handle, formats[value_type]) if value_type not in (6, 12) else struct.unpack(
             formats[value_type], _exact(handle, _SCALAR_SIZES[value_type])
         )[0]
-    _skip_value(handle, value_type)
+    _skip_value(handle, value_type, end)
     return None
 
 
+# Everything a corrupt or hostile file can make the parsing below raise. The
+# reader's contract is to give up quietly, and the folder scan depends on it.
+_UNREADABLE = (
+    OSError,
+    struct.error,
+    _MalformedGGUF,
+    UnicodeError,
+    MemoryError,
+    RecursionError,
+    ValueError,
+    OverflowError,
+)
+
+
 def _read_key_values(path: Path) -> dict[str, Any] | None:
-    """Return the keys this module needs, or ``None`` if the file is unreadable.
+    """Return the keys this module needs, or ``None`` if the file is unreadable."""
+    try:
+        with path.open("rb") as handle:
+            return _read_key_values_from(handle)
+    except _UNREADABLE:
+        return None
+
+
+def _read_key_values_from(handle: BinaryIO) -> dict[str, Any] | None:
+    """Read the wanted keys from an open handle, or ``None`` if it is unreadable.
 
     Every other key is stepped over, so the cost is proportional to the number
     of keys rather than to the size of the vocabulary behind them.
@@ -156,27 +194,31 @@ def _read_key_values(path: Path) -> dict[str, Any] | None:
     wanted_exact = {"general.architecture", "general.file_type"}
     found: dict[str, Any] = {}
     try:
-        with path.open("rb") as handle:
-            magic, version, _tensor_count, metadata_count = struct.unpack(
-                "<4sIQQ", _exact(handle, _GGUF_HEADER_BYTES)
-            )
-            if magic != GGUF_MAGIC:
-                return None
-            if version not in (2, 3):
-                return None
-            if metadata_count > _MAX_ENTRIES:
-                return None
-            for _ in range(metadata_count):
-                key = _string(handle, max_bytes=_MAX_KEY_BYTES).decode("utf-8", "replace")
-                value_type = _uint(handle, "<I")
-                # context_length is namespaced by architecture, which is not
-                # guaranteed to appear first, so take any of them and pick the
-                # matching one once the whole block has been read.
-                if key in wanted_exact or key.endswith(".context_length"):
-                    found[key] = _read_value(handle, value_type)
-                else:
-                    _skip_value(handle, value_type)
-    except (OSError, struct.error, _MalformedGGUF, UnicodeError, MemoryError, RecursionError):
+        end = handle.seek(0, 2)
+        handle.seek(0)
+        magic, version, _tensor_count, metadata_count = struct.unpack(
+            "<4sIQQ", _exact(handle, _GGUF_HEADER_BYTES)
+        )
+        if magic != GGUF_MAGIC:
+            return None
+        if version not in (2, 3):
+            return None
+        if metadata_count > _MAX_ENTRIES:
+            return None
+        for _ in range(metadata_count):
+            key = _string(handle, max_bytes=_MAX_KEY_BYTES).decode("utf-8", "replace")
+            value_type = _uint(handle, "<I")
+            # context_length is namespaced by architecture, which is not
+            # guaranteed to appear first, so take any of them and pick the
+            # matching one once the whole block has been read.
+            if key in wanted_exact or key.endswith(".context_length"):
+                found[key] = _read_value(handle, value_type, end)
+            else:
+                _skip_value(handle, value_type, end)
+        if handle.tell() > end:
+            # The last value claimed bytes the file does not have.
+            return None
+    except _UNREADABLE:
         return None
     return found
 

@@ -9,6 +9,7 @@ answers and to its contract: it never raises, whatever the bytes say.
 
 from __future__ import annotations
 
+import io
 import struct
 from pathlib import Path
 
@@ -135,4 +136,56 @@ def test_the_magic_check_and_the_reader_agree_about_a_bad_file(tmp_path: Path) -
     path.write_bytes(b"<html>not a model</html>")
 
     assert is_valid_gguf_file(path) is False
+    assert read_gguf_metadata(path) is None
+
+
+def _skipped_string_of_length(length: int) -> bytes:
+    """One unwanted key whose string value claims ``length`` bytes.
+
+    Unwanted keys are seeked past rather than read, so the length goes
+    straight to ``seek``, which cannot take an offset of 2**63 or more.
+    """
+    key = b"general.junk"
+    return (
+        GGUF_MAGIC
+        + struct.pack("<IQQ", 3, 0, 1)
+        + struct.pack("<Q", len(key))
+        + key
+        + struct.pack("<I", 8)          # STRING
+        + struct.pack("<Q", length)
+        + b"tail"
+    )
+
+
+@pytest.mark.parametrize("length", [2**63, 2**64 - 1, 2**40])
+def test_a_skipped_string_longer_than_the_file_is_refused(tmp_path: Path, length: int) -> None:
+    """2**63 and above raised ValueError out of ``seek`` on a real file.
+
+    The reader promises never to raise, and the folder scan relies on that:
+    the error escaped, and one corrupt file emptied the whole GGUF list.
+    """
+    path = tmp_path / "corrupt.gguf"
+    path.write_bytes(_skipped_string_of_length(length))
+
+    assert read_gguf_metadata(path) is None
+
+
+@pytest.mark.parametrize("length", [2**63, 2**64 - 1, 2**40])
+def test_a_skipped_string_longer_than_the_file_is_refused_in_memory(length: int) -> None:
+    """The same bytes through an in-memory handle, where ``seek`` raises
+    OverflowError instead."""
+    from cortex_backend.llamacpp.gguf_metadata import _read_key_values_from
+
+    assert _read_key_values_from(io.BytesIO(_skipped_string_of_length(length))) is None
+
+
+def test_a_last_value_that_runs_off_the_end_is_refused(tmp_path: Path) -> None:
+    """Smaller than the file, so the per-value check passes it, but the file
+    ends before the value does. Nothing reads after the last value, so only
+    the final position check can notice."""
+    data = _skipped_string_of_length(20)  # four bytes of "tail" follow
+    assert 20 < len(data)
+    path = tmp_path / "short.gguf"
+    path.write_bytes(data)
+
     assert read_gguf_metadata(path) is None
