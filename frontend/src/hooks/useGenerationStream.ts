@@ -284,7 +284,16 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 }
                 if (event.event === "generation.failed" || event.event === "generation.cancelled") {
                   terminal = true;
-                  onFailed(job.threadId, typeof data.message === "string" ? data.message : "Generation did not complete.");
+                  // A stop that kept the answer the user had already seen is
+                  // not a failure: the reload shows that answer, marked as
+                  // stopped. Only a stop with nothing to keep, or a real
+                  // failure, gets the error and its Retry.
+                  const keptAnswer = event.event === "generation.cancelled"
+                    && typeof data.assistant_message_id === "string"
+                    && data.assistant_message_id.length > 0;
+                  if (!keptAnswer) {
+                    onFailed(job.threadId, typeof data.message === "string" ? data.message : "Generation did not complete.");
+                  }
                   completion = onCompleted(job.threadId);
                 }
               },

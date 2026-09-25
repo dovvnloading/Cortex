@@ -395,6 +395,50 @@ describe("useGenerationStream", () => {
     await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
   });
 
+  it("a stop that kept the answer reloads the chat without reporting a failure", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    const onFailed = vi.fn();
+
+    act(() => {
+      result.current.start("job-kept", "thread-kept", onCompleted, onFailed);
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({
+        event_id: 1,
+        event: "generation.cancelled",
+        job_id: "job-kept",
+        thread_id: "thread-kept",
+        data: { message: "Job cancelled.", assistant_message_id: "assistant-kept" },
+      });
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-kept"));
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it("a stop with nothing to keep still reports it, so Retry stays reachable", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onFailed = vi.fn();
+
+    act(() => {
+      result.current.start("job-empty", "thread-empty", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.cancelled", job_id: "job-empty", thread_id: "thread-empty", data: { message: "Job cancelled." } });
+    });
+
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith("thread-empty", "Job cancelled."));
+  });
+
   it("dedupes a second consume() call for the same jobId already in flight", async () => {
     const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => new Promise<void>((_resolve, reject) => {
       options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });

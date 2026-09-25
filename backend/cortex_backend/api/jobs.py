@@ -143,6 +143,14 @@ class JobProgressSink:
     def publish(self, event: ProgressEvent) -> None:
         self.publish_progress(event.phase, event.message, data=event.data)
 
+    def deliver(self, event: ProgressEvent) -> bool:
+        """Publish ``event`` and report whether it reached the event stream.
+
+        Output published after Stop is dropped (see publish_event), so only a
+        ``True`` here means a client could have seen it.
+        """
+        return self.deliver_progress(event.phase, event.message, data=event.data)
+
     def publish_progress(
         self,
         phase: str,
@@ -151,8 +159,18 @@ class JobProgressSink:
         data: Mapping[str, Any] | None = None,
     ) -> None:
         """Publish a safe progress message for generation or model work."""
+        self.deliver_progress(phase, message, data=data)
+
+    def deliver_progress(
+        self,
+        phase: str,
+        message: str,
+        *,
+        data: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Publish a progress message and report whether it was appended."""
         payload = {"message": message, **dict(data or {})}
-        self.publish_event("progress", phase=phase, data=payload)
+        return self._append_if_active("progress", phase=phase, data=payload)
 
     def begin_commit(
         self,
@@ -196,6 +214,16 @@ class JobProgressSink:
         status: JobStatus = "running",
     ) -> None:
         """Publish a typed event while the owning job is still active."""
+        self._append_if_active(kind, phase=phase, data=data, status=status)
+
+    def _append_if_active(
+        self,
+        kind: EventKind,
+        *,
+        phase: str | None = None,
+        data: Mapping[str, Any] | None = None,
+        status: JobStatus = "running",
+    ) -> bool:
         with self._registry._lock:
             # A cancellation request is intentionally non-terminal while the
             # synchronous worker unwinds. Do not let callbacks from that
@@ -205,7 +233,7 @@ class JobProgressSink:
                 self._record.status != "running"
                 or self._record.cancel_event.is_set()
             ):
-                return
+                return False
             self._registry._append_event(
                 self._record,
                 kind=kind,
@@ -213,6 +241,7 @@ class JobProgressSink:
                 phase=phase,
                 data=data,
             )
+            return True
 
 
 class JobRegistry:
@@ -711,7 +740,7 @@ class JobRegistry:
                 if not record.commit_started and (
                     record.status == "cancelling" or record.cancel_event.is_set()
                 ):
-                    self._finalize_cancellation(record)
+                    self._finalize_cancellation(record, kept=_kept_message_id(result))
                     return
                 data = dict(
                     serialize_result(result) if serialize_result else _serialize(result)
@@ -764,16 +793,26 @@ class JobRegistry:
                 if self._active.get(record.kind) == record.job_id:
                     self._active.pop(record.kind, None)
 
-    def _finalize_cancellation(self, record: _JobRecord) -> None:
-        """Publish the terminal cancellation only after the worker has exited."""
+    def _finalize_cancellation(
+        self, record: _JobRecord, *, kept: str | None = None
+    ) -> None:
+        """Publish the terminal cancellation only after the worker has exited.
+
+        ``kept`` names a message the stopped worker saved -- the part of an
+        answer the user had already seen -- so the client can show it rather
+        than report a failure.
+        """
         if record.status in TERMINAL_STATUSES:
             return
         record.error = "Job cancelled."
+        data: dict[str, Any] = {"message": "Job cancelled."}
+        if kept:
+            data["assistant_message_id"] = kept
         self._append_event(
             record,
             kind="state",
             status="cancelled",
-            data={"message": "Job cancelled."},
+            data=data,
         )
 
     def _owned_record(self, job_id: str, owner: str) -> _JobRecord:
@@ -921,3 +960,12 @@ def _retain_event_data(
     if fallback_bytes is not None and fallback_bytes <= max_bytes:
         return fallback, fallback_bytes
     return {}, 0
+
+
+def _kept_message_id(result: Any) -> str | None:
+    """The message a stopped worker kept, if its result names one."""
+    if isinstance(result, Mapping):
+        kept = result.get("assistant_message_id")
+        if isinstance(kept, str) and kept:
+            return kept
+    return None

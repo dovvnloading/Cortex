@@ -68,6 +68,6 @@ export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onF
 
 function MessageMeta({ timestamp, stats }: { timestamp?: string | null; stats?: GenerationStats | null }) {
   const displayTime = formatMessageTime(timestamp);
-  if (!displayTime && !stats?.tokens_per_second) return null;
+  if (!displayTime && !stats?.tokens_per_second && !stats?.stopped) return null;
   return <div className="message-meta">{displayTime && <time dateTime={timestamp ?? undefined}>{displayTime}</time>}<MessageStats stats={stats} /></div>;
 }

@@ -1,3 +1,24 @@
+### **Stop Keeps the Answer**
+
+**Date:** 2026-09-25
+**Version:** Bug-fix pass
+
+* Pressing Stop keeps the part of the answer you already watched appear.
+  Since answers started streaming, Stop visibly erased text that was on
+  screen: the turn was thrown away and the chat reloaded without it. The
+  kept answer is saved with the chat, survives a restart, and is marked
+  "Stopped" where the token count would be.
+* Only text that actually reached the screen is kept, so the answer never
+  ends with words you did not see.
+* Stopping during translation keeps the untranslated answer instead of
+  discarding a finished one.
+* Stopping a regenerated answer leaves the original in place, as before.
+* A stop that kept an answer no longer shows an error banner. When nothing
+  had been written yet, the banner and its Retry remain, since Retry is then
+  the way to ask again.
+
+---
+
 ### **Cortex 2.0.0**
 
 **Date:** 2026-09-25
