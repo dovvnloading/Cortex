@@ -5,4 +5,4 @@
 # frontend builds with it, and a test holds frontend/package.json to it -- npm
 # cannot read a Python constant, so equality there is enforced rather than
 # derived.
-__version__ = "0.1.0"
+__version__ = "2.0.0"
