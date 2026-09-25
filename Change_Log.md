@@ -24,16 +24,9 @@
 **Date:** 2026-09-25
 **Version:** 2.0.0
 
-* The first downloadable release of the rewritten Cortex. Everything since
-  the Qt-era v1.0.0 (January 2026) ships in it: the native web shell, the
-  managed llama.cpp runtime for GGUF files, real token streaming, the
-  redesigned model picker and generation controls, and every fix listed
-  below. The version jumps to 2.0.0 because this is a different application
-  from v1.0.0, and a number below it would have sorted as older.
-* Release downloads are code-signed with Azure Artifact Signing, so Windows
-  shows a verified publisher rather than "unknown publisher". SmartScreen can
-  still ask about early downloads until the app builds reputation. Each
-  release carries a `SHA256SUMS.txt` for checking the download.
+* The declared version is 2.0.0, marking the rewrite as a different
+  application from the Qt-era v1.0.0 so it sorts above it. There is no
+  published download of 2.0.0; run Cortex from source.
 * The release workflow now builds the tag it was asked to build (a manual run
   used to build whatever `main` held), and only its upload step can write to
   the repository.
