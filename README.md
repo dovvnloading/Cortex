@@ -43,9 +43,10 @@ beneath.](.github/images/models-and-runtimes.png)
 Generation defaults live in one place, and the chat model doubles as the title
 model so there is only one choice to make:
 
-![Cortex settings, AI Model section: the local model picker above grouped
-Sampling and Context controls, with filled-track sliders and their current
-values shown beside each label.](.github/images/settings.png)
+![Cortex settings, AI Model section: the chat model picker showing each model's
+source, size, and quantization, above the generation defaults -- Precise,
+Balanced, and Creative response styles, sliders with an editable exact value,
+and one-tap context window sizes from 2K to 64K.](.github/images/settings.png)
 
 Temperature, top-p, top-k, repeat penalty, and context window can also be
 overridden for a single conversation from the composer, without disturbing these
@@ -85,7 +86,9 @@ transcript.](.github/images/workspace-light.png)
   `auto` (try Vulkan, fall back to CPU), `vulkan`, or `cpu`.
 - **Bring your own GGUF.** Download a model into the local folder by direct URL
   or Hugging Face repo, then select it from the same picker as everything else.
-  Local files appear as `gguf:<filename>`.
+  The folder is searched a few levels deep, so the one-folder-per-repository
+  layout downloaders use works as-is; a file appears as `gguf:<path>`, e.g.
+  `gguf:Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf`.
 - **Composer model control.** Inspect the local inventory, switch models without
   leaving the composer, refresh the inventory, and stage local image or text
   attachments.
@@ -107,9 +110,9 @@ transcript.](.github/images/workspace-light.png)
 - **Durable context.** Threads live in SQLite; permanent memories use atomic
   local JSON storage. Existing JSON chat history and Windows settings are read
   additively during migration without rewriting the legacy source.
-- **Bounded local tools.** Explicit arithmetic can use the deterministic scratch
-  calculator. User-selected PNG/JPEG/WebP transforms run as fixed recipes in a
-  short-lived worker.
+- **Exact arithmetic.** An explicit calculation ("what is 17.5% of 2,340?") is
+  checked by a deterministic local calculator before the model answers, so the
+  figure in the reply is computed rather than guessed.
 - **Approval-gated Python.** A local model may propose a task in a small,
   restricted subset of Python (no imports, no `def`/`class`/`while`, no method
   or attribute calls -- assignment, bounded loops, comprehensions, and a fixed
@@ -130,21 +133,24 @@ When a model proposes a task, the transcript states what it wants and the exact
 access it is asking for, and the task parks in the tray until the user decides.
 Nothing runs in the meantime:
 
-![A Cortex transcript where the model has proposed a Python task to total a CSV
-column: it explains that reading the disk is a capability it must ask for, shows
-the exact source it wants to run, and lists what it asks for -- files only, no
-writes, no process access, no network. The task activity tray on the right reads
-"Review before running" with Allow once and Deny
-controls.](.github/images/execution-approval.png)
+![A Cortex transcript where the model has proposed a short Python calculation
+for the monthly payment and total interest on a car loan: it shows the exact
+source it wants to run and states that it asks for no file, process, or network
+access. The task activity tray on the right reads "Review before running" with
+Allow once and Deny controls.](.github/images/execution-approval.png)
 
 The tray names the requested host access, flags broad access as a high-risk
 choice for that run, and lets the generated source be inspected before anything
 executes. A finished task keeps its captured output alongside it:
 
-![The Cortex task activity tray: a pending task requesting Files access with a
-broad-local-access warning, an "Inspect generated source" disclosure, and Allow
-once and Deny buttons; below it a completed task showing its captured output and
-return value.](.github/images/execution-tray.png)
+![The Cortex task activity tray: the pending loan calculation marked "No host
+access requested", with a prompt to review the generated source and Allow once
+and Deny buttons; below it a completed task showing its captured
+output.](.github/images/execution-tray.png)
+
+Both tasks in these images pass the real validator, and the output shown is
+what the restricted interpreter prints for that source
+(`tests/test_showcase_fixtures.py` holds the demo to that).
 
 Code execution is a separate capability from scratch computation:
 
@@ -165,6 +171,20 @@ Broad filesystem, process, or network access is a clearly labeled high-risk
 choice for that run. It is never silently enabled or persisted. If the required
 worker boundary cannot be established, Cortex fails closed and ordinary chat
 remains available.
+
+What the capabilities reach today is deliberately narrow:
+
+- **Files:** a scratch folder created empty for that one run and deleted
+  afterwards. A task cannot read your documents or your projects.
+- **Processes:** refused. Starting another program is not available until
+  Windows can enforce the same boundary the broker promises.
+- **Network:** a small number of HTTP GET requests to public addresses; private,
+  local, and carrier-NAT ranges are refused.
+
+The language itself is a restricted Python subset, so this suits calculations
+over data the model writes into the program -- not editing files or running
+your tests. A consent-gated workspace mode for that kind of work is the
+project's stated direction, and it is not built yet.
 
 ## Architecture
 
@@ -219,10 +239,11 @@ If you would rather not run Ollama, skip the first line and instead drop a
 download one from there by URL or Hugging Face repo. Cortex serves it with its
 own llama.cpp runtime.
 
-The first launch checks the local model inventory. Choose a model from the setup
-screen or later from the composer picker. If neither runtime has a usable model,
-Cortex still opens and explains the connection state; generation becomes
-available once a model is present and the inventory is refreshed.
+The first launch checks the local model inventory. Choose a model from the
+composer's model picker, or under **Settings -> AI Model**. If neither runtime
+has a usable model, Cortex still opens and explains the connection state;
+generation becomes available once a model is present and the inventory is
+refreshed.
 
 Useful launcher options:
 

@@ -68,53 +68,72 @@ SYSTEM_INSTRUCTIONS = (
     "When you show a command or a query, show the output you expect from it."
 )
 
+# --- Staged local execution sources -----------------------------------------
+# Both must pass the real validator (restricted Python: no imports, no method
+# calls, loops over literal ranges) and ask for no host access, because the
+# README screenshots present them as what Cortex runs. The staged stdout below
+# is what the real restricted interpreter prints for COMPLETED_SOURCE; a test
+# in tests/test_showcase_fixtures.py holds both to that.
+
+APPROVAL_SOURCE = '''principal = 25000
+monthly_rate = 0.065 / 12
+growth = 1
+for month in range(60):
+    growth = growth * (1 + monthly_rate)
+payment = principal * monthly_rate * growth / (growth - 1)
+interest = payment * 60 - principal
+print(f"monthly payment: {round(payment, 2)}")
+print(f"total interest: {round(interest, 2)}")
+'''
+
+COMPLETED_SOURCE = '''orders = [182.40, 96.15, 240.00, 57.80, 131.25, 310.60, 74.90]
+average = sum(orders) / len(orders)
+count = 0
+total = 0
+for index in range(7):
+    if orders[index] > average:
+        count = count + 1
+        total = total + orders[index]
+print(f"average order: {round(average, 2)}")
+print(f"above average: {count} orders, {round(total, 2)} in total")
+'''
+
+COMPLETED_STDOUT = "average order: 156.16\nabove average: 3 orders, 733.0 in total\n"
+
 # --- Extra staged conversations ---------------------------------------------
 # These sit alongside the documentation fixtures so the library has enough
 # filed material to look like a workspace someone actually uses.
 
 EXTRA_CHATS: list[dict] = [
     {
-        "id": "demo-orders-total",
-        "title": "Totalling a month of orders on disk",
+        "id": "demo-loan-payment",
+        "title": "Monthly payment on a car loan",
         "timestamp": "2026-08-09T16:58:00Z",
         "messages": [
             {
                 "id": "m-50",
                 "role": "user",
-                "content": "There is an `exports/orders-2026-08.csv` on this machine. Can you total the `amount` column and tell me the row count?",
+                "content": "What's the monthly payment on a $25,000 car loan at 6.5% APR over five years, and how much interest is that in total?",
             },
             {
                 "id": "m-51",
                 "role": "assistant",
-                "content": """I can, but reading a file off your disk is a capability I have to ask for rather
-than assume. I have prepared the task and it is waiting in the tray for your approval -- nothing
-runs until you allow it.
+                "content": """That is sixty rounds of compounding -- exactly the kind of arithmetic I would rather
+run than estimate. I have prepared a short calculation and it is waiting in the task tray for your
+approval. Nothing runs until you allow it.
 
 Here is exactly what I want to execute:
 
 ```python
-import csv
-from pathlib import Path
+""" + APPROVAL_SOURCE + """```
 
-path = Path("exports/orders-2026-08.csv")
-total = 0.0
-rows = 0
-with path.open(newline="", encoding="utf-8-sig") as handle:
-    for row in csv.DictReader(handle):
-        total += float(row["amount"])
-        rows += 1
+What it asks for: nothing beyond arithmetic.
 
-print(f"rows={rows} total={total:,.2f}")
-```
-
-What it asks for, and nothing else:
-
-- **Files** -- read `exports/orders-2026-08.csv`. No writes.
+- **No file access.** It does not read or write anything on this machine.
 - **No process access.** It does not start anything.
 - **No network access.** Nothing leaves this machine.
 
-Approve it in the task tray and I will report the totals. Deny it and I will instead give you a
-one-liner you can run yourself.""",
+Approve it in the task tray and I will report the exact figures.""",
                 "stats": _stats(prompt_tokens=52, output_tokens=203, tokens_per_second=46.8),
             },
         ],
@@ -315,7 +334,7 @@ GROUPS = [
         "grp-engineering",
         "Engineering",
         [
-            "demo-orders-total",
+            "demo-loan-payment",
             "demo-streaming-csv",
             "demo-sqlite-locked",
             "demo-pg-index",
@@ -327,27 +346,6 @@ GROUPS = [
 ]
 
 # --- Staged local execution --------------------------------------------------
-
-APPROVAL_SOURCE = '''import csv
-from pathlib import Path
-
-path = Path("exports/orders-2026-08.csv")
-total = 0.0
-rows = 0
-with path.open(newline="", encoding="utf-8-sig") as handle:
-    for row in csv.DictReader(handle):
-        total += float(row["amount"])
-        rows += 1
-
-print(f"rows={rows} total={total:,.2f}")
-'''
-
-COMPLETED_SOURCE = '''from pathlib import Path
-
-for path in sorted(Path("assets/icons").glob("*.png")):
-    print(f"{path.name:28} {path.stat().st_size:>7,} bytes")
-'''
-
 
 def _digest(source: str) -> str:
     return sha256(source.encode("utf-8")).hexdigest()
@@ -376,65 +374,58 @@ def stage_execution_tasks(coordinator: DurableFakeCoordinator) -> None:
     """
     repository = coordinator.repository
     owner = repository.installation_principal_id
-    if repository.get_job("code-orders-total", owner=owner) is not None:
+    if repository.get_job("code-loan-payment", owner=owner) is not None:
         return  # already staged
 
     # Finished earlier: approved, ran, returned output.
     repository.create_job(
-        job_id="code-icon-audit",
+        job_id="code-orders-above-average",
         owner=owner,
-        request_id="request-code-icon-audit",
+        request_id="request-code-orders-above-average",
         profile="code.exec.v1",
         payload=_code_payload(
             COMPLETED_SOURCE,
-            "List every icon asset with its file size.",
-            filesystem=True,
+            "Find the orders above the average and total them.",
         ),
     )
     repository.request_approval(
-        "code-icon-audit",
+        "code-orders-above-average",
         owner=owner,
         scope_digest=_digest(COMPLETED_SOURCE),
-        reason="Read the icon assets directory.",
+        reason="Run a short calculation on the order amounts.",
         ttl_seconds=300.0,
     )
-    repository.decide_approval("code-icon-audit", owner=owner, decision="approved")
+    repository.decide_approval("code-orders-above-average", owner=owner, decision="approved")
     repository.transition(
-        "code-icon-audit",
+        "code-orders-above-average",
         status="succeeded",
         event="execution.completed",
         phase="completed",
         data={"message": "Local code execution finished."},
         result={
-            "stdout": (
-                "cortex-16.png                  1,204 bytes\n"
-                "cortex-32.png                  2,918 bytes\n"
-                "cortex-48.png                  5,471 bytes\n"
-                "cortex-256.png                38,602 bytes"
-            ),
+            "stdout": COMPLETED_STDOUT,
             "stderr": "",
-            "value": 4,
+            "value": None,
             "duration_ms": 412,
         },
     )
 
     # Waiting on the user right now.
     repository.create_job(
-        job_id="code-orders-total",
+        job_id="code-loan-payment",
         owner=owner,
-        request_id="request-code-orders-total",
+        request_id="request-code-loan-payment",
         profile="code.exec.v1",
         payload=_code_payload(
             APPROVAL_SOURCE,
-            "Total the amount column in exports/orders-2026-08.csv.",
-            filesystem=True,
+            "Work out the monthly payment and total interest on the loan.",
         ),
     )
     repository.request_approval(
-        "code-orders-total",
+        "code-loan-payment",
         owner=owner,
         scope_digest=_digest(APPROVAL_SOURCE),
-        reason="Read exports/orders-2026-08.csv and total one column.",
+        reason="Run a short loan calculation.",
         ttl_seconds=300.0,
     )
 

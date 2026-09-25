@@ -206,7 +206,7 @@ await page.waitForTimeout(600);
 // the top of the library -- .chat-list scrolls, so a menu on the last row is
 // clipped by its own container.
 try {
-  const row = page.locator(".chat-row", { hasText: "Totalling a month of orders on disk" }).first();
+  const row = page.locator(".chat-row", { hasText: "Monthly payment on a car loan" }).first();
   await row.hover();
   await page.waitForTimeout(250);
   await row.getByRole("button", { name: /^Move .* to a group$/ }).click();
@@ -242,7 +242,7 @@ await closeOverlay();
 // ---------------------------------------------------------------------------
 // The composer: model switching and per-chat generation parameters
 // ---------------------------------------------------------------------------
-await openChat("Totalling a month of orders on disk");
+await openChat("Monthly payment on a car loan");
 await frameFinalExchange();
 
 await page.getByRole("button", { name: /^Selected local model:/ }).click();
@@ -318,7 +318,7 @@ await page.waitForTimeout(500);
 const staged = await fetch(`${base}/showcase/execution/stage`, { method: "POST" });
 if (!staged.ok) throw new Error(`Could not stage execution tasks: ${staged.status}`);
 
-await openChat("Totalling a month of orders on disk");
+await openChat("Monthly payment on a car loan");
 await frameFinalExchange();
 await page.locator(".execution-task-tray").waitFor({ state: "visible" });
 await page.waitForTimeout(900); // let the 1s task poll settle
