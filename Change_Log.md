@@ -1,3 +1,20 @@
+### **Translation Failures**
+
+**Date:** 2026-09-25
+**Version:** Bug-fix pass
+
+* A failed translation no longer breaks the answer while it streams in. Since
+  the 2026-09-12 pass, a failed translation keeps the original answer, but
+  the event announcing it was not one the app's own event list allowed, so
+  the live stream broke at that point, and again on every reconnect. The
+  answer only appeared once the app fell back to checking the job's status.
+  A test now checks that every event the server can send is on that list.
+* The answer now says when it was left untranslated: "Couldn't translate this
+  answer; showing the original." The note lasts until Cortex is closed,
+  because the failure is not yet saved with the message.
+
+---
+
 ### **GGUF Model Discovery**
 
 **Date:** 2026-09-22

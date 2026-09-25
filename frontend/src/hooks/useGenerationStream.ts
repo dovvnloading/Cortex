@@ -134,6 +134,15 @@ function hasClearRequest(value: unknown): boolean {
   return (result.memory_command as { clear_requested?: unknown }).clear_requested === true;
 }
 
+/** A job result whose translation failed carries the untranslated answer and a translation_error. */
+function noteTranslationFailure(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const result = value as { translation_error?: unknown; assistant_message_id?: unknown };
+  if (typeof result.translation_error !== "string" || !result.translation_error) return;
+  if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
+  useChatStore.getState().markUntranslated(result.assistant_message_id);
+}
+
 /**
  * Coalesces many rapid push() calls into at most one flush per animation
  * frame, so a fast token stream doesn't trigger a store update (and every
@@ -267,6 +276,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
+                  noteTranslationFailure(data);
                   const clearRequested = hasClearRequest(data);
                   completion = clearRequested
                     ? onCompleted(job.threadId, true, job.jobId)
@@ -296,6 +306,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 terminal = true;
                 if (snapshot.status !== "succeeded") {
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
+                } else {
+                  noteTranslationFailure(snapshot.result);
                 }
                 const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
                 completion = clearRequested

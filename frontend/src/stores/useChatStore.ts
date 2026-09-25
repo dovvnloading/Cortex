@@ -44,6 +44,12 @@ interface ChatStoreState {
    */
   generationCursor: number;
   generationOptionsByThread: Record<string, GenerationOptionsOverride>;
+  /**
+   * Assistant messages whose requested translation failed, so the original
+   * answer is shown instead. The backend reports this only on the job
+   * result, not on the stored message, so the note lasts for this session.
+   */
+  untranslatedMessageIds: Record<string, true>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
   upsertChatSummary: (chat: ChatResponse) => void;
@@ -66,6 +72,7 @@ interface ChatStoreState {
   endGeneration: (jobId: string) => void;
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
+  markUntranslated: (messageId: string) => void;
 }
 
 const idleGeneration: GenerationState = {
@@ -92,6 +99,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   generation: idleGeneration,
   generationCursor: 0,
   generationOptionsByThread: {},
+  untranslatedMessageIds: {},
 
   setChats: (next) =>
     set((state) => ({ chats: typeof next === "function" ? (next as (current: ChatSummary[]) => ChatSummary[])(state.chats) : next })),
@@ -192,4 +200,10 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       else next[threadKey] = options;
       return { generationOptionsByThread: next };
     }),
+  markUntranslated: (messageId) =>
+    set((state) => (
+      state.untranslatedMessageIds[messageId]
+        ? state
+        : { untranslatedMessageIds: { ...state.untranslatedMessageIds, [messageId]: true } }
+    )),
 }));
