@@ -211,7 +211,22 @@ The supported source runtime is Windows. User data stays under
 `%APPDATA%\ChatLLM\ChatLLM-Assistant` unless an explicit `--data-dir` is supplied.
 Cortex does not pull an embedding model at startup and has no semantic retrieval.
 
-## Requirements
+## Download
+
+Get the latest signed build from
+[Releases](https://github.com/dovvnloading/Cortex/releases/latest): extract
+`Cortex-<version>-windows-x64.zip` anywhere and run `Cortex.exe`. It needs no
+Python, Node.js or browser; if the Microsoft Edge WebView2 runtime is missing,
+Cortex installs it first. Each release lists a SHA-256 in `SHA256SUMS.txt`:
+
+```powershell
+Get-FileHash .\Cortex-<version>-windows-x64.zip -Algorithm SHA256
+```
+
+You still need a model: Ollama running locally, or a `.gguf` file (Cortex can
+download one for you under **Settings -> System**).
+
+## Requirements (running from source)
 
 - Windows 10 or later
 - Python 3.10 or later
