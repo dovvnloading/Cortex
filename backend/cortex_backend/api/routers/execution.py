@@ -92,6 +92,10 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+# The event stream's clock, looked up on every tick so a test can drive the
+# idle cap and heartbeat pacing exactly instead of racing the wall clock.
+_stream_clock = time.monotonic
+
 
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     """Attach the execution routes to ``router``."""
@@ -525,7 +529,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
 
         async def stream():
             next_sequence = cursor
-            idle_since = time.monotonic()
+            idle_since = _stream_clock()
             last_heartbeat = idle_since
             while True:
                 # One hop off the event loop per tick, covering both reads.
@@ -537,14 +541,14 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     _poll_execution_stream, repository, job_id, owner, next_sequence
                 )
                 if events:
-                    idle_since = time.monotonic()
+                    idle_since = _stream_clock()
                     for event in events:
                         next_sequence = event.sequence
                         yield _execution_sse_line(event)
                     last_heartbeat = idle_since
                 if current is None or current.status in TerminalExecutionStatus:
                     return
-                now = time.monotonic()
+                now = _stream_clock()
                 if not events:
                     if now - idle_since >= EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS:
                         return
