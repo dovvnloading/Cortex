@@ -249,6 +249,12 @@ def test_agent_defaults_to_fail_closed_for_code_proposals() -> None:
         "Summarise the attached document",
         "Write a short story about a request for help",
         "Analyze this poem about data",
+        "Help me start a blog",
+        "Start the process of writing my novel",
+        "Run me through the data from the survey",
+        "Launch a request for proposals for our office move",
+        "Help me start a network of local volunteers",
+        "Start a conversation with my landlord about the request",
     ),
 )
 def test_writing_and_summarising_turns_do_not_get_the_contract(query: str) -> None:
@@ -262,6 +268,10 @@ def test_writing_and_summarising_turns_do_not_get_the_contract(query: str) -> No
     output for creative writing. Small models also answered "read this
     document" with a code-execution envelope instead of reading the
     attachment already in the prompt.
+
+    The execution verbs had the same two flaws: "start", "run" and friends
+    paired with "process", "data", "request" or "network" anywhere in the
+    sentence, so "start the process of writing my novel" was a code turn.
     """
     assert should_offer_code_execution(query) is False
 
@@ -294,6 +304,12 @@ def test_the_explanation_guard_is_reachable(query: str) -> None:
         "Write a file called notes.txt",
         "Parse the attached spreadsheet",
         "Fetch that url and save the json",
+        "Run the tests",
+        "Start my python script",
+        "Launch the app",
+        "Execute the command in the attached file",
+        "Run the script in this folder",
+        "Start the application and tell me if it crashes",
     ),
 )
 def test_real_local_tasks_still_receive_the_contract(query: str) -> None:
