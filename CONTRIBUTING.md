@@ -108,6 +108,29 @@ When API models change, regenerate and review both contract artifacts:
 python tools/generate_contracts.py --write
 ```
 
+### Workflow and dependency checks
+
+The GitHub Actions workflows are part of the code and get the same treatment:
+
+- `actionlint` checks them for mistakes (bad expressions, unknown keys, wrong
+  runner labels) and `zizmor` audits them for security (unpinned actions,
+  template injection, persisted credentials). Both are pinned in the dev lock
+  and run in `check.ps1` and in CI's `fast` job. Every `uses:` is pinned to a
+  commit with the version as a trailing comment; to bump one, look up the
+  commit for the new tag and change both.
+- A `dependency-review` job fails a pull request that adds a dependency with
+  a known vulnerability.
+- CodeQL (GitHub's default setup) scans Python, TypeScript and the workflows
+  on every push and pull request and weekly, and Dependabot alerts are on.
+  Results appear under the repository's Security tab; neither opens pull
+  requests.
+- The `Dependency refresh` workflow runs on the first of each month, or on
+  demand from the Actions tab. It regenerates both Python locks with
+  `uv pip compile --upgrade` and `frontend/package-lock.json` with
+  `npm update --package-lock-only`, within the ranges already declared, and
+  opens one grouped pull request. A pull request opened by a workflow does
+  not start CI on its own: close and reopen it, or push to its branch.
+
 ## Pull requests
 
 - Keep each pull request limited to one staged architectural concern.
@@ -162,4 +185,5 @@ boundary requires them.
 ## Security reports
 
 Please use GitHub private vulnerability reporting for security issues rather
-than public issues. See [SECURITY.md](SECURITY.md).
+than public issues. See [SECURITY.md](SECURITY.md). Findings from CodeQL,
+Dependabot and dependency review are in the repository's Security tab.
