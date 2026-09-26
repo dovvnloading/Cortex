@@ -86,6 +86,7 @@ def test_server_supervisor_hands_reserved_socket_to_uvicorn_and_closes_it():
     supervisor = supervisor_module.ServerSupervisor(FakeServer(), sockets=[listener])
     supervisor.start()
     supervisor.thread.join(timeout=1)
+    assert not supervisor.thread.is_alive()
 
     assert calls == [[listener]]
     assert listener.fileno() == -1
@@ -1278,3 +1279,4 @@ def test_wait_for_http_ignores_system_and_environment_proxies(monkeypatch) -> No
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+    assert not thread.is_alive()

@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Event
@@ -717,8 +716,9 @@ def test_job_registry_enforces_ownership_and_one_active_job():
         def runner(sink, cancel_event):
             captured["sink"] = sink
             worker_started.set()
-            while not cancel_event.is_set():
-                time.sleep(0.001)
+            # Bounded wait: a cancel that never arrives fails the job (and
+            # the assertions below) instead of parking this thread forever.
+            assert cancel_event.wait(timeout=5.0), "the job was never cancelled"
             release_worker.wait(timeout=1)
             return {"done": True}
 

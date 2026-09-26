@@ -78,7 +78,8 @@ class PersistenceTests(unittest.TestCase):
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join()
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "a writer thread did not finish")
 
             self.assertEqual(errors, [])
             self.assertEqual(len(manager.get_all_chats_summary()), 6)
@@ -249,7 +250,8 @@ class PersistenceTests(unittest.TestCase):
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join()
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "a writer thread did not finish")
 
             self.assertEqual(errors, [])
             expected = {f"memo {index}" for index in range(20)}

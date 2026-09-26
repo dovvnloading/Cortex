@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<10",
+    "pytest-timeout>=2.3,<3",
     "ruff==0.16.5",
     "mypy==2.3.1",
 ]
@@ -74,3 +75,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = ["backend"]
 addopts = "-ra"
+# Hang protection. A test that stops making progress fails after two minutes
+# with every thread's stack, instead of holding a CI job until its 30-minute
+# limit with nothing to read. "thread" is the only method that works on
+# Windows; it ends the whole pytest process, which is the point. pytest's own
+# faulthandler fires first so the stacks are in the log before the kill.
+timeout = 120
+timeout_method = "thread"
+faulthandler_timeout = 100

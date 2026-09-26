@@ -139,6 +139,7 @@ def test_llamacpp_chat_client_defers_owned_http_close_until_inflight_request_fin
     assert http_client.close_calls == 0
     http_client.release.set()
     worker.join(timeout=5)
+    assert not worker.is_alive()
 
     assert not errors
     assert result[0]["message"]["content"] == "ok"
