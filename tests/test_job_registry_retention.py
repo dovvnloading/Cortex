@@ -36,6 +36,21 @@ def _data_bytes(events) -> int:
     )
 
 
+async def _wait_for_status(registry: JobRegistry, job_id: str, expected: str = "succeeded") -> None:
+    """Wait for the job to reach ``expected``, bounded.
+
+    A job that never gets there used to spin this loop until the CI job's
+    30-minute limit killed it, with nothing in the log. Now it fails in five
+    seconds with the loop's stack.
+    """
+
+    async def poll() -> None:
+        while registry.status(job_id, owner="owner").status != expected:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(poll(), timeout=5.0)
+
+
 def test_job_events_obey_count_and_byte_caps() -> None:
     async def exercise() -> None:
         registry = JobRegistry(
@@ -60,8 +75,7 @@ def test_job_events_obey_count_and_byte_caps() -> None:
                 thread_id="thread",
                 runner=runner,
             )
-            while registry.status(job.job_id, owner="owner").status != "succeeded":
-                await asyncio.sleep(0.001)
+            await _wait_for_status(registry, job.job_id)
             events = [
                 event
                 async for event in registry.events(job.job_id, owner="owner")
@@ -98,8 +112,7 @@ def test_oversized_event_is_compacted_and_terminal_result_is_retained() -> None:
                 thread_id="thread",
                 runner=runner,
             )
-            while registry.status(job.job_id, owner="owner").status != "succeeded":
-                await asyncio.sleep(0.001)
+            await _wait_for_status(registry, job.job_id)
             events = [
                 event
                 async for event in registry.events(job.job_id, owner="owner")
@@ -131,8 +144,7 @@ def test_malformed_event_data_falls_back_without_failing_the_job() -> None:
                 thread_id="thread",
                 runner=runner,
             )
-            while registry.status(job.job_id, owner="owner").status != "succeeded":
-                await asyncio.sleep(0.001)
+            await _wait_for_status(registry, job.job_id)
             events = [
                 event
                 async for event in registry.events(job.job_id, owner="owner")
@@ -167,8 +179,7 @@ def test_replay_cursor_starts_at_oldest_retained_event_after_eviction() -> None:
                 thread_id="thread",
                 runner=runner,
             )
-            while registry.status(job.job_id, owner="owner").status != "succeeded":
-                await asyncio.sleep(0.001)
+            await _wait_for_status(registry, job.job_id)
             retained = [
                 event
                 async for event in registry.events(job.job_id, owner="owner")

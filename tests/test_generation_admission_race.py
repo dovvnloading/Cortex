@@ -570,8 +570,13 @@ def test_cancelling_during_preparation_still_reaches_a_terminal_job():
                 prepare=prepare,
             )
         )
-        while not preparing.is_set():
-            await asyncio.sleep(0.005)
+        async def until_preparing() -> None:
+            while not preparing.is_set():
+                await asyncio.sleep(0.005)
+
+        # Bounded: if prepare() is never entered this fails in seconds with a
+        # stack, rather than spinning until the CI job's limit.
+        await asyncio.wait_for(until_preparing(), timeout=5.0)
 
         cancelled = registry.cancel(reservation.snapshot.job_id, owner="owner")
         assert cancelled.status == "cancelling"

@@ -1236,6 +1236,7 @@ def test_crash_loop_guard_termination_does_not_block_status_polls(tmp_path: Path
 
     stop_polling.set()
     poller.join(timeout=2.0)
+    assert not poller.is_alive()
 
     assert slow_process.terminated
     assert max_poll_latency < 0.15, (
