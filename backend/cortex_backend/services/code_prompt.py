@@ -41,9 +41,15 @@ _LOCAL_TASK_RE = re.compile(
     r"parse|convert|rename|read|write|modify|edit|create|generate|save)\b"
     r"(?:\s+\S+){0,3}\s+\b" + _ARTEFACT + r"\b"
 )
-_CODE_TARGET_RE = re.compile(
-    r"\b(?:python|script|code|program|command|shell|test|tests|file|folder|directory|"
-    r"attachment|data|csv|json|spreadsheet|app|application|process|request|url|network)\b"
+# The execution verbs follow the same rule: "run", "start" and friends count
+# only when a concrete target sits within a few words of them. With any
+# distance allowed and "data", "process", "request" and "network" as targets,
+# "start the process of writing my novel", "run me through the data from the
+# survey" and "launch a request for proposals" were all admitted as code turns.
+_DIRECT_EXECUTION_RE = re.compile(
+    r"\b(?:run|execute|launch|invoke|start)\b(?:\s+\S+){0,3}\s+"
+    r"\b(?:python|scripts?|code|programs?|commands?|shell|tests?|files?|folders?|"
+    r"director(?:y|ies)|attachments?|csv|json|spreadsheets?|apps?|applications?|urls?)\b"
 )
 _NEGATED_EXECUTION_RE = re.compile(
     r"\b(?:do not|don't|never|without)\s+(?:run|execute|launch|invoke|start)\b"
@@ -76,10 +82,7 @@ def should_offer_code_execution(query: str) -> bool:
 
     direct_execution = bool(
         _REFERENTIAL_EXECUTION_RE.search(normalized)
-        or (
-            re.search(r"\b(?:run|execute|launch|invoke|start)\b", normalized)
-            and _CODE_TARGET_RE.search(normalized)
-        )
+        or _DIRECT_EXECUTION_RE.search(normalized)
     )
     if direct_execution:
         return True
