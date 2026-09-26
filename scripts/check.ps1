@@ -38,6 +38,23 @@ $frontend = Join-Path $repoRoot 'frontend'
 # Prefer npm.cmd where it exists so this script works on a default machine.
 $npm = if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { 'npm.cmd' } else { 'npm' }
 
+# pip puts a package's console scripts in the interpreter's Scripts directory
+# or the per-user one, and neither is reliably on PATH (the same reason the
+# lock check runs `python -m uv`). Look there before giving up.
+function Find-PythonScript {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $onPath = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $directories = python -c "import sysconfig; print(sysconfig.get_path('scripts')); print(sysconfig.get_path('scripts', 'nt_user'))" 2>$null
+    foreach ($directory in @($directories)) {
+        foreach ($candidate in @((Join-Path $directory "$Name.exe"), (Join-Path $directory $Name))) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    return $null
+}
+
 $results = [System.Collections.Generic.List[object]]::new()
 # Distinct from any real tool exit code so a skip is never mistaken for one.
 $SKIPPED_EXIT_CODE = 77
@@ -136,6 +153,23 @@ if (-not $SkipBackend) {
 
     Invoke-Step 'Lint Python (ruff)' {
         python -m ruff check backend tests tools main.py app_factory.py
+    }
+
+    # The same two checks as quality.yml's `Lint workflows` and `Audit
+    # workflows` steps, from the same pinned versions. zizmor runs offline
+    # here; CI has a token for the audits that consult GitHub.
+    Invoke-Step 'Lint workflows (actionlint, zizmor)' {
+        $actionlint = Find-PythonScript 'actionlint'
+        $zizmor = Find-PythonScript 'zizmor'
+        if (-not $actionlint -or -not $zizmor) {
+            Write-Host '   actionlint or zizmor is not installed; CI still enforces this.' -ForegroundColor Yellow
+            Write-Host '   Install them with: python -m pip install -r requirements-dev.lock.txt' -ForegroundColor Yellow
+            $global:LASTEXITCODE = $SKIPPED_EXIT_CODE
+            return
+        }
+        & $actionlint -shellcheck= -pyflakes=
+        if ($LASTEXITCODE -ne 0) { return }
+        & $zizmor --offline .github/workflows
     }
 
     Invoke-Step 'Type-check Python (mypy)' {

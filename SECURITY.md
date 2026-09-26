@@ -41,3 +41,12 @@ tokens, or local database files.
 
 Dependency or packaging concerns that could affect these boundaries should be
 reported privately as well.
+
+## Automated checks
+
+CodeQL scans the Python, TypeScript and workflow code on every push and pull
+request and on a weekly schedule; Dependabot alerts cover both Python locks
+and the frontend lock; a dependency-review job fails a pull request that adds
+a dependency with a known vulnerability; and the workflows themselves are
+linted with `actionlint` and audited with `zizmor`, with every action pinned
+to a commit. Findings are in the repository's Security tab.

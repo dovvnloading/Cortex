@@ -33,12 +33,13 @@ jobs:
       version: ${{ steps.declared.outputs.version }}
     steps:
       - name: Check out the tag being released
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
@@ -51,11 +52,16 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Declared version: $version"
 
+      # Values reach the script through env, never by expanding them into
+      # the script text, so a crafted tag name cannot become PowerShell.
       - name: Refuse a tag that disagrees with the declared version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          DECLARED_VERSION: ${{ steps.declared.outputs.version }}
         run: |
-          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
-          $expected = "v${{ steps.declared.outputs.version }}"
+          $tag = $env:RELEASE_TAG
+          $expected = "v$($env:DECLARED_VERSION)"
           if ($tag -ne $expected) {
             throw "Tag '$tag' does not match the declared version ('$expected'). Bump cortex_backend.__version__ and let frontend/package.json follow, or retag."
           }
@@ -69,23 +75,23 @@ jobs:
       contents: write
     steps:
       - name: Check out the tag being released
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
+      # No dependency caches in a job that produces a release artifact: a
+      # poisoned cache entry would end up inside the package.
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements.lock.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          package-manager-cache: false
 
       - name: Install dependencies
         run: python -m pip install -r requirements.lock.txt
@@ -156,8 +162,10 @@ jobs:
 
       - name: Archive the package
         shell: pwsh
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
         run: |
-          $name = "Cortex-${{ needs.verify-version.outputs.version }}-windows-x64.zip"
+          $name = "Cortex-$($env:VERSION)-windows-x64.zip"
           Compress-Archive -Path dist/Cortex/* -DestinationPath $name
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $name).Hash.ToLowerInvariant()
           "$hash  $name" | Set-Content -Encoding ascii -NoNewline SHA256SUMS.txt
@@ -167,8 +175,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           gh release create $tag $env:ARCHIVE SHA256SUMS.txt `
             --draft `
             --title "Cortex $tag" `
