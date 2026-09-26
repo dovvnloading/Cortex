@@ -1280,3 +1280,35 @@ def test_wait_for_http_ignores_system_and_environment_proxies(monkeypatch) -> No
         server.server_close()
         thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_build_app_creates_one_ssl_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Three HTTP clients, one certificate-bundle parse.
+
+    httpx builds a fresh TLS context for every client whose ``verify`` is the
+    default, and each build parses the whole bundle (about 0.25 s). build_app
+    used to pay that three times -- the Ollama client and both llama.cpp
+    clients -- before the window could open and in every test that builds the
+    app.
+    """
+    import httpx
+    import httpx._transports.default as httpx_transport
+    from app_factory import build_app
+
+    real_create_ssl_context = httpx.create_ssl_context
+    fresh_builds = 0
+
+    def counting_create_ssl_context(verify=True, **kwargs):
+        nonlocal fresh_builds
+        if verify is True:
+            fresh_builds += 1
+        return real_create_ssl_context(verify=verify, **kwargs)
+
+    # app_factory calls the public name; every httpx.Client calls the copy the
+    # transport module imported, so both are counted.
+    monkeypatch.setattr(httpx, "create_ssl_context", counting_create_ssl_context)
+    monkeypatch.setattr(httpx_transport, "create_ssl_context", counting_create_ssl_context)
+
+    build_app(data_dir=tmp_path / "app-data", serve_frontend=False)
+
+    assert fresh_builds == 1

@@ -90,9 +90,15 @@ def build_app(
         adopt_from=paths.database,
     )
     ollama_host = os.environ.get("CORTEX_OLLAMA_HOST", "http://127.0.0.1:11434")
+    # One TLS context for every HTTP client built here. httpx builds a fresh
+    # one per client by default, and each build parses the whole certificate
+    # bundle: about a quarter of a second, paid three times before the window
+    # could open and in every test that builds the app.
+    ssl_context = httpx.create_ssl_context()
     client = ollama.Client(
         host=ollama_host,
         timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
+        verify=ssl_context,
     )
 
     def gguf_directory() -> Path:
@@ -110,10 +116,13 @@ def build_app(
         release=CURRENT_RELEASE,
         gpu_backend_setting=lambda: settings_repository.load().settings.llamacpp.gpu_backend,
         models_directory=gguf_directory,
+        verify=ssl_context,
     )
     gguf_model_directory = GGUFModelDirectory(gguf_directory)
     model_catalog = CombinedModelCatalog(ModelService(client), gguf_model_directory)
-    llamacpp_chat_client = LlamaCppChatClient(llamacpp_manager, models_directory=gguf_directory)
+    llamacpp_chat_client = LlamaCppChatClient(
+        llamacpp_manager, models_directory=gguf_directory, verify=ssl_context
+    )
     routing_chat_client = RoutingChatClient(
         OllamaChatClient(client),
         llamacpp_chat_client,

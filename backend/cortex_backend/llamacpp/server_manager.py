@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import ssl
 import subprocess
 import sys
 import threading
@@ -462,6 +463,7 @@ class LlamaServerManager:
         health_timeout_seconds: float = 180.0,
         launcher: ProcessLauncher = default_launcher,
         http_client: httpx.Client | None = None,
+        verify: ssl.SSLContext | bool = True,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._fetcher = fetcher
@@ -470,8 +472,12 @@ class LlamaServerManager:
         self._models_directory = models_directory
         self._health_timeout_seconds = health_timeout_seconds
         self._launcher = launcher
+        # ``verify`` only shapes the client this manager owns; the app passes
+        # one shared TLS context so each client does not parse the
+        # certificate bundle again.
         self._http = http_client if http_client is not None else httpx.Client(
-            timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)
+            timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0),
+            verify=verify,
         )
         self._owns_http_client = http_client is None
 
