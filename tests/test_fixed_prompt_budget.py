@@ -260,7 +260,7 @@ def test_memories_are_dropped_from_a_small_window_and_the_user_is_told() -> None
     kept = [message for message in prompt if message["role"] == "assistant"]
     assert 0 < len(kept) < 12
     (notice,) = sink.notices("prompt_trimmed")
-    assert "saved memories" in notice.message and "code-task" not in notice.message
+    assert notice.message.startswith("Memory did not fit") and "code-task" not in notice.message
     assert notice.data == {"notice": True, "dropped_memories": True, "dropped_code_contract": False}
 
 
@@ -278,7 +278,27 @@ def test_the_code_contract_is_dropped_when_it_does_not_fit_and_no_proposal_is_ta
     assert PromptTemplate._load_code_execution_prompt()[:80] not in _system_text(prompt)
     assert result.code_execution_proposal is None
     (notice,) = sink.notices("prompt_trimmed")
-    assert "code-task" in notice.message and "saved memories" not in notice.message
+    assert "code-task" in notice.message and "Memory" not in notice.message
+
+
+def test_the_notice_names_both_when_both_are_dropped_even_with_nothing_saved() -> None:
+    """Memory is on by default and usually empty; what goes is its instructions, and the notice says so."""
+    client = _RecordingClient()
+    sink = _Sink()
+
+    _service(client).generate(
+        _snapshot(num_ctx=2048, memories_enabled=True, code_execution_eligible=True),
+        progress_sink=sink,
+        history_messages=_history(2),
+    )
+
+    (notice,) = sink.notices("prompt_trimmed")
+    assert notice.message == (
+        "Memory and the local code-task instructions did not fit the model's context window, "
+        "so this reply was written without them. "
+        "Raise the context window in Settings to include them."
+    )
+    assert notice.data == {"notice": True, "dropped_memories": True, "dropped_code_contract": True}
 
 
 def test_only_what_is_over_the_limit_is_dropped() -> None:

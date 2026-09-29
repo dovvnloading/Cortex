@@ -110,16 +110,21 @@ def _history_notice(report: HistoryWindowReport) -> str:
 
 
 def _prompt_trim_notice(plan: FixedPromptPlan) -> str:
-    """What the user is told when the memory or code-task instructions did not fit the window."""
+    """What the user is told when the memory or code-task instructions did not fit the window.
+
+    "Memory", not "your saved memories": it is the memory instructions that go,
+    and they go whether or not anything has been saved yet.
+    """
     left_out = []
     if plan.dropped_memories:
-        left_out.append("Your saved memories")
+        left_out.append("Memory")
     if plan.dropped_code_contract:
         left_out.append("the local code-task instructions")
+    them = "it" if left_out == ["Memory"] else "them"
     return (
         f"{' and '.join(left_out)} did not fit the model's context window, "
-        "so they were left out of this reply. "
-        "Raise the context window in Settings to include them."
+        f"so this reply was written without {them}. "
+        f"Raise the context window in Settings to include {them}."
     )
 
 
