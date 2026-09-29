@@ -1122,18 +1122,32 @@ class _WindowsJobExtendedLimitInformation(ctypes.Structure):
     ]
 
 
+class _WindowsJobUiRestrictions(ctypes.Structure):
+    _fields_ = [("ui_restrictions_class", wintypes.DWORD)]
+
+
 class _WindowsProcessJob:
     """Kill-on-close Job Object for one brokered child process.
 
     The handle lives in the code worker, so terminating that worker also closes
     the job and tears down any descendants spawned by the approved process.
+
+    This module has to stay importable without its siblings or
+    ``cortex_backend.core`` (see ``test_code_execution_worker_import_stays_lean``),
+    so it carries its own small copy of the Win32 job definitions that
+    ``cortex_backend.core.win_jobs`` also has. The limits are the same ones:
+    kill-on-close, per-process and job-wide committed memory, a live-process
+    count, per-process CPU time, and every user-interface restriction.
     """
 
     _PROCESS_TIME = 0x00000002
     _ACTIVE_PROCESS = 0x00000008
     _PROCESS_MEMORY = 0x00000100
+    _JOB_MEMORY = 0x00000200
     _KILL_ON_CLOSE = 0x00002000
     _EXTENDED_LIMIT_INFORMATION = 9
+    _BASIC_UI_RESTRICTIONS = 4
+    _UILIMIT_ALL = 0x000000FF
 
     def __init__(
         self,
@@ -1172,10 +1186,15 @@ class _WindowsProcessJob:
             | self._PROCESS_TIME
             | self._ACTIVE_PROCESS
             | self._PROCESS_MEMORY
+            | self._JOB_MEMORY
         )
         limits.basic_limit_information.per_process_user_time = int(cpu_seconds * 10_000_000)
         limits.basic_limit_information.active_process_limit = active_process_limit
         limits.process_memory_limit = memory_limit
+        # The job as a whole is held to the same figure, so descendants cannot
+        # each take a per-process share of memory on top of the child's own.
+        limits.job_memory_limit = memory_limit
+        ui_restrictions = _WindowsJobUiRestrictions(self._UILIMIT_ALL)
         process_handle = getattr(process, "_handle", None)
         if process_handle is None:
             process_handle = getattr(getattr(process, "_popen", None), "_handle", None)
@@ -1185,12 +1204,21 @@ class _WindowsProcessJob:
             self.close()
             raise CodeExecutionError("process_isolation_unavailable")
         try:
-            if not kernel32.SetInformationJobObject(
-                handle,
-                self._EXTENDED_LIMIT_INFORMATION,
-                ctypes.byref(limits),
-                ctypes.sizeof(limits),
-            ) or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process_handle)):
+            if (
+                not kernel32.SetInformationJobObject(
+                    handle,
+                    self._EXTENDED_LIMIT_INFORMATION,
+                    ctypes.byref(limits),
+                    ctypes.sizeof(limits),
+                )
+                or not kernel32.SetInformationJobObject(
+                    handle,
+                    self._BASIC_UI_RESTRICTIONS,
+                    ctypes.byref(ui_restrictions),
+                    ctypes.sizeof(ui_restrictions),
+                )
+                or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process_handle))
+            ):
                 raise CodeExecutionError("process_isolation_unavailable")
         except Exception:
             self.close()
@@ -1202,12 +1230,58 @@ class _WindowsProcessJob:
             self._kernel32.CloseHandle(handle)
 
 
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _resume_suspended_process(process: Any) -> None:
+    """Let a process created with ``CREATE_SUSPENDED`` start running.
+
+    ``NtResumeProcess`` is exported by ntdll but not documented by Microsoft;
+    psutil resumes processes with it too. It was chosen over walking a Toolhelp
+    thread snapshot because a process that has never run has exactly one
+    thread and this resumes it without having to find it. Anything but success
+    is reported as isolation being unavailable, and the caller ends the still
+    suspended process.
+    """
+
+    if os.name != "nt":
+        raise CodeExecutionError("process_isolation_unavailable")
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise CodeExecutionError("process_isolation_unavailable")
+    try:
+        ntdll = ctypes.WinDLL("ntdll.dll", use_last_error=True)
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        status = ntdll.NtResumeProcess(wintypes.HANDLE(int(handle)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        raise CodeExecutionError("process_isolation_unavailable") from None
+    # An NTSTATUS: negative values are failures.
+    if status < 0:
+        raise CodeExecutionError("process_isolation_unavailable")
+
+
+def _minimal_worker_environment() -> dict[str, str]:
+    """``SystemRoot`` on Windows, which most binaries cannot run without, and nothing else."""
+
+    system_root = os.environ.get("SystemRoot") if os.name == "nt" else None
+    return {"SystemRoot": system_root} if system_root else {}
+
+
 def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -> dict[str, Any]:
-    """Run one approved process with bounded output and descendant cleanup."""
+    """Run one approved process with bounded output and descendant cleanup.
+
+    On Windows the child is created suspended, placed in its job object while it
+    has executed nothing, and only then resumed, so it cannot start a
+    descendant that escapes the job's kill-on-close and limits. What remains: a
+    job constrains memory, process count and the user interface, not files or
+    the network, and nested jobs need Windows 8 or later (this worker is
+    itself in a job).
+    """
 
     kwargs: dict[str, Any] = {
         "cwd": str(workspace),
-        "env": {},
+        "env": _minimal_worker_environment(),
         "shell": False,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
@@ -1217,6 +1291,7 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
         kwargs["creationflags"] = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | _CREATE_SUSPENDED
         )
     else:
         kwargs["start_new_session"] = True
@@ -1226,6 +1301,7 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
     try:
         if os.name == "nt":
             job = _WindowsProcessJob(process)
+            _resume_suspended_process(process)
         output_lock = ThreadLock()
         output_exceeded = ThreadEvent()
         remaining = MAX_CODE_OUTPUT_BYTES
@@ -1780,10 +1856,9 @@ def _apply_resource_limits() -> None:
 def _scrub_worker_environment() -> None:
     """Remove inherited credentials/proxy settings before broker calls."""
 
-    system_root = os.environ.get("SystemRoot") if os.name == "nt" else None
+    kept = _minimal_worker_environment()
     os.environ.clear()
-    if system_root:
-        os.environ["SystemRoot"] = system_root
+    os.environ.update(kept)
 
 
 def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, Any], workspace: str) -> None:
