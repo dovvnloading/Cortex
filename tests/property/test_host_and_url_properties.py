@@ -203,6 +203,29 @@ def test_a_download_request_resolves_to_a_safe_address_and_file_name_or_is_refus
         assert os.path.basename(urlsplit(url).path) == filename
 
 
+@given(
+    scheme=st.sampled_from(("http", "HTTP", "ftp", "file", "ws", "wss", "data", "javascript", "gopher", "")),
+    host=_HOSTNAMES,
+)
+def test_only_an_https_url_is_ever_resolved(scheme: str, host: str) -> None:
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(DownloadSource(source="url", url=f"{scheme}://{host}/model.gguf"))
+
+
+@given(
+    head=st.from_regex(r"[a-z0-9]{1,8}", fullmatch=True),
+    separator=st.sampled_from(("/", "\\", "../", "..\\", "/../", "%2f", "\n", "\x00", " ", ":", "*")),
+    tail=st.from_regex(r"[a-z0-9]{1,8}", fullmatch=True),
+)
+def test_a_huggingface_file_name_is_one_plain_component(head: str, separator: str, tail: str) -> None:
+    """A name that could name a place other than the models folder is refused, not trimmed."""
+
+    request = DownloadSource(source="huggingface", repo_id="owner/name", filename=f"{head}{separator}{tail}.gguf")
+
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(request)
+
+
 @given(request=_SOURCES)
 def test_resolving_a_download_request_is_deterministic(request: DownloadSource) -> None:
     def outcome() -> object:
