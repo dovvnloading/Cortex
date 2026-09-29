@@ -689,6 +689,15 @@ class SynthesisAgent:
         return token_budget.estimate_tokens(value, token_budget.TOKEN_RATIOS.chars_per_token(model))
 
     @staticmethod
+    def _raw_prompt_tokens(prompt: Sequence[Mapping[str, Any]], ratio: float) -> int:
+        """Estimated tokens in a whole prompt, template overhead included, before the safety margin."""
+        return sum(
+            token_budget.estimate_tokens(str(item.get("content", "")), ratio)
+            + token_budget.MESSAGE_OVERHEAD_TOKENS
+            for item in prompt
+        )
+
+    @staticmethod
     def estimate_prompt_tokens(prompt: Sequence[Mapping[str, Any]], model: str | None = None) -> int:
         """Estimated size of a whole prompt: chat-template overhead and the safety margin included.
 
@@ -696,12 +705,7 @@ class SynthesisAgent:
         the margin lives in exactly one place.
         """
         ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
-        raw = sum(
-            token_budget.estimate_tokens(str(item.get("content", "")), ratio)
-            + token_budget.MESSAGE_OVERHEAD_TOKENS
-            for item in prompt
-        )
-        return token_budget.with_safety_margin(raw)
+        return token_budget.with_safety_margin(SynthesisAgent._raw_prompt_tokens(prompt, ratio))
 
     @classmethod
     def output_token_reservation(cls, num_ctx: int) -> int:
@@ -1569,11 +1573,21 @@ class SynthesisAgent:
         history left that still does not fit is reported by the runtime.
         """
         texts = [str(message.get("content", "")) for message in prompt_messages]
+        # Learning keeps its guards: a reading that no tokenizer could produce is
+        # not turned into a ratio.
         token_budget.TOKEN_RATIOS.observe(self.gen_model, texts, measured_tokens)
         limit = max(256, num_ctx) - self.output_token_reservation(num_ctx)
-        ratio = token_budget.measure_chars_per_token(texts, measured_tokens)
-        if measured_tokens <= limit or ratio is None or not turns:
+        if measured_tokens <= limit or not turns:
             return prompt_messages, 0
+        # The count is exact, so it is believed however far the estimate was off.
+        # It used to be turned into a characters-per-token ratio for ordinary
+        # text and thrown away when that ratio looked implausible -- which is
+        # exactly what CJK and emoji on a byte-fallback vocabulary produce, so
+        # the prompts the estimate was worst for were sent whole and unannounced.
+        # What each shorter prompt would cost is still an estimate; it is scaled
+        # by how far off the estimate was for this one.
+        ratio = token_budget.TOKEN_RATIOS.chars_per_token(self.gen_model)
+        scale = measured_tokens / self._raw_prompt_tokens(prompt_messages, ratio)
         remaining: list[dict[str, Any]] = [dict(turn) for turn in turns]
         dropped = 0
         while remaining and measured_tokens > limit:
@@ -1581,11 +1595,7 @@ class SynthesisAgent:
             dropped += 1
             prompt_messages = build_prompt(remaining)
             measured_tokens = token_budget.with_safety_margin(
-                sum(
-                    token_budget.estimate_tokens(str(message.get("content", "")), ratio)
-                    + token_budget.MESSAGE_OVERHEAD_TOKENS
-                    for message in prompt_messages
-                )
+                math.ceil(scale * self._raw_prompt_tokens(prompt_messages, ratio))
             )
         return prompt_messages, dropped
 

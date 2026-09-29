@@ -526,6 +526,26 @@ class _TokenizingClient:
         return {"message": {"content": "ok"}}
 
 
+class _WideTokenizingClient(_TokenizingClient):
+    """Counts like a byte-fallback vocabulary: several tokens for every CJK character.
+
+    ``tokens_per_wide`` is what the tokenizer really charges per wide character,
+    and the estimate's floor is only 1.2, so the truth is well above it.
+    """
+
+    def __init__(self, tokens_per_wide: float, *, chars_per_token: float = 4.0):
+        super().__init__(chars_per_token)
+        self.tokens_per_wide = tokens_per_wide
+
+    def tokenize(self, *, model, text, options, cancellation_event=None):
+        self.counted.append(text)
+        wide = token_budget.count_wide_characters(text)
+        return int(wide * self.tokens_per_wide + (len(text) - wide) / self.chars_per_token)
+
+    def true_tokens(self, messages: list[dict]) -> int:
+        return sum(self.tokenize(model="", text=message["content"], options={}) + 4 for message in messages)
+
+
 class MeasuredPromptTests(unittest.TestCase):
     """A runtime that can count tokens is asked once, about the finished prompt."""
 
@@ -571,6 +591,53 @@ class MeasuredPromptTests(unittest.TestCase):
         characters = sum(len(message["content"]) for message in sent)
         limit = 16384 - SynthesisAgent.output_token_reservation(16384)
         self.assertLessEqual(characters / 2.0 + 4 * len(sent), limit)
+
+    def test_wide_text_the_estimate_badly_undercounts_is_still_trimmed_by_the_measured_count(self):
+        """The tokenizer's number is exact, so it must be used exactly when the estimate is far off.
+
+        CJK and emoji on a byte-fallback vocabulary cost two or three tokens a
+        character against an estimate of 1.2. The count used to be reduced to a
+        ratio for the *ordinary* characters and discarded as implausible when
+        that ratio fell outside a sane range -- so the prompts the estimate was
+        worst for went out whole, with no trim and no notice, and the model's
+        runtime then dropped their beginning silently.
+        """
+        limit = 16384 - SynthesisAgent.output_token_reservation(16384)
+        for tokens_per_wide in (1.5, 2.0, 3.0):
+            with self.subTest(tokens_per_wide=tokens_per_wide):
+                token_budget.TOKEN_RATIOS.reset()
+                client = _WideTokenizingClient(tokens_per_wide)
+                agent = SynthesisAgent(self.MODEL, "title", "translate", client)
+                # About 1.3 times the window in real tokens, whatever the vocabulary.
+                per_exchange = int(1.3 * limit / tokens_per_wide / 14)
+                history = SynthesisAgent._paired_history_messages(
+                    [
+                        message
+                        for index in range(14)
+                        for message in (
+                            {"role": "user", "content": chr(0x554F) * 20 + str(index)},
+                            {"role": "assistant", "content": chr(0x7B54) * per_exchange},
+                        )
+                    ]
+                )
+                notices: list[str] = []
+
+                agent.generate(
+                    "question", "unused", [], False, None, options={"num_ctx": 16384},
+                    history_messages=history,
+                    on_delta=lambda kind, text, sink=notices: sink.append(text) if kind == "notice" else None,
+                )
+
+                sent = client.sent or []
+                kept = sent[1:-1]
+                self.assertGreater(client.true_tokens(list(history) + [{"content": "x"}]), limit)
+                self.assertLess(len(kept), len(history), "history must have been dropped")
+                self.assertGreater(len(kept), 0, "and not all of it")
+                # Whole exchanges from the old end, the note saying so, and the
+                # prompt that is sent really fits the window by the tokenizer.
+                self.assertTrue(kept[0]["content"].startswith(HISTORY_OMISSION_NOTE))
+                self.assertLessEqual(client.true_tokens(sent), limit)
+                self.assertEqual(len(notices), 1)
 
     def test_a_prompt_that_fits_the_measured_count_is_left_alone(self):
         client = _TokenizingClient(4.0)
