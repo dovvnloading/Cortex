@@ -104,10 +104,12 @@ source = ["backend/cortex_backend"]
 relative_files = true
 
 [tool.coverage.report]
-# One point below the total measured when this gate was added. It only ratchets
-# up: raise it in the pull request that adds tests, never lower it to make a
-# change pass. Lowering it needs a stated reason in the pull request.
-fail_under = 79
+# One point below the total CI measured when this gate was added: 79.4 on the
+# Python 3.11 lock (a local run on 3.14 reads about 80.0, so a floor set from
+# that would sit only 0.4 under the number CI actually enforces). It only
+# ratchets up: raise it in the pull request that adds tests, never lower it to
+# make a change pass. Lowering it needs a stated reason in the pull request.
+fail_under = 78.4
 skip_covered = true
 show_missing = false
 precision = 1
