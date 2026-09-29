@@ -287,6 +287,10 @@ def _history_turn(message: Mapping[str, Any]) -> dict[str, Any]:
     fed its answers back in the target language, a small model starts answering
     in it, and the translation model is then asked to translate a language into
     itself.
+
+    An answer with no original is shown as stored. That covers every untranslated
+    answer, and also one translated before originals were kept: that one is still
+    shown in the target language, and only newer turns are fed back untranslated.
     """
     turn = dict(message)
     original = turn.get("original_content")

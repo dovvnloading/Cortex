@@ -145,7 +145,11 @@ transcript.](.github/images/workspace-light.png)
   state. Ordinary assistant text and fenced code are never executed.
 - **Optional response translation.** A configured local model can translate
   each response into a target language, off by default and set independently
-  of the chat model.
+  of the chat model. The untranslated answer is kept beside the translation and
+  is what the chat model sees as its own earlier turn, so the conversation it
+  continues stays in one language. That applies to answers translated from this
+  version on: one translated by an earlier version has no untranslated copy, so
+  the model still sees it in the target language.
 - **Native local runtime.** The API binds to loopback, the native handoff uses
   an expiring session token, and the embedded WebView uses a private Cortex-owned
   profile.

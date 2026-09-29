@@ -233,8 +233,12 @@ def _migrate_to_v5(connection: sqlite3.Connection) -> None:
     With translation on, ``content`` holds the translation the user reads and
     ``original_content`` the untranslated answer. The model is shown the
     original as its own earlier turn, and titles are made from it, so the
-    conversation it continues stays in one language. NULL means ``content``
-    is what the model wrote, which is every message that existed before this.
+    conversation it continues stays in one language. NULL means there is no
+    separate original, so ``content`` is shown to the model as it stands. That
+    is right for an answer that was never translated. It is not for one
+    translated before this column existed: its original was not kept and is not
+    reconstructed, so the model keeps seeing that answer in the target language
+    and only turns translated from now on get the benefit.
     """
     add_column_if_missing(connection, "messages", "original_content", "TEXT")
 

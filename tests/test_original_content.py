@@ -131,7 +131,13 @@ def _columns(path: Path | str) -> set[str]:
         probe.close()
 
 
-def test_a_database_from_before_the_column_upgrades_and_reads_as_untranslated(tmp_path: Path) -> None:
+def test_a_database_from_before_the_column_upgrades_and_its_answers_have_no_original(tmp_path: Path) -> None:
+    """Every earlier answer has no original, whether or not it was translated.
+
+    An answer translated by the earlier release is stored in the target language
+    with nothing to say what the model wrote, so the model keeps seeing it that
+    way; the upgrade never rewrites a row to guess otherwise.
+    """
     path = tmp_path / "chats.sqlite"
     _write_version_4_database(path)
 
