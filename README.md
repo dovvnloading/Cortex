@@ -410,7 +410,9 @@ restore.
   successful start, and the previous file as `startup.log.1`) and
   `logs\cortex.log` (what the backend and launcher log, rotating at 1 MiB with
   three backups; `--log-level` sets its verbosity). Both are redacted for
-  credential-like text, but read them before sharing.
+  credential-like text, and a traceback in `cortex.log` keeps only its frames
+  and exception class names, never an exception message. Read them before
+  sharing anyway.
 - If a previous Cortex instance is already running, launching Cortex again
   restores its native window rather than starting a second server. If that
   instance is still starting, the second launch waits up to 90 seconds for its

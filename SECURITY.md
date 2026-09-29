@@ -44,9 +44,12 @@ tokens, or local database files.
 - Cortex does not log prompts, responses, memories or credentials. As a second
   line of defence its runtime log (`logs\cortex.log`) and startup log redact
   values that follow credential-like or content-like names (`token=`, `prompt=`,
-  `Authorization: Bearer ...` and similar), keep each record to one bounded line,
-  and stay bounded in size. That filter matches names, not meaning: free-form
-  text a future change logged carelessly would not be caught.
+  `Authorization: Bearer ...` and similar, including compound names such as
+  `session_token`), keep each record to one bounded line, and stay bounded in
+  size. A traceback in the runtime log keeps its frames and the class of each
+  exception, and never an exception message or a source line. For an ordinary
+  record that filter matches names, not meaning: free-form text a future change
+  logged carelessly would not be caught.
 - External links and rendered model content are validated by the frontend.
 - Model-produced memory actions are validated and destructive clears require
   explicit user confirmation. A memory the model proposes is only shown under
