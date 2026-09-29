@@ -42,6 +42,7 @@ from cortex_backend.repositories.sqlite_backup import (
     snapshot_database,
     utc_now_iso,
 )
+from cortex_backend.repositories.sqlite_reclaim import reclaim_free_space
 from cortex_backend.repositories.sqlite_schema import (
     Migration,
     SchemaTooNewError,
@@ -345,6 +346,7 @@ class DatabaseManager:
             self._snapshot_before_upgrade()
             self._create_tables()
             self._refresh_startup_backup(primary_verified=primary_verified)
+            self._reclaim_free_space()
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -955,6 +957,13 @@ class DatabaseManager:
         connection: sqlite3.Connection | None = None
         try:
             connection = open_for_upgrade(self.db_path)
+            if self._is_new_database(connection):
+                # Only a database with no tables yet can be given this, and it
+                # has to come before write-ahead logging is switched on: it lets
+                # a history that has been cleared give its disk space back (see
+                # sqlite_reclaim). Existing files are converted later, when
+                # there is enough to give back to make that worth doing.
+                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
             prepare_database(connection, _MIGRATIONS, target=self.SCHEMA_VERSION)
         except SchemaTooNewError as exc:
             raise self._unsupported_schema_error(exc.version) from exc
@@ -993,6 +1002,41 @@ class DatabaseManager:
                 "AND group_id NOT IN (SELECT id FROM chat_groups)"
             )
             logging.info("Database schema is at version %d.", stored_version(conn))
+
+    @staticmethod
+    def _is_new_database(connection: sqlite3.Connection) -> bool:
+        """Whether the file has never held a table: brand new, or created empty."""
+        return (
+            stored_version(connection) == 0
+            and connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None
+        )
+
+    def _reclaim_free_space(self) -> None:
+        """Give the disk space of deleted chats back, at startup and only when safe.
+
+        Deleting history frees pages inside the file but never makes the file
+        smaller. When more than a quarter of it is free (see sqlite_reclaim) they
+        are handed back, and only under these conditions:
+
+        * a backup of this very content was just written and verified this
+          launch, so the one operation that rewrites the whole file has a
+          restore point (a failed backup skips it, and the next launch tries);
+        * it runs here, in the constructor, before the application serves a
+          request, so it never competes with a write, and another connection
+          holding the write lock only makes it give up;
+        * it is bounded in time and in size, and it is all-or-nothing, so
+          whatever the outcome the file holds exactly the rows it held.
+
+        A failure is logged and ignored, like a failed backup: it is not a
+        reason to refuse to start.
+        """
+        if self.backup_status.state != "ok" or not os.path.exists(self.backup_path):
+            return
+        outcome = reclaim_free_space(self.db_path)
+        if outcome in ("trimmed", "rewritten"):
+            logging.info("Returned unused space in the chat database to the disk (%s).", outcome)
+        elif outcome != "nothing_to_do":
+            logging.info("Left unused space in the chat database in place (%s).", outcome)
 
     @staticmethod
     def _parse_legacy_attachment(value: object) -> dict | None:

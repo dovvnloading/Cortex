@@ -1113,3 +1113,120 @@ def test_adoption_never_overwrites_a_log_already_beside_the_quarantined_file(tmp
     assert Path(f"{report.quarantined_path}-wal").read_bytes() == b"the log of the primary being quarantined now"
     assert report.adopted_sidecars == ()
     assert orphan.read_bytes() == b"stranded by an earlier attempt"
+
+
+# -- returning the disk space of deleted history ----------------------------------
+
+
+def _space_facts(path: str) -> dict[str, int]:
+    """Free pages, auto-vacuum mode and file size once the write-ahead log is folded in."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        return {
+            "free_pages": connection.execute("PRAGMA freelist_count").fetchone()[0],
+            "auto_vacuum": connection.execute("PRAGMA auto_vacuum").fetchone()[0],
+            "bytes": os.path.getsize(path),
+        }
+    finally:
+        connection.close()
+
+
+def _fill_then_delete(manager: DatabaseManager, *, keep: int) -> dict[str, dict]:
+    """40 chats of 12 messages of about 4 KB, of which all but ``keep`` are deleted."""
+    turns = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"{index:02d} " + "y" * 4000}
+        for index in range(12)
+    ]
+    for number in range(40):
+        manager.create_chat_from_messages(f"chat-{number}", f"Chat {number}", turns)
+    for number in range(keep, 40):
+        manager.delete_chat(f"chat-{number}")
+    return {f"chat-{number}": manager.load_chat(f"chat-{number}") for number in range(keep)}
+
+
+def _reclaimable_paths(tmp_path: Path) -> tuple[str, str]:
+    return str(tmp_path / "chat.sqlite"), str(tmp_path / "legacy")
+
+
+def test_startup_reclaims_free_pages_after_large_deletes(tmp_path: Path) -> None:
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["auto_vacuum"] == 2  # a new database is created reclaimable
+    kept = _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+    assert before["free_pages"] > 300
+
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    after = _space_facts(db_path)
+    assert after["free_pages"] == 0
+    assert after["bytes"] < before["bytes"] / 4
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert reopened.backup_status == ("ok", None)
+    assert DatabaseManager._database_is_valid(reopened.backup_path)
+    assert DatabaseManager._database_is_valid(db_path)
+
+
+def test_startup_converts_an_existing_database_once_most_of_it_is_free(tmp_path: Path) -> None:
+    """A file made before this release has no auto-vacuum; one rewrite fixes that."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    connection = sqlite3.connect(db_path)
+    for step in range(1, DatabaseManager.SCHEMA_VERSION + 1):
+        storage._MIGRATIONS[step](connection)
+    connection.execute(f"PRAGMA user_version = {DatabaseManager.SCHEMA_VERSION}")
+    connection.commit()
+    connection.close()
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["auto_vacuum"] == 0  # an existing file is not silently altered
+    kept = _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    after = _space_facts(db_path)
+    assert (after["free_pages"], after["auto_vacuum"]) == (0, 2)
+    assert after["bytes"] < before["bytes"] / 4
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert DatabaseManager._database_is_valid(db_path)
+
+
+def test_a_database_that_is_mostly_in_use_is_not_touched_at_startup(tmp_path: Path) -> None:
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    _fill_then_delete(manager, keep=38)
+    before = _space_facts(db_path)
+
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    assert _space_facts(db_path) == before
+
+
+def test_free_pages_are_left_alone_when_the_startup_backup_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite is only ever done with a backup of the same content taken first."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+    attempts: list[str] = []
+
+    def reclaim(*_args, **_kwargs):
+        attempts.append("ran")
+        return "trimmed"
+
+    def no_backup(self, **_kwargs):
+        raise PersistenceError("injected: the disk is full", operation="backup")
+
+    monkeypatch.setattr(storage, "reclaim_free_space", reclaim)
+    monkeypatch.setattr(DatabaseManager, "_create_backup", no_backup)
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    monkeypatch.undo()
+
+    assert reopened.backup_status[0] == "failed"
+    assert attempts == []
+    assert _space_facts(db_path) == before
+    # The next launch, with a backup, does it.
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["free_pages"] == 0
