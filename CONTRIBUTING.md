@@ -85,7 +85,9 @@ git config core.hooksPath .githooks
 ```
 
 The `pre-push` hook then runs the `quick` tier and aborts the push if anything
-fails. Bypass it in an emergency with `git push --no-verify`.
+fails. A push of only tags or branch deletions carries no new code, so the hook
+lets it through without running anything. Bypass it in an emergency with
+`git push --no-verify` or `CORTEX_SKIP_HOOK=1 git push`.
 
 The individual commands, if you prefer to run them by hand. These are the steps
 `check.ps1` runs and CI's `fast` job runs; the quick tier skips the ones marked

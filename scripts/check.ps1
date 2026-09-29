@@ -37,7 +37,10 @@ $frontend = Join-Path $repoRoot 'frontend'
 
 # README.md warns that PowerShell's execution policy can block npm's .ps1 shim.
 # Prefer npm.cmd where it exists so this script works on a default machine.
+# npx ships the same kind of shim, so it gets the same treatment: a bare `npx`
+# would resolve to npx.ps1 and fail under exactly the policy this works around.
 $npm = if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { 'npm.cmd' } else { 'npm' }
+$npx = if (Get-Command npx.cmd -ErrorAction SilentlyContinue) { 'npx.cmd' } else { 'npx' }
 
 # pip puts a package's console scripts in the interpreter's Scripts directory
 # or the per-user one, and neither is reliably on PATH (the same reason the
@@ -222,7 +225,7 @@ if (-not $SkipFrontend) {
 
     if ($Tier -eq 'full') {
         Invoke-Step 'Install Playwright Chromium' {
-            npx playwright install chromium
+            & $npx playwright install chromium
         } $frontend
 
         Invoke-Step 'Frontend browser tests (playwright)' {
