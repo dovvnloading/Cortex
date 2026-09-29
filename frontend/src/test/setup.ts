@@ -46,6 +46,17 @@ const initialUiState = useUiStore.getState();
 
 afterEach(() => {
   cleanup?.();
+  // Composer drafts outlive the page (see lib/composerDraft.ts), so one test's
+  // unsent text would otherwise be restored into the next test's composer.
+  if (hasDom) {
+    try {
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith("cortex.composer.")) window.localStorage.removeItem(key);
+      }
+    } catch {
+      // A test that replaced or broke storage has nothing to clean up here.
+    }
+  }
   useChatStore.setState(initialChatState, true);
   useModelStore.setState(initialModelState, true);
   useSettingsStore.setState(initialSettingsState, true);

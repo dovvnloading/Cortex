@@ -383,3 +383,52 @@ describe("how a download ends", () => {
     expect(screen.getByRole("button", { name: "Downloading…" })).toBeDisabled();
   });
 });
+
+describe("the reason a download failed, beside the form", () => {
+  // The reason used to reach the person only as a toast, and the form said
+  // "See the notification" after that toast had already gone. These render the
+  // panel without a file lister so the file name field is in plain view.
+  async function submitHuggingFaceDownload(user: ReturnType<typeof userEvent.setup>) {
+    await user.type(screen.getByLabelText(/Repo id/), "vendor/demo-GGUF");
+    await user.type(fileNameInput(), "demo.Q4_K_M.gguf");
+    await user.click(screen.getByRole("button", { name: /Download model/ }));
+  }
+
+  it("shows the reason in the form itself, not only in a notification", async () => {
+    const reason = "The downloaded file did not match the published SHA-256 checksum";
+    const { user, onDownload } = renderPanel({ onListFiles: null, onDownload: () => Promise.reject(new Error(reason)) });
+
+    await submitHuggingFaceDownload(user);
+
+    const alert = await screen.findByText(/did not match the published SHA-256 checksum/);
+    expect(alert.textContent).toBe(reason);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).not.toHaveTextContent("notification");
+    expect(onDownload).toHaveBeenCalledWith({ source: "huggingface", repo_id: "vendor/demo-GGUF", filename: "demo.Q4_K_M.gguf" });
+    expect(screen.getByLabelText(/Repo id/)).toHaveValue("vendor/demo-GGUF");
+  });
+
+  it("falls back to a generic sentence when the rejection carries no message", async () => {
+    const { user } = renderPanel({ onListFiles: null, onDownload: () => Promise.reject(undefined) });
+
+    await submitHuggingFaceDownload(user);
+
+    expect(await screen.findByText("The download did not complete. Check the details above and try again.")).toHaveAttribute("role", "alert");
+  });
+
+  it("clears the reason when the next download starts and empties the form when it succeeds", async () => {
+    const onDownload = vi.fn<(request: unknown) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("Connection reset"))
+      .mockResolvedValueOnce();
+    const { user } = renderPanel({ onListFiles: null, onDownload });
+
+    await submitHuggingFaceDownload(user);
+    expect(await screen.findByText("Connection reset")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /Download model/ }));
+
+    await waitFor(() => expect(screen.getByLabelText(/Repo id/)).toHaveValue(""));
+    expect(screen.queryByText(/Connection reset/)).not.toBeInTheDocument();
+    expect(onDownload).toHaveBeenCalledTimes(2);
+  });
+});
