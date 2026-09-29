@@ -11,7 +11,7 @@ builds is shared by both backends (``RoutingChatClient`` hands the same dict to
 whichever client the model tag selects), but the backends do not accept the
 same option keys. Options only one runtime understands therefore have to be
 filtered out by the client that cannot use them -- see
-``_LLAMACPP_ONLY_OPTION_KEYS`` below -- so a caller can set them
+``LLAMACPP_ONLY_OPTION_KEYS`` below -- so a caller can set them
 unconditionally without having to know which runtime will serve the call.
 """
 
@@ -34,8 +34,9 @@ GGUF_PREFIX = "gguf:"
 # unknown option keys rather than ignoring them, so forwarding these would
 # turn a harmless "no constraint available on this backend" into a failed
 # turn. Note that min_p is deliberately absent: it is a legitimate Ollama
-# option and must keep flowing through.
-_LLAMACPP_ONLY_OPTION_KEYS = frozenset({"grammar", "response_format"})
+# option and must keep flowing through. These are also the bulk payloads the
+# engine leaves out of its option log (see ``SynthesisAgent.generate``).
+LLAMACPP_ONLY_OPTION_KEYS = frozenset({"grammar", "response_format"})
 
 
 def _without_llamacpp_only_options(options: dict) -> dict:
@@ -46,9 +47,9 @@ def _without_llamacpp_only_options(options: dict) -> dict:
     a plain chat turn with no constrained decoding requested -- stays
     allocation-free.
     """
-    if not any(key in options for key in _LLAMACPP_ONLY_OPTION_KEYS):
+    if not any(key in options for key in LLAMACPP_ONLY_OPTION_KEYS):
         return options
-    return {key: value for key, value in options.items() if key not in _LLAMACPP_ONLY_OPTION_KEYS}
+    return {key: value for key, value in options.items() if key not in LLAMACPP_ONLY_OPTION_KEYS}
 
 
 @contextmanager

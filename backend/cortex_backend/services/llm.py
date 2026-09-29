@@ -1,10 +1,10 @@
-# synthesis_agent.py
 """
 Defines the agent responsible for synthesizing responses from the language model.
 
 This module contains the PromptTemplate for constructing structured prompts and the
-SynthesisAgent for interacting with the Ollama client to generate responses,
-parse validated memory commands from the output, and generate chat titles.
+SynthesisAgent for talking to the local model runtime (through a chat client) to
+generate responses, parse validated memory commands and code proposals from the
+output, translate answers, and generate chat titles.
 """
 
 import logging
@@ -31,6 +31,7 @@ from cortex_backend.core.generation import (
     TranslationResult,
     prompt_too_long_message,
 )
+from cortex_backend.core.settings import DEFAULT_NUM_CTX
 from cortex_backend.execution.code_execution import (
     CodeCapabilities,
     CodeExecutionError,
@@ -41,7 +42,7 @@ from cortex_backend.execution.code_execution import (
 from cortex_backend.services import token_budget
 from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
-from cortex_backend.services.chat_client import GGUF_PREFIX
+from cortex_backend.services.chat_client import GGUF_PREFIX, LLAMACPP_ONLY_OPTION_KEYS
 from cortex_backend.services.code_feedback import (
     MAX_PROPOSAL_REPAIR_ATTEMPTS,
     describe_rejection,
@@ -269,9 +270,6 @@ _CODE_REQUEST_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _PROPOSAL_FIELDS = frozenset({"language", "source", "intent_summary", "capabilities"})
-# Bulk constrained-decoding payloads. Useful to send, useless to log.
-_UNLOGGED_OPTION_KEYS = frozenset({"grammar", "response_format"})
-
 # Matches the literal "BEGIN/END UNTRUSTED ... DATA" fence markers used below
 # to wrap memories, host observations, and attachment text in the user turn.
 # Case- and whitespace-insensitive so a lookalike (extra spaces, mixed case)
@@ -343,58 +341,56 @@ def _fence_untrusted(label: str, body: str, *, notice: str | None = None) -> str
     return "\n".join(lines)
 
 
+# Runtime assets already read, by filename. An asset is immutable for the life
+# of the process, so it is read once.
+_ASSET_CACHE: dict[str, str] = {}
+
+
+def _load_asset(filename: str, *, required: bool) -> str:
+    """Read one runtime asset the first time it is asked for, and remember it.
+
+    A ``required`` asset that cannot be read raises: the application cannot
+    build a prompt without it. An optional one reads as ``""`` (and says so in
+    the log), so a packaging mistake degrades one feature instead of taking the
+    chat down. Only the failure's type is logged, never its text.
+    """
+    cached = _ASSET_CACHE.get(filename)
+    if cached is not None:
+        return cached
+    try:
+        text = _get_asset_path(filename).read_text(encoding="utf-8")
+    except Exception as exc:
+        if required:
+            logging.critical(
+                "CRITICAL: Could not read the required asset %s (%s). The application cannot function without it.",
+                filename,
+                type(exc).__name__,
+            )
+            raise
+        logging.warning(
+            "Cortex could not load %s (%s); the feature that uses it runs without it.",
+            filename,
+            type(exc).__name__,
+        )
+        text = ""
+    else:
+        logging.info("Loaded and cached %s.", filename)
+    _ASSET_CACHE[filename] = text
+    return text
+
+
 class PromptTemplate:
     """Build system prompts, adding optional capability guidance just in time."""
-    _system_prompt_cache = None
-    _memory_prompt_cache = None
-    _code_execution_prompt_cache = None
-    _code_repair_grammar_cache = None
 
     @staticmethod
     def _load_system_prompt() -> str:
-        """
-        Loads the main system prompt from an external text file.
-        Caches the prompt after the first read to improve performance.
-        """
-        if PromptTemplate._system_prompt_cache is not None:
-            return PromptTemplate._system_prompt_cache
+        """The built-in system prompt (identity and safety directives)."""
+        return _load_asset("system_prompt.txt", required=True)
 
-        try:
-            prompt_path = _get_asset_path("system_prompt.txt")
-            with open(prompt_path, encoding='utf-8') as f:
-                prompt = f.read()
-            PromptTemplate._system_prompt_cache = prompt
-            logging.info("Successfully loaded and cached system prompt from file.")
-            return prompt
-        except FileNotFoundError:
-            logging.critical("CRITICAL: system_prompt.txt not found. The application cannot function without it.")
-            raise
-        except Exception as e:
-            logging.critical(f"CRITICAL: Failed to read system_prompt.txt: {e}")
-            raise
-    
     @staticmethod
     def _load_memory_prompt() -> str:
-        """
-        Loads the memory system instructions from an external text file.
-        Caches the prompt after the first read to improve performance.
-        """
-        if PromptTemplate._memory_prompt_cache is not None:
-            return PromptTemplate._memory_prompt_cache
-
-        try:
-            prompt_path = _get_asset_path("memory_prompt.txt")
-            with open(prompt_path, encoding='utf-8') as f:
-                prompt = f.read()
-            PromptTemplate._memory_prompt_cache = prompt
-            logging.info("Successfully loaded and cached memory prompt from file.")
-            return prompt
-        except FileNotFoundError:
-            logging.critical("CRITICAL: memory_prompt.txt not found. The application cannot function without it.")
-            raise
-        except Exception as e:
-            logging.critical(f"CRITICAL: Failed to read memory_prompt.txt: {e}")
-            raise
+        """The memory system instructions."""
+        return _load_asset("memory_prompt.txt", required=True)
 
     @staticmethod
     def load_code_repair_grammar() -> str:
@@ -406,44 +402,12 @@ class PromptTemplate:
         therefore degrades to today's unconstrained behavior instead of taking
         the chat down with it.
         """
-        if PromptTemplate._code_repair_grammar_cache is not None:
-            return PromptTemplate._code_repair_grammar_cache
-
-        try:
-            grammar_path = _get_asset_path("code_execution_repair.gbnf")
-            with open(grammar_path, encoding="utf-8") as handle:
-                grammar = handle.read().strip()
-        except OSError as exc:
-            logging.warning(
-                "Cortex could not load the code repair grammar (%s); repairs run unconstrained.",
-                type(exc).__name__,
-            )
-            grammar = ""
-        PromptTemplate._code_repair_grammar_cache = grammar
-        return grammar
+        return _load_asset("code_execution_repair.gbnf", required=False).strip()
 
     @staticmethod
     def _load_code_execution_prompt() -> str:
         """Load the opt-in execution contract without adding it to chat by default."""
-        if PromptTemplate._code_execution_prompt_cache is not None:
-            return PromptTemplate._code_execution_prompt_cache
-
-        try:
-            prompt_path = _get_asset_path("code_execution_prompt.txt")
-            with open(prompt_path, encoding="utf-8") as f:
-                prompt = f.read()
-            PromptTemplate._code_execution_prompt_cache = prompt
-            logging.info("Successfully loaded and cached the JIT code prompt.")
-            return prompt
-        except FileNotFoundError:
-            logging.critical(
-                "CRITICAL: code_execution_prompt.txt not found."
-            )
-            raise
-        except Exception as exc:
-            logging.critical("CRITICAL: Failed to read JIT code prompt: %s", exc)
-            raise
-
+        return _load_asset("code_execution_prompt.txt", required=True)
 
     @staticmethod
     def build_synthesis_prompt(
@@ -620,9 +584,9 @@ class SynthesisAgent:
     Invokes LLMs for synthesis, command parsing, and translation.
 
     This class acts as an interface to a local model runtime, handling prompt
-    creation, API calls for response generation, parsing of special tags
-    (like <memo> or <clear_memory />), and chaining outputs through a
-    translation model. The runtime itself is abstracted behind a
+    creation, API calls for response generation, parsing of the structured
+    ``<memory_command>`` and ``<code_execution_request>`` blocks, and chaining
+    outputs through a translation model. The runtime itself is abstracted behind a
     :class:`~cortex_backend.services.chat_client.ChatClient` -- today that's
     either a direct Ollama client or a :class:`RoutingChatClient` that also
     dispatches to a locally-managed llama.cpp runtime for ``gguf:`` model ids.
@@ -918,44 +882,6 @@ class SynthesisAgent:
         return tuple(fitted)
 
     @classmethod
-    def fit_history_to_context(
-        cls,
-        messages: list[dict],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None = None,
-        bypass_system_prompt: bool = False,
-        host_observations: str | None = None,
-        attachments: Sequence[GenerationAttachment] = (),
-        model: str | None = None,
-    ) -> str:
-        """Keep the newest history that fits beside prompts, memories, and output.
-
-        ``attachments`` are already-fitted reference text (see
-        ``fit_attachments_to_context``); they are threaded into the same
-        per-candidate prompt sizing used here purely so history leaves them
-        room, mirroring the fixed overhead memories and the system prompt
-        already contribute.
-        """
-        return cls._retained_history(
-            messages,
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
-        )[0]
-
-    @classmethod
     def fit_history(
         cls,
         messages: list[dict],
@@ -981,79 +907,6 @@ class SynthesisAgent:
         for no benefit.
         """
 
-        return cls._retained_history(
-            messages,
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
-        )
-
-    @classmethod
-    def select_history_messages(
-        cls,
-        messages: list[dict],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None = None,
-        bypass_system_prompt: bool = False,
-        host_observations: str | None = None,
-        attachments: Sequence[GenerationAttachment] = (),
-        model: str | None = None,
-    ) -> list[dict]:
-        """The same retained history, as real chat turns instead of a transcript.
-
-        Sizing is shared with :meth:`fit_history_to_context` so both renderings
-        keep exactly the same exchanges; only the shape handed to the model
-        differs.
-        """
-
-        return cls._retained_history(
-            messages,
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
-        )[1]
-
-    @classmethod
-    def _retained_history(
-        cls,
-        messages: list[dict],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None,
-        bypass_system_prompt: bool,
-        host_observations: str | None,
-        attachments: Sequence[GenerationAttachment],
-        model: str | None,
-    ) -> tuple[str, list[dict]]:
-        """Select once, then render the transcript and the structured turns.
-
-        When whole exchanges were left out, both renderings say so where they
-        were left out. The model otherwise reads a conversation that simply
-        begins mid-thought, and "as I showed above" points at nothing.
-        """
         annotated = with_attachment_notes(messages)
         selected = cls._select(
             annotated,
@@ -1070,40 +923,12 @@ class SynthesisAgent:
         )
         transcript = cls._format_history_messages(selected)
         paired = cls._paired_history_messages(selected)
+        # When whole exchanges were left out, both renderings say so where they
+        # were left out. The model otherwise reads a conversation that simply
+        # begins mid-thought, and "as I showed above" points at nothing.
         if len(answered_exchanges(annotated)) > len(answered_exchanges(selected)):
             return with_omission_note(transcript), with_omission_note_on_turns(paired)
         return transcript, paired
-
-    @classmethod
-    def _select_history(
-        cls,
-        messages: list[dict],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None,
-        bypass_system_prompt: bool,
-        host_observations: str | None,
-        attachments: Sequence[GenerationAttachment],
-        model: str | None = None,
-    ) -> list[dict]:
-        """The retained messages, before either rendering (see :meth:`_select`)."""
-        return cls._select(
-            with_attachment_notes(messages),
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
-        )
 
     @classmethod
     def _select(
@@ -1331,11 +1156,12 @@ class SynthesisAgent:
     def _paired_history_messages(messages: list[dict]) -> list[dict]:
         """Retained history as alternating user/assistant turns.
 
-        Applies the same pairing rule as :meth:`_format_history_messages`: a
-        turn only survives if it is a user message, optionally followed by the
-        assistant's reply. An assistant message with no preceding user turn is
-        dropped rather than sent, because a transcript that opens mid-exchange
-        breaks the strict alternation most chat templates assume.
+        The pairing rule is :func:`answered_exchanges`, which the flattened
+        transcript uses too (see :meth:`_format_history_messages`): a turn only
+        survives if it is a user message followed by the assistant's reply, both
+        with text. An assistant message with no preceding user turn is dropped
+        rather than sent, because a transcript that opens mid-exchange breaks
+        the strict alternation most chat templates assume.
 
         A user turn with no reply -- an interrupted or failed generation -- is
         dropped too: keeping it would put two user turns in a row, which strict
@@ -1355,6 +1181,10 @@ class SynthesisAgent:
         """Render prepared chunks exactly as _format_history_messages would."""
         return "\n\n".join(chunks).strip() or "No history available."
 
+    @staticmethod
+    def _render_exchange(question: str, answer: str) -> str:
+        return f"User: {question}\nAI: {answer}"
+
     @classmethod
     def _prepend_history_chunks(
         cls,
@@ -1364,23 +1194,27 @@ class SynthesisAgent:
     ) -> tuple[str, ...]:
         """Chunks for ``[message, *selected]``, given the chunks for ``selected``.
 
-        _format_history_messages pairs greedily from the front, so prepending a
-        message can in general re-pair everything behind it. Here it cannot,
-        because of how _select_history builds its list: every accepted
-        ``selected`` was itself produced by one prepend onto the previous one.
+        The transcript is one chunk per answered exchange (see
+        :func:`answered_exchanges`), which pairs greedily from the front, so
+        prepending a message can in general re-pair everything behind it. Here
+        it cannot, because of how :meth:`_select` builds its list: every
+        accepted ``selected`` was itself produced by one prepend onto the
+        previous one.
 
-        Three cases, matching the formatter exactly:
+        Three cases, matching the pairing rule exactly:
 
-        * The new message is not a user turn. The formatter skips it (index 0
-          is not a user role) and continues from ``selected`` at its own index
-          0 -- which is what ``chunks`` already describes. Unchanged.
+        * The new message is not a user turn. The rule skips it (index 0 is not
+          a user role) and continues from ``selected`` at its own index 0 --
+          which is what ``chunks`` already describes. Unchanged.
 
         * The new message is a user turn and ``selected`` does not start with
-          an assistant reply. It renders alone and the rest is untouched.
+          an assistant reply. It has no answer, so it is not an exchange and
+          renders nothing. Unchanged.
 
         * The new message is a user turn and ``selected`` starts with an
-          assistant reply. They pair, and the formatter then continues from
-          ``selected[1:]``.
+          assistant reply. They pair, and the rule then continues from
+          ``selected[1:]``; the pair renders as a chunk unless either side has
+          no text.
 
         The last case is the one that looks like it needs a re-render, and does
         not. ``selected`` can only begin with an assistant message if the last
@@ -1389,33 +1223,25 @@ class SynthesisAgent:
         """
         if str(message.get("role", "")) != "user":
             return chunks
+        if not selected or str(selected[0].get("role", "")) != "assistant":
+            return chunks
+        question = str(message.get("content", "")).strip()
+        answer = str(selected[0].get("content", "")).strip()
+        if not question or not answer:
+            return chunks
+        return (cls._render_exchange(question, answer), *chunks)
 
-        user_content = str(message.get("content", ""))
-        if selected and str(selected[0].get("role", "")) == "assistant":
-            assistant_content = str(selected[0].get("content", ""))
-            return (f"User: {user_content}\nAI: {assistant_content}", *chunks)
-        return (f"User: {user_content}", *chunks)
+    @classmethod
+    def _format_history_messages(cls, messages: list[dict]) -> str:
+        """The flattened transcript of ``messages``: one block per answered exchange.
 
-    @staticmethod
-    def _format_history_messages(messages: list[dict]) -> str:
-        if not messages:
-            return "No history available."
-        formatted: list[str] = []
-        index = 0
-        while index < len(messages):
-            item = messages[index]
-            if item.get("role") == "user":
-                user_content = str(item.get("content", ""))
-                if index + 1 < len(messages) and messages[index + 1].get("role") == "assistant":
-                    assistant_content = str(messages[index + 1].get("content", ""))
-                    formatted.append(f"User: {user_content}\nAI: {assistant_content}")
-                    index += 2
-                else:
-                    formatted.append(f"User: {user_content}")
-                    index += 1
-            else:
-                index += 1
-        return "\n\n".join(formatted).strip() or "No history available."
+        Built from :func:`answered_exchanges`, the same rule
+        :meth:`_paired_history_messages` uses, so the transcript that sizes a
+        turn's attachments never holds a turn the model is not sent.
+        """
+        return cls._join_history_chunks(
+            tuple(cls._render_exchange(question, answer) for question, answer in answered_exchanges(messages))
+        )
 
     def generate(
         self,
@@ -1455,10 +1281,9 @@ class SynthesisAgent:
             - GenerationStats | None: Token/timing usage, if the backend reported it.
         """
         api_options = options.copy() if options is not None else {}
-        # Kept in step with GenerationSettings.num_ctx's own default -- a real
-        # call always carries num_ctx, so the fallback only matters for options
-        # built by hand without one.
-        num_ctx = int(api_options.get("num_ctx", 8192))
+        # A real call always carries num_ctx, so the fallback only matters for
+        # options built by hand without one.
+        num_ctx = int(api_options.get("num_ctx", DEFAULT_NUM_CTX))
         # The last gate before the runtime. GenerationService settles this
         # earlier and sizes history around the result, so a turn that comes
         # through it always passes; this is for whatever calls the engine
@@ -1516,11 +1341,11 @@ class SynthesisAgent:
         # Only the sampler knobs are logged. A constrained turn also carries a
         # grammar, which is a large fixed blob that would bury every other line
         # in the log without telling anyone anything they cannot read in the
-        # asset itself.
+        # asset itself (the llama.cpp-only option keys are exactly those payloads).
         logging.info(
             "Generating response using Generator: '%s'. Options: %s",
             self.gen_model,
-            {key: value for key, value in api_options.items() if key not in _UNLOGGED_OPTION_KEYS},
+            {key: value for key, value in api_options.items() if key not in LLAMACPP_ONLY_OPTION_KEYS},
         )
 
         try:

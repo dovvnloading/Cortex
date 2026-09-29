@@ -211,38 +211,6 @@ class FakeGenerationEngine:
         del bypass_system_prompt, host_observations, model
         return tuple(attachments)
 
-    def fit_history_to_context(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None = None,
-        bypass_system_prompt: bool = False,
-        host_observations: str | None = None,
-        attachments: Sequence[GenerationAttachment] = (),
-        model: str | None = None,
-    ) -> str:
-        del (
-            model,
-            query,
-            permanent_memories,
-            memories_enabled,
-            user_system_instructions,
-            num_ctx,
-            code_execution_eligible,
-            bypass_system_prompt,
-            host_observations,
-            attachments,
-        )
-        return "\n".join(
-            f"{message.get('role', 'unknown')}: {message.get('content', '')}"
-            for message in messages
-        )
-
     def fit_history(
         self,
         messages: list[dict[str, Any]],
@@ -260,18 +228,21 @@ class FakeGenerationEngine:
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the messages that produced it."""
 
-        flattened = self.fit_history_to_context(
-            messages,
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
+        del (
+            model,
+            query,
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            num_ctx,
+            code_execution_eligible,
+            bypass_system_prompt,
+            host_observations,
+            attachments,
+        )
+        flattened = "\n".join(
+            f"{message.get('role', 'unknown')}: {message.get('content', '')}"
+            for message in messages
         )
         return flattened, list(messages)
 

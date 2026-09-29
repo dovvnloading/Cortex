@@ -26,6 +26,7 @@ import pytest
 
 from cortex_backend.api import create_app
 from cortex_backend.core.generation import GenerationAttachment, GenerationSnapshot, ModelOperationError
+from cortex_backend.core.settings import GenerationSettings
 from cortex_backend.services import token_budget
 from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.generation import GenerationService
@@ -372,6 +373,22 @@ def test_admission_lets_through_a_message_whose_optional_parts_alone_do_not_fit(
     service.ensure_prompt_fits(
         _snapshot(num_ctx=2048, memories_enabled=True, code_execution_eligible=True)
     )
+
+
+def test_options_without_a_window_are_sized_for_the_settings_default() -> None:
+    """The service and the engine fall back to the one default the settings model uses."""
+    default = GenerationSettings().num_ctx
+    message = "x" * 100_000
+    client = _RecordingClient()
+
+    with pytest.raises(ChatDomainError) as admission:
+        _service(client).ensure_prompt_fits(replace(_snapshot(num_ctx=default, user_input=message), model_options={}))
+    with pytest.raises(ModelOperationError) as engine:
+        _agent(client).generate(message, "No history available.", [], False, None, options={})
+
+    assert str(admission.value) == TOO_LONG.format(ctx=default)
+    assert engine.value.user_message == TOO_LONG.format(ctx=default)
+    assert client.prompts == []
 
 
 # --- the API ---------------------------------------------------------------

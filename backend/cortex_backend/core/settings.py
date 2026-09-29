@@ -17,6 +17,12 @@ LanguageName = Annotated[
 ]
 
 
+# The context window a turn is sized for when nothing says otherwise. One name
+# for the value the settings model defaults to and every fallback for options
+# built without a ``num_ctx`` uses, so they cannot drift apart.
+DEFAULT_NUM_CTX = 8192
+
+
 class _SettingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
@@ -35,6 +41,10 @@ class ModelSettings(_SettingsModel):
     # cortex_backend.llamacpp.model_directory). Keeping them unset until a
     # scan happens avoids shipping a hidden, hard-coded model preference.
     chat: ModelTag | None = None
+    # Not read by anything: titles use the chat model (see
+    # ``_generation_snapshot``). Kept because a settings file saved by an
+    # earlier build carries the key and this model rejects unknown ones, so
+    # removing it would make those files read as invalid.
     title: ModelTag | None = None
     translation: ModelTag = "translategemma:4b"
     # Folder scanned for .gguf files and used as the download destination for
@@ -68,7 +78,7 @@ class GenerationSettings(_SettingsModel):
     # use it; the default stays conservative because published long-context
     # evaluations show quality falling off well before a model's advertised
     # limit, so more context is a deliberate choice rather than free.
-    num_ctx: int = Field(default=8192, ge=2048, le=65536)
+    num_ctx: int = Field(default=DEFAULT_NUM_CTX, ge=2048, le=65536)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
     # No length cap: whatever doesn't fit in the configured context window is
     # already handled gracefully by the history/memory/attachment budget
