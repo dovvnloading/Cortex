@@ -108,6 +108,10 @@ test("the toggle switch shows on and off with different system colours and a che
   });
   const on = await paint();
   await toggle.uncheck();
+  // A style change starts a transition, and a computed-style read in the same
+  // frame still returns the old value even at a 0.01ms duration. Poll until the
+  // new state has painted rather than sampling once.
+  await expect.poll(async () => (await paint()).background).not.toBe(on.background);
   const off = await paint();
 
   expect(on.background).not.toBe(off.background);
