@@ -147,9 +147,10 @@ class FakeGenerationEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         del query, user_system_instructions, code_execution_eligible, bypass_system_prompt
-        del host_observations
+        del host_observations, model
         budget = max(1, num_ctx // 4)
         retained: list[str] = []
         used = 0
@@ -174,6 +175,7 @@ class FakeGenerationEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Keep every attachment; the fake has no real context pressure.
 
@@ -184,7 +186,7 @@ class FakeGenerationEngine:
 
         del query, chat_history, permanent_memories, memories_enabled
         del user_system_instructions, num_ctx, code_execution_eligible
-        del bypass_system_prompt, host_observations
+        del bypass_system_prompt, host_observations, model
         return tuple(attachments)
 
     def fit_history_to_context(
@@ -200,8 +202,10 @@ class FakeGenerationEngine:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> str:
         del (
+            model,
             query,
             permanent_memories,
             memories_enabled,
@@ -230,6 +234,7 @@ class FakeGenerationEngine:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the messages that produced it."""
 
@@ -244,6 +249,7 @@ class FakeGenerationEngine:
             bypass_system_prompt=bypass_system_prompt,
             host_observations=host_observations,
             attachments=attachments,
+            model=model,
         )
         return flattened, list(messages)
 

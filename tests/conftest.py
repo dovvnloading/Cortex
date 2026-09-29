@@ -20,6 +20,7 @@ from cortex_backend.api import create_app
 from cortex_backend.execution import repository as repository_module
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.repository import ExecutionRepository
+from cortex_backend.services import token_budget
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 from support import CoordinatorPool, FrozenClock, live_cortex_threads, parse_sse_events, session_headers
@@ -121,6 +122,20 @@ def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> FrozenClock:
     clock = FrozenClock()
     monkeypatch.setattr(repository_module, "datetime", clock.datetime_class)
     return clock
+
+
+@pytest.fixture(autouse=True)
+def fresh_token_ratios() -> Iterator[None]:
+    """Start every test from an uncalibrated token estimator.
+
+    The registry is process-wide by design (the chat engine is rebuilt every
+    turn; what it has learned is not), so a turn run by one test would
+    otherwise change what the next test's budget arithmetic sees.
+    """
+
+    token_budget.TOKEN_RATIOS.reset()
+    yield
+    token_budget.TOKEN_RATIOS.reset()
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -9,6 +9,7 @@ parse validated memory commands from the output, and generate chat titles.
 
 import logging
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 import re
@@ -35,12 +36,22 @@ from cortex_backend.execution.code_execution import (
     capabilities_required_by_source,
     validate_code_source,
 )
+from cortex_backend.services import token_budget
+from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
 from cortex_backend.services.chat_client import GGUF_PREFIX
 from cortex_backend.services.code_feedback import (
     MAX_PROPOSAL_REPAIR_ATTEMPTS,
     describe_rejection,
+    head_tail_truncate,
     repair_prompt,
+)
+from cortex_backend.services.history_window import (
+    answered_exchanges,
+    drop_oldest_exchange,
+    with_attachment_notes,
+    with_omission_note,
+    with_omission_note_on_turns,
 )
 from cortex_backend.services.reply_blocks import extract_tag_blocks, split_leading_reasoning
 from cortex_backend.services.stream_filter import EnvelopeStreamFilter
@@ -280,6 +291,28 @@ _COMMAND_TAG_RE = re.compile(
     r"</?\s*(?:memory_command|code_execution_request|memo|clear_memory)\b[^>]*>",
     re.IGNORECASE,
 )
+
+
+# Reference text is never cut below this many characters (the truncation notice
+# included), so a document squeezed out by a small window still shows the model
+# how it begins.
+_MIN_ATTACHMENT_CHARS = 256
+_ATTACHMENT_TRUNCATION_MARKER = "\n\n[Attachment text truncated to fit the model context.]"
+# What one document costs beside its text: the filename and type lines and the
+# fence around it.
+_DOCUMENT_FRAME_TOKENS = 64
+# Room for the "[Attachment text truncated by Cortex.]" line the attachment
+# resolver appends to a document it cut at MAX_DOCUMENT_TEXT_CHARS.
+_RESOLVER_TRUNCATION_NOTICE_CHARS = 64
+# Said to the user when the model's own tokenizer found the prompt larger than
+# the estimate that sized it, and more history had to go.
+_MEASURED_TRIM_NOTICE = (
+    "{count} more earlier exchange(s) were left out after measuring the prompt "
+    "with the model's own tokenizer. Raise the context window in Settings to keep more."
+)
+# An answer is never shortened below this, and one already this short is not
+# worth shortening: the exchange is dropped instead.
+_MIN_SHORTENED_ANSWER_CHARS = 512
 
 
 def _fence_untrusted(label: str, body: str, *, notice: str | None = None) -> str:
@@ -645,15 +678,73 @@ class SynthesisAgent:
             setter(callback)
 
     @staticmethod
-    def estimate_tokens(value: str) -> int:
-        """Estimate tokens conservatively for local context budgeting."""
-        return max(1, (len(str(value or "")) + 3) // 4)
+    def estimate_tokens(value: str, model: str | None = None) -> int:
+        """Estimate tokens for local context budgeting.
+
+        ``model`` selects the characters-per-token ratio learned for that model
+        from the runtime's own prompt counts (see ``token_budget``); with none,
+        or before the model has been seen, the conservative default applies.
+        Wide characters (CJK) are never counted below one token each.
+        """
+        return token_budget.estimate_tokens(value, token_budget.TOKEN_RATIOS.chars_per_token(model))
+
+    @staticmethod
+    def estimate_prompt_tokens(prompt: Sequence[Mapping[str, Any]], model: str | None = None) -> int:
+        """Estimated size of a whole prompt: chat-template overhead and the safety margin included.
+
+        Every "does it fit" decision below goes through this one function, so
+        the margin lives in exactly one place.
+        """
+        ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
+        raw = sum(
+            token_budget.estimate_tokens(str(item.get("content", "")), ratio)
+            + token_budget.MESSAGE_OVERHEAD_TOKENS
+            for item in prompt
+        )
+        return token_budget.with_safety_margin(raw)
 
     @classmethod
     def output_token_reservation(cls, num_ctx: int) -> int:
         """Reserve room for a useful answer inside the configured context window."""
         context_limit = max(256, int(num_ctx))
         return max(256, min(1024, context_limit // 4))
+
+    @staticmethod
+    def _chars_within(text: str, tokens: int, ratio: float) -> int:
+        """How many leading characters of ``text`` fit in ``tokens``, margin included."""
+        if tokens <= 0 or not text:
+            return 0
+        needed = token_budget.with_safety_margin(token_budget.estimate_tokens(text, ratio))
+        count = min(len(text), int(len(text) * tokens / needed))
+        # The estimate is close to linear but not exactly (wide characters are
+        # counted per character); step down until it is measured to fit.
+        while count > 0 and (
+            token_budget.with_safety_margin(token_budget.estimate_tokens(text[:count], ratio)) > tokens
+        ):
+            count = int(count * 0.95)
+        return count
+
+    @staticmethod
+    def _share_attachment_budget(
+        needs: Mapping[int, int], budget: int, floors: Mapping[int, int]
+    ) -> dict[int, int]:
+        """Split ``budget`` tokens across documents, smallest need first.
+
+        Each document is offered an even share of what is left. One that needs
+        less keeps all of its text and the difference goes to the rest, so
+        the large documents divide what the small ones leave. Nobody is offered
+        less than its floor. Without a split the first document took the whole
+        budget and every later one arrived as nothing but a truncation notice.
+        """
+        shares: dict[int, int] = {}
+        remaining = budget
+        ordered = sorted(needs, key=lambda index: needs[index])
+        for position, index in enumerate(ordered):
+            fair = remaining // (len(ordered) - position)
+            share = min(needs[index], max(floors[index], fair))
+            shares[index] = share
+            remaining = max(0, remaining - share)
+        return shares
 
     @classmethod
     def fit_attachments_to_context(
@@ -669,6 +760,7 @@ class SynthesisAgent:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Bound reference text so documents cannot consume the answer budget.
 
@@ -676,9 +768,16 @@ class SynthesisAgent:
         share the model context with history and the generated answer.  Keep
         every attachment visible by metadata while truncating only document
         reference text when the configured context cannot hold it all.
+
+        The room documents may take is what the window has left after the rest
+        of the prompt and the answer reservation, so it grows with the context
+        size instead of stopping at a fixed number of characters; the one
+        ceiling is ``MAX_DOCUMENT_TEXT_CHARS``, the most a single attachment can
+        resolve to. Several documents divide that room between them.
         """
-        if not attachments:
-            return ()
+        documents = [index for index, item in enumerate(attachments) if item.text_content is not None]
+        if not documents:
+            return tuple(attachments)
         base_prompt = PromptTemplate.build_synthesis_prompt(
             query,
             chat_history,
@@ -689,31 +788,43 @@ class SynthesisAgent:
             bypass_system_prompt=bypass_system_prompt,
             host_observations=host_observations,
         )
-        base_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in base_prompt)
+        ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
         available_tokens = max(
             0,
-            int(num_ctx) - cls.output_token_reservation(num_ctx) - base_tokens,
+            int(num_ctx) - cls.output_token_reservation(num_ctx) - cls.estimate_prompt_tokens(base_prompt, model),
         )
-        remaining_chars = min(32_000, max(256, available_tokens * 4))
-        fitted: list[GenerationAttachment] = []
-        truncation_marker = "\n\n[Attachment text truncated to fit the model context.]"
-        for attachment in attachments:
-            text = attachment.text_content
-            if text is None:
-                fitted.append(attachment)
-                continue
-            if len(text) <= remaining_chars:
-                fitted.append(attachment)
-                remaining_chars -= len(text)
-                continue
-            available = max(0, remaining_chars - len(truncation_marker))
-            fitted.append(
-                replace(
-                    attachment,
-                    text_content=text[:available] + truncation_marker,
-                )
+        # One maximal document (its text plus the notice the resolver appends
+        # when it had to cut it) always fits a window with room for it.
+        ceiling_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
+            math.ceil((MAX_DOCUMENT_TEXT_CHARS + _RESOLVER_TRUNCATION_NOTICE_CHARS) / ratio)
+        )
+        needs: dict[int, int] = {}
+        floors: dict[int, int] = {}
+        for index in documents:
+            text = attachments[index].text_content or ""
+            needs[index] = (
+                token_budget.with_safety_margin(token_budget.estimate_tokens(text, ratio))
+                + _DOCUMENT_FRAME_TOKENS
             )
-            remaining_chars = 0
+            floors[index] = min(
+                needs[index],
+                _DOCUMENT_FRAME_TOKENS
+                + token_budget.with_safety_margin(math.ceil(_MIN_ATTACHMENT_CHARS / ratio)),
+            )
+        shares = cls._share_attachment_budget(needs, min(available_tokens, ceiling_tokens), floors)
+        fitted = list(attachments)
+        for index, share in shares.items():
+            if share >= needs[index]:
+                continue
+            attachment = attachments[index]
+            # Text this method already cut (the service fits attachments once
+            # to size history around them, and the engine fits what it was
+            # given again) carries the notice; cutting it again must leave one
+            # notice at the end, not the stump of the old one in the middle.
+            text = (attachment.text_content or "").removesuffix(_ATTACHMENT_TRUNCATION_MARKER)
+            room = cls._chars_within(text, share - _DOCUMENT_FRAME_TOKENS, ratio)
+            keep = max(0, max(room, _MIN_ATTACHMENT_CHARS) - len(_ATTACHMENT_TRUNCATION_MARKER))
+            fitted[index] = replace(attachment, text_content=text[:keep] + _ATTACHMENT_TRUNCATION_MARKER)
         return tuple(fitted)
 
     @classmethod
@@ -730,6 +841,7 @@ class SynthesisAgent:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> str:
         """Keep the newest history that fits beside prompts, memories, and output.
 
@@ -739,20 +851,19 @@ class SynthesisAgent:
         room, mirroring the fixed overhead memories and the system prompt
         already contribute.
         """
-        return cls._format_history_messages(
-            cls._select_history(
-                messages,
-                query=query,
-                permanent_memories=permanent_memories,
-                memories_enabled=memories_enabled,
-                user_system_instructions=user_system_instructions,
-                num_ctx=num_ctx,
-                code_execution_eligible=code_execution_eligible,
-                bypass_system_prompt=bypass_system_prompt,
-                host_observations=host_observations,
-                attachments=attachments,
-            )
-        )
+        return cls._retained_history(
+            messages,
+            query=query,
+            permanent_memories=permanent_memories,
+            memories_enabled=memories_enabled,
+            user_system_instructions=user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            attachments=attachments,
+            model=model,
+        )[0]
 
     @classmethod
     def fit_history(
@@ -768,6 +879,7 @@ class SynthesisAgent:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> tuple[str, list[dict]]:
         """Both renderings of the retained history, selected once.
 
@@ -779,7 +891,7 @@ class SynthesisAgent:
         for no benefit.
         """
 
-        selected = cls._select_history(
+        return cls._retained_history(
             messages,
             query=query,
             permanent_memories=permanent_memories,
@@ -790,10 +902,7 @@ class SynthesisAgent:
             bypass_system_prompt=bypass_system_prompt,
             host_observations=host_observations,
             attachments=attachments,
-        )
-        return (
-            cls._format_history_messages(selected),
-            cls._paired_history_messages(selected),
+            model=model,
         )
 
     @classmethod
@@ -810,6 +919,7 @@ class SynthesisAgent:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> list[dict]:
         """The same retained history, as real chat turns instead of a transcript.
 
@@ -818,20 +928,61 @@ class SynthesisAgent:
         differs.
         """
 
-        return cls._paired_history_messages(
-            cls._select_history(
-                messages,
-                query=query,
-                permanent_memories=permanent_memories,
-                memories_enabled=memories_enabled,
-                user_system_instructions=user_system_instructions,
-                num_ctx=num_ctx,
-                code_execution_eligible=code_execution_eligible,
-                bypass_system_prompt=bypass_system_prompt,
-                host_observations=host_observations,
-                attachments=attachments,
-            )
+        return cls._retained_history(
+            messages,
+            query=query,
+            permanent_memories=permanent_memories,
+            memories_enabled=memories_enabled,
+            user_system_instructions=user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            attachments=attachments,
+            model=model,
+        )[1]
+
+    @classmethod
+    def _retained_history(
+        cls,
+        messages: list[dict],
+        *,
+        query: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None,
+        bypass_system_prompt: bool,
+        host_observations: str | None,
+        attachments: Sequence[GenerationAttachment],
+        model: str | None,
+    ) -> tuple[str, list[dict]]:
+        """Select once, then render the transcript and the structured turns.
+
+        When whole exchanges were left out, both renderings say so where they
+        were left out. The model otherwise reads a conversation that simply
+        begins mid-thought, and "as I showed above" points at nothing.
+        """
+        annotated = with_attachment_notes(messages)
+        selected = cls._select(
+            annotated,
+            query=query,
+            permanent_memories=permanent_memories,
+            memories_enabled=memories_enabled,
+            user_system_instructions=user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            attachments=attachments,
+            model=model,
         )
+        transcript = cls._format_history_messages(selected)
+        paired = cls._paired_history_messages(selected)
+        if len(answered_exchanges(annotated)) > len(answered_exchanges(selected)):
+            return with_omission_note(transcript), with_omission_note_on_turns(paired)
+        return transcript, paired
 
     @classmethod
     def _select_history(
@@ -847,10 +998,71 @@ class SynthesisAgent:
         bypass_system_prompt: bool,
         host_observations: str | None,
         attachments: Sequence[GenerationAttachment],
+        model: str | None = None,
     ) -> list[dict]:
-        """Walk newest to oldest, keeping every exchange that still fits."""
+        """The retained messages, before either rendering (see :meth:`_select`)."""
+        return cls._select(
+            with_attachment_notes(messages),
+            query=query,
+            permanent_memories=permanent_memories,
+            memories_enabled=memories_enabled,
+            user_system_instructions=user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            attachments=attachments,
+            model=model,
+        )
 
-        output_reservation = cls.output_token_reservation(num_ctx)
+    @classmethod
+    def _select(
+        cls,
+        messages: list[dict],
+        *,
+        query: str,
+        permanent_memories: list[str],
+        memories_enabled: bool,
+        user_system_instructions: str | None,
+        num_ctx: int,
+        code_execution_eligible: bool | None,
+        bypass_system_prompt: bool,
+        host_observations: str | None,
+        attachments: Sequence[GenerationAttachment],
+        model: str | None,
+    ) -> list[dict]:
+        """Keep the newest run of exchanges that fits, never a run with a hole in it.
+
+        Walks newest to oldest and stops at the first exchange that does not
+        fit. It used to skip such an exchange and keep going, so a large one in
+        the middle vanished while older, smaller ones stayed: the model saw a
+        conversation with an invisible gap. Dropping strictly from the old end
+        leaves a conversation that is merely shorter, and the caller says so.
+
+        One exception, because stopping there would wipe the whole history: a
+        newest exchange too large to fit has its *answer* head/tail-truncated
+        to at most half of the room history has, and the walk carries on behind
+        it.
+        """
+
+        limit = max(256, int(num_ctx)) - cls.output_token_reservation(num_ctx)
+
+        def prompt_tokens(history: str) -> int:
+            return cls.estimate_prompt_tokens(
+                PromptTemplate.build_synthesis_prompt(
+                    query,
+                    history,
+                    permanent_memories,
+                    memories_enabled,
+                    user_system_instructions,
+                    attachments,
+                    code_execution_eligible=code_execution_eligible,
+                    bypass_system_prompt=bypass_system_prompt,
+                    host_observations=host_observations,
+                ),
+                model,
+            )
+
         selected: list[dict] = []
         # Rendered form of `selected`, kept in step with it. Re-rendering the
         # whole transcript for every candidate made this walk quadratic in the
@@ -858,34 +1070,91 @@ class SynthesisAgent:
         # turn. See _prepend_history_chunks for why prepending is exact.
         chunks: tuple[str, ...] = ()
 
-        for message in reversed(messages):
-            candidate = [message, *selected]
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") != "user":
+                # Renders nothing on its own (the transcript only starts a turn
+                # at a user message), so it costs nothing to keep and cannot be
+                # the exchange that does not fit. The user turn before it does
+                # the measuring.
+                selected = [message, *selected]
+                continue
             candidate_chunks = cls._prepend_history_chunks(message, selected, chunks)
             history = cls._join_history_chunks(candidate_chunks)
-            prompt = PromptTemplate.build_synthesis_prompt(
-                query,
-                history,
-                permanent_memories,
-                memories_enabled,
-                user_system_instructions,
-                attachments,
-                code_execution_eligible=code_execution_eligible,
-                bypass_system_prompt=bypass_system_prompt,
-                host_observations=host_observations,
-            )
-            prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
-            if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
-                selected = candidate
+            if index > 0:
+                # Older messages are being left out, so the note that says so
+                # is part of what this candidate costs.
+                history = with_omission_note(history)
+            if prompt_tokens(history) <= limit:
+                selected = [message, *selected]
                 chunks = candidate_chunks
-            # Candidate sizes are not monotonic: dropping a newly-unpaired
-            # trailing assistant message (see _format_history_messages)
-            # shrinks the *next* candidate, so an oversized exchange must not
-            # stop the walk -- older, smaller exchanges further back can
-            # still fit. Stopping here previously discarded the entire
-            # history whenever the single newest exchange alone was too
-            # large for the budget.
+                continue
+            if not chunks and selected and selected[0].get("role") == "assistant":
+                shortened = cls._shorten_newest_answer(
+                    message,
+                    selected,
+                    older_messages=index > 0,
+                    limit=limit,
+                    prompt_tokens=prompt_tokens,
+                )
+                if shortened is not None:
+                    trailing, chunks = shortened
+                    selected = [message, *trailing]
+                    continue
+            break
 
         return selected
+
+    @classmethod
+    def _shorten_newest_answer(
+        cls,
+        message: dict,
+        selected: list[dict],
+        *,
+        older_messages: bool,
+        limit: int,
+        prompt_tokens: Callable[[str], int],
+    ) -> tuple[list[dict], tuple[str, ...]] | None:
+        """Cut the newest answer down until its exchange takes half the history room.
+
+        Half, not all: an exchange allowed to fill the room would push out
+        everything older than it, which is the outcome this exists to avoid.
+        Returns the messages that follow the user turn with the shortened
+        answer first, and the rendered chunks for the exchange -- or ``None``
+        when there is nothing to cut or even the shortest form does not fit,
+        in which case the exchange is dropped like any other.
+        """
+        answer = selected[0]
+        text = str(answer.get("content", ""))
+        empty_history = prompt_tokens(cls._join_history_chunks(()))
+        room = limit - empty_history
+        if room <= 0 or len(text) <= _MIN_SHORTENED_ANSWER_CHARS:
+            return None
+        ceiling = empty_history + room // 2
+
+        def attempt(chars: int) -> tuple[list[dict], tuple[str, ...], int]:
+            shortened = {**answer, "content": head_tail_truncate(text, chars, head_ratio=0.5)[0]}
+            trailing = [shortened, *selected[1:]]
+            chunks = cls._prepend_history_chunks(message, trailing, ())
+            history = cls._join_history_chunks(chunks)
+            if older_messages:
+                history = with_omission_note(history)
+            return trailing, chunks, prompt_tokens(history)
+
+        low, high = _MIN_SHORTENED_ANSWER_CHARS, len(text) - 1
+        trailing, chunks, tokens = attempt(low)
+        if tokens > ceiling:
+            return None
+        best = (trailing, chunks)
+        while low < high:
+            middle = (low + high + 1) // 2
+            trailing, chunks, tokens = attempt(middle)
+            if tokens <= ceiling:
+                low = middle
+                best = (trailing, chunks)
+            else:
+                high = middle - 1
+        return best
 
     @classmethod
     def fit_memories_to_context(
@@ -898,6 +1167,7 @@ class SynthesisAgent:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Keep the newest permanent memories that fit before chat history."""
         output_reservation = cls.output_token_reservation(num_ctx)
@@ -914,7 +1184,7 @@ class SynthesisAgent:
                 bypass_system_prompt=bypass_system_prompt,
                 host_observations=host_observations,
             )
-            prompt_tokens = sum(cls.estimate_tokens(item.get("content", "")) + 4 for item in prompt)
+            prompt_tokens = cls.estimate_prompt_tokens(prompt, model)
             if prompt_tokens + output_reservation <= max(256, int(num_ctx)):
                 selected = candidate
             elif selected:
@@ -930,29 +1200,16 @@ class SynthesisAgent:
         assistant's reply. An assistant message with no preceding user turn is
         dropped rather than sent, because a transcript that opens mid-exchange
         breaks the strict alternation most chat templates assume.
+
+        A user turn with no reply -- an interrupted or failed generation -- is
+        dropped too: keeping it would put two user turns in a row, which strict
+        chat templates reject outright and lenient ones merge into one
+        confusing message. So is an empty turn, which some templates drop or
+        mis-render, silently breaking the alternation after it.
         """
 
         paired: list[dict] = []
-        index = 0
-        while index < len(messages):
-            item = messages[index]
-            if item.get("role") != "user":
-                index += 1
-                continue
-            if index + 1 >= len(messages) or messages[index + 1].get("role") != "assistant":
-                # A user turn with no reply -- an interrupted or failed
-                # generation. Keeping it would put two user turns in a row,
-                # which strict chat templates reject outright and lenient ones
-                # merge into one confusing message.
-                index += 1
-                continue
-            question = str(item.get("content", "")).strip()
-            answer = str(messages[index + 1].get("content", "")).strip()
-            index += 2
-            if not question or not answer:
-                # An empty turn carries nothing and some templates drop or
-                # mis-render it, silently breaking the alternation after it.
-                continue
+        for question, answer in answered_exchanges(messages):
             paired.append({"role": "user", "content": question})
             paired.append({"role": "assistant", "content": answer})
         return paired
@@ -1062,6 +1319,10 @@ class SynthesisAgent:
             - GenerationStats | None: Token/timing usage, if the backend reported it.
         """
         api_options = options.copy() if options is not None else {}
+        # Kept in step with GenerationSettings.num_ctx's own default -- a real
+        # call always carries num_ctx, so the fallback only matters for options
+        # built by hand without one.
+        num_ctx = int(api_options.get("num_ctx", 8192))
         fitted_attachments = self.fit_attachments_to_context(
             attachments,
             query=query,
@@ -1069,26 +1330,28 @@ class SynthesisAgent:
             permanent_memories=permanent_memories,
             memories_enabled=memories_enabled,
             user_system_instructions=user_system_instructions,
-            # Kept in step with GenerationSettings.num_ctx's own default --
-            # a real call always carries num_ctx, so this only matters for
-            # options built by hand without one.
-            num_ctx=int(api_options.get("num_ctx", 8192)),
+            num_ctx=num_ctx,
             code_execution_eligible=self.code_execution_eligible,
             bypass_system_prompt=self.bypass_system_prompt,
             host_observations=host_observations,
+            model=self.gen_model,
         )
-        prompt_messages = PromptTemplate.build_synthesis_prompt(
-            query,
-            chat_history,
-            permanent_memories,
-            memories_enabled,
-            user_system_instructions,
-            fitted_attachments,
-            code_execution_eligible=self.code_execution_eligible,
-            bypass_system_prompt=self.bypass_system_prompt,
-            host_observations=host_observations,
-            history_messages=history_messages,
-        )
+
+        def build_prompt(turns: Sequence[Mapping[str, Any]] | None) -> list[dict]:
+            return PromptTemplate.build_synthesis_prompt(
+                query,
+                chat_history,
+                permanent_memories,
+                memories_enabled,
+                user_system_instructions,
+                fitted_attachments,
+                code_execution_eligible=self.code_execution_eligible,
+                bypass_system_prompt=self.bypass_system_prompt,
+                host_observations=host_observations,
+                history_messages=turns,
+            )
+
+        prompt_messages = build_prompt(history_messages)
 
         # Only the sampler knobs are logged. A constrained turn also carries a
         # grammar, which is a large fixed blob that would bury every other line
@@ -1103,6 +1366,21 @@ class SynthesisAgent:
         try:
             if api_options.get('seed') == -1:
                 del api_options['seed']
+
+            # A runtime that can count tokens is asked once, about the finished
+            # prompt: an estimate that was too low is corrected here, before
+            # the model is asked to read something it cannot hold.
+            measured = self._exact_prompt_tokens(prompt_messages, api_options, cancellation_event)
+            if measured is not None:
+                prompt_messages, dropped = self._fit_to_measured_prompt(
+                    prompt_messages,
+                    measured,
+                    turns=history_messages,
+                    build_prompt=build_prompt,
+                    num_ctx=num_ctx,
+                )
+                if dropped and on_delta is not None:
+                    on_delta("notice", _MEASURED_TRIM_NOTICE.format(count=dropped))
 
             # Deliberately no num_predict/max_tokens default here: both Ollama
             # and llama-server already stop generation on their own once the
@@ -1144,7 +1422,9 @@ class SynthesisAgent:
                 def _relay(kind: str, text: str) -> None:
                     if kind == "content":
                         content_filter.feed(text)
-                    else:
+                    elif kind == "thinking":
+                        # Nothing else is the chat client's to say: "notice"
+                        # is the engine's own channel to the user.
                         on_delta(kind, text)
 
                 chat_kwargs["on_delta"] = _relay
@@ -1157,6 +1437,8 @@ class SynthesisAgent:
             main_content = message_obj.get('content', '')
             thinking_content = message_obj.get('thinking')
             stats = _extract_stats(response)
+            if measured is None:
+                self._learn_token_ratio(prompt_messages, response, num_ctx)
 
             final_answer, thoughts, commands = self._parse_and_clean_response(main_content, thinking_content)
             self._repair_code_proposal(
@@ -1181,6 +1463,111 @@ class SynthesisAgent:
                 cause=e,
                 error_details=error_details,
             ) from e
+
+    def _exact_prompt_tokens(
+        self,
+        prompt_messages: Sequence[Mapping[str, Any]],
+        api_options: Mapping[str, Any],
+        cancellation_event: Event | None,
+    ) -> int | None:
+        """The model's own token count for the prompt, when its runtime can give one.
+
+        Only a locally managed llama-server can: it tokenizes on request. Ollama
+        has no such endpoint, so its prompts are sized from calibrated estimates
+        and the count it reports afterwards. Best effort throughout: the chat
+        call that follows is the one that reports a real failure.
+        """
+        tokenize = getattr(self.chat_client, "tokenize", None)
+        if not callable(tokenize) or not self.gen_model.startswith(GGUF_PREFIX):
+            return None
+        text = "\n".join(str(message.get("content", "")) for message in prompt_messages)
+        try:
+            count = tokenize(
+                model=self.gen_model,
+                text=text,
+                options=dict(api_options),
+                cancellation_event=cancellation_event,
+            )
+        except Exception as exc:
+            logging.warning(
+                "Cortex could not count prompt tokens with the local runtime (%s).",
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return None
+        return count + len(prompt_messages) * token_budget.MESSAGE_OVERHEAD_TOKENS
+
+    def _fit_to_measured_prompt(
+        self,
+        prompt_messages: list[dict],
+        measured_tokens: int,
+        *,
+        turns: Sequence[Mapping[str, Any]] | None,
+        build_prompt: Callable[[Sequence[Mapping[str, Any]] | None], list[dict]],
+        num_ctx: int,
+    ) -> tuple[list[dict], int]:
+        """Calibrate on the measured count, then drop history until the prompt fits it.
+
+        History selection sizes candidates from an estimate, and this is the one
+        place the real number is known before anything is sent. It always feeds
+        the ratio registry, so the turn after this one starts from the truth.
+        If the prompt still does not fit the window -- an estimate that was too
+        low by more than the safety margin -- whole exchanges are dropped from
+        the old end, as history selection does, and the count is returned so
+        the caller can say so. Nothing else is trimmed: attachments and memories
+        were already sized against the same estimate, and a prompt with no
+        history left that still does not fit is reported by the runtime.
+        """
+        texts = [str(message.get("content", "")) for message in prompt_messages]
+        token_budget.TOKEN_RATIOS.observe(self.gen_model, texts, measured_tokens)
+        limit = max(256, num_ctx) - self.output_token_reservation(num_ctx)
+        ratio = token_budget.measure_chars_per_token(texts, measured_tokens)
+        if measured_tokens <= limit or ratio is None or not turns:
+            return prompt_messages, 0
+        remaining: list[dict[str, Any]] = [dict(turn) for turn in turns]
+        dropped = 0
+        while remaining and measured_tokens > limit:
+            remaining = drop_oldest_exchange(remaining)
+            dropped += 1
+            prompt_messages = build_prompt(remaining)
+            measured_tokens = token_budget.with_safety_margin(
+                sum(
+                    token_budget.estimate_tokens(str(message.get("content", "")), ratio)
+                    + token_budget.MESSAGE_OVERHEAD_TOKENS
+                    for message in prompt_messages
+                )
+            )
+        return prompt_messages, dropped
+
+    def _learn_token_ratio(
+        self,
+        prompt_messages: Sequence[Mapping[str, Any]],
+        response: Mapping[str, Any],
+        num_ctx: int,
+    ) -> None:
+        """Feed the runtime's own prompt-token count back into the estimator.
+
+        ``prompt_token_count`` (the whole prompt, as llama-server reports it) is
+        preferred over ``prompt_eval_count``, which a runtime may count only for
+        the part it had to evaluate. A prompt that filled the window says
+        nothing reliable -- the runtime may have cut it -- and one with images
+        counts tokens that are not text.
+        """
+        count = response.get("prompt_token_count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            count = response.get("prompt_eval_count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            return
+        if count >= token_budget.NEAR_FULL_CONTEXT * max(256, num_ctx):
+            return
+        if any(message.get("images") for message in prompt_messages):
+            return
+        token_budget.TOKEN_RATIOS.observe(
+            self.gen_model,
+            [str(message.get("content", "")) for message in prompt_messages],
+            count,
+        )
 
     def _repair_code_proposal(
         self,

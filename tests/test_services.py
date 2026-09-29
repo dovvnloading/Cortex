@@ -65,8 +65,9 @@ class _FakeEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations=(),
+        model: str | None = None,
     ) -> list[str]:
-        del code_execution_eligible, bypass_system_prompt, host_observations
+        del code_execution_eligible, bypass_system_prompt, host_observations, model
         self.memory_inputs = list(memories)
         return list(memories)
 
@@ -83,8 +84,9 @@ class _FakeEngine:
         bypass_system_prompt: bool = False,
         host_observations=(),
         attachments=(),
+        model: str | None = None,
     ) -> str:
-        del code_execution_eligible, bypass_system_prompt, host_observations, attachments
+        del code_execution_eligible, bypass_system_prompt, host_observations, attachments, model
         self.history_messages = messages
         return "formatted history"
 
@@ -1027,6 +1029,35 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertEqual(streamed_text, "Hello world")
         self.assertEqual(result.response, "translated")
 
+    def test_an_engine_notice_reaches_the_user_as_a_notice_and_never_as_answer_text(self):
+        class _NoticingEngine(self._StreamingEngine):
+            def generate(self, **kwargs):
+                on_delta = kwargs["on_delta"]
+                on_delta("content", "Hello ")
+                on_delta("notice", "Two more exchanges were left out.")
+                on_delta("content", "world")
+                return super().generate(**kwargs)
+
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _NoticingEngine([]),
+        )
+
+        service.generate(_snapshot(translation_enabled=False), progress_sink=recorder)
+
+        notices = [e for e in recorder.events if e.phase == "history_truncated"]
+        self.assertEqual([e.message for e in notices], ["Two more exchanges were left out."])
+        self.assertEqual(notices[0].data, {"notice": True})
+        streamed = "".join(
+            (e.data or {}).get("delta", "") for e in recorder.events if e.phase == "content_delta"
+        )
+        self.assertEqual(streamed, "Hello world")
+        # In order: the text before it is published before it, not after.
+        phases = [e.phase for e in recorder.events]
+        self.assertLess(phases.index("content_delta"), phases.index("history_truncated"))
+
     def test_a_non_streaming_engine_leaves_the_replay_to_the_api(self):
         """The deterministic double returns a whole answer, as before.
 
@@ -1162,3 +1193,54 @@ class StreamingGenerationTests(unittest.TestCase):
         result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
 
         self.assertFalse(result.streamed)
+
+
+class ContextWindowNoticeTests(unittest.TestCase):
+    """A prompt that fills the window is never silent about it."""
+
+    class _CountingEngine(_FakeEngine):
+        def __init__(self, prompt_tokens):
+            super().__init__()
+            self._prompt_tokens = prompt_tokens
+
+        def generate(self, **kwargs):
+            answer, thoughts, command, _ = super().generate(**kwargs)
+            stats = GenerationStats(
+                prompt_eval_count=self._prompt_tokens, eval_count=10, eval_duration_ms=100.0
+            )
+            return answer, thoughts, command, stats
+
+    def _run(self, prompt_tokens, *, num_ctx=4096):
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: self._CountingEngine(prompt_tokens),
+        )
+        snapshot = _snapshot(
+            translation_enabled=False,
+            model_options={"num_ctx": num_ctx, "seed": -1},
+        )
+        service.generate(snapshot, progress_sink=recorder)
+        return [event for event in recorder.events if event.phase == "context_full"]
+
+    def test_a_prompt_that_used_the_whole_window_is_reported(self):
+        for reported in (4096, 4090, 3990):
+            with self.subTest(prompt_tokens=reported):
+                notices = self._run(reported)
+                self.assertEqual(len(notices), 1)
+                self.assertTrue(notices[0].data["notice"])
+                self.assertEqual(notices[0].data["prompt_tokens"], reported)
+                self.assertEqual(notices[0].data["context_tokens"], 4096)
+                self.assertIn("discarded", notices[0].message)
+
+    def test_a_prompt_with_room_to_spare_is_not_reported(self):
+        self.assertEqual(self._run(3000), [])
+        self.assertEqual(self._run(0), [])
+
+    def test_a_runtime_that_reported_no_count_is_not_reported(self):
+        self.assertEqual(self._run(None), [])
+
+    def test_the_threshold_follows_the_configured_window(self):
+        self.assertEqual(len(self._run(7900, num_ctx=8192)), 0)
+        self.assertEqual(len(self._run(8000, num_ctx=8192)), 1)

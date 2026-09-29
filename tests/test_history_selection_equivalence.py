@@ -43,14 +43,31 @@ def _messages(rng: random.Random, count: int) -> list[dict]:
 
 
 def _reference_select_history(messages: list[dict], **kwargs) -> list[dict]:
-    """The pre-optimisation walk, rendering every candidate from scratch."""
+    """The pre-optimisation walk, rendering every candidate from scratch.
+
+    It keeps the retention rule the selection has now: a contiguous run of the
+    newest exchanges, ending at the first user turn that does not fit (the walk
+    used to skip such a turn and carry on, which left a hole in the middle of
+    the conversation). What this reference deliberately does *not* share with
+    the implementation is the rendering: every candidate is formatted from
+    scratch instead of being built up chunk by chunk, and that is what these
+    tests hold the two to.
+    """
+    from cortex_backend.services.history_window import with_omission_note
     from cortex_backend.services.llm import PromptTemplate
 
-    output_reservation = SynthesisAgent.output_token_reservation(kwargs["num_ctx"])
+    limit = max(256, int(kwargs["num_ctx"])) - SynthesisAgent.output_token_reservation(kwargs["num_ctx"])
     selected: list[dict] = []
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         candidate = [message, *selected]
+        if message.get("role") != "user":
+            # Renders nothing by itself, so there is nothing to measure.
+            selected = candidate
+            continue
         history = SynthesisAgent._format_history_messages(candidate)
+        if index > 0:
+            history = with_omission_note(history)
         prompt = PromptTemplate.build_synthesis_prompt(
             kwargs["query"],
             history,
@@ -62,11 +79,9 @@ def _reference_select_history(messages: list[dict], **kwargs) -> list[dict]:
             bypass_system_prompt=kwargs["bypass_system_prompt"],
             host_observations=kwargs["host_observations"],
         )
-        prompt_tokens = sum(
-            SynthesisAgent.estimate_tokens(item.get("content", "")) + 4 for item in prompt
-        )
-        if prompt_tokens + output_reservation <= max(256, int(kwargs["num_ctx"])):
-            selected = candidate
+        if SynthesisAgent.estimate_prompt_tokens(prompt) > limit:
+            break
+        selected = candidate
     return selected
 
 

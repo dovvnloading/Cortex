@@ -21,7 +21,14 @@ from cortex_backend.core.generation import (
     TranslationResult,
 )
 
+from .history_window import (
+    HistoryWindowReport,
+    describe_history_window,
+    safe_label,
+    with_attachment_notes,
+)
 from .progress import NullProgressSink, ProgressEvent, ProgressPhase, ProgressSink
+from .token_budget import NEAR_FULL_CONTEXT
 
 
 def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -78,6 +85,27 @@ TRUNCATED_ANSWER_MESSAGE = (
 )
 
 
+# Attachments named in a truncation notice before the rest are counted.
+_MAX_NAMED_ATTACHMENTS = 5
+
+
+def _history_notice(report: HistoryWindowReport) -> str:
+    """What the user is told about the part of the conversation the model was not shown."""
+    parts: list[str] = []
+    if report.omitted_exchanges:
+        count = report.omitted_exchanges
+        parts.append(
+            f"The conversation is longer than the model's context window, so the {count} oldest "
+            f"{'exchange was' if count == 1 else 'exchanges were'} left out of this reply."
+        )
+    if report.shortened_newest:
+        parts.append(
+            "The previous answer was too long to keep whole, so only its beginning and end were kept."
+        )
+    parts.append("Raise the context window in Settings, or start a new chat, to keep more.")
+    return " ".join(parts)
+
+
 class GenerationEngine(Protocol):
     """Model-facing operations required by the generation use case.
 
@@ -109,8 +137,13 @@ class GenerationEngine(Protocol):
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
-        """Fit permanent memories into the configured context budget."""
+        """Fit permanent memories into the configured context budget.
+
+        ``model`` names the model the prompt is for, so an estimate learned from
+        that model's own token counts can be used instead of a fixed ratio.
+        """
 
     def fit_history_to_context(
         self,
@@ -125,6 +158,7 @@ class GenerationEngine(Protocol):
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> str:
         """Format the retained history for the model prompt."""
 
@@ -141,11 +175,14 @@ class GenerationEngine(Protocol):
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the structured history together.
 
         One call returns both renderings because choosing which exchanges fit
-        is the expensive part and must not be done twice.
+        is the expensive part and must not be done twice. Retention is
+        contiguous -- the newest whole exchanges that fit -- and where older
+        ones were left out the structured form carries a note that says so.
         """
 
     def generate_chat_title(
@@ -175,6 +212,7 @@ class GenerationEngine(Protocol):
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Bound attachment reference text to fit the configured context."""
 
@@ -198,7 +236,10 @@ class GenerationEngine(Protocol):
         ``on_delta`` receives ``(kind, text)`` for each piece of output as the
         model produces it, where ``kind`` is ``"content"`` or ``"thinking"``.
         Implementations that cannot stream simply never call it; the return
-        value is the same either way.
+        value is the same either way. ``"notice"`` is the one kind that is not
+        model output: a sentence for the user about what the engine did before
+        asking the model (today, dropping more history after measuring the
+        prompt), delivered as a status notice rather than as answer text.
         """
 
     def translate_text(
@@ -290,6 +331,7 @@ class GenerationService:
                 code_execution_eligible=snapshot.code_execution_eligible,
                 bypass_system_prompt=snapshot.bypass_system_prompt,
                 host_observations=snapshot.host_observations,
+                model=snapshot.model,
             )
 
         # Lets an engine backed by a locally-managed llama.cpp runtime report
@@ -330,6 +372,10 @@ class GenerationService:
                     code_execution_eligible=snapshot.code_execution_eligible,
                     bypass_system_prompt=snapshot.bypass_system_prompt,
                     host_observations=snapshot.host_observations,
+                    model=snapshot.model,
+                )
+                self._announce_truncated_attachments(
+                    sink, snapshot, snapshot.attachments, reserved_attachments
                 )
 
             history_kwargs: dict[str, Any] = {
@@ -341,6 +387,7 @@ class GenerationService:
                 "code_execution_eligible": snapshot.code_execution_eligible,
                 "bypass_system_prompt": snapshot.bypass_system_prompt,
                 "host_observations": snapshot.host_observations,
+                "model": snapshot.model,
             }
             if reserved_attachments:
                 history_kwargs["attachments"] = reserved_attachments
@@ -354,6 +401,7 @@ class GenerationService:
             chat_history, structured_history = engine.fit_history(
                 working_history, **history_kwargs
             )
+            self._announce_history_window(sink, snapshot, working_history, structured_history)
 
             self._check_cancelled(cancellation_event)
             generate_kwargs: dict[str, Any] = {
@@ -369,7 +417,10 @@ class GenerationService:
             # do not use attachments or cancellation; real engines receive the
             # resolved payload.
             if snapshot.attachments:
-                generate_kwargs["attachments"] = snapshot.attachments
+                # The already-fitted text, so what the user was told was cut is
+                # what the model receives. The engine sizes them again against
+                # the real history, which leaves text that fits unchanged.
+                generate_kwargs["attachments"] = reserved_attachments
             if cancellation_event is not None:
                 generate_kwargs["cancellation_event"] = cancellation_event
             generate_kwargs["history_messages"] = structured_history
@@ -409,6 +460,15 @@ class GenerationService:
             def publish_delta(kind: str, text: str) -> None:
                 if not text:
                     return
+                if kind == "notice":
+                    # The engine speaking to the user, not the model. Sent at
+                    # once and after anything already buffered, so it never
+                    # overtakes the text it follows.
+                    flush_deltas()
+                    self._publish(
+                        sink, snapshot, "history_truncated", text, data={"notice": True}
+                    )
+                    return
                 pending[kind] = pending.get(kind, "") + text
                 buffered = sum(len(value) for value in pending.values())
                 if (
@@ -445,6 +505,7 @@ class GenerationService:
                     TRUNCATED_ANSWER_MESSAGE,
                     data={"truncated": True, "stop_reason": stats.stop_reason},
                 )
+            self._announce_full_context(sink, snapshot, stats, num_ctx)
             if not snapshot.memories_enabled:
                 memory_command = MemoryCommand()
 
@@ -588,6 +649,96 @@ class GenerationService:
         return (
             f"User: {str(user_input)[:max_content]}\n"
             f"Assistant: {str(response)[:max_content]}"
+        )
+
+    @classmethod
+    def _announce_history_window(
+        cls,
+        sink: ProgressSink,
+        snapshot: GenerationSnapshot,
+        original: Sequence[Mapping[str, Any]],
+        retained: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Tell the user when the model will not see the whole conversation.
+
+        Worked out by comparing what the engine kept with what the thread holds,
+        so it needs nothing from the engine beyond the history it already
+        returns. A history that fits produces no event at all.
+        """
+        report = describe_history_window(with_attachment_notes(original), retained)
+        if not report.truncated:
+            return
+        cls._publish(
+            sink,
+            snapshot,
+            "history_truncated",
+            _history_notice(report),
+            data={
+                "notice": True,
+                "omitted_exchanges": report.omitted_exchanges,
+                "shortened_newest": report.shortened_newest,
+            },
+        )
+
+    @classmethod
+    def _announce_truncated_attachments(
+        cls,
+        sink: ProgressSink,
+        snapshot: GenerationSnapshot,
+        original: Sequence[GenerationAttachment],
+        fitted: Sequence[GenerationAttachment],
+    ) -> None:
+        """Name every document whose text was cut to fit the context window."""
+        names = [
+            safe_label(before.filename) or "an attachment"
+            for before, after in zip(original, fitted, strict=False)
+            if before.text_content != after.text_content
+        ]
+        if not names:
+            return
+        shown = ", ".join(names[:_MAX_NAMED_ATTACHMENTS])
+        if len(names) > _MAX_NAMED_ATTACHMENTS:
+            shown += f" and {len(names) - _MAX_NAMED_ATTACHMENTS} more"
+        cls._publish(
+            sink,
+            snapshot,
+            "attachment_truncated",
+            f"Part of the attached text did not fit the context window and was cut short: {shown}. "
+            "Raise the context window in Settings to include more.",
+            data={"notice": True, "truncated_attachments": names},
+        )
+
+    @classmethod
+    def _announce_full_context(
+        cls,
+        sink: ProgressSink,
+        snapshot: GenerationSnapshot,
+        stats: GenerationStats | None,
+        num_ctx: int,
+    ) -> None:
+        """Say so when the runtime reports a prompt that filled the whole window.
+
+        Cortex sizes a prompt to leave room for the answer, so a prompt that
+        used the window up means the estimate was wrong, and a runtime that
+        truncates on its own (Ollama drops from the front) has then discarded
+        the oldest part of it -- the system prompt first -- without an error.
+        This cannot prevent that turn, but it stops it being silent.
+        """
+        if stats is None or not isinstance(stats.prompt_eval_count, int):
+            return
+        if stats.prompt_eval_count < NEAR_FULL_CONTEXT * max(256, num_ctx):
+            return
+        cls._publish(
+            sink,
+            snapshot,
+            "context_full",
+            "This conversation filled the model's context window, so the runtime may have "
+            "discarded the oldest part of it. Raise the context window in Settings, or start a new chat.",
+            data={
+                "notice": True,
+                "prompt_tokens": stats.prompt_eval_count,
+                "context_tokens": num_ctx,
+            },
         )
 
     @staticmethod
