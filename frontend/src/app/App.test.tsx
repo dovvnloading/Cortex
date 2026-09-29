@@ -25,8 +25,30 @@ describe("App", () => {
     );
   };
 
+  const respond = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  /** The routes every workspace load needs, for tests that only care about session handling. */
+  const workspaceRoute = (url: string): Response | null => {
+    if (url.endsWith("/system")) return respond({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
+    if (url.endsWith("/chat-groups")) return respond([]);
+    if (url.endsWith("/chats")) return respond([]);
+    if (url.endsWith("/settings")) return respond({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+    if (url.endsWith("/models")) return respond({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+    return null;
+  };
+
+  const callsTo = (fetcher: { mock: { calls: readonly (readonly unknown[])[] } }, suffix: string) =>
+    fetcher.mock.calls.filter(([input]) => String(input).endsWith(suffix));
+
   afterEach(() => {
     useModelStore.getState().setLlamacppStatus(null);
+    // A generation kept across a 401 is left tracked on purpose; do not let it
+    // leak into the next test.
+    const { generation, endGeneration } = useChatStore.getState();
+    if (generation.jobId) endGeneration(generation.jobId);
     window.sessionStorage.clear();
     window.history.replaceState({}, "", "/");
   });
@@ -192,7 +214,10 @@ describe("App", () => {
     expect(window.location.href).not.toContain("handoff=");
   });
 
-  it("returns to onboarding and clears a persisted generation when its stream session expires", async () => {
+  it("returns to onboarding but keeps the running generation when its stream session cannot be renewed", async () => {
+    // No handoff secret: nothing can renew the session, so the app has to go
+    // back to onboarding. The job is still running on the backend, though, and
+    // the transcript must not lose it.
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({
       jobId: "job-expired",
@@ -200,21 +225,15 @@ describe("App", () => {
       lastEventId: 3,
     }));
     window.history.replaceState({}, "", "/chat/thread-expired");
-    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
-      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
-      if (url.endsWith("/chat-groups")) return json([]);
-      if (url.endsWith("/chats")) return json([{ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z" }]);
-      if (url.endsWith("/chats/thread-expired")) return json({ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z", revision: 1, messages: [] });
-      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
-      if (url.endsWith("/memories")) return json({ memos: [] });
-      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
-      if (url.endsWith("/generations/job-expired/events")) return json({ detail: "Local session expired." }, 401);
-      return json({ detail: "Unexpected test route." }, 404);
+      if (url.endsWith("/chats")) return respond([{ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z" }]);
+      if (url.endsWith("/chats/thread-expired")) return respond({ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z", revision: 1, messages: [] });
+      if (url.endsWith("/settings")) return respond({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return respond({ memos: [] });
+      if (url.endsWith("/models")) return respond({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.endsWith("/generations/job-expired/events")) return respond({ detail: "Local session expired." }, 401);
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
     });
 
     // This test targets recovery from an expired stream session, not the
@@ -229,10 +248,10 @@ describe("App", () => {
     // could elapse at effectively the same moment, failing the test even
     // though the app was still working correctly.
     expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 12_000 })).toBeVisible();
-    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/generations/job-expired/events"))).toHaveLength(1);
+    expect(callsTo(fetcher, "/generations/job-expired/events")).toHaveLength(1);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
-    expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();
-    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.active.generation") ?? "null")).toMatchObject({ jobId: "job-expired" });
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
   });
 
   it("returns to onboarding when a model job stream reports an expired session", async () => {
