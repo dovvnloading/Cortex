@@ -41,6 +41,23 @@ describe("ErrorBoundary", () => {
     expect(screen.getByRole("button", { name: "Copy details" })).toBeVisible();
   });
 
+  it("says of the copied details only what the record keeps", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(
+      <ErrorBoundary>
+        <BrokenView />
+      </ErrorBoundary>,
+    );
+
+    // It used to promise that the details never describe a conversation, which
+    // rested on nothing the code enforced. The record is limited to where and
+    // what kind, and the page says just that.
+    expect(screen.queryByText(/not your conversations/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/name the part of cortex that failed and the kind of error/i)).toBeVisible();
+    expect(screen.getByText(/leave out the error's own text/i)).toBeVisible();
+  });
+
   it("records the crash for the session before offering a reload", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -51,8 +68,10 @@ describe("ErrorBoundary", () => {
     );
 
     const record = readLastCrash();
-    expect(record).toMatchObject({ scope: "workspace", name: "Error", message: "synthetic render failure" });
-    expect(record?.componentStack).toContain("BrokenView");
+    expect(record).toMatchObject({ scope: "workspace", name: "Error" });
+    expect(record?.componentPath).toContain("BrokenView");
+    // Where and what kind, not what the error said.
+    expect(JSON.stringify(record)).not.toContain("synthetic render failure");
     expect(Number.isNaN(Date.parse(record?.time ?? ""))).toBe(false);
   });
 
@@ -69,10 +88,93 @@ describe("ErrorBoundary", () => {
     );
 
     const stored = window.sessionStorage.getItem(LAST_CRASH_KEY) ?? "";
-    expect(stored).toContain("card failed to render");
+    expect(stored).toContain("Card");
+    expect(stored).not.toContain("card failed to render");
     expect(stored).not.toContain("PRIVATE-PROMPT-TEXT");
     // Nothing on the crash screen quotes it either.
     expect(document.body).not.toHaveTextContent("PRIVATE-PROMPT-TEXT");
+  });
+
+  describe("when the error's own text is hostile", () => {
+    // The text of an error comes from running code, which can build it from
+    // anything it was holding. None of it may reach a record, the details a
+    // person copies, the screen, or a production console.
+    const HOSTILE = "PRIVATE-PROMPT-TEXT: what my doctor said about the lawsuit";
+    function Leaky(): never {
+      throw new Error(HOSTILE);
+    }
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("keeps it out of the record, the copied details and the screen, and still says where and what kind", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+      stubClipboard(writeText);
+      render(
+        <ErrorBoundary scope="workspace">
+          <Leaky />
+        </ErrorBoundary>,
+      );
+
+      await act(async () => {
+        screen.getByRole("button", { name: "Copy details" }).click();
+      });
+
+      expect(window.sessionStorage.getItem(LAST_CRASH_KEY) ?? "").not.toContain("PRIVATE-PROMPT-TEXT");
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText.mock.calls[0][0]).not.toContain("PRIVATE-PROMPT-TEXT");
+      expect(writeText.mock.calls[0][0]).toContain("View: workspace");
+      expect(writeText.mock.calls[0][0]).toContain("Leaky");
+      expect(document.body).not.toHaveTextContent("PRIVATE-PROMPT-TEXT");
+      expect(readLastCrash()).toMatchObject({ scope: "workspace", name: "Error" });
+    });
+
+    it("keeps it out of a route's details as well", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      stubClipboard(vi.fn<(text: string) => Promise<void>>().mockResolvedValue());
+      render(
+        <RouteBoundary name="Settings" scope="settings" resetKey="/settings">
+          <Leaky />
+        </RouteBoundary>,
+      );
+
+      expect(screen.getByRole("alert")).toHaveTextContent("Settings hit a problem");
+      expect(document.body).not.toHaveTextContent("PRIVATE-PROMPT-TEXT");
+      expect(window.sessionStorage.getItem(LAST_CRASH_KEY) ?? "").not.toContain("PRIVATE-PROMPT-TEXT");
+    });
+
+    it("keeps it off the console in a production build, logging the kind of error and a fixed line", () => {
+      vi.stubEnv("PROD", true);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      render(
+        <ErrorBoundary>
+          <Leaky />
+        </ErrorBoundary>,
+      );
+
+      // React reports a caught error itself as well; only this boundary's own
+      // line is the app's to control.
+      const ours = consoleError.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("Cortex UI boundary"));
+      expect(ours).toHaveLength(1);
+      expect(ours[0].some((argument) => argument instanceof Error)).toBe(false);
+      expect(ours[0].map(String).join(" ")).not.toContain("PRIVATE-PROMPT-TEXT");
+      expect(ours[0].map(String).join(" ")).toContain("Error");
+    });
+
+    it("keeps the full error on the console outside a production build, for the developer running it", () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      render(
+        <ErrorBoundary>
+          <Leaky />
+        </ErrorBoundary>,
+      );
+
+      const ours = consoleError.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("Cortex UI boundary"));
+      expect(ours).toHaveLength(1);
+      expect(ours[0].some((argument) => argument instanceof Error && argument.message === HOSTILE)).toBe(true);
+    });
   });
 
   it("still shows the restart page when session storage refuses the record", () => {
@@ -177,8 +279,9 @@ describe("ErrorBoundary", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     const copied = writeText.mock.calls[0][0];
     expect(copied).toContain("View: workspace");
-    expect(copied).toContain("Error: Error: synthetic render failure");
+    expect(copied).toContain("Error type: Error");
     expect(copied).toContain("BrokenView");
+    expect(copied).not.toContain("synthetic render failure");
     expect(await screen.findByText("Copied.")).toBeVisible();
   });
 

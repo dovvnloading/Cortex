@@ -42,7 +42,17 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    recordCrash(error, info.componentStack, this.props.scope ?? "app");
+    const record = recordCrash(error, info.componentStack, this.props.scope ?? "app");
+    if (import.meta.env.PROD) {
+      // An error's own text comes from running code and can carry anything it
+      // was holding; a console line is also what gets copied into reports. A
+      // production build says what kind of error it was and where to find the
+      // details the person can copy.
+      console.error("Cortex UI boundary caught an error. Use Copy details on the error screen.", record.name);
+      return;
+    }
+    // A development build runs on the developer's own machine, where the full
+    // error and component stack are what they need.
     console.error("Cortex UI boundary caught an error", error, info.componentStack);
   }
 
@@ -70,8 +80,8 @@ export class ErrorBoundary extends Component<Props, State> {
         <p>
           The interface hit an unexpected state. The crashed view took no further action.
           Copy the details first, because reloading clears them from the screen, then
-          reload the workspace to try again. The details describe the failing view, not
-          your conversations.
+          reload the workspace to try again. The copied details name the part of Cortex
+          that failed and the kind of error, and leave out the error's own text.
         </p>
         <div className="crash-actions">
           <button className="button button-primary" onClick={() => window.location.reload()}>

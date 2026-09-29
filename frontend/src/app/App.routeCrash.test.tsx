@@ -63,7 +63,8 @@ describe("a crash inside one route", () => {
 
     // The route says what happened, and the crash is on record for this session.
     expect(await screen.findByRole("alert", {}, WAIT)).toHaveTextContent("Settings hit a problem");
-    expect(readLastCrash()).toMatchObject({ scope: "settings", message: "synthetic settings crash" });
+    expect(readLastCrash()).toMatchObject({ scope: "settings", name: "Error" });
+    expect(JSON.stringify(readLastCrash())).not.toContain("synthetic settings crash");
     // Not the whole-window restart page: the shell around it never went away.
     expect(screen.queryByRole("heading", { name: "Cortex needs a restart" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New thread" })).toBeVisible();

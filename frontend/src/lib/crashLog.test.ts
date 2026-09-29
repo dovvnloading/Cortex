@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../api/client";
 import { buildCrashRecord, describeCrash, LAST_CRASH_KEY, readLastCrash, recordCrash } from "./crashLog";
 
 describe("crashLog", () => {
@@ -7,26 +8,107 @@ describe("crashLog", () => {
     window.sessionStorage.clear();
   });
 
-  it("flattens and bounds the one field that comes from running code", () => {
-    const long = `first line\nsecond\u0000line ${"x".repeat(1000)}`;
-    const record = buildCrashRecord(new TypeError(long), "", "chat", new Date("2026-09-29T10:00:00Z"));
+  it("records when, which part of the app and what kind of error, and nothing else", () => {
+    const record = buildCrashRecord(new TypeError("x"), "", "chat", new Date("2026-09-29T10:00:00Z"));
 
-    expect(record.time).toBe("2026-09-29T10:00:00.000Z");
-    expect(record.name).toBe("TypeError");
-    expect(record.message.startsWith("first line second line ")).toBe(true);
-    expect(record.message).not.toContain("\n");
-    expect(record.message).not.toContain("\u0000");
-    expect(record.message.length).toBeLessThanOrEqual(300);
+    expect(record).toEqual({ time: "2026-09-29T10:00:00.000Z", scope: "chat", name: "TypeError", componentPath: "" });
   });
 
-  it("bounds the component stack by lines and by size, and drops control characters", () => {
-    const stack = Array.from({ length: 100 }, (_, index) => `    at Component${index} (bundle.js:${index}:1)\u0007`).join("\n");
+  it("flattens and bounds the scope the app passes in", () => {
+    const record = buildCrashRecord(new Error("x"), "", `first\nsecond\u0000third ${"x".repeat(200)}`);
 
-    const record = buildCrashRecord(new Error("boom"), stack, "app");
+    expect(record.scope.startsWith("first second third ")).toBe(true);
+    expect(record.scope).not.toContain("\n");
+    expect(record.scope).not.toContain("\u0000");
+    expect(record.scope.length).toBeLessThanOrEqual(40);
+    expect(buildCrashRecord(new Error("x"), "", "  ").scope).toBe("app");
+  });
 
-    expect(record.componentStack.split("\n")).toHaveLength(25);
-    expect(record.componentStack).not.toContain("\u0007");
-    expect(record.componentStack.length).toBeLessThanOrEqual(2000);
+  describe("an error's own text", () => {
+    // Nothing decides, from the outside, that an error message is free of
+    // conversation text: the app itself puts file names into some, and a
+    // message can be built from anything running code was holding. So none is
+    // copied, whatever kind of error carries it.
+    const HOSTILE = "PRIVATE-PROMPT-TEXT: what my doctor said about the lawsuit";
+    class SummaryError extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = "PromptSummaryError";
+      }
+    }
+    const hostileErrors = (): unknown[] => [
+      new Error(HOSTILE),
+      new TypeError(HOSTILE),
+      new RangeError(HOSTILE),
+      new ApiError(500, HOSTILE),
+      new SummaryError(HOSTILE),
+      Object.assign(new Error("failed"), { name: HOSTILE }),
+      Object.assign(new Error("failed"), { detail: HOSTILE, response: { text: HOSTILE } }),
+    ];
+
+    it("is never copied into the record or the text a person pastes", () => {
+      for (const error of hostileErrors()) {
+        const record = buildCrashRecord(error, "    at Card (bundle.js:1:1)", "chat", new Date("2026-09-29T10:00:00Z"));
+
+        expect(JSON.stringify(record)).not.toContain("PRIVATE-PROMPT-TEXT");
+        expect(describeCrash(record)).not.toContain("PRIVATE-PROMPT-TEXT");
+      }
+    });
+
+    it("is not stored either", () => {
+      for (const error of hostileErrors()) {
+        recordCrash(error, "    at Card (bundle.js:1:1)", "chat");
+
+        expect(window.sessionStorage.getItem(LAST_CRASH_KEY) ?? "").not.toContain("PRIVATE-PROMPT-TEXT");
+      }
+    });
+
+    it("leaves only the error's class name, and only when it is one of a known few", () => {
+      const nameOf = (error: unknown) => buildCrashRecord(error, "", "app").name;
+
+      expect(nameOf(new TypeError("x"))).toBe("TypeError");
+      expect(nameOf(new RangeError("x"))).toBe("RangeError");
+      expect(nameOf(new ApiError(500, "x"))).toBe("ApiError");
+      // A name is read from running code too, so an unknown one is not trusted.
+      expect(nameOf(new SummaryError("x"))).toBe("Error");
+      expect(nameOf(Object.assign(new Error("x"), { name: HOSTILE }))).toBe("Error");
+    });
+  });
+
+  it("reduces the component stack to component names, innermost first, without locations", () => {
+    const stack = [
+      "    at Card (http://localhost:5173/src/features/chat/Card.tsx?t=17:12:3)",
+      "    at MessageList (http://localhost:5173/src/features/chat/MessageList.tsx:1:1)",
+      "    at Suspense (<anonymous>)",
+      "    at <anonymous>:1:1",
+      "Gecko@http://localhost:5173/src/Gecko.tsx:2:2",
+      "    at PRIVATE-PROMPT-TEXT looks like prose (not a frame)",
+    ].join("\n");
+
+    const record = buildCrashRecord(new Error("x"), stack, "chat");
+
+    expect(record.componentPath).toBe("Card > MessageList > Suspense > Gecko");
+    expect(JSON.stringify(record)).not.toMatch(/localhost|\.tsx|:12:3|PRIVATE/);
+  });
+
+  it("bounds the component path to 25 names and skips a name that is too long", () => {
+    const frames = Array.from({ length: 100 }, (_, index) => `    at Component${index} (bundle.js:${index}:1)\u0007`);
+    frames.splice(1, 0, `    at ${"L".repeat(200)} (bundle.js:1:1)`);
+
+    const record = buildCrashRecord(new Error("boom"), frames.join("\r\n"), "app");
+
+    const names = record.componentPath.split(" > ");
+    expect(names).toHaveLength(25);
+    expect(names.slice(0, 3)).toEqual(["Component0", "Component1", "Component2"]);
+    expect(record.componentPath).not.toContain("\u0007");
+    expect(record.componentPath).not.toContain("LLLL");
+    expect(record.componentPath.length).toBeLessThan(500);
+  });
+
+  it("has no component path when the stack is missing or holds no frames", () => {
+    expect(buildCrashRecord(new Error("x"), undefined, "app").componentPath).toBe("");
+    expect(buildCrashRecord(new Error("x"), null, "app").componentPath).toBe("");
+    expect(buildCrashRecord(new Error("x"), "\n\n   \nnot a frame at all", "app").componentPath).toBe("");
   });
 
   it("never turns an arbitrary thrown value into text", () => {
@@ -36,7 +118,7 @@ describe("crashLog", () => {
       const record = buildCrashRecord(thrown, undefined, "app");
       expect(JSON.stringify(record)).not.toContain("PRIVATE-PROMPT-TEXT");
       expect(record.name).toBe("Error");
-      expect(record.message).toBe("");
+      expect(record).not.toHaveProperty("message");
     }
   });
 
@@ -81,17 +163,26 @@ describe("crashLog", () => {
       time: "2026-09-29T10:00:00.000Z",
       scope: "chat",
       name: "TypeError",
-      message: "x is undefined",
-      componentStack: "    at ChatPage (bundle.js:1:1)",
+      componentPath: "ChatPage > Suspense > App",
     });
 
     expect(text.split("\n")).toEqual([
       "Cortex UI crash",
       "Time: 2026-09-29T10:00:00.000Z",
       "View: chat",
-      "Error: TypeError: x is undefined",
-      "Component stack:",
-      "    at ChatPage (bundle.js:1:1)",
+      "Error type: TypeError",
+      "Components, innermost first: ChatPage > Suspense > App",
+    ]);
+  });
+
+  it("leaves the component line out of the pasted text when there is no path", () => {
+    const text = describeCrash({ time: "2026-09-29T10:00:00.000Z", scope: "app", name: "Error", componentPath: "" });
+
+    expect(text.split("\n")).toEqual([
+      "Cortex UI crash",
+      "Time: 2026-09-29T10:00:00.000Z",
+      "View: app",
+      "Error type: Error",
     ]);
   });
 });
