@@ -168,15 +168,39 @@ def test_an_enormous_integer_literal_is_refused_even_when_the_interpreter_would_
     assert unlimited.value.code == "integer_too_large"
 
 
-def test_a_very_long_expression_is_too_complex_not_a_crash() -> None:
-    """Sizes are worked out bottom-up, so a deep chain cannot recurse past the depth limit."""
+def test_a_long_expression_is_too_complex_on_every_interpreter() -> None:
+    """A chain far past the depth limit that every supported parser still accepts.
+
+    Sizes are worked out bottom-up, so a deep chain cannot recurse past the
+    depth limit. 200 terms is well over ``MAX_CODE_AST_DEPTH`` and far inside
+    the depth at which any supported interpreter's own parser gives up, so the
+    validator's own bound is the one that must fire.
+    """
+
+    source = "x = " + " * ".join(["2"] * 200)
+
+    with pytest.raises(CodeExecutionError) as refused:
+        validate_code_source(source)
+
+    assert refused.value.code == "source_too_complex"
+
+
+def test_a_very_long_expression_is_refused_not_a_crash() -> None:
+    """Past the parser's own depth limit the refusal is still a fail-closed code.
+
+    Which limit fires first is the interpreter's decision. CPython 3.12 stops
+    inside ``ast.parse`` at about 3000 chained terms (``syntax_invalid``);
+    3.14 parses far deeper and the validator's depth bound answers instead
+    (``source_too_complex``). Either way the program is refused with a stable
+    code and nothing escapes as an unhandled RecursionError or MemoryError.
+    """
 
     source = "x = " + " * ".join(["2"] * 3_000)
 
     with pytest.raises(CodeExecutionError) as refused:
         validate_code_source(source)
 
-    assert refused.value.code == "source_too_complex"
+    assert refused.value.code in {"source_too_complex", "syntax_invalid"}
 
 
 def test_growth_carried_through_a_name_is_not_tracked() -> None:
