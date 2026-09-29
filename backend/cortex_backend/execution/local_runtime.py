@@ -82,6 +82,11 @@ from .scratch_compute import (
 
 _LOGGER = logging.getLogger("cortex.execution.local_runtime")
 
+# How long a code job waiting for approval sleeps before it looks again on its
+# own. Decisions, expiries, cancellation and shutdown all wake it sooner; this
+# only bounds how long a change nobody announced can go unnoticed.
+_APPROVAL_RECHECK_SECONDS = 2.0
+
 
 class LocalExecutionCoordinator:
     """One lifecycle owner for the normal local image and compute profiles."""
@@ -352,6 +357,8 @@ class LocalExecutionCoordinator:
                 code_attempt = self._code_attempts.get(job_id)
             if code_event is not None:
                 code_event.set()
+                # Wakes the job if it is still asleep waiting for approval.
+                self.repository.approval_changes.bump()
             if code_attempt is not None:
                 code_attempt.cancel()
             return self.repository.request_cancel(job_id)
@@ -440,6 +447,9 @@ class LocalExecutionCoordinator:
             code_threads = list(self._code_threads.values())
         for event in code_events:
             event.set()
+        # A job still waiting for approval is asleep on this signal, not on its
+        # cancel event; without a nudge it would sit out its recheck.
+        self.repository.approval_changes.bump()
         for code_attempt in code_attempts:
             code_attempt.cancel()
         for thread in code_threads:
@@ -528,6 +538,36 @@ class LocalExecutionCoordinator:
             self._code_threads[job_id] = thread
             thread.start()
 
+    def _await_approval(self, job_id: str, cancel_event: Event) -> ExecutionJob | None:
+        """Park a code job until its approval is decided, expires, or the run is cancelled.
+
+        Nothing polls. The thread sleeps on the repository's approval signal,
+        which a decision or an expiry moves, and otherwise wakes at its own
+        approval's deadline to persist the expiry -- so a pending approval still
+        expires during a live coordinator, not only at startup, at the moment it
+        lapses rather than a poll later. Cancellation and shutdown move the same
+        signal. A bounded recheck is a safety net for a change made behind the
+        repository's back (another process, a clock that jumped); it costs one
+        read, never a write, and is never what wakes a normal decision.
+
+        Returns the job as last read, or ``None`` when it no longer exists.
+        """
+
+        changes = self.repository.approval_changes
+        while True:
+            # Read the counter before the state it guards, so a change landing
+            # in between wakes the wait below instead of being slept through.
+            seen = changes.version
+            current = self.repository.get_job(job_id)
+            if current is None or current.approval_state != "pending" or cancel_event.is_set():
+                return current
+            remaining = self.repository.pending_approval_seconds(job_id)
+            timeout = _APPROVAL_RECHECK_SECONDS
+            if remaining is not None:
+                # A hair past the deadline, so the wake-up finds it expired.
+                timeout = min(timeout, max(0.0, remaining) + 0.01)
+            changes.wait(seen, timeout)
+
     def _run_code(self, job_id: str, cancel_event: Event) -> None:
         lease_owner = f"code-coordinator-{uuid4().hex}"
         attempt: LocalCodeAttempt | None = None
@@ -541,16 +581,8 @@ class LocalExecutionCoordinator:
             if current.approval_state == "expired":
                 self.repository.expire_approvals()
                 return
-            next_approval_expiry_check = 0.0
-            while current.approval_state == "pending" and not cancel_event.is_set():
-                now = time.monotonic()
-                if now >= next_approval_expiry_check:
-                    # Pending approvals must expire during a live coordinator,
-                    # not only during process startup/recovery.
-                    self.repository.expire_approvals()
-                    next_approval_expiry_check = now + 0.25
-                time.sleep(0.05)
-                current = self.repository.get_job(job_id)
+            if current.approval_state == "pending":
+                current = self._await_approval(job_id, cancel_event)
                 if current is None:
                     return
             if current.approval_state == "expired":

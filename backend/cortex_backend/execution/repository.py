@@ -15,7 +15,7 @@ import sqlite3
 import stat
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from threading import RLock
+from threading import Condition, RLock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -130,6 +130,41 @@ class ArtifactCleanupBlocked(ExecutionRepositoryError):
     """A cleanup row could not be finished this time; a later pass may succeed."""
 
 
+class ChangeSignal:
+    """A counter waiters can sleep on until it moves, so nothing has to poll.
+
+    Read :attr:`version` *before* looking at the state being waited on, then
+    hand it to :meth:`wait`. A change that lands between that read and the
+    sleep has already moved the counter, so the wait returns at once instead of
+    sleeping through it.
+    """
+
+    def __init__(self) -> None:
+        self._condition = Condition()
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        with self._condition:
+            return self._version
+
+    def bump(self) -> None:
+        """Announce a change to everyone waiting."""
+
+        with self._condition:
+            self._version += 1
+            self._condition.notify_all()
+
+    def wait(self, since: int, timeout: float) -> bool:
+        """Sleep until the counter moves past ``since`` or ``timeout`` seconds pass.
+
+        Returns whether it moved. A wake-up is only a hint to look again.
+        """
+
+        with self._condition:
+            return self._condition.wait_for(lambda: self._version != since, timeout=timeout)
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCleanupResult:
     """Bounded cleanup work completed by one janitor pass.
@@ -173,6 +208,9 @@ class ExecutionRepository:
         # process. "Allow once" is one run in the process the user answered
         # in, so it cannot be spent by this one.
         self._opened_at = datetime.now(timezone.utc)
+        # Moves whenever an approval is decided or expires, so a job waiting
+        # for one can sleep instead of polling the store.
+        self.approval_changes = ChangeSignal()
         self._ensure_schema()
 
     @property
@@ -1009,9 +1047,29 @@ class ExecutionRepository:
                 data={"message": message, "approval_state": persisted_state},
                 now=now,
             )
+        # After the commit, so a woken waiter reads the decision, and before the
+        # expiry error below, since finding the approval expired settled it too.
+        self.approval_changes.bump()
         if expired:
             raise ApprovalTransitionError("Approval has expired.")
         return decision
+
+    def pending_approval_seconds(self, job_id: str) -> float | None:
+        """Seconds until a pending approval expires, by this repository's clock.
+
+        Negative once it is overdue but the sweep has not yet persisted that.
+        ``None`` when the job has no pending approval.
+        """
+
+        now = datetime.now(timezone.utc)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT expires_at FROM execution_approvals WHERE job_id = ? AND state = 'pending'",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return (datetime.fromisoformat(row["expires_at"]) - now).total_seconds()
 
     def expire_approvals(self, *, now: str | None = None) -> list[str]:
         cutoff = now or self._now()
@@ -1047,6 +1105,8 @@ class ExecutionRepository:
                     now=cutoff,
                 )
                 expired.append(job_id)
+        if expired:
+            self.approval_changes.bump()
         return expired
 
     def claim_supervisor_lease(
