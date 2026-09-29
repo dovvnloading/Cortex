@@ -1592,6 +1592,7 @@ def _attachment_owner(request: Request, principal: SessionPrincipal) -> str:
 
 def _raise_chat_attachment_error(exc: ChatAttachmentError) -> NoReturn:
     messages = {
+        "attachment_filename_invalid": "The file name is too long or contains only punctuation.",
         "attachment_too_large": "Files must be 10 MB or smaller.",
         "attachment_type_unsupported": "Cortex supports images and common text/code/config documents.",
         "attachment_not_text": "That document is not a readable text file.",

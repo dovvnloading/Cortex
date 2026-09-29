@@ -385,6 +385,35 @@ def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
         assert "does not support image input" in blocked.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        # Passes the schema's 512-character cap, fails the service's 180 once
+        # the name is normalised.
+        "a" * 296 + ".txt",
+        # Nothing is left of a name that is only dots and spaces.
+        " . . . ",
+    ],
+    ids=["a-300-character-name", "a-name-of-only-punctuation"],
+)
+def test_a_300_character_filename_is_refused_with_a_specific_message(filename: str):
+    app = create_app(build_demo_dependencies(), allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        response = client.post(
+            "/api/v1/attachments",
+            headers=headers,
+            json={
+                "request_id": "bad-name-1",
+                "filename": filename,
+                "content_base64": base64.b64encode(b"plain text").decode("ascii"),
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The file name is too long or contains only punctuation."
+
+
 def test_api_accepts_images_when_ollama_advertises_vision():
     state = FakeOllamaState(
         installed_models={"vision-model"},
