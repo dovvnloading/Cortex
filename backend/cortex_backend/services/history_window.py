@@ -34,10 +34,11 @@ HISTORY_OMISSION_NOTE = (
 # guards a hand-built message.
 _MAX_ATTACHMENT_NOTES = 8
 _MAX_LABEL_CHARS = 120
-# Control characters, line breaks and the brackets the note itself is made of:
-# a filename is user-controlled text, and must not be able to end its own note
-# early or start a line of its own.
-_UNSAFE_LABEL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f  \[\]]")
+# Control characters, line breaks, invisible and direction-changing characters
+# and the brackets the note itself is made of: a filename is user-controlled
+# text, and must not be able to end its own note early, start a line of its
+# own, or make what follows it read in a different order.
+_UNSAFE_LABEL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿\[\]]")
 
 
 def answered_exchanges(messages: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:

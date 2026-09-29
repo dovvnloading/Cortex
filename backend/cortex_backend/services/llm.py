@@ -1379,8 +1379,14 @@ class SynthesisAgent:
                     build_prompt=build_prompt,
                     num_ctx=num_ctx,
                 )
-                if dropped and on_delta is not None:
-                    on_delta("notice", _MEASURED_TRIM_NOTICE.format(count=dropped))
+                if dropped:
+                    # Counts only: nothing of the conversation goes in a log.
+                    logging.info(
+                        "Dropped %d earlier exchange(s) after measuring the prompt with the runtime's tokenizer.",
+                        dropped,
+                    )
+                    if on_delta is not None:
+                        on_delta("notice", _MEASURED_TRIM_NOTICE.format(count=dropped))
 
             # Deliberately no num_predict/max_tokens default here: both Ollama
             # and llama-server already stop generation on their own once the
