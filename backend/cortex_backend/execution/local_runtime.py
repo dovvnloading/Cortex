@@ -180,9 +180,7 @@ class LocalExecutionCoordinator:
     def _probe_image_provider() -> RuntimeHealth:
         provider = RecipeImageProvider()
         try:
-            return provider.start(
-                RuntimeHealth.ready("The local image provider is being checked.")
-            )
+            return provider.start()
         except Exception:
             return RuntimeHealth.blocked(
                 "image_provider_unavailable",

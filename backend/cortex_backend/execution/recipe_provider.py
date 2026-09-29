@@ -3,9 +3,9 @@
 This module is a bounded transform core, not an execution route.  It accepts
 validated ``ImageTransformPlan`` objects and immutable bytes, never paths or
 model source, and returns a new encoded image only after decoding and
-re-validating the result. The provider starts only after a caller supplies a
-health result. The local runtime invokes it inside a short-lived worker
-process.
+re-validating the result. The provider starts only after its own dependency
+health passes. The local runtime invokes it inside a short-lived worker
+process, which the runtime -- not this module -- contains.
 """
 
 from __future__ import annotations
@@ -410,12 +410,16 @@ class RecipeImageProvider:
         return self._health
 
     def health(self, sandbox_health: RuntimeHealth | None = None) -> RuntimeHealth:
-        if sandbox_health is None:
-            return RuntimeHealth.blocked(
-                code="sandbox_unverified",
-                message="The image provider sandbox has not been verified.",
-            )
-        if not sandbox_health.available:
+        """Dependency health, gated by a containment probe only when the caller ran one.
+
+        ``sandbox_health`` is the verdict of a probe that really executed. Both
+        callers used to hand in a verdict they had just made up themselves, so
+        the ``sandbox_unverified`` block for a missing verdict never stopped
+        anything and only made the health look checked. A missing verdict now
+        means no probe was run, and a failing one still blocks.
+        """
+
+        if sandbox_health is not None and not sandbox_health.available:
             return RuntimeHealth.blocked(
                 code="sandbox_unavailable",
                 message="The image provider sandbox is unavailable.",
@@ -423,8 +427,8 @@ class RecipeImageProvider:
         available, code, message = _pillow_health()
         return RuntimeHealth(available=available, code=code, message=message)
 
-    def start(self, sandbox_health: RuntimeHealth) -> RuntimeHealth:
-        """Enable only after the caller supplies a passing external sandbox probe."""
+    def start(self, sandbox_health: RuntimeHealth | None = None) -> RuntimeHealth:
+        """Enable only when dependency health, and any containment probe supplied, pass."""
 
         health = self.health(sandbox_health)
         self._health = health
