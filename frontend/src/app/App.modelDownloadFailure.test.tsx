@@ -70,7 +70,7 @@ describe("App model download failures", () => {
     await waitFor(() => expect(screen.getAllByRole("alert").filter((node) => node.textContent?.includes(reason))).toHaveLength(2));
     const inline = screen.getAllByRole("alert").find((node) => node.classList.contains("field-error") && node.textContent?.includes(reason));
     expect(inline).toBeDefined();
-    expect(inline).toHaveTextContent(`${reason} Check the details above and try again.`);
+    expect(inline?.textContent).toBe(reason);
     expect(inline).not.toHaveTextContent("notification");
     // The toast is dismissible rather than timed.
     const toast = screen.getAllByRole("alert").find((node) => node.classList.contains("toast"));
@@ -96,6 +96,6 @@ describe("App model download failures", () => {
       expect(node).toBeDefined();
       return node as HTMLElement;
     });
-    expect(inline).toHaveTextContent("That host is not on the download allow-list. Check the details above and try again.");
+    expect(inline.textContent).toBe("That host is not on the download allow-list.");
   });
 });

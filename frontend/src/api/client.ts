@@ -72,13 +72,16 @@ export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
   readonly kind: ApiErrorKind;
+  /** The backend's machine-readable name for the failure, on the few routes that send one. */
+  readonly code: string | null;
 
-  constructor(status: number, detail: string, kind: ApiErrorKind = kindForStatus(status)) {
+  constructor(status: number, detail: string, kind: ApiErrorKind = kindForStatus(status), code: string | null = null) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.kind = kind;
+    this.code = code;
   }
 }
 
@@ -136,7 +139,7 @@ type FetchLike = typeof fetch;
 type SessionExpiredListener = () => void;
 type ValidationIssue = { loc?: unknown; msg?: unknown };
 type ErrorBody = {
-  detail?: string | { message?: string } | ValidationIssue[];
+  detail?: string | { message?: string; code?: string } | ValidationIssue[];
 };
 
 const SESSION_TOKEN_KEY = "cortex.session.token";
@@ -536,9 +539,12 @@ export class CortexApi {
     });
   }
 
-  listHuggingFaceGGUFFiles(repoId: string): Promise<HuggingFaceFileListResponse> {
+  listHuggingFaceGGUFFiles(repoId: string, options: { signal?: AbortSignal } = {}): Promise<HuggingFaceFileListResponse> {
     const params = new URLSearchParams({ repo_id: repoId });
-    return this.request<HuggingFaceFileListResponse>(`/models/gguf/huggingface-files?${params.toString()}`);
+    return this.request<HuggingFaceFileListResponse>(
+      `/models/gguf/huggingface-files?${params.toString()}`,
+      { signal: options.signal },
+    );
   }
 
   downloadGGUFModel(payload: ModelDownloadRequest): Promise<JobAccepted> {
@@ -701,11 +707,8 @@ export class CortexApi {
       ? await this.fetchWithSession(url, init)
       : await this.send(url, init);
     if (!response.ok) {
-      const detail = await this.errorDetail(response);
-      throw new ApiError(
-        response.status,
-        detail,
-      );
+      const { detail, code } = await this.errorFields(response);
+      throw new ApiError(response.status, detail, kindForStatus(response.status), code);
     }
     if (response.status === 204) {
       return undefined as T;
@@ -789,15 +792,20 @@ export class CortexApi {
   }
 
   private async errorDetail(response: Response): Promise<string> {
+    return (await this.errorFields(response)).detail;
+  }
+
+  private async errorFields(response: Response): Promise<{ detail: string; code: string | null }> {
     const body = (await response.json().catch(() => null)) as ErrorBody | null;
     if (response.status === 422 && Array.isArray(body?.detail)) {
       const validationDetail = formatValidationIssues(body.detail);
-      if (validationDetail) return validationDetail;
+      if (validationDetail) return { detail: validationDetail, code: null };
     }
-    if (typeof body?.detail === "string") return body.detail;
+    if (typeof body?.detail === "string") return { detail: body.detail, code: null };
     if (body?.detail && typeof body.detail === "object" && !Array.isArray(body.detail) && typeof body.detail.message === "string") {
-      return body.detail.message;
+      const { message, code } = body.detail;
+      return { detail: message, code: typeof code === "string" ? code : null };
     }
-    return "The local workspace did not respond.";
+    return { detail: "The local workspace did not respond.", code: null };
   }
 }

@@ -1,17 +1,19 @@
-import { Download, ExternalLink, FolderOpen, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { ExternalLink, FolderOpen, RefreshCw, X } from "lucide-react";
 import type {
   LlamaCppRuntimeStatus,
   ModelDownloadRequest,
   ModelResponse,
 } from "../../../../contracts/cortex-api";
 import { displayModelName } from "../../lib/localModels";
+import { GGUFDownloadForm, type ListGGUFFiles } from "./GGUFDownloadForm";
 import { ModelInfoPanel } from "./ModelInfoPanel";
 
 type Progress = {
   model: string;
   status: string;
   percent: number | null;
+  /** The person asked for this operation to stop and it has not yet. */
+  cancelling?: boolean;
 };
 
 type GGUFControls = {
@@ -20,19 +22,23 @@ type GGUFControls = {
   onDirectoryChange: (value: string) => void;
   onDownload: (request: ModelDownloadRequest) => Promise<void>;
   busy: boolean;
+  /** Lists a Hugging Face repository's files; without it the form only takes a typed file name. */
+  onListFiles?: ListGGUFFiles;
 };
 
 type Props = {
   models: ModelResponse;
   busy: boolean;
   progress: Progress | null;
+  /** Stops the operation being shown; without it the progress row has no Cancel. */
+  onCancel?: () => void;
   setupUrl: string;
   onCheck: () => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
   gguf: GGUFControls;
 };
 
-export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, llamacppStatus, gguf }: Props) {
+export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onCheck, llamacppStatus, gguf }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
@@ -91,7 +97,20 @@ export function ModelsPanel({ models, busy, progress, setupUrl, onCheck, llamacp
             <span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span>
           </div>
           <div className="progress-track"><span style={{ width: `${progress.percent ?? 8}%` }} /></div>
-          <small>{progress.status}</small>
+          <div className="model-progress-footer">
+            <small>{progress.status}</small>
+            {busy && onCancel && (
+              <button
+                className="button button-quiet model-progress-cancel"
+                type="button"
+                onClick={onCancel}
+                disabled={progress.cancelling}
+                aria-label={`Cancel ${progress.model}`}
+              >
+                <X aria-hidden="true" size={14} /> {progress.cancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            )}
+          </div>
         </div>
       )}
       <GGUFRuntimeSection llamacppStatus={llamacppStatus} gguf={gguf} />
@@ -148,100 +167,12 @@ function GGUFRuntimeSection({ llamacppStatus, gguf }: { llamacppStatus: LlamaCpp
           Save the folder setting before downloading a model. Downloads use the saved folder.
         </p>
       )}
-      <GGUFDownloadForm onDownload={gguf.onDownload} busy={gguf.busy} directoryDirty={gguf.directoryDirty} />
-    </div>
-  );
-}
-
-function GGUFDownloadForm({ onDownload, busy, directoryDirty }: { onDownload: (request: ModelDownloadRequest) => Promise<void>; busy: boolean; directoryDirty: boolean }) {
-  const [source, setSource] = useState<"huggingface" | "url">("huggingface");
-  const [repoId, setRepoId] = useState("");
-  const [filename, setFilename] = useState("");
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async () => {
-    setError(null);
-    const request: ModelDownloadRequest =
-      source === "huggingface"
-        ? { source, repo_id: repoId.trim(), filename: filename.trim() }
-        : { source, url: url.trim() };
-    try {
-      await onDownload(request);
-      setRepoId("");
-      setFilename("");
-      setUrl("");
-    } catch (failure) {
-      // App reports why the download failed (a checksum mismatch, a refused
-      // URL) in the rejection, so the reason stays here after any toast is gone.
-      const reason = failure instanceof Error && failure.message.trim() ? failure.message.trim() : "The download did not complete.";
-      setError(`${/[.!?]$/.test(reason) ? reason : `${reason}.`} Check the details above and try again.`);
-    }
-  };
-
-  const canSubmit = source === "huggingface" ? repoId.trim() && filename.trim() : url.trim();
-
-  return (
-    <div className="gguf-download-form">
-      <div className="gguf-download-source-toggle" role="radiogroup" aria-label="Download source">
-        <button
-          type="button"
-          className={`button button-quiet ${source === "huggingface" ? "icon-button-active" : ""}`}
-          aria-pressed={source === "huggingface"}
-          onClick={() => setSource("huggingface")}
-        >
-          Hugging Face
-        </button>
-        <button
-          type="button"
-          className={`button button-quiet ${source === "url" ? "icon-button-active" : ""}`}
-          aria-pressed={source === "url"}
-          onClick={() => setSource("url")}
-        >
-          Direct URL
-        </button>
-      </div>
-      {source === "huggingface" ? (
-        <div className="gguf-download-fields">
-          <label className="field-label" htmlFor="gguf-repo-id">
-            Repo id
-            <input
-              id="gguf-repo-id"
-              value={repoId}
-              placeholder="bartowski/some-model-GGUF"
-              onChange={(event) => setRepoId(event.target.value)}
-            />
-          </label>
-          <label className="field-label" htmlFor="gguf-filename">
-            File name
-            <input
-              id="gguf-filename"
-              value={filename}
-              placeholder="some-model.Q4_K_M.gguf"
-              onChange={(event) => setFilename(event.target.value)}
-            />
-          </label>
-        </div>
-      ) : (
-        <label className="field-label" htmlFor="gguf-url">
-          Direct .gguf URL
-          <input
-            id="gguf-url"
-            value={url}
-            placeholder="https://example.com/model.gguf"
-            onChange={(event) => setUrl(event.target.value)}
-          />
-        </label>
-      )}
-      {error && <p className="field-error" role="alert">{error}</p>}
-      <button
-        className="button button-secondary"
-        type="button"
-        onClick={() => void submit()}
-        disabled={!canSubmit || busy || directoryDirty}
-      >
-        <Download aria-hidden="true" size={15} /> {busy ? "Downloading…" : "Download model"}
-      </button>
+      <GGUFDownloadForm
+        onDownload={gguf.onDownload}
+        busy={gguf.busy}
+        directoryDirty={gguf.directoryDirty}
+        onListFiles={gguf.onListFiles}
+      />
     </div>
   );
 }

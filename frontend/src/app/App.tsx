@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SystemResponse } from "../../../contracts/cortex-api";
 import {
   CortexApi,
   ApiError,
@@ -21,12 +21,14 @@ import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
+import { ModelJobCancelledError } from "../lib/modelJobs";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { applyStoredTheme, DEFAULT_THEME_PREFERENCE } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
+import { useModelJobs } from "../hooks/useModelJobs";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
-import { useModelStore, type ModelProgress } from "../stores/useModelStore";
+import { useModelStore } from "../stores/useModelStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import { RouteBoundary } from "./ErrorBoundary";
 import { lazyRoute } from "./lazyRoute";
@@ -293,10 +295,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const setModels = useModelStore((state) => state.setModels);
   const [memoryBusy, setMemoryBusy] = useState(false);
   const modelBusy = useModelStore((state) => state.modelBusy);
-  const setModelBusy = useModelStore((state) => state.setModelBusy);
   const modelProgress = useModelStore((state) => state.modelProgress);
   const liveLlamacppStatus = useModelStore((state) => state.llamacppStatus);
-  const setModelProgress = useModelStore((state) => state.setModelProgress);
   const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
   // What `executionTasks` currently holds, as text. Every poll response is a
@@ -345,13 +345,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       groupLoadGenerationRef.current += 1;
       modelGenerationRef.current += 1;
       memoryGenerationRef.current += 1;
-      // The model job itself is durable on the backend, but its UI ownership
-      // ends with this authenticated workspace. Do not strand a busy flag in
-      // the process-wide store after logout or a remount.
-      setModelBusy(false);
-      setModelProgress(null);
     };
-  }, [setModelBusy, setModelProgress]);
+  }, []);
 
   useEffect(() => {
     chatsRef.current = visibleChats;
@@ -751,97 +746,39 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
-  // `checkOllamaConnection`: the refreshed inventory's `connection` field
-  // reflects Ollama's reachability specifically -- a GGUF-only user with no
-  // Ollama running should never see an unrelated job (like a successful
-  // GGUF download) reported as failed just because Ollama is unreachable.
-  // `notifyOnSuccess`: callers that want their own, more specific success
-  // message (e.g. "modelname downloaded and selected") suppress the generic
-  // one here instead of showing both.
-  // `onFailure`: receives the specific reason a failed job reports, so a
-  // caller can show it next to the control that started the job as well as in
-  // the toast.
-  const runModelJob = async (
-    accepted: JobAccepted,
-    model = "local model inventory",
-    options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean; onFailure?: (message: string) => void } = {},
-  ): Promise<Record<string, unknown> | null> => {
-    const { checkOllamaConnection = true, notifyOnSuccess = true, onFailure } = options;
-    const generation = ++modelGenerationRef.current;
-    const isCurrentModelJob = () => mountedRef.current && modelGenerationRef.current === generation;
-    setModelBusy(true);
-    setModelProgress({ model, status: "Starting...", percent: null });
-    let completedData: Record<string, unknown> | null = null;
-    let failureMessage: string | null = null;
-    try {
-      const terminalEvent = await api.streamJob(accepted.job_id, (event) => {
-        if (mountedRef.current && modelGenerationRef.current === generation) updateModelProgress(event, setModelProgress);
-        if (event.kind === "completed") completedData = event.data ?? null;
-        if (event.kind === "error") {
-          const message = event.data?.message;
-          failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
-        }
-      });
+  // A model job is followed by `useModelJobs`, which keeps the job in the
+  // model store (and session storage) so a remount or reload picks it up
+  // again. A finished job's fresh inventory supersedes any initial load still
+  // in flight, and a download that finishes with nothing waiting on it (one
+  // picked up again after a reload) is selected here just like one started
+  // from Settings.
+  const modelJobs = useModelJobs({
+    api,
+    notify,
+    onModels: (refreshed) => {
+      modelGenerationRef.current += 1;
+      setModels(refreshed);
+    },
+    onDownloaded: (filename) => finishGGUFDownload(filename),
+  });
 
-      // A clean SSE close carries the terminal event back from streamJob. If
-      // the connection ends before that event, reconcile against the durable
-      // job snapshot before treating the operation as complete.
-      let terminalStatus: JobStatusResponse["status"] | null = terminalEvent ? terminalEvent.status : null;
-      if (!terminalEvent) {
-        const snapshot = await api.jobStatus(accepted.job_id);
-        terminalStatus = snapshot.status;
-        if (snapshot.status === "succeeded") completedData = snapshot.result ?? null;
-        if (snapshot.status === "failed" || snapshot.status === "cancelled") {
-          failureMessage = snapshot.error ?? null;
-        }
-      }
-
-      if (terminalStatus === "failed" || terminalStatus === "cancelled") {
-        const message = failureMessage
-          ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed.");
-        onFailure?.(message);
-        if (isCurrentModelJob()) notify(message, "error");
-        return null;
-      }
-      if (terminalStatus !== "succeeded") {
-        // Do not refresh inventory, announce success, or imply that a GGUF
-        // download produced a selectable file while the worker may continue.
-        if (isCurrentModelJob()) {
-          setModelProgress({ model, status: "Model operation is still running; completion was not confirmed.", percent: null });
-          notify("Model operation is still running; completion was not confirmed.", "error");
-        }
-        return null;
-      }
-
-      const refreshedModels = await api.models();
-      if (!isCurrentModelJob()) return completedData;
-      setModels(refreshedModels);
-      if (checkOllamaConnection && !refreshedModels.connection?.success) {
-        notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
-        return completedData;
-      }
-      if (notifyOnSuccess) {
-        notify(model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
-      }
-      return completedData;
-    } catch (error) {
-      const message = apiMessage(error, "Model operation failed.");
-      onFailure?.(message);
-      if (isCurrentModelJob()) notify(message, "error");
-      return null;
-    } finally {
-      if (isCurrentModelJob()) setModelBusy(false);
-    }
-  };
+  const listHuggingFaceFiles = (repoId: string, signal: AbortSignal) => api.listHuggingFaceGGUFFiles(repoId, { signal });
 
   const checkModels = async () => {
-    try { await runModelJob(await api.checkModels()); }
+    try { await modelJobs.run(await api.checkModels()); }
     catch (error) { notify(apiMessage(error, "Could not check Ollama models."), "error"); }
   };
 
   const pullModel = async (model: string) => {
-    try { await runModelJob(await api.pullModel(model), model); }
+    try { await modelJobs.run(await api.pullModel(model), model); }
     catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
+  };
+
+  const finishGGUFDownload = async (filename: string) => {
+    const selected = await chooseLocalModel(`gguf:${filename}`);
+    if (!selected) {
+      notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
+    }
   };
 
   const downloadGGUFModel = async (request: ModelDownloadRequest) => {
@@ -854,22 +791,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       notify(message, "error");
       throw new Error(message, { cause: error });
     }
-    let failure: string | null = null;
-    const result = await runModelJob(accepted, label, {
-      checkOllamaConnection: false,
-      notifyOnSuccess: false,
-      onFailure: (message) => { failure = message; },
-    });
-    const filename = result && typeof result.filename === "string" ? result.filename : null;
+    const result = await modelJobs.run(accepted, label, { checkOllamaConnection: false, notifyOnSuccess: false });
+    // The workspace closed first; the download carries on and is picked up
+    // again (and selected) by the next one.
+    if (result.detached) return;
+    if (result.cancelled) throw new ModelJobCancelledError();
+    const filename = result.succeeded && typeof result.data?.filename === "string" ? result.data.filename : null;
     if (!filename) {
-      // The toast already carries the specific reason, but it is the only
-      // place it would otherwise appear. The form shows it inline as well.
-      throw new Error(failure ?? "Model download failed.");
+      // The job's own toast already gave the specific failure reason; the form
+      // shows the same sentence beside its button.
+      throw new Error(result.failure ?? "Model download failed.");
     }
-    const selected = await chooseLocalModel(`gguf:${filename}`);
-    if (!selected) {
-      notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
-    }
+    await finishGGUFDownload(filename);
   };
 
   const chooseLocalModel = async (model: string): Promise<boolean> => {
@@ -948,8 +881,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={visibleChats} activeChatId={routeChatId} modelConnection={inventory.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
-            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} /></RouteBoundary>
-            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
+            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} modelBusy={modelBusy} modelProgress={modelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} /></RouteBoundary>
+            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>
       <CommandPalette
@@ -965,15 +898,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <ShortcutsHelpDialog />
     </>
   );
-}
-
-function updateModelProgress(event: SSEEvent, setProgress: (progress: ModelProgress) => void): void {
-  if (event.kind !== "progress") return;
-  const data = event.data ?? {};
-  const model = typeof data.model === "string" ? data.model : "local model inventory";
-  const status = typeof data.message === "string" ? data.message : event.phase ?? "Working";
-  const percent = typeof data.percent === "number" ? data.percent : null;
-  setProgress({ model, status, percent });
 }
 
 function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: () => Promise<void> }) {
