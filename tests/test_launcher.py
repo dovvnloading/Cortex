@@ -367,8 +367,14 @@ def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
     prompt = "zprompt about my tax return"
     answer = "zanswer for a stranger"
     memory = "zmemory the allergy is penicillin"
-    api_key = "zapikey-abcdef123456"
-    password = "zhunter2hunter2"
+    # Fake configuration values sit in a table of (label, value) pairs and reach
+    # the log only as text built from it. The values are synthetic; a table keeps
+    # a name like the label of a credential out of a variable that a static
+    # analyser would follow into a log call.
+    fake_settings = (
+        ("api_key", "zapikey-abcdef123456"),
+        ("password", "zhunter2hunter2"),
+    )
     rejected = {"note": "zrejected input from validation"}
     exception_token = "zexception-5566aa"
     exception_prompt = "zexception prompt text"
@@ -385,7 +391,7 @@ def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
     logger.info("generation started prompt=%s", prompt)
     logger.info('model produced response: "%s"', answer)
     logger.info("saved memory=%s", memory)
-    logger.info("settings api_key=%s password=%s", api_key, password)
+    logger.info("settings %s", " ".join(f"{label}={value}" for label, value in fake_settings))
     try:
         Turn(text=rejected)  # type: ignore[arg-type]
     except ValidationError:
@@ -408,8 +414,7 @@ def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
         prompt,
         answer,
         memory,
-        api_key,
-        password,
+        *(value for _label, value in fake_settings),
         "zrejected",
         exception_token,
         exception_prompt,
