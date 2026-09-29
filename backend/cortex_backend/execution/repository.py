@@ -28,6 +28,7 @@ from .models import (
     ExecutionArtifact,
     ExecutionEvent,
     ExecutionJob,
+    ExecutionJobListing,
     ExecutionStatus,
     TerminalExecutionStatus,
 )
@@ -831,14 +832,71 @@ class ExecutionRepository:
         limit: int = 50,
     ) -> list[ExecutionJob]:
         """List only one owner's jobs for the task tray and recovery supervisor."""
+        rows = self._list_job_rows(
+            owner=owner, include_terminal=include_terminal, limit=limit, detail=False
+        )
+        return [self._job_from_row(row) for row in rows]
+
+    def list_job_listings(
+        self,
+        *,
+        owner: str,
+        include_terminal: bool = False,
+        limit: int = 50,
+    ) -> list[ExecutionJobListing]:
+        """List one owner's jobs, each with its newest event and approval.
+
+        The same jobs in the same order as :meth:`list_jobs`, read in a single
+        query on a single connection instead of one more connection per job
+        for :meth:`events` and another for :meth:`get_approval`.
+        """
+        rows = self._list_job_rows(
+            owner=owner, include_terminal=include_terminal, limit=limit, detail=True
+        )
+        return [self._listing_from_row(row) for row in rows]
+
+    def _list_job_rows(
+        self, *, owner: str, include_terminal: bool, limit: int, detail: bool
+    ) -> list[sqlite3.Row]:
         if not owner:
             raise ValueError("owner must be non-empty")
         if not 1 <= limit <= 200:
             raise ValueError("limit must be between 1 and 200")
-        terminal_clause = "" if include_terminal else "AND status NOT IN ('succeeded', 'failed', 'cancelled')"
+        terminal_clause = (
+            "" if include_terminal else "AND j.status NOT IN ('succeeded', 'failed', 'cancelled')"
+        )
+        detail_columns = ""
+        detail_join = ""
+        if detail:
+            # The approval columns come from the join every listing already
+            # makes. The newest event is the one job_status reports: the
+            # highest sequence, and only when it is at or past the job's own
+            # sequence -- the same rule as events(after_sequence=sequence - 1).
+            detail_columns = """
+                       , a.job_id AS approval_job_id,
+                       a.reason AS approval_reason,
+                       a.created_at AS approval_created_at,
+                       a.decided_at AS approval_decided_at,
+                       a.expires_at AS approval_expires_at,
+                       e.sequence AS event_sequence,
+                       e.event AS event_name,
+                       e.status AS event_status,
+                       e.phase AS event_phase,
+                       e.data_json AS event_data_json,
+                       e.created_at AS event_created_at
+            """
+            detail_join = """
+                LEFT JOIN execution_events e
+                       ON e.job_id = j.job_id
+                      AND e.sequence = (
+                          SELECT MAX(x.sequence) FROM execution_events x
+                          WHERE x.job_id = j.job_id
+                      )
+                      AND e.sequence > MAX(0, j.sequence - 1)
+            """
         now = self._now()
         with self.connect() as connection:
-            rows = connection.execute(
+            rows: list[sqlite3.Row] = connection.execute(
                 f"""
                 SELECT j.*,
                        COALESCE(
@@ -848,9 +906,11 @@ class ExecutionRepository:
                            END,
                            'not_required'
                        ) AS approval_state
+                       {detail_columns}
                 FROM execution_jobs j
                 LEFT JOIN execution_approvals a ON a.job_id = j.job_id
-                WHERE j.owner = ? {terminal_clause.replace('status', 'j.status')}
+                {detail_join}
+                WHERE j.owner = ? {terminal_clause}
                 ORDER BY
                     CASE
                         WHEN a.state = 'pending' AND a.expires_at > ? THEN 0
@@ -862,7 +922,37 @@ class ExecutionRepository:
                 """,
                 (now, owner, now, limit),
             ).fetchall()
-        return [self._job_from_row(row) for row in rows]
+        return rows
+
+    @classmethod
+    def _listing_from_row(cls, row: sqlite3.Row) -> ExecutionJobListing:
+        job = cls._job_from_row(row)
+        event = (
+            ExecutionEvent(
+                job_id=job.job_id,
+                sequence=row["event_sequence"],
+                event=row["event_name"],
+                status=row["event_status"],
+                phase=row["event_phase"],
+                data=json.loads(row["event_data_json"]),
+                created_at=row["event_created_at"],
+            )
+            if row["event_sequence"] is not None
+            else None
+        )
+        approval = (
+            ExecutionApproval(
+                job_id=job.job_id,
+                state=job.approval_state,
+                reason=row["approval_reason"],
+                created_at=row["approval_created_at"],
+                decided_at=row["approval_decided_at"],
+                expires_at=row["approval_expires_at"],
+            )
+            if row["approval_job_id"] is not None
+            else None
+        )
+        return ExecutionJobListing(job=job, latest_event=event, approval=approval)
 
     def transition(
         self,

@@ -383,7 +383,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
     ) -> ExecutionTaskListResponse:
         repository = _execution_repository(request)
         try:
-            jobs = repository.list_jobs(
+            # One query on one connection, not two more connections per job.
+            listings = repository.list_job_listings(
                 owner=_durable_owner(principal),
                 include_terminal=include_terminal,
                 limit=limit,
@@ -391,7 +392,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return ExecutionTaskListResponse(
-            tasks=[_execution_task_summary(repository, job) for job in jobs]
+            tasks=[_execution_task_summary(listing) for listing in listings]
         )
 
 

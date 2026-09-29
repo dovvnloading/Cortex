@@ -66,7 +66,13 @@ from cortex_backend.execution.lifecycle import (
     ScratchCapable,
 )
 from cortex_backend.services.model_catalog import GGUF_PREFIX
-from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
+from cortex_backend.execution.models import (
+    ExecutionApproval,
+    ExecutionEvent,
+    ExecutionJob,
+    ExecutionJobListing,
+    TerminalExecutionStatus,
+)
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionError,
 )
@@ -1711,6 +1717,20 @@ def _execution_message(event: ExecutionEvent | None) -> str | None:
 def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatusResponse:
     event = _execution_latest_event(repository, job)
     approval = repository.get_approval(job.job_id, owner=job.owner)
+    return _execution_status_from(job, event, approval)
+
+
+def _execution_status_from(
+    job: ExecutionJob,
+    event: ExecutionEvent | None,
+    approval: ExecutionApproval | None,
+) -> ExecutionStatusResponse:
+    """Describe a job from what has already been read about it.
+
+    One place builds the response for the single-job routes, which look the
+    event and approval up per request, and for the task list, which gets them
+    from its one listing query, so the two cannot describe a job differently.
+    """
     approval_state = approval.state if approval is not None else job.approval_state
     code_fields = _code_job_fields(job)
     return ExecutionStatusResponse(
@@ -1738,8 +1758,9 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
     )
 
 
-def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
-    response = _execution_status_response(repository, job)
+def _execution_task_summary(listing: ExecutionJobListing) -> ExecutionTaskSummary:
+    job = listing.job
+    response = _execution_status_from(job, listing.latest_event, listing.approval)
     code_fields = _code_job_fields(job, include_result=True)
     if job.profile != CODE_EXECUTION_PROFILE:
         code_fields = {"result": _generic_execution_result(job.result)}
