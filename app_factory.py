@@ -53,6 +53,7 @@ from cortex_backend.services.models import ModelService  # noqa: E402
 def build_app(
     *,
     data_dir: Path | None = None,
+    paths: AppPaths | None = None,
     frontend_dist: Path | None = None,
     serve_frontend: bool = True,
     handoff_secret: str | None = None,
@@ -64,8 +65,17 @@ def build_app(
     Source and packaged launches select the checked-in ``local`` execution
     profile. Pass ``execution_profile="disabled"`` for a chat-only build, or
     inject a lifecycle explicitly in tests.
+
+    ``paths`` is what the launcher passes: it has already resolved the data
+    directory and where the caches live. Otherwise the paths come from
+    ``data_dir``, or from the current Windows user when that is not given
+    either.
     """
-    paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
+    if paths is None:
+        paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
+    # One answer for every consumer below: the llama.cpp manager re-reads its
+    # models folder on each call while the API routes keep the value from here.
+    paths = paths.with_resolved_caches()
     execution_repository = ExecutionRepository(
         paths.execution_database,
         paths.execution_artifacts,

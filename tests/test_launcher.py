@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import ctypes
 import http.client
+import io
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
@@ -20,9 +23,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ValidationError
 
 import main as launcher_main
 from cortex_backend.api import create_app
+from cortex_backend.core import paths as paths_module
+from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
@@ -32,6 +38,45 @@ from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowEr
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
+
+
+_REAL_CONFIRM = runtime_module._confirm
+
+
+@pytest.fixture(autouse=True)
+def _no_real_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that reaches the WebView2 prompt must say what it answers.
+
+    The real prompt is a modal native message box: on a developer's machine it
+    would sit on the screen until someone clicked it.
+    """
+
+    def refuse(_title: str, _text: str) -> bool:
+        raise AssertionError("this test must pass confirm= or patch runtime_module._confirm")
+
+    monkeypatch.setattr(runtime_module, "_confirm", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state() -> Iterator[None]:
+    """Undo what a launch does to the process-wide logging configuration.
+
+    ``_configure_logging`` attaches file handlers to the root logger and
+    ``uvicorn.Config`` rewrites uvicorn's own loggers; left in place they would
+    write into a later test's directory and hold this one's open.
+    """
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {
+        name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate, logging.getLogger(name).level)
+        for name in names
+    }
+    yield
+    launcher_main._close_runtime_logging()
+    for name, (handlers, propagate, level) in saved.items():
+        logger = logging.getLogger(name)
+        logger.handlers[:] = handlers
+        logger.propagate = propagate
+        logger.setLevel(level)
 
 
 def test_normal_launch_selects_an_available_backend_port(
@@ -204,6 +249,686 @@ def test_windowed_launcher_does_not_configure_uvicorn_console_logging_without_st
     assert server.config.log_config is None
 
 
+def _runtime_log_text(data_dir: Path) -> str:
+    return (data_dir / "logs" / "cortex.log").read_text(encoding="utf-8")
+
+
+def test_windowed_launcher_writes_a_rotating_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A packaged (console=False) build has no stderr; it used to log nowhere.
+
+    Backend warnings, worker leak reports and llama-server crash loops all went
+    to ``logging.lastResort``, which writes to ``sys.stderr`` -- ``None`` here.
+    """
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    monkeypatch.setattr(launcher_main, "MAX_RUNTIME_LOG_BYTES", 4096)
+
+    log_path = launcher_main._configure_logging(tmp_path, "info")
+
+    assert log_path == tmp_path / "logs" / "cortex.log"
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43125, log_level="info")
+    logging.getLogger("cortex_backend.services.generation").warning(
+        "generation stopped after a failure token=windowed-secret-value"
+    )
+    logging.getLogger("uvicorn.error").info("Started server process")
+    text = _runtime_log_text(tmp_path)
+    assert "generation stopped after a failure token=<redacted>" in text
+    assert "windowed-secret-value" not in text
+    assert "Started server process" in text
+
+    noisy = logging.getLogger("cortex_backend.noise")
+    for index in range(300):
+        noisy.warning("filler record %d %s", index, "x" * 80)
+    names = sorted(entry.name for entry in log_path.parent.iterdir())
+    assert names == ["cortex.log", "cortex.log.1", "cortex.log.2", "cortex.log.3"]
+    assert all(entry.stat().st_size <= 4096 for entry in log_path.parent.iterdir())
+    # The newest records are in the live file and the oldest have aged out.
+    assert "filler record 299" in log_path.read_text(encoding="utf-8")
+    everything = "".join(entry.read_text(encoding="utf-8") for entry in log_path.parent.iterdir())
+    assert "windowed-secret-value" not in everything
+    assert "filler record 0 " not in everything
+
+
+def test_console_launcher_keeps_the_console_and_reaches_uvicorns_own_logger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+
+    launcher_main._configure_logging(tmp_path, "info")
+    # A real uvicorn console configuration is applied here, after the file
+    # handler exists, and gives its own logger a private console handler.
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43125, log_level="info")
+    logging.getLogger("cortex_backend.probe").warning("root record")
+    logging.getLogger("uvicorn.error").info("uvicorn record")
+
+    text = _runtime_log_text(tmp_path)
+    assert "root record" in text
+    assert "uvicorn record" in text
+    assert "root record" in console.getvalue()
+    assert "uvicorn record" in console.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("level", "shown", "hidden"),
+    [
+        ("debug", ["debug line", "info line", "warning line"], []),
+        ("info", ["info line", "warning line"], ["debug line"]),
+        ("error", [], ["debug line", "info line", "warning line"]),
+    ],
+)
+def test_the_log_level_option_reaches_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str, shown: list[str], hidden: list[str]
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, level)
+    logger = logging.getLogger("cortex_backend.levels")
+
+    logger.debug("debug line")
+    logger.info("info line")
+    logger.warning("warning line")
+
+    text = _runtime_log_text(tmp_path)
+    assert all(line in text for line in shown)
+    assert not any(line in text for line in hidden)
+
+
+def test_request_logs_that_carry_urls_stay_out_of_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    logging.getLogger("httpx").info('HTTP Request: GET https://example.invalid/model?token=abc "200 OK"')
+    logging.getLogger("httpx").warning("http warning")
+
+    text = _runtime_log_text(tmp_path)
+    assert "HTTP Request" not in text
+    assert "http warning" in text
+
+
+def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Hostile fixtures: every way a private value reaches a log call.
+
+    The values are kept in variables, so a traceback that prints the failing
+    source line cannot put one into the log for a reason unrelated to the code
+    under test.
+    """
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.hostile")
+    bootstrap = "zbootstrap-9f3a1c"
+    handoff = "zhandoff-77b1e0"
+    bearer = "zbearer-aa11bb22cc33"
+    dict_bearer = "zdictbearer-ff00ee11dd22"
+    cookie = "zcookie-12345678"
+    bare_bearer = "zbarebearer-0123456789ab"
+    prompt = "zprompt about my tax return"
+    answer = "zanswer for a stranger"
+    memory = "zmemory the allergy is penicillin"
+    # Fake configuration values sit in a table of (label, value) pairs and reach
+    # the log only as text built from it. The values are synthetic; a table keeps
+    # a name like the label of a credential out of a variable that a static
+    # analyser would follow into a log call.
+    fake_settings = (
+        ("api_key", "zapikey-abcdef123456"),
+        ("password", "zhunter2hunter2"),
+    )
+    rejected = {"note": "zrejected input from validation"}
+    exception_token = "zexception-5566aa"
+    exception_prompt = "zexception prompt text"
+
+    class Turn(BaseModel):
+        text: str
+
+    logger.warning(
+        "could not open http://127.0.0.1:43125/#bootstrap=%s&handoff=%s", bootstrap, handoff
+    )
+    logger.error("upstream rejected the request: Authorization: Bearer %s", bearer)
+    logger.error("headers %r", {"Authorization": f"Bearer {dict_bearer}", "Cookie": f"session={cookie}"})
+    logger.error("connection with a bare Bearer %s in it", bare_bearer)
+    logger.info("generation started prompt=%s", prompt)
+    logger.info('model produced response: "%s"', answer)
+    logger.info("saved memory=%s", memory)
+    logger.info("settings %s", " ".join(f"{label}={value}" for label, value in fake_settings))
+    try:
+        Turn(text=rejected)  # type: ignore[arg-type]
+    except ValidationError:
+        logger.exception("could not validate the turn")
+    try:
+        raise RuntimeError(f"upstream said token={exception_token} and prompt={exception_prompt}")
+    except RuntimeError:
+        logger.exception("worker failed")
+    logger.warning("innocent line\n2030-01-01T00:00:00.000Z CRITICAL cortex_backend.forged forged record")
+    logger.warning("x" * 100_000)
+
+    text = _runtime_log_text(tmp_path)
+    for private in (
+        bootstrap,
+        handoff,
+        bearer,
+        dict_bearer,
+        cookie,
+        bare_bearer,
+        prompt,
+        answer,
+        memory,
+        *(value for _label, value in fake_settings),
+        "zrejected",
+        exception_token,
+        exception_prompt,
+        "penicillin",
+        "tax return",
+    ):
+        assert private not in text, private
+    # Redaction keeps the record and says what it removed.
+    assert "could not validate the turn" in text
+    assert "worker failed" in text
+    assert "bootstrap=<redacted>" in text
+    # A message is one line: an embedded newline cannot start a forged record.
+    assert "\n2030-01-01T00:00:00.000Z CRITICAL" not in text
+    # And a record is bounded.
+    assert max(len(line) for line in text.splitlines()) < 5000
+
+
+def test_runtime_log_messages_survive_escaped_quotes_and_embedded_newlines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The two shapes a line-bound, quote-naive redactor let through."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.shapes")
+    # Built from a label so the fixture is one JSON document, escaped as one.
+    label = "password"
+    escaped_quote = json.dumps({label: 'pa"ss zescaped-tail SECRET'})
+
+    logger.warning("client settings %s", escaped_quote)
+    logger.warning("rejected turn prompt=zfirst\nzsecond-line-of-a-prompt\nzthird")
+
+    text = _runtime_log_text(tmp_path)
+    for private in ("zescaped-tail", "SECRET", "zsecond-line-of-a-prompt", "zthird", "zfirst"):
+        assert private not in text, private
+    assert "client settings" in text
+    assert "rejected turn" in text
+
+
+def _failing_with_a_newline_in_the_message() -> None:
+    raise RuntimeError("bad prompt=a\nzprivate-second-line")
+
+
+def _failing_with_a_bare_prompt_in_the_message() -> None:
+    raise ValueError("zplain sentence the person typed about their divorce")
+
+
+def _failing_with_a_cause() -> None:
+    try:
+        _failing_with_a_newline_in_the_message()
+    except RuntimeError as inner:
+        raise KeyError("zouter message zchained-secret") from inner
+
+
+def test_runtime_log_tracebacks_keep_their_structure_and_drop_every_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only the frames and the exception class are kept: a message can hold anything."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.tracebacks")
+
+    for failing in (
+        _failing_with_a_newline_in_the_message,
+        _failing_with_a_bare_prompt_in_the_message,
+        _failing_with_a_cause,
+    ):
+        try:
+            failing()
+        except Exception:
+            logger.exception("worker failed in %s", failing.__name__)
+
+    text = _runtime_log_text(tmp_path)
+    for private in (
+        "zprivate-second-line",
+        "bad prompt",
+        "zplain sentence",
+        "divorce",
+        "zouter message",
+        "zchained-secret",
+    ):
+        assert private not in text, private
+    # No source line either: it is code the maintainer already has.
+    for source in ("raise RuntimeError", "raise ValueError", "raise KeyError"):
+        assert source not in text, source
+    # What a developer needs is still there.
+    assert text.count("Traceback (most recent call last):") == 4
+    assert "in _failing_with_a_newline_in_the_message" in text
+    assert "in _failing_with_a_bare_prompt_in_the_message" in text
+    assert "in _failing_with_a_cause" in text
+    for name in ("RuntimeError", "ValueError", "KeyError"):
+        assert f"\n{name}: " in text, name
+    assert "The above exception was the direct cause of the following exception:" in text
+    assert "worker failed in _failing_with_a_bare_prompt_in_the_message" in text
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="exception groups need Python 3.11")
+def test_runtime_log_keeps_the_classes_inside_an_exception_group_and_no_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+    logger = logging.getLogger("cortex_backend.groups")
+
+    try:
+        raise ExceptionGroup(  # noqa: F821 -- builtin from Python 3.11
+            "zgroup message", [ValueError("zfirst child"), KeyError("zsecond child")]
+        )
+    except Exception:
+        logger.exception("task group failed")
+
+    text = _runtime_log_text(tmp_path)
+    for private in ("zgroup message", "zfirst child", "zsecond child"):
+        assert private not in text, private
+    for name in ("ExceptionGroup", "ValueError", "KeyError"):
+        assert name in text, name
+
+
+class _MisbehavingError(Exception):
+    """An exception whose own attributes fail when they are read."""
+
+    @property
+    def exceptions(self) -> tuple[BaseException, ...]:
+        raise RuntimeError("zproperty message")
+
+
+def test_an_exception_that_misbehaves_still_reaches_the_log_without_its_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    try:
+        raise _MisbehavingError("zmisbehaving message")
+    except _MisbehavingError:
+        logging.getLogger("cortex_backend.misbehaving").exception("worker failed")
+
+    text = _runtime_log_text(tmp_path)
+    assert "worker failed" in text
+    assert "_MisbehavingError" in text
+    assert "zmisbehaving message" not in text
+    assert "zproperty message" not in text
+
+
+@pytest.mark.parametrize(
+    "exc_info",
+    [("not", "an", "exception"), (None, None, None), (RuntimeError,)],
+    ids=["not-an-exception", "no-exception", "wrong-length"],
+)
+def test_an_exc_info_that_cannot_be_summarised_is_dropped_not_formatted(
+    exc_info: tuple[object, ...],
+):
+    record = logging.LogRecord(
+        "cortex_backend.odd", logging.ERROR, __file__, 1, "worker failed", None, exc_info
+    )
+    record.exc_text = "RuntimeError: zcached message"
+
+    assert launcher_main._RedactingFilter().filter(record) is True
+
+    formatted = logging.Formatter("%(message)s").format(record)
+    assert formatted == "worker failed"
+
+
+def test_a_traceback_another_handler_already_formatted_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A formatter caches the full text on the record; the log must not copy it."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    root = logging.getLogger()
+    earlier_output = io.StringIO()
+    earlier = logging.StreamHandler(earlier_output)  # no redaction: it formats first
+    root.addHandler(earlier)
+    try:
+        launcher_main._configure_logging(tmp_path, "info")
+        try:
+            raise RuntimeError("zearly message about a private matter")
+        except RuntimeError:
+            logging.getLogger("cortex_backend.cached").exception("worker failed")
+    finally:
+        root.removeHandler(earlier)
+
+    assert "zearly message" in earlier_output.getvalue(), "the fixture must cache the full text"
+    text = _runtime_log_text(tmp_path)
+    assert "zearly" not in text
+    assert "worker failed" in text
+    assert "RuntimeError" in text
+
+
+def test_a_record_that_only_carries_traceback_text_keeps_the_frames_and_nothing_else():
+    """No exception object to read the class from: keep what has a fixed shape."""
+    record = logging.LogRecord(
+        "cortex_backend.text_only", logging.ERROR, __file__, 1, "failed", None, None
+    )
+    record.exc_text = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            '  File "worker.py", line 12, in run',
+            '    raise RuntimeError("zsource-literal")',
+            "RuntimeError: zmessage first line",
+            "zmessage second line",
+            "",
+            "zmessage after a blank line",
+        ]
+    )
+    record.stack_info = "\n".join(
+        [
+            "Stack (most recent call last):",
+            '  File "caller.py", line 3, in start',
+            '    logger.info("zstack-source", stack_info=True)',
+        ]
+    )
+
+    assert launcher_main._RedactingFilter().filter(record) is True
+
+    assert record.exc_text == (
+        'Traceback (most recent call last):\n  File "worker.py", line 12, in run'
+    )
+    assert record.stack_info == (
+        'Stack (most recent call last):\n  File "caller.py", line 3, in start'
+    )
+
+
+def test_stack_info_in_the_runtime_log_drops_the_source_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    logging.getLogger("cortex_backend.stack").warning("where am I", stack_info=True)
+
+    text = _runtime_log_text(tmp_path)
+    assert "Stack (most recent call last):" in text
+    assert "test_stack_info_in_the_runtime_log_drops_the_source_lines" in text
+    assert 'stack_info=True' not in text
+
+
+def test_configuring_the_runtime_log_twice_does_not_stack_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    root = logging.getLogger()
+    before = (list(root.handlers), root.level, logging.getLogger("httpx").level)
+
+    launcher_main._configure_logging(tmp_path, "info")
+    launcher_main._configure_logging(tmp_path, "info")
+    logging.getLogger("cortex_backend.once").warning("written once")
+    added = [handler for handler in root.handlers if handler not in before[0]]
+
+    assert len(added) == 1
+    assert _runtime_log_text(tmp_path).count("written once") == 1
+
+    launcher_main._close_runtime_logging()
+
+    assert (list(root.handlers), root.level, logging.getLogger("httpx").level) == before
+
+
+def test_an_unusable_log_folder_is_reported_and_never_stops_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+    (tmp_path / "logs").write_bytes(b"a file where the log folder should be")
+
+    assert launcher_main._configure_logging(tmp_path, "info") is None
+
+    assert "could not open its runtime log" in console.getvalue()
+    logging.getLogger("cortex_backend.after").warning("still logs to the console")
+    assert "still logs to the console" in console.getvalue()
+
+
+def test_startup_log_rotates_instead_of_truncating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Reaching the size limit used to reopen the file in "w" mode: all history gone."""
+    monkeypatch.setattr(launcher_main, "MAX_STARTUP_LOG_BYTES", 2048)
+    path = tmp_path / launcher_main.STARTUP_LOG_NAME
+    older = tmp_path / f"{launcher_main.STARTUP_LOG_NAME}.1"
+
+    # About 370 bytes an entry: five fit, the sixth would pass the limit.
+    for index in range(6):
+        launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        )
+
+    assert older.is_file()
+    assert all(f"attempt-{index}" in older.read_text(encoding="utf-8") for index in range(5))
+    assert "attempt-5" in path.read_text(encoding="utf-8")
+    assert "attempt-0" not in path.read_text(encoding="utf-8")
+
+    for index in range(6, 40):
+        launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        )
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["startup.log", "startup.log.1"]
+    assert path.stat().st_size <= 2048 and older.stat().st_size <= 2048
+    assert "attempt-39" in path.read_text(encoding="utf-8")
+
+
+def test_startup_log_stays_bounded_when_it_cannot_be_moved_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Another program holding the file open must not make the log grow or raise."""
+    monkeypatch.setattr(launcher_main, "MAX_STARTUP_LOG_BYTES", 2048)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("the file is in use")
+
+    monkeypatch.setattr(launcher_main.os, "replace", refuse)
+    path = tmp_path / launcher_main.STARTUP_LOG_NAME
+
+    for index in range(30):
+        assert launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        ) == path
+
+    assert path.stat().st_size <= 2048
+    assert "attempt-29" in path.read_text(encoding="utf-8")
+    assert not (tmp_path / "startup.log.1").exists()
+
+
+def test_a_successful_start_leaves_a_timeline_entry_and_runtime_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    startup = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    (entry,) = startup.splitlines()
+    assert "stage=started detail=ok" in entry
+    assert f"version={launcher_main.CORTEX_VERSION}" in entry
+    assert f"pid={os.getpid()}" in entry
+    assert f"port={fakes.record.port}" in entry
+    assert f"started (port {fakes.record.port})" in _runtime_log_text(tmp_path)
+    # The launch is over: nothing keeps writing to (or holding open) the log.
+    assert launcher_main._runtime_handlers == []
+
+
+def test_a_launch_that_hands_off_does_not_touch_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two processes rotating one file fail on Windows; only the owner opens it."""
+    _second_launch(monkeypatch, tmp_path, activations=[WindowActivation.ACTIVATED])
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert not (tmp_path / "logs").exists()
+    assert launcher_main._runtime_handlers == []
+
+
+def test_the_runtime_log_is_limited_to_the_shipped_size_and_backup_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The tests above shrink the size to rotate quickly; these are the real numbers."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+
+    launcher_main._configure_logging(tmp_path, "info")
+
+    handler = launcher_main._runtime_file_handler
+    assert isinstance(handler, RotatingFileHandler)
+    assert handler.maxBytes == 1024 * 1024
+    assert handler.backupCount == 3
+    assert launcher_main.MAX_RUNTIME_LOG_BYTES == 1024 * 1024
+    assert launcher_main.RUNTIME_LOG_BACKUPS == 3
+    # One live file and its backups: "about four megabytes" is the promise.
+    assert handler.maxBytes * (handler.backupCount + 1) == 4 * 1024 * 1024
+
+
+def _launch_with_a_separate_cache_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[_LaunchFakes, AppPaths, list[tuple[AppPaths, bool]]]:
+    """A launch whose paths name a cache root apart from the data directory.
+
+    The last item records, for each ``build_app`` call, the paths it was given
+    and whether the cache root already existed by then.
+    """
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    paths = AppPaths(
+        data_dir=(tmp_path / "data").resolve(), cache_root=(tmp_path / "local").resolve()
+    )
+    monkeypatch.setattr(launcher_main, "_resolve_paths", lambda _data_dir: paths)
+    built: list[tuple[AppPaths, bool]] = []
+    build_for_the_fake_app = launcher_main.build_app
+
+    def recording_build_app(**kwargs):
+        built.append((kwargs["paths"], (tmp_path / "local").is_dir()))
+        return build_for_the_fake_app(**kwargs)
+
+    monkeypatch.setattr(launcher_main, "build_app", recording_build_app)
+    return fakes, paths, built
+
+
+def test_a_launch_creates_and_secures_the_cache_folder_before_the_app_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Removing the call from ``_launch`` left every other launcher test green."""
+    fakes, paths, built = _launch_with_a_separate_cache_root(monkeypatch, tmp_path)
+    secured: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        paths_module,
+        "secure_private_path",
+        lambda path, *, directory: secured.append((Path(path), directory)) or Path(path),
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((given, cache_root_existed),) = built
+    assert cache_root_existed, "the cache root must exist before the app is built"
+    assert secured == [(paths.cache_root, True)]
+    assert given.cache_dir == paths.cache_root
+    assert fakes.window_configs[0].storage_path == paths.cache_root / "webview"
+
+
+def test_a_launch_keeps_the_caches_with_the_data_when_the_cache_folder_cannot_be_secured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, paths, built = _launch_with_a_separate_cache_root(monkeypatch, tmp_path)
+
+    def refuse(*_args: object, **_kwargs: object) -> Path:
+        raise AppPathError("Cortex could not secure its private data permissions.")
+
+    monkeypatch.setattr(paths_module, "secure_private_path", refuse)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((given, _existed),) = built
+    assert given.cache_dir == paths.data_dir
+    assert given.default_gguf_models_dir == paths.data_dir / "gguf_models"
+    assert fakes.window_configs[0].storage_path == paths.data_dir / "webview"
+    assert "caches stay in the data folder" in _runtime_log_text(paths.data_dir)
+
+
+@pytest.mark.parametrize(
+    ("hostile", "removed"),
+    [
+        ("Authorization: Bearer abcdefgh12345678", "abcdefgh12345678"),
+        ("authorization=Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("{'Authorization': 'Bearer secretsecret1'}", "secretsecret1"),
+        ('{"password": "correct horse battery"}', "correct horse battery"),
+        ("open http://x/#bootstrap=aaa111&handoff=bbb222", "bbb222"),
+        ("cookie: sid=abc123def", "abc123def"),
+        ("prompt=say something private here", "private here"),
+        ("input_value='a private sentence', input_type=str", "a private sentence"),
+        ("memories: [1, 2, 3] more text", "more text"),
+        # A key name is often a compound: the value after ``session_token`` is as
+        # private as the one after ``token``.
+        ("'input': {'session_token': 'sess-X'}", "sess-X"),
+        ("access_token=zaccess-1234", "zaccess-1234"),
+        ('{"refresh_token": "zrefresh.abc.def"}', "zrefresh.abc.def"),
+        ("client_secret: zclient-secret-1", "zclient-secret-1"),
+        ("HF_TOKEN=hf_abcdefghijkl", "hf_abcdefghijkl"),
+        ("LLAMA_API_KEY=zllama-key-9", "zllama-key-9"),
+        ("X-Api-Key: zheader-key-7", "zheader-key-7"),
+        ("secret_key=zsecret-key-3", "zsecret-key-3"),
+        ("user_prompt=tell me about my taxes", "my taxes"),
+        ("system_prompt: you are a private assistant", "private assistant"),
+        ("assistant_response='the answer is private'", "the answer is private"),
+        ("memory_text=allergic to penicillin", "penicillin"),
+        ("prompt_text: a note nobody else should read", "nobody else"),
+        # What a validation error prints for the input it rejected.
+        ("[{'type': 'string_type', 'input': 'a typed sentence'}]", "a typed sentence"),
+        ("1 validation error for Turn input=zrejected sentence here", "zrejected sentence"),
+        # A value can hold an escaped quote, and a quote may be left open.
+        ('{"password": "pa\\"ss SECRET"}', "SECRET"),
+        ("password='it\\'s SECRET'", "SECRET"),
+        ('password="left open SECRET', "SECRET"),
+        ('{"detail": "{\\"password\\": \\"pa ss SECRET\\"}"}', "SECRET"),
+        # A value that runs to the end of the record does not stop at a newline.
+        ("bad prompt=a\nzsecond-line", "zsecond-line"),
+        ("bad memory: first\r\nzsecond-line\nzthird-line", "zthird-line"),
+    ],
+)
+def test_credential_and_content_redaction_covers_common_shapes(hostile: str, removed: str):
+    assert removed not in launcher_main._redact_credentials(hostile)
+    assert removed not in launcher_main._redact_startup_detail(hostile)
+
+
+def test_redaction_keeps_the_name_of_the_value_it_removed():
+    assert launcher_main._redact_credentials("call failed session_token=zsess-1 retrying") == (
+        "call failed session_token=<redacted> retrying"
+    )
+    assert launcher_main._redact_credentials("LLAMA_API_KEY=zkey") == "LLAMA_API_KEY=<redacted>"
+
+
+def test_redaction_of_a_hostile_run_of_key_names_stays_fast():
+    """A name can be long and repeated; the scan must not go quadratic on it."""
+    # Sized so that an unbounded tail on a key name costs tens of seconds (not
+    # hours), while the shipped patterns take a few milliseconds.
+    hostile = "token_" * 3_000 + "prompt_" * 3_000 + "a-" * 3_000
+    started = time.monotonic()
+
+    launcher_main._redact_credentials(hostile)
+
+    assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    [
+        "Started server process [1234]",
+        "prompt_tokens=12 completion_tokens=40 max_tokens=512",
+        "prompt_eval_count=12 response_time=0.4 memory_usage=512 input_type=str",
+        "content-type: application/json",
+        "ResponseError: model not found",
+        "listening on 127.0.0.1:43125 (basic auth is not used)",
+    ],
+)
+def test_redaction_leaves_ordinary_diagnostics_alone(harmless: str):
+    assert launcher_main._redact_credentials(harmless) == harmless
+
+
 def test_default_launch_is_native_and_legacy_no_browser_alias_is_headless():
     assert launcher_main.build_parser().parse_args([]).headless is False
     assert launcher_main.build_parser().parse_args(["--headless"]).headless is True
@@ -339,11 +1064,11 @@ def test_native_window_uses_private_isolated_edge_webview(
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(
-            url="http://127.0.0.1:8765",
             storage_path=storage,
             icon_path=icon,
+            starting_html="<p>starting</p>",
         ),
-        monitor=monitored.append,
+        worker=monitored.append,
     )
 
     assert storage.is_dir()
@@ -352,7 +1077,11 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["private_mode"] is True
     assert calls["start"]["storage_path"] == str(storage)
     assert calls["start"]["icon"] == str(icon)
-    assert loaded_urls == ["http://127.0.0.1:8765"]
+    create_args, create_kwargs = calls["create"]
+    assert create_args == ("Cortex",), "the window opens on the starting page, not on a URL"
+    assert create_kwargs["html"] == "<p>starting</p>"
+    assert "url" not in create_kwargs
+    assert loaded_urls == [], "the app is loaded by the worker once it is ready, not before"
     assert dark_title_bar_calls == [
         {"pid": desktop_module.os.getpid(), "title": "Cortex", "dark": True}
     ]
@@ -393,7 +1122,7 @@ def _run_window_against_pywebview_defaults(
     monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
     monkeypatch.setattr(desktop_module, "_apply_windows_title_bar_theme", lambda **kwargs: True)
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "webview")
+        DesktopWindowConfig(storage_path=tmp_path / "webview")
     )
     return webview_settings
 
@@ -463,7 +1192,6 @@ def test_native_window_legacy_start_without_icon_option_still_launches(
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(
-            url="http://127.0.0.1:8765",
             storage_path=tmp_path / "private-webview",
             icon_path=icon,
         )
@@ -498,7 +1226,7 @@ def test_native_window_rejects_legacy_windows_renderer(
 
     with pytest.raises(DesktopWindowError, match="legacy browser engine"):
         desktop_module.run_desktop_window(
-            DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path)
+            DesktopWindowConfig(storage_path=tmp_path)
         )
 
 
@@ -592,7 +1320,7 @@ def test_native_window_follows_system_app_theme(
     monkeypatch.setattr(desktop_module, "_apply_windows_window_icon", lambda **_kwargs: True)
 
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
 
     # The pre-paint ground and the title bar both come from the system's mode.
@@ -646,7 +1374,7 @@ def test_exposed_title_bar_switch_refuses_anything_but_a_boolean(
         lambda **kwargs: calls.append(kwargs) or True,
     )
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
     calls.clear()
 
@@ -686,7 +1414,7 @@ def test_exposed_title_bar_switch_does_nothing_off_windows(
         lambda **kwargs: calls.append(kwargs) or True,
     )
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
 
     assert exposed[0](True) is False
@@ -839,7 +1567,10 @@ def test_webview2_bootstrap_installs_and_rechecks_runtime(
 
     monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
 
-    assert runtime_module.ensure_webview2_runtime(tmp_path) == "150.0.1.2"
+    assert (
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+        == "150.0.1.2"
+    )
     assert calls[0][0] == [str(bootstrapper), "/silent", "/install"]
     assert calls[0][1]["timeout"] == 600
 
@@ -872,6 +1603,275 @@ def test_webview2_bootstrap_rejects_an_invalid_runtime_signature(
         runtime_module.ensure_webview2_runtime(tmp_path)
 
 
+def _webview2_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, versions: list[str | None]) -> Path:
+    """A bundled installer, a signature that checks out, and scripted registry answers."""
+    bootstrapper = tmp_path / "webview2" / runtime_module.WEBVIEW2_BOOTSTRAPPER
+    bootstrapper.parent.mkdir()
+    bootstrapper.write_bytes(b"signed-at-build-time")
+    answers = iter(versions)
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", lambda _path: None)
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: next(answers))
+    return bootstrapper
+
+
+def test_webview2_bootstrap_asks_before_installing_and_explains_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The install used to start with no question, no window and no explanation.
+
+    A first launch without WebView2 sat invisible for as long as the download
+    took, and offline it ended in a message about a log path.
+    """
+    _webview2_bundle(tmp_path, monkeypatch, [None, None])
+    questions: list[tuple[str, str]] = []
+    notes: list[str] = []
+    installer_runs: list[list[str]] = []
+
+    def offline_installer(command, **_kwargs):
+        installer_runs.append(command)
+        return SimpleNamespace(returncode=0x80072EE7)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", offline_installer)
+
+    def agree(title: str, text: str) -> bool:
+        questions.append((title, text))
+        return True
+
+    with pytest.raises(WebViewRuntimeError) as failure:
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, packaged=True, confirm=agree, report=notes.append
+        )
+
+    # It asked first, in plain words, before anything was installed.
+    assert len(questions) == 1
+    assert "one-time download from Microsoft" in questions[0][1]
+    assert "Install now?" in questions[0][1]
+    assert len(installer_runs) == 1
+    # The failure says what happened and what to do, with the real link.
+    message = str(failure.value)
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in message
+    assert "start Cortex again" in message
+    assert "offline" in message
+    assert str(0x80072EE7) in message
+    # The installer's exit code reaches the startup log as well.
+    assert notes == [f"WebView2 bootstrapper exit code {0x80072EE7} (0x80072EE7)"]
+
+
+def test_declining_the_webview2_install_installs_nothing_and_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+    notes: list[str] = []
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("the installer must not run without consent"),
+    )
+
+    with pytest.raises(runtime_module.WebViewInstallDeclined):
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, confirm=lambda _title, _text: False, report=notes.append
+        )
+
+    assert notes == ["WebView2 install declined"]
+    assert not issubclass(runtime_module.WebViewInstallDeclined, WebViewRuntimeError)
+
+
+def test_webview2_is_not_offered_when_it_is_already_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: "150.0.1.2")
+
+    def never(_title: str, _text: str) -> bool:
+        raise AssertionError("nothing to ask")
+
+    assert runtime_module.ensure_webview2_runtime(tmp_path, confirm=never) == "150.0.1.2"
+
+
+@pytest.mark.parametrize(
+    ("packaged", "mentions", "omits"),
+    [
+        (True, [], [runtime_module.WEBVIEW2_PREPARE_SCRIPT, "build_windows.ps1"]),
+        (False, [runtime_module.WEBVIEW2_PREPARE_SCRIPT], ["build_windows.ps1"]),
+    ],
+)
+def test_a_missing_bootstrapper_gives_advice_that_fits_how_cortex_was_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    packaged: bool,
+    mentions: list[str],
+    omits: list[str],
+):
+    """A source run pointed at "rebuild the package", which is not what a developer needs."""
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: None)
+
+    with pytest.raises(WebViewRuntimeError, match="bootstrapper is missing") as failure:
+        runtime_module.ensure_webview2_runtime(tmp_path, packaged=packaged)
+
+    message = str(failure.value)
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in message
+    assert "start Cortex again" in message
+    assert all(text in message for text in mentions)
+    assert not any(text in message for text in omits)
+
+
+def test_webview2_install_timeout_is_explained_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+    notes: list[str] = []
+
+    def slow(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", slow)
+
+    with pytest.raises(WebViewRuntimeError, match="did not finish within 10 minutes") as timed_out:
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, confirm=lambda _title, _text: True, report=notes.append
+        )
+
+    assert "start Cortex again" in str(timed_out.value)
+    assert notes == ["WebView2 bootstrapper timed out after 600 seconds"]
+
+
+def test_webview2_installer_that_cannot_start_is_explained_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+
+    def blocked(*_args, **_kwargs):
+        raise PermissionError("blocked by policy")
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", blocked)
+
+    with pytest.raises(WebViewRuntimeError, match="could not start the WebView2 Runtime installer") as refused:
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in str(refused.value)
+
+
+def test_webview2_signature_failure_still_fails_closed_and_gives_the_manual_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+
+    def reject(_path: Path) -> None:
+        raise WebViewRuntimeError("signature verification failed")
+
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", reject)
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("an unverified installer must never run"),
+    )
+
+    with pytest.raises(WebViewRuntimeError, match="signature verification failed") as failure:
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in str(failure.value)
+
+
+@pytest.mark.parametrize(("answer", "expected"), [(1, True), (2, False), (0, False)])
+def test_the_webview2_prompt_is_a_native_ok_cancel_box_and_only_ok_is_a_yes(
+    monkeypatch: pytest.MonkeyPatch, answer: int, expected: bool
+):
+    shown: list[tuple[object, str, str, int]] = []
+
+    def message_box(hwnd, text, title, flags):
+        shown.append((hwnd, text, title, flags))
+        return answer
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(MessageBoxW=message_box)), raising=False)
+
+    assert _REAL_CONFIRM("Title", "Body") is expected
+
+    (_hwnd, text, title, flags), = shown
+    assert (text, title) == ("Body", "Title")
+    assert flags & 0x1, "an OK/Cancel box, so Cancel is an answer"
+    assert flags & 0x10000, "brought to the foreground: no window exists to sit in front of"
+
+
+def test_the_webview2_prompt_fails_closed_when_no_box_can_be_shown(monkeypatch: pytest.MonkeyPatch):
+    def broken(*_args):
+        raise OSError("no desktop")
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(MessageBoxW=broken)), raising=False)
+
+    assert _REAL_CONFIRM("Title", "Body") is False
+
+
+def test_the_advertised_webview2_download_link_is_the_one_the_prepare_script_uses():
+    script = Path(launcher_main.ROOT / runtime_module.WEBVIEW2_PREPARE_SCRIPT).read_text(encoding="utf-8")
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in script
+
+
+def test_a_declined_webview2_install_closes_cortex_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def declined(_root, **_kwargs):
+        raise runtime_module.WebViewInstallDeclined()
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", declined)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert shown == []
+    assert fakes.calls == [], "no window may open without the runtime"
+    startup_log = tmp_path / launcher_main.STARTUP_LOG_NAME
+    recorded = startup_log.read_text(encoding="utf-8") if startup_log.exists() else ""
+    assert "stage=desktop" not in recorded, "declining is not a startup failure"
+    assert "not installed" in capsys.readouterr().out
+
+
+def test_a_webview2_failure_shows_its_own_advice_in_the_startup_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+    advice = f"Download it from {runtime_module.WEBVIEW2_DOWNLOAD_URL}, then start Cortex again."
+
+    def failing(_root, **_kwargs):
+        raise WebViewRuntimeError(advice)
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", failing)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (dialog,) = shown
+    assert advice in dialog
+    assert "diagnostic log" in dialog
+    assert "stage=desktop startup/runtime" in (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_installer_exit_code_reaches_the_startup_log_from_a_real_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def installing(_root, *, packaged, report, **_kwargs):
+        assert packaged is False
+        report("WebView2 bootstrapper exit code 0 (0x00000000)")
+        return "150.0.1.2"
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", installing)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert "stage=webview2 detail=WebView2 bootstrapper exit code 0" in (
+        tmp_path / launcher_main.STARTUP_LOG_NAME
+    ).read_text(encoding="utf-8")
+
+
 def test_webview2_signature_check_uses_noninteractive_powershell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -902,6 +1902,11 @@ def test_webview2_signature_check_uses_noninteractive_powershell(
 def test_default_runtime_starts_backend_then_native_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """The window opens first, on the starting page; the app is loaded once ready.
+
+    Nothing used to appear until the backend was ready, so a slow first launch
+    looked like Cortex had not started.
+    """
     reserved_port: list[int] = []
     real_reserve_port = launcher_main._reserve_port
 
@@ -941,7 +1946,7 @@ def test_default_runtime_starts_backend_then_native_window(
             )
         )
     )
-    server = SimpleNamespace(should_exit=False)
+    server = SimpleNamespace(should_exit=False, force_exit=False)
     backend_instances: list[object] = []
 
     class FakeBackend:
@@ -963,70 +1968,65 @@ def test_default_runtime_starts_backend_then_native_window(
             for listener in self.sockets:
                 listener.close()
 
-    calls: list[tuple[str, object]] = []
+    order: list[str] = []
     probed_urls: list[str] = []
+    windows: list[_FakeWindow] = []
+    backend_built_when_the_window_opened: list[bool] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
     monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
 
     def fake_wait_for_http(url, *_args, **_kwargs):
         probed_urls.append(url)
+        order.append("ready" if url.endswith("/health/ready") else "live")
+        if url.endswith("/health/live"):
+            # The monitor's first liveness probe: the person closes the window.
+            windows[0].events.closed.set()
         return True
 
     monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
     monkeypatch.setattr(
         launcher_main,
         "ensure_webview2_runtime",
-        lambda root: calls.append(("runtime", root)),
+        lambda root, **_kwargs: order.append("runtime"),
     )
-    monkeypatch.setattr(
-        launcher_main,
-        "run_desktop_window",
-        lambda config, monitor: calls.append(("window", (config, monitor))),
-    )
+
+    def fake_run_desktop_window(config, *, worker):
+        order.append("window")
+        backend_built_when_the_window_opened.append(bool(backend_instances))
+        assert config.starting_html == (
+            launcher_main.ROOT / "assets" / "starting.html"
+        ).read_text(encoding="utf-8")
+        assert config.storage_path == tmp_path / "webview"
+        window = _FakeWindow(order, close_after_load=False)
+        windows.append(window)
+        worker(window)
+
+    monkeypatch.setattr(launcher_main, "run_desktop_window", fake_run_desktop_window)
 
     args = launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path)])
     assert launcher_main._run_web(args) == 0
 
-    assert [name for name, _value in calls] == ["runtime", "window"]
-    window_config, monitor = calls[1][1]
-    assert isinstance(window_config, DesktopWindowConfig)
-    assert window_config.url == (
+    # WebView2 first (it is the renderer), then the window on its starting
+    # page, and only then the backend's readiness gate and the app itself.
+    assert order == ["runtime", "window", "ready", "load_url", "live"]
+    assert backend_built_when_the_window_opened == [False]
+    assert windows[0].loaded_urls == [
         f"http://127.0.0.1:{reserved_port[0]}/#bootstrap=bootstrap-token&handoff=handoff-secret"
-    )
-    assert window_config.storage_path == tmp_path / "webview"
+    ]
     assert server.should_exit is True
     assert backend_instances[0].running is False
 
-    # Startup gate used the heavier readiness probe.
+    # Startup gate used the heavier readiness probe; the window's monitor, which
+    # runs for the app's lifetime, polls the cheap liveness route.
     assert probed_urls == [
-        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready"
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready",
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live",
     ]
-
-    # The ongoing native-window monitor should poll the cheap liveness route
-    # rather than the readiness route, since it runs for the app's lifetime.
-    closed_checks = {"count": 0}
-
-    def closed_is_set() -> bool:
-        closed_checks["count"] += 1
-        return closed_checks["count"] > 1
-
-    fake_window = SimpleNamespace(
-        events=SimpleNamespace(closed=SimpleNamespace(is_set=closed_is_set)),
-        destroy=lambda: None,
-    )
-    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
-    # The window closing set should_exit above; a monitor that starts under an
-    # owned shutdown closes at once (covered separately), so make the backend
-    # look live again to exercise the probing path.
-    server.should_exit = False
-    monitor(fake_window)
-    assert probed_urls[-1] == (
-        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
-    )
 
 
 def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
@@ -1698,13 +2698,51 @@ def test_build_app_creates_one_ssl_context(tmp_path: Path, monkeypatch: pytest.M
     assert fresh_builds == 1
 
 
+class _FakeWindow:
+    """pywebview's window, reduced to what the launcher does with it.
+
+    By default the person closes the window as soon as the app has loaded into
+    it (``close_after_load``), which is what ends the launcher's monitor loop.
+    """
+
+    def __init__(self, calls: list[str], *, close_after_load: bool = True) -> None:
+        self.calls = calls
+        self.close_after_load = close_after_load
+        self.events = SimpleNamespace(closed=threading.Event())
+        self.loaded_urls: list[str] = []
+        self.pages: list[str] = []
+        self.exposed: dict[str, Callable[[], None]] = {}
+        self.destroyed = 0
+        self.fail_load_html = False
+
+    def load_url(self, url: str) -> None:
+        self.calls.append("load_url")
+        self.loaded_urls.append(url)
+        if self.close_after_load:
+            self.events.closed.set()
+
+    def load_html(self, page: str) -> None:
+        if self.fail_load_html:
+            raise RuntimeError("the window is gone")
+        self.calls.append("error_page")
+        self.pages.append(page)
+
+    def expose(self, *functions: Callable[[], None]) -> None:
+        for function in functions:
+            self.exposed[function.__name__] = function
+
+    def destroy(self) -> None:
+        self.destroyed += 1
+        self.events.closed.set()
+
+
 class _LaunchFakes:
     """What ``_run_web`` needs to run a whole launch without a window or a port.
 
     Everything that would touch the machine -- the instance lock, the frontend
     build, the server thread, WebView2 and the native window -- is replaced.
     ``calls`` records the order of the interesting steps, and ``on_window`` is
-    what runs in place of the GUI loop.
+    what runs in place of the GUI loop (by default: run the window's worker).
     """
 
     def __init__(
@@ -1719,9 +2757,14 @@ class _LaunchFakes:
     ) -> None:
         self.calls: list[str] = [] if calls is None else calls
         self.window_configs: list[DesktopWindowConfig] = []
+        self.windows: list[_FakeWindow] = []
+        self.backends: list[object] = []
+        self.signal_targets: list[tuple[object, bool]] = []
         self.server = SimpleNamespace(should_exit=False, force_exit=False)
         self.record = SimpleNamespace(pid=1234, port=0)
-        self.on_window: Callable[[DesktopWindowConfig, object], None] = lambda config, monitor: None
+        self.on_window: Callable[[DesktopWindowConfig, Callable[[object], None]], None] = (
+            lambda _config, worker: worker(self.windows[-1])
+        )
         fakes = self
         manager = session_manager or SimpleNamespace(
             issue_bootstrap_token=lambda: ("bootstrap-token", None),
@@ -1751,6 +2794,7 @@ class _LaunchFakes:
                 self.running = False
                 self.accepting_startup = True
                 self.error = None
+                fakes.backends.append(self)
 
             def start(self):
                 self.running = True
@@ -1762,26 +2806,522 @@ class _LaunchFakes:
                 if backend_stop_error is not None:
                     raise backend_stop_error
 
-        def window(config, monitor):
+        def window(config, *, worker):
             fakes.window_configs.append(config)
             fakes.calls.append("window")
-            fakes.on_window(config, monitor)
+            fakes.windows.append(_FakeWindow(fakes.calls))
+            fakes.on_window(config, worker)
+
+        def probe(url, **_kwargs):
+            if url.endswith("/health/ready"):
+                fakes.calls.append("ready")
+            return True
 
         monkeypatch.setattr(launcher_main, "InstanceLock", instance_class or FakeInstance)
         monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_a, **_k: tmp_path)
         monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
         monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_a, **_k: self.server)
-        monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
-        monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
-        monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: True)
         monkeypatch.setattr(
-            launcher_main, "ensure_webview2_runtime", lambda _root: self.calls.append("runtime")
+            launcher_main,
+            "_install_shutdown_signals",
+            lambda target: self.signal_targets.append(
+                (target, threading.current_thread() is threading.main_thread())
+            ),
+        )
+        monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+        monkeypatch.setattr(launcher_main, "wait_for_http", probe)
+        monkeypatch.setattr(
+            launcher_main,
+            "ensure_webview2_runtime",
+            lambda _root, **_kwargs: self.calls.append("runtime"),
         )
         monkeypatch.setattr(launcher_main, "run_desktop_window", window)
 
 
 def _launch_args(tmp_path: Path, *extra: str):
     return launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path), *extra])
+
+
+def test_a_failed_startup_is_shown_in_the_window_with_the_diagnostic_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failure behind the starting page used to leave it there, or nothing at all."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("synthetic migration failure token=do-not-show")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (window,) = fakes.windows
+    assert fakes.calls == ["runtime", "window", "error_page"]
+    assert window.loaded_urls == [], "the app must not load after a failed startup"
+    (page,) = window.pages
+    log_path = tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert str(log_path) in page
+    assert "synthetic migration failure" in page
+    assert "do-not-show" not in page
+    assert "{{" not in page, "every placeholder is filled"
+    assert list(window.exposed) == ["acknowledge_startup_failure"]
+    recorded = log_path.read_text(encoding="utf-8")
+    assert "stage=desktop startup/runtime error_type=RuntimeError" in recorded
+    assert "do-not-show" not in recorded
+    # The window already said it, so the message box must not say it again.
+    assert shown == []
+    # And the failure reaches the runtime log, redacted, for a bug report.
+    runtime_log = (tmp_path / "logs" / "cortex.log").read_text(encoding="utf-8")
+    assert "Cortex could not start (RuntimeError)" in runtime_log
+    assert "do-not-show" not in runtime_log
+
+
+def test_a_data_path_failure_after_the_window_opened_names_the_remedy_on_the_error_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(**_kwargs):
+        raise AppPathError("Cortex could not secure its private data permissions.")
+
+    monkeypatch.setattr(launcher_main, "build_app", refuse)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (page,) = fakes.windows[0].pages
+    assert "could not secure its private data permissions" in page
+    assert "--data-dir" in page
+
+
+def test_a_data_path_failure_without_a_window_names_the_remedy_in_the_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(**_kwargs):
+        raise AppPathError("Cortex could not create its data directory.")
+
+    monkeypatch.setattr(launcher_main, "build_app", refuse)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path), "--headless"]) == 1
+
+    (dialog,) = shown
+    assert "--data-dir" in dialog
+
+
+def test_the_error_page_close_button_destroys_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (window,) = fakes.windows
+    assert window.destroyed == 0
+    window.exposed["acknowledge_startup_failure"]()
+    assert window.destroyed == 1
+
+
+def test_a_frontend_build_failure_is_shown_in_the_window_and_still_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_frontend(*_args, **_kwargs):
+        raise FrontendBuildError("npm is not installed")
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", failing_frontend)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    (window,) = fakes.windows
+    assert "npm is not installed" in window.pages[0]
+    startup_log = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=frontend preparation" in startup_log
+    assert fakes.backends == [], "no backend is started for a launch that has no frontend"
+
+
+def test_a_backend_that_never_becomes_ready_is_shown_in_the_window_and_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: False)
+    running_while_the_error_page_was_up: list[bool] = []
+
+    def worker_then_leave_the_page_up(_config, worker):
+        worker(fakes.windows[-1])
+        # The window is still open here, the way it is while the error is read.
+        running_while_the_error_page_was_up.append(fakes.backends[0].running)
+
+    fakes.on_window = worker_then_leave_the_page_up
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (window,) = fakes.windows
+    assert "did not become ready within 30 seconds" in window.pages[0]
+    assert window.loaded_urls == []
+    (backend,) = fakes.backends
+    assert backend.running is False, "the half-started backend was left running"
+    assert running_while_the_error_page_was_up == [False], "it should stop as soon as the page is up"
+
+
+def test_a_startup_failure_with_no_window_left_still_gets_the_message_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """If the error page cannot be shown, the person is not left with nothing."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+    original_window = fakes.on_window
+
+    def window_that_cannot_show_pages(config, worker):
+        fakes.windows[-1].fail_load_html = True
+        original_window(config, worker)
+
+    fakes.on_window = window_that_cannot_show_pages
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (dialog,) = shown
+    assert "Cortex could not start" in dialog
+
+
+def test_closing_the_window_while_starting_abandons_the_launch_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def close_during_the_gate(_url, **_kwargs):
+        fakes.windows[0].events.closed.set()
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", close_during_the_gate)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    (window,) = fakes.windows
+    assert window.loaded_urls == [] and window.pages == []
+    (backend,) = fakes.backends
+    assert backend.running is False
+    assert shown == []
+    startup_log = tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert not startup_log.exists(), "closing the window is not a startup failure"
+
+
+def test_teardown_waits_for_a_startup_still_in_flight_before_stopping_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Closing the window mid-startup must not stop a backend the worker is still building."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    startup_returned = threading.Event()
+    stop_saw_startup_returned: list[bool] = []
+    worker_threads: list[threading.Thread] = []
+
+    def blocking_probe(url, **_kwargs):
+        if not url.endswith("/health/ready"):
+            return True
+        entered.set()
+        threading.Timer(0.3, release.set).start()
+        assert release.wait(10)
+        startup_returned.set()
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", blocking_probe)
+    fake_backend = launcher_main.ServerSupervisor
+
+    class RecordingBackend(fake_backend):  # type: ignore[misc, valid-type]
+        def stop(self):
+            stop_saw_startup_returned.append(startup_returned.is_set())
+            super().stop()
+
+    monkeypatch.setattr(launcher_main, "ServerSupervisor", RecordingBackend)
+
+    def close_the_window_mid_startup(_config, worker):
+        window = fakes.windows[-1]
+        thread = threading.Thread(target=worker, args=(window,), name="cortex-test-window-worker")
+        worker_threads.append(thread)
+        thread.start()
+        assert entered.wait(10), "startup never reached the readiness gate"
+        window.events.closed.set()  # the person closes the window; the GUI loop ends
+
+    fakes.on_window = close_the_window_mid_startup
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    worker_threads[0].join(timeout=10)
+    assert not worker_threads[0].is_alive()
+    assert stop_saw_startup_returned == [True], "the backend was stopped under the worker"
+    assert fakes.windows[0].loaded_urls == []
+
+
+def test_an_interrupt_while_starting_closes_the_window_and_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted_during_the_gate(_url, **_kwargs):
+        fakes.server.should_exit = True  # what Ctrl+C sets, once the server exists
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", interrupted_during_the_gate)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    (window,) = fakes.windows
+    assert window.destroyed == 1, "the starting window was left open"
+    assert window.pages == [] and window.loaded_urls == []
+    assert fakes.backends[0].running is False
+
+
+def test_an_interrupt_before_the_server_exists_is_remembered_and_stops_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ctrl+C can land while the frontend is being checked, before any server."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted_in_the_frontend_check(*_args, **_kwargs):
+        target, _on_main = fakes.signal_targets[0]
+        target.should_exit = True  # the handler's first action
+        return tmp_path
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", interrupted_in_the_frontend_check)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert fakes.backends == [], "a backend was started after an interrupt"
+    assert fakes.windows[0].destroyed == 1
+    assert fakes.windows[0].loaded_urls == []
+
+
+def test_signals_are_installed_on_the_main_thread_and_startup_runs_on_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Handlers can only be installed on the main thread, which the GUI loop then owns."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    build_threads: list[threading.Thread] = []
+    original_build = launcher_main.build_app
+
+    def recording_build_app(**kwargs):
+        build_threads.append(threading.current_thread())
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(launcher_main, "build_app", recording_build_app)
+
+    def worker_on_its_own_thread(_config, worker):
+        thread = threading.Thread(
+            target=worker, args=(fakes.windows[-1],), name="cortex-test-window-worker"
+        )
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    fakes.on_window = worker_on_its_own_thread
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((target, on_main_thread),) = fakes.signal_targets
+    assert on_main_thread
+    assert isinstance(target, launcher_main._ShutdownHandle)
+    assert [thread.name for thread in build_threads] == ["cortex-test-window-worker"]
+    # The interrupt state the main thread owns is the one the backend now obeys.
+    assert fakes.server.should_exit is True
+
+
+def test_the_shutdown_handle_remembers_an_interrupt_until_the_server_exists():
+    handle = launcher_main._ShutdownHandle()
+    assert (handle.should_exit, handle.force_exit) == (False, False)
+    saved = {signal.SIGINT: signal.getsignal(signal.SIGINT)}
+    try:
+        launcher_main._install_shutdown_signals(handle)
+        interrupt = signal.getsignal(signal.SIGINT)
+        interrupt(signal.SIGINT, None)
+        assert (handle.should_exit, handle.force_exit) == (True, False)
+        interrupt(signal.SIGINT, None)
+        assert handle.force_exit is True
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+    server = SimpleNamespace(should_exit=False, force_exit=False)
+    handle.bind(server)
+
+    assert (server.should_exit, server.force_exit) == (True, True)
+    server.should_exit = False
+    assert handle.should_exit is False, "reads go through to the server once bound"
+    handle.should_exit = True
+    assert server.should_exit is True, "and so do writes"
+
+
+def test_a_headless_launch_needs_no_window_and_no_webview2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    ran: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        launcher_main, "_run_headless", lambda **kwargs: ran.append(kwargs) or 0
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert fakes.calls == ["ready"]
+    assert len(ran) == 1 and ran[0]["backend"] is fakes.backends[0]
+    assert fakes.backends[0].running is False
+    startup_log = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=started" in startup_log
+
+
+def test_an_interrupted_headless_start_exits_zero_without_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted(_url, **_kwargs):
+        fakes.server.should_exit = True
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", interrupted)
+    monkeypatch.setattr(
+        launcher_main, "_run_headless", lambda **_kwargs: pytest.fail("nothing to serve")
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert fakes.backends[0].running is False
+
+
+def test_starting_page_is_plain_offline_html_on_the_windows_own_grounds():
+    page = launcher_main._starting_page()
+
+    assert page == (launcher_main.ROOT / "assets" / "starting.html").read_text(encoding="utf-8")
+    assert "Starting Cortex" in page
+    # Nothing to fetch, nothing to run: it is shown before anything is trusted.
+    for forbidden in ("http://", "https://", "<script", "@import", "url(", " src=", " href="):
+        assert forbidden not in page, forbidden
+    assert "default-src 'none'" in page
+    # The same two grounds as the window itself, so nothing flashes at the swap.
+    assert desktop_module.WINDOW_BACKGROUND_LIGHT in page
+    assert desktop_module.WINDOW_BACKGROUND_DARK in page
+
+
+def test_a_missing_starting_page_falls_back_to_inline_html(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: tmp_path)
+
+    assert launcher_main._starting_page() == desktop_module.FALLBACK_STARTING_HTML
+    assert "Starting Cortex" in desktop_module.FALLBACK_STARTING_HTML
+
+
+def test_the_failure_page_escapes_what_it_shows_and_fills_each_placeholder_once():
+    error = RuntimeError("<script>alert(1)</script> {{log}} password=hunter2")
+    log_path = Path("C:/Users/someone <b>/Cortex/startup.log")
+
+    page = launcher_main._startup_failure_page(error, log_path)
+
+    assert "<script>alert(1)" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "hunter2" not in page
+    assert "&lt;b&gt;" in page and "<b>" not in page
+    # The log path was substituted for the log placeholder only, not into the
+    # message that happens to contain the same braces.
+    assert page.count("startup.log") == 1
+    assert "{{log}}" in page
+
+
+def test_the_failure_page_template_and_its_close_hook_agree_with_the_launcher():
+    template = (launcher_main.ROOT / "assets" / "startup_failed.html").read_text(encoding="utf-8")
+
+    assert template.count("{{message}}") == 1 and template.count("{{log}}") == 1
+    assert "acknowledge_startup_failure" in template
+    for forbidden in ("http://", "https://", "@import", "url(", " src=", " href="):
+        assert forbidden not in template, forbidden
+
+
+def test_the_failure_page_falls_back_when_its_template_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: tmp_path)
+
+    page = launcher_main._startup_failure_page(RuntimeError("boom"), tmp_path / "startup.log")
+
+    assert "boom" in page and "startup.log" in page and "Cortex could not start" in page
+
+
+def test_show_startup_failure_exposes_its_close_hook_only_for_the_error_page():
+    window = _FakeWindow([])
+    exposed_when_the_page_loaded: list[list[str]] = []
+    original_load_html = window.load_html
+
+    def load_html(page: str) -> None:
+        exposed_when_the_page_loaded.append(list(window.exposed))
+        original_load_html(page)
+
+    window.load_html = load_html  # type: ignore[method-assign]
+
+    desktop_module.show_startup_failure(window, "<p>failed</p>")
+
+    assert window.pages == ["<p>failed</p>"]
+    assert exposed_when_the_page_loaded == [["acknowledge_startup_failure"]]
+    window.exposed["acknowledge_startup_failure"]()
+    assert window.destroyed == 1
+
+
+def test_a_successful_launch_exposes_nothing_extra_to_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The close hook exists only while the error page is up."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert fakes.windows[0].exposed == {}
+
+
+def test_importing_the_launcher_leaves_the_backend_for_the_worker_thread():
+    """The whole backend loads behind the starting page, not before the window.
+
+    ``app_factory`` is about a second of imports warm and far more on a first
+    run through antivirus; it used to be imported by ``main`` itself.
+    """
+    probe = (
+        "import sys; sys.path.insert(0, 'backend'); import main; "
+        "print('app_factory' in sys.modules, 'cortex_backend.api' in sys.modules)"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=launcher_main.ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+
+    assert result.stdout.split() == ["False", "False"]
+
+
+def test_build_app_is_imported_when_the_worker_first_needs_it(monkeypatch: pytest.MonkeyPatch):
+    import app_factory
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(app_factory, "build_app", lambda **kwargs: seen.append(kwargs) or "app")
+
+    assert launcher_main.build_app(serve_frontend=False) == "app"
+    assert seen == [{"serve_frontend": False}]
 
 
 def test_server_for_app_bounds_graceful_shutdown():
@@ -1961,7 +3501,7 @@ def test_run_web_does_not_exit_zero_when_the_backend_will_not_stop(
     assert launcher_main._backend_abandoned_at_exit is True
     recorded = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
     assert "stage=backend shutdown" in recorded
-    assert fakes.calls == ["runtime", "window"]
+    assert fakes.calls == ["runtime", "window", "ready", "load_url"]
 
 
 def test_run_web_exits_zero_when_the_backend_stops_cleanly(
@@ -2019,6 +3559,46 @@ def test_a_startup_failure_still_shows_the_could_not_start_dialog(
     assert "Cortex could not start" in shown[0]
 
 
+def test_a_data_path_failure_tells_the_person_how_to_choose_another_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A path error used to end in the generic dialog, with no way forward.
+
+    A redirected AppData folder stopped Cortex with "cannot use UNC paths" in a
+    log the dialog only pointed at; nothing said that --data-dir exists.
+    """
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+    monkeypatch.setenv("TEMP", str(tmp_path))
+    monkeypatch.setenv("TMP", str(tmp_path))
+
+    def refuse(_data_dir):
+        raise AppPathError("Cortex data directories cannot use UNC paths.")
+
+    monkeypatch.setattr(launcher_main, "_resolve_paths", refuse)
+
+    assert launcher_main.main([]) == 2
+
+    assert len(shown) == 1
+    assert "--data-dir" in shown[0]
+    assert "local drive" in shown[0]
+
+
+def test_an_unrelated_startup_failure_does_not_suggest_a_different_data_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_window(_config, _monitor):
+        raise DesktopWindowError("synthetic window failure")
+
+    fakes.on_window = failing_window
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert "--data-dir" not in shown[0]
+
+
 def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2040,12 +3620,14 @@ def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
 
     assert launcher_main._run_web(_launch_args(tmp_path)) == 0
 
-    assert calls == ["runtime", "issue", "window"]
-    (config,) = fakes.window_configs
-    assert config.url == (
+    # Issued after the slow steps (backend, readiness gate), just before the
+    # app is loaded into the window -- and only once.
+    assert calls == ["runtime", "window", "ready", "issue", "load_url"]
+    (url,) = fakes.windows[0].loaded_urls
+    assert url == (
         f"http://127.0.0.1:{fakes.record.port}/#bootstrap=fresh-token&handoff=handoff-secret"
     )
-    assert "stale-token" not in config.url
+    assert "stale-token" not in url
 
 
 def _held_instance_class(acquired: list[bool], *, existing: object | None):
@@ -2170,7 +3752,12 @@ def test_second_launch_starts_normally_when_the_first_instance_died(
 
     assert len(attempts) == 1, "it kept looking for a window after the process was gone"
     assert len(held.attempts) == 2, "the lock was not retried after the first instance died"
-    assert fakes.calls == ["runtime", "window"], "the launch did not go on to open its own window"
+    assert fakes.calls == [
+        "runtime",
+        "window",
+        "ready",
+        "load_url",
+    ], "the launch did not go on to open its own window"
 
 
 def test_second_launch_gives_up_quietly_when_the_window_never_appears(

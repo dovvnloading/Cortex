@@ -1,7 +1,16 @@
-"""Detection and bounded installation of the Windows WebView2 Runtime."""
+"""Detection and bounded installation of the Windows WebView2 Runtime.
+
+The runtime is the renderer for Cortex's window, so it has to be present before
+any window can exist. When it is missing the person is asked before anything is
+installed, and every failure says what to do next. The installer itself is the
+bundled Microsoft Evergreen bootstrapper, run silently: whether it asks Windows
+for elevation when started unelevated has not been verified here, so the prompt
+only says that Windows may ask.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 from pathlib import Path
 import subprocess
@@ -10,10 +19,66 @@ import sys
 
 WEBVIEW2_CLIENT_ID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 WEBVIEW2_BOOTSTRAPPER = "MicrosoftEdgeWebview2Setup.exe"
+# The Evergreen bootstrapper's own download link, the same one
+# packaging/prepare_webview2.ps1 fetches; a test keeps the two in step.
+WEBVIEW2_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+WEBVIEW2_PREPARE_SCRIPT = "packaging/prepare_webview2.ps1"
+INSTALL_TIMEOUT_SECONDS = 10 * 60
+_PROMPT_TITLE = "Cortex needs the WebView2 Runtime"
+_INSTALL_PROMPT = (
+    "Cortex needs the Microsoft Edge WebView2 Runtime, a one-time download from "
+    "Microsoft. It is not installed on this computer.\n\n"
+    "Install now? This needs an internet connection, can take a few minutes, and "
+    "Windows may ask you to approve it. Cortex opens when it is done.\n\n"
+    "Choose OK to install, or Cancel to close Cortex."
+)
+
+_MB_OKCANCEL = 0x00000001
+_MB_ICONINFORMATION = 0x00000040
+_MB_SETFOREGROUND = 0x00010000
+_IDOK = 1
 
 
 class WebViewRuntimeError(RuntimeError):
-    """Raised when the native Chromium runtime cannot be prepared."""
+    """Raised when the native Chromium runtime cannot be prepared.
+
+    The message is fixed text with something the person can do next, so the
+    launcher may show it as it stands.
+    """
+
+
+class WebViewInstallDeclined(Exception):
+    """The person chose not to install the runtime. Not a failure: Cortex just closes."""
+
+
+def _manual_install_advice(packaged: bool) -> str:
+    advice = (
+        f"Download the Microsoft Edge WebView2 Runtime from {WEBVIEW2_DOWNLOAD_URL}, "
+        "install it, then start Cortex again."
+    )
+    if not packaged:
+        advice += (
+            f" When running from source, {WEBVIEW2_PREPARE_SCRIPT} fetches the installer "
+            "Cortex looks for in packaging/.runtime/webview2."
+        )
+    return advice
+
+
+def _confirm(title: str, text: str) -> bool:
+    """Ask an OK/Cancel question in a native message box; only OK is a yes.
+
+    Fails closed: with no way to show the box there is no consent, so nothing is
+    installed.
+    """
+    try:
+        import ctypes
+
+        answer = ctypes.windll.user32.MessageBoxW(
+            None, text, title, _MB_OKCANCEL | _MB_ICONINFORMATION | _MB_SETFOREGROUND
+        )
+    except (AttributeError, OSError):
+        return False
+    return bool(answer == _IDOK)
 
 
 def _verify_microsoft_signature(bootstrapper: Path) -> None:
@@ -98,8 +163,21 @@ def webview2_version() -> str | None:
     return None
 
 
-def ensure_webview2_runtime(resource_root: Path) -> str | None:
-    """Install the bundled Evergreen bootstrapper only when WebView2 is absent."""
+def ensure_webview2_runtime(
+    resource_root: Path,
+    *,
+    packaged: bool = True,
+    confirm: Callable[[str, str], bool] | None = None,
+    report: Callable[[str], None] | None = None,
+) -> str | None:
+    """Install the bundled Evergreen bootstrapper only when WebView2 is absent.
+
+    The person is asked first (``confirm`` defaults to a native message box);
+    declining raises ``WebViewInstallDeclined``. ``report`` receives one short,
+    non-sensitive note per step -- notably the installer's exit code -- for the
+    launcher's startup log. ``packaged`` only changes which advice a failure
+    gives: a source checkout is pointed at the script that fetches the installer.
+    """
     if sys.platform != "win32":
         return None
 
@@ -107,33 +185,54 @@ def ensure_webview2_runtime(resource_root: Path) -> str | None:
     if installed:
         return installed
 
+    advice = _manual_install_advice(packaged)
     bootstrapper = resource_root / "webview2" / WEBVIEW2_BOOTSTRAPPER
     if not bootstrapper.is_file():
         raise WebViewRuntimeError(
-            "Microsoft Edge WebView2 Runtime is not installed and Cortex's signed "
-            "runtime bootstrapper is missing. Rebuild the package with "
-            "packaging/build_windows.ps1."
+            "Microsoft Edge WebView2 Runtime is not installed and Cortex's runtime "
+            f"bootstrapper is missing. {advice}"
         )
 
-    _verify_microsoft_signature(bootstrapper)
+    try:
+        _verify_microsoft_signature(bootstrapper)
+    except WebViewRuntimeError as exc:
+        raise WebViewRuntimeError(f"{exc} {advice}") from exc
+
+    if not (confirm or _confirm)(_PROMPT_TITLE, _INSTALL_PROMPT):
+        if report is not None:
+            report("WebView2 install declined")
+        raise WebViewInstallDeclined()
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         result = subprocess.run(
             [str(bootstrapper), "/silent", "/install"],
             check=False,
-            timeout=10 * 60,
+            timeout=INSTALL_TIMEOUT_SECONDS,
             creationflags=creationflags,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        if report is not None:
+            report(f"WebView2 bootstrapper timed out after {INSTALL_TIMEOUT_SECONDS} seconds")
         raise WebViewRuntimeError(
-            "Cortex could not complete the bundled WebView2 Runtime bootstrap."
+            "The WebView2 Runtime installer did not finish within "
+            f"{INSTALL_TIMEOUT_SECONDS // 60} minutes. {advice}"
+        ) from exc
+    except OSError as exc:
+        if report is not None:
+            report(f"WebView2 bootstrapper could not be started ({type(exc).__name__})")
+        raise WebViewRuntimeError(
+            f"Cortex could not start the WebView2 Runtime installer. {advice}"
         ) from exc
 
+    code = result.returncode
+    if report is not None:
+        report(f"WebView2 bootstrapper exit code {code} (0x{code & 0xFFFFFFFF:08X})")
     installed = webview2_version()
     if not installed:
         raise WebViewRuntimeError(
-            "The WebView2 Runtime bootstrapper finished without making the runtime "
-            f"available (installer exit code {result.returncode})."
+            "The WebView2 Runtime installer finished without installing the runtime "
+            f"(exit code {code}). If this computer is offline, connect it to the "
+            f"internet and try again. {advice}"
         )
     return installed

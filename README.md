@@ -233,6 +233,13 @@ tests/                    Python API, lifecycle, worker, and migration tests
 
 The supported source runtime is Windows. User data stays under
 `%APPDATA%\ChatLLM\ChatLLM-Assistant` unless an explicit `--data-dir` is supplied.
+The large, re-downloadable folders a new install creates -- the llama.cpp runtime,
+the default GGUF models folder and the WebView profile -- go under
+`%LOCALAPPDATA%\ChatLLM\ChatLLM-Assistant` instead, so a roaming profile does not
+synchronise gigabytes of them. A folder that already exists in the data directory
+stays where it is and keeps being used there; Cortex does not move or copy an
+existing one to the new location. With
+`--data-dir` everything stays together under that folder.
 Cortex does not pull an embedding model at startup and has no semantic retrieval.
 
 ## Requirements
@@ -382,7 +389,8 @@ What is kept, all beside the database files in that folder:
 
 Cortex needs write-ahead logging, so the data directory has to be on a local
 drive SQLite can use it on; some network, cloud-synced and removable drives
-cannot (a roaming `%APPDATA%` redirected to a network share is one). If SQLite
+cannot (a folder on a network share is one; when `%APPDATA%` itself is a network
+path, Cortex uses `%LOCALAPPDATA%` for its data instead of refusing to start). If SQLite
 reports that it could not enable it, Cortex stops at startup with a message
 saying so rather than running with weaker durability. Your existing databases
 are not deleted or modified when it does, and your chats and settings are still
@@ -406,8 +414,21 @@ restore.
 
 - If Cortex reports Ollama unavailable, verify the Ollama service and endpoint.
 - If no models appear, run `ollama list` and install a generation model.
+- The window opens on a short "Starting Cortex" page while the backend starts,
+  and shows what went wrong (and where the log is) if startup fails.
 - If the native window does not open from source, reinstall `requirements.txt`
-  and verify that the Microsoft Edge WebView2 Runtime is installed.
+  and verify that the Microsoft Edge WebView2 Runtime is installed. When it is
+  missing Cortex asks before installing it (Cancel closes Cortex without an
+  error); offline, or if the installer fails, the message names Microsoft's
+  download link. From source, `packaging/prepare_webview2.ps1` fetches the
+  installer Cortex looks for.
+- Two logs live in the data folder: `startup.log` (startup failures, one line per
+  successful start, and the previous file as `startup.log.1`) and
+  `logs\cortex.log` (what the backend and launcher log, rotating at 1 MiB with
+  three backups; `--log-level` sets its verbosity). Both are redacted for
+  credential-like text, and a traceback in `cortex.log` keeps only its frames
+  and exception class names, never an exception message. Read them before
+  sharing anyway.
 - If a previous Cortex instance is already running, launching Cortex again
   restores its native window rather than starting a second server. If that
   instance is still starting, the second launch waits up to 90 seconds for its
