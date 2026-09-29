@@ -13,7 +13,7 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ## [Unreleased]
 
-Everything merged since 2026-09-04 (pull requests #212 to #284), which this
+Everything merged since 2026-09-04 (pull requests #212 to #291), which this
 file had no summary of. Test-only pull requests (#228, #269, #273) and a README
 edit that was later undone (#278) are left out. Some changes are also told at
 length in the dated entries under [Earlier entries](#earlier-entries), which
@@ -51,7 +51,9 @@ are named where they apply.
   tests that never touch a DOM no longer build one (#229), every wait in the
   suite is bounded (#282), and the GitHub Actions are pinned to commits, the
   workflows are linted and audited, and pull requests get a dependency review
-  (#283).
+  (#283). Tests share fixtures, a frozen repository clock and a check that no
+  worker thread outlives the run (#285), and the repository documents were
+  brought back in step with the repository (#288).
 
 ### Fixed
 
@@ -75,6 +77,14 @@ Chat and streaming
   (#250), and the image capability probe no longer breaks GIF attachments
   (#248).
 - An ordinary chat message can no longer freeze the backend (#247).
+- Replies are parsed more carefully: an unfinished memory or code block no
+  longer leaks into the answer, an identical memory block counts once, quoted
+  examples are left alone, a leading `<think>` block is shown as reasoning, and
+  command tags hidden in attachments, memories or tool output are neutralised
+  (#291).
+- An offline runtime and a timed-out model get their own messages instead of
+  the generic failure, and the system message keeps the same beginning from
+  turn to turn so the model's cache is reused (#291).
 
 Interface
 
@@ -89,6 +99,9 @@ Interface
   the user out of a working session, a failed chat move no longer undoes a
   later one that succeeded, and memories the server normalized away no longer
   stay on screen (#241).
+- An expired session is renewed in place instead of reloading the workspace,
+  a generation keeps running when its stream meets an expired session, and a
+  failing memory store no longer blocks the whole workspace (#290).
 
 Code execution
 
@@ -109,6 +122,10 @@ Code execution
   duration stays an integer (#224), and shipped code raises real errors where
   it relied on `assert` (#222).
 - Engine hooks that receive host observations now declare them (#245).
+- "Allow once" no longer survives a restart, a locked execution store is no
+  longer discarded as if it were corrupt, a store written by a newer version is
+  set aside instead of stopping startup, and one bad cleanup record no longer
+  turns off all retention (#287).
 
 API and storage
 
@@ -122,6 +139,11 @@ API and storage
 - A corrupt memory file can be repaired from the app (#253).
 - The API accepts an IPv6 loopback host under Starlette 1.7's host parser
   (#272).
+- Database backups use SQLite's own backup interface, a failed backup no longer
+  stops Cortex from starting, the chat backup is taken before a schema upgrade,
+  and recovery keeps the crashed database's write-ahead log next to the
+  quarantined file instead of deleting it, which replaces the behaviour
+  described under #230 (#286).
 
 Local models and the llama.cpp runtime
 
@@ -135,6 +157,9 @@ Local models and the llama.cpp runtime
 - A one-second network hiccup no longer aborts the runtime download (#254).
 - The crash-loop warning no longer turns into its own opposite (#257).
 - The context window reported by Ollama is the one that is read (#249).
+- The llama.cpp child no longer inherits `LLAMA_ARG_*` overrides, runs a
+  single slot, and has its web page switched off, and the context size the
+  server actually loaded is read back (#289).
 
 Launcher
 
