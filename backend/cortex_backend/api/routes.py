@@ -178,9 +178,9 @@ def _call_with_timeout(
     return outcome[0] if outcome else None
 
 
-# A client may supply the id of a chat that does not exist yet -- both
-# add_message() and _start_generation_job() then create that chat using the
-# client's literal string as its permanent primary key. A server-generated id
+# A client may supply the id of a chat that does not exist yet --
+# _start_generation_job() then creates that chat using the client's literal
+# string as its permanent primary key. A server-generated id
 # is always uuid4().hex (32 lowercase hex characters), which trivially
 # satisfies this pattern, so the cap below never bites a legitimate id; it
 # exists only to keep a client from turning the primary key into something
@@ -1670,43 +1670,6 @@ def _resolve_generation_attachments(
             )
         )
     return tuple(resolved)
-
-
-def _validate_chat_attachment_refs(
-    request: Request,
-    deps: BackendDependenciesProtocol,
-    principal: SessionPrincipal,
-    references: list[ChatAttachment],
-) -> list[ChatAttachment]:
-    """Validate metadata-only message writes against the local attachment store."""
-
-    if not references:
-        return []
-    if len(references) > MAX_CHAT_ATTACHMENTS:
-        raise ChatDomainError(
-            "A message can include at most eight attachments.", code="invalid_input"
-        )
-    if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
-        raise ChatDomainError(
-            "The combined attachment size is too large for one message.",
-            code="invalid_input",
-        )
-    service = _chat_attachment_service(request, deps)
-    owner = _attachment_owner(request, principal)
-    normalized: list[ChatAttachment] = []
-    seen: set[str] = set()
-    for reference in references:
-        if reference.attachment_id in seen:
-            raise ChatDomainError(
-                "The same attachment cannot be added twice.", code="invalid_input"
-            )
-        seen.add(reference.attachment_id)
-        try:
-            resolved = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
-        except ChatAttachmentError:
-            raise
-        normalized.append(ChatAttachment.model_validate(resolved.descriptor.as_dict()))
-    return normalized
 
 
 def _execution_repository(request: Request):

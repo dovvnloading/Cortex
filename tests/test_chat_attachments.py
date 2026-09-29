@@ -369,18 +369,6 @@ def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
         assert attachment["kind"] == "image"
         assert "content_base64" not in attachment
 
-        persisted = client.post(
-            "/api/v1/chats/thread-metadata/messages",
-            headers=headers,
-            json={
-                "role": "user",
-                "content": "Keep this attachment reference.",
-                "attachments": [attachment],
-            },
-        )
-        assert persisted.status_code == 200
-        assert persisted.json()["messages"][0]["attachments"][0]["filename"] == "photo.png"
-
         blocked = client.post(
             "/api/v1/generations",
             headers=headers,

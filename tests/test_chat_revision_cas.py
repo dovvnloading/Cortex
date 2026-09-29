@@ -63,35 +63,33 @@ def test_sqlite_chat_revision_conflict_is_atomic(tmp_path: Path):
 
 
 
-def test_message_route_rejects_a_stale_base_revision():
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+def test_generation_route_rejects_a_stale_base_revision():
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=("testserver",))
     with TestClient(app) as client:
         headers = _session(client, app)
         created = client.post(
             "/api/v1/chats", json={"title": "Thread"}, headers=headers
         ).json()
         thread_id = created["id"]
-        assert client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "first"},
-            headers=headers,
-        ).status_code == 200
+        dependencies.chats.add_message(thread_id, "user", "first")
+        chat_before = dependencies.chats.get_chat(thread_id)
 
         stale = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "stale", "base_revision": 0},
+            "/api/v1/generations",
+            json={"thread_id": thread_id, "user_input": "stale", "base_revision": 0},
             headers=headers,
         )
 
         assert stale.status_code == 409
-        assert "revision changed" in stale.json()["detail"].lower()
+        assert "chat changed" in stale.json()["detail"].lower()
+        assert dependencies.chats.get_chat(thread_id) == chat_before
 
 
 def test_generation_does_not_append_an_assistant_after_a_concurrent_chat_mutation():
     state = FakeOllamaState(generation_delay_seconds=0.2)
-    app = create_app(
-        build_demo_dependencies(ollama_state=state), allowed_hosts=("testserver",)
-    )
+    dependencies = build_demo_dependencies(ollama_state=state)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
     with TestClient(app) as client:
         headers = _session(client, app)
         accepted = client.post(
@@ -116,12 +114,8 @@ def test_generation_does_not_append_an_assistant_after_a_concurrent_chat_mutatio
         else:
             raise AssertionError("generation did not begin running")
 
-        concurrent = client.post(
-            "/api/v1/chats/cas-thread/messages",
-            json={"role": "user", "content": "concurrent"},
-            headers=headers,
-        )
-        assert concurrent.status_code == 200
+        # Another writer lands a turn while the generation is running.
+        dependencies.chats.add_message("cas-thread", "user", "concurrent")
 
         with client.stream(
             "GET",
@@ -138,7 +132,7 @@ def test_generation_does_not_append_an_assistant_after_a_concurrent_chat_mutatio
 class _RaceInjectingChatRepository:
     """Land a genuinely concurrent chat write mid ``add_message``.
 
-    Mimics an independent ``/chats/{id}/messages`` request that lands between
+    Mimics an independent write to the chat that lands between
     the coarse admission-revision check in ``prepare()`` and the actual
     compare-and-append it performs, so the real ``add_message`` call's own
     CAS observes a stale ``expected_revision`` and raises

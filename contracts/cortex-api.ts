@@ -5,15 +5,6 @@ export interface AddMemoryRequest {
   memo: string;
 }
 
-export interface AddMessageRequest {
-  role: "user" | "assistant" | "system";
-  content: string;
-  base_revision?: number | null;
-  sources?: Array<unknown> | null;
-  thoughts?: string | null;
-  attachments?: Array<ChatAttachment> | null;
-}
-
 export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }

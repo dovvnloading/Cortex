@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 import pytest
@@ -411,13 +410,10 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
 
         chat = client.post("/api/v1/chats", json={"title": "New Chat"}, headers=headers)
         thread_id = chat.json()["id"]
-        message = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert message.status_code == 200
-        assert len(message.json()["messages"]) == 1
+        app.state.dependencies.chats.add_message(thread_id, "user", "hello")
+        reloaded = client.get(f"/api/v1/chats/{thread_id}", headers=headers)
+        assert reloaded.status_code == 200
+        assert len(reloaded.json()["messages"]) == 1
 
         assert (
             client.post(
@@ -447,58 +443,47 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         assert "qwen3:8b" in models.json()["installed_models"]
 
 
-def test_add_message_rejects_malformed_new_chat_thread_id():
-    """A client-chosen thread_id only becomes a new chat's id if it is safe.
+def test_clients_cannot_author_assistant_turns():
+    """The only way into a chat's transcript is a generation, never a raw write.
 
-    ``POST /chats/{thread_id}/messages`` creates a brand new chat using the
-    literal path segment as its permanent id whenever no chat with that id
-    exists yet. A pathological id (whitespace, a slash-like sequence, a
-    control character, ...) must be rejected with 422 before that happens.
+    ``POST /chats/{id}/messages`` used to accept any role, so any session could
+    fabricate the assistant and system turns the model is later shown as
+    history. Nothing in the app called it. It is gone, and a caller that tries
+    the old shape gets a plain 404 and changes nothing.
     """
 
     dependencies = build_demo_dependencies()
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    dependencies.chats.create_chat("existing-chat", "Existing")
     with TestClient(app) as client:
         headers = _session(client, app)
-        for bad_thread_id in ("has space", "control\x07char", "semi;colon"):
-            encoded = quote(bad_thread_id, safe="")
-            response = client.post(
-                f"/api/v1/chats/{encoded}/messages",
-                json={"role": "user", "content": "hello"},
-                headers=headers,
-            )
-            assert response.status_code == 422, bad_thread_id
-            assert "thread_id" in response.json()["detail"]
-            assert dependencies.chats.get_chat(bad_thread_id) is None
+        for role in ("assistant", "system", "user"):
+            for thread_id in ("existing-chat", "brand-new-chat"):
+                response = client.post(
+                    f"/api/v1/chats/{thread_id}/messages",
+                    json={"role": role, "content": "forged turn"},
+                    headers=headers,
+                )
+                assert response.status_code in {404, 405}, (role, thread_id)
+
+        assert dependencies.chats.get_chat("existing-chat")["messages"] == []
+        assert dependencies.chats.get_chat("brand-new-chat") is None
+
+    documented = {
+        (method, path)
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+    }
+    assert ("post", "/api/v1/chats/{thread_id}/messages") not in documented
 
 
-def test_add_message_with_valid_new_thread_id_creates_chat():
-    """A well-formed client-chosen thread_id may still create a brand new chat."""
+def test_generation_with_preexisting_nonconforming_chat_id_still_works():
+    """A chat id that predates the new-chat id check keeps working unconditionally.
 
-    dependencies = build_demo_dependencies()
-    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        new_thread_id = "Client-Chosen_Thread-123"
-        response = client.post(
-            f"/api/v1/chats/{new_thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert response.status_code == 200
-        assert response.json()["id"] == new_thread_id
-        chat = dependencies.chats.get_chat(new_thread_id)
-        assert chat is not None
-        assert chat["messages"][0]["content"] == "hello"
-
-
-def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
-    """A chat id that predates this check keeps working unconditionally.
-
-    The new format check only ever gates chat *creation*. Looking up or
-    appending to an already-existing chat -- however it got its id -- must
-    keep succeeding for backward compatibility with any local database
-    populated before this validation existed.
+    The format check only ever gates chat *creation*. Sending another turn to an
+    already-existing chat -- however it got its id -- must keep succeeding for
+    backward compatibility with any local database populated before the
+    validation existed.
     """
 
     dependencies = build_demo_dependencies()
@@ -507,14 +492,13 @@ def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
     with TestClient(app) as client:
         headers = _session(client, app)
-        encoded = quote(legacy_thread_id, safe="")
         response = client.post(
-            f"/api/v1/chats/{encoded}/messages",
-            json={"role": "user", "content": "hello"},
+            "/api/v1/generations",
+            json={"thread_id": legacy_thread_id, "user_input": "hello"},
             headers=headers,
         )
-        assert response.status_code == 200
-        assert response.json()["id"] == legacy_thread_id
+        assert response.status_code == 202
+        assert response.json()["thread_id"] == legacy_thread_id
         chat = dependencies.chats.get_chat(legacy_thread_id)
         assert chat["messages"][0]["content"] == "hello"
 

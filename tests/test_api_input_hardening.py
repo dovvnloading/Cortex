@@ -167,18 +167,23 @@ class _Seeded:
     assistant_message_id: str
 
 
+def _chats(client: TestClient):
+    """The chat repository behind ``client``'s app, for seeding a transcript.
+
+    There is no route that writes a raw turn -- a client can only generate one --
+    so a scenario that needs an assistant reply or a system note already in a
+    chat puts it there the way the generation worker does.
+    """
+    return client.app.state.dependencies.chats
+
+
 def _seed_chat(
     client: TestClient, headers: dict[str, str], ollama_state: FakeOllamaState
 ) -> _Seeded:
     chat = client.post("/api/v1/chats", json={"title": "Status codes"}, headers=headers).json()
-    for role, content in (("user", "hello"), ("assistant", "hi there")):
-        chat = client.post(
-            f"/api/v1/chats/{chat['id']}/messages",
-            json={"role": role, "content": content},
-            headers=headers,
-        ).json()
-    user, assistant = chat["messages"]
-    return _Seeded(client, headers, ollama_state, chat["id"], user["id"], assistant["id"])
+    user_id = _chats(client).add_message(chat["id"], "user", "hello")
+    assistant_id = _chats(client).add_message(chat["id"], "assistant", "hi there")
+    return _Seeded(client, headers, ollama_state, chat["id"], user_id, assistant_id)
 
 
 def _regenerate(seeded: _Seeded, message_id: str, **extra: object) -> httpx.Response:
@@ -206,12 +211,10 @@ def _regenerate_a_message_that_is_no_longer_last(seeded: _Seeded) -> httpx.Respo
 
 
 def _regenerate_a_message_that_is_not_a_reply(seeded: _Seeded) -> httpx.Response:
-    note = seeded.client.post(
-        f"/api/v1/chats/{seeded.thread_id}/messages",
-        json={"role": "system", "content": "a note, not a reply"},
-        headers=seeded.headers,
-    ).json()
-    return _regenerate(seeded, note["messages"][-1]["id"])
+    note_id = _chats(seeded.client).add_message(
+        seeded.thread_id, "system", "a note, not a reply"
+    )
+    return _regenerate(seeded, note_id)
 
 
 def _regenerate_from_a_stale_revision(seeded: _Seeded) -> httpx.Response:

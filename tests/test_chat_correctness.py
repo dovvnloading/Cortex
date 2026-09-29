@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from cortex_backend.api.schemas import AddMessageRequest, ChatMessage
+from cortex_backend.api.schemas import ChatMessage
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.core.generation import GenerationAttachment
@@ -32,9 +32,7 @@ class _CapturingClient:
 class ChatCorrectnessTests(unittest.TestCase):
     def test_reasoning_metadata_is_scoped_to_assistant_messages(self):
         user_response = ChatMessage(role="user", content="Question", thoughts="must not leak")
-        user_request = AddMessageRequest(role="user", content="Question", thoughts="must not persist")
         self.assertIsNone(user_response.thoughts)
-        self.assertIsNone(user_request.thoughts)
 
         repository = InMemoryChatRepository(
             [{

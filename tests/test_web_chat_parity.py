@@ -94,8 +94,7 @@ def test_new_generation_persists_both_turns_and_replays_parity_events():
 
 
 def test_generation_rejects_malformed_new_chat_thread_id():
-    """A client-supplied body ``thread_id`` gates chat creation the same way
-    the ``/messages`` path parameter does.
+    """A client-supplied body ``thread_id`` only becomes a new chat's id if it is safe.
 
     When no chat with the given id exists yet, ``_start_generation_job``
     creates one using that literal string as its permanent id. A
@@ -107,7 +106,7 @@ def test_generation_rejects_malformed_new_chat_thread_id():
     app = create_app(dependencies, allowed_hosts=("testserver",))
     with TestClient(app) as client:
         headers = _session(client, app)
-        for bad_thread_id in ("has space", "slash/like", "control\x07char"):
+        for bad_thread_id in ("has space", "slash/like", "control\x07char", "semi;colon"):
             response = client.post(
                 "/api/v1/generations",
                 json={"thread_id": bad_thread_id, "user_input": "hello"},

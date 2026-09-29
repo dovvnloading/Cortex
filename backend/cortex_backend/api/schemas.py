@@ -246,22 +246,6 @@ class RenameChatRequest(NonBlankTextModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-class AddMessageRequest(NonBlankTextModel):
-    role: ChatRole
-    content: str = Field(min_length=1, max_length=100_000)
-    base_revision: int | None = Field(default=None, ge=0)
-    sources: list[Any] | None = None
-    thoughts: str | None = Field(default=None, max_length=100_000)
-    attachments: list[ChatAttachment] | None = Field(default=None, max_length=MAX_CHAT_ATTACHMENTS)
-
-    @model_validator(mode="after")
-    def assistant_only_thoughts(self) -> AddMessageRequest:
-        """Ignore client-supplied reasoning metadata on non-assistant messages."""
-        if self.role != "assistant":
-            self.thoughts = None
-        return self
-
-
 class SettingsMigrationReport(APIModel):
     status: Literal["not_needed", "migrated", "already_migrated", "failed"]
     source: str
