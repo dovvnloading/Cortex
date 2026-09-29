@@ -16,6 +16,7 @@ import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
+import { ResponseAnnouncer } from "./ResponseAnnouncer";
 
 const DEFAULT_GENERATION_SETTINGS = {
   temperature: 0.7,
@@ -898,6 +899,7 @@ export function ChatPage({
         </div>
       )}
       <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
+      <ResponseAnnouncer threadId={displayedThreadId} />
       <MessageList
         ref={messageListRef}
         messages={messages}
