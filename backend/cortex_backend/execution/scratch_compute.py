@@ -25,6 +25,19 @@ MAX_AST_NODES = 96
 MAX_AST_DEPTH = 16
 MAX_OPERATIONS = 64
 MAX_RESULT_ABS = Decimal("1e18")
+# How many arguments each function takes. The validator and the evaluator both
+# read this table: the validator used to accept one to sixteen arguments for
+# any allowed name while the evaluator required exact counts, so min(5) and
+# abs(1, 2) validated and then failed -- and because the automatic-expression
+# extractor decides on the validator, "what is min(5)?" made a durable failed
+# job instead of falling back to ordinary chat.
+_FUNCTION_ARITY: Final = {
+    "abs": (1, 1),
+    "sqrt": (1, 1),
+    "min": (2, 16),
+    "max": (2, 16),
+    "round": (1, 2),
+}
 MAX_DECIMAL_SCALE = 18
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -151,21 +164,35 @@ def _validate_structure(node: ast.AST) -> None:
         _validate_structure(node.right)
         return
     if isinstance(node, ast.Call):
-        if (
-            not isinstance(node.func, ast.Name)
-            or node.keywords
-            or node.func.id not in {"abs", "sqrt", "min", "max", "round"}
-            or not node.args
-            or len(node.args) > 16
-        ):
+        if not isinstance(node.func, ast.Name) or node.keywords:
             raise ScratchComputeError("expression_not_allowed")
+        arity = _FUNCTION_ARITY.get(node.func.id)
+        if arity is None or not arity[0] <= len(node.args) <= arity[1]:
+            raise ScratchComputeError("expression_not_allowed")
+        if node.func.id == "sqrt" and _is_negative_literal(node.args[0]):
+            raise ScratchComputeError("domain_error")
         _validate_structure(node.func)
         for argument in node.args:
             _validate_structure(argument)
         return
-    if isinstance(node, ast.Name) and node.id in {"abs", "sqrt", "min", "max", "round"}:
+    if isinstance(node, ast.Name) and node.id in _FUNCTION_ARITY:
         return
     raise ScratchComputeError("expression_not_allowed")
+
+
+def _is_negative_literal(node: ast.AST) -> bool:
+    """Whether ``node`` is a number written below zero (``-4`` parses as a negated ``4``)."""
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        node = node.operand
+        negated = True
+    else:
+        negated = False
+    if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
+        return False
+    if not isinstance(node.value, (int, float)):
+        return False
+    return node.value > 0 if negated else node.value < 0
 
 
 class _Evaluator:
@@ -235,18 +262,25 @@ class _Evaluator:
         if not isinstance(node.func, ast.Name) or node.keywords:
             raise ScratchComputeError("expression_not_allowed")
         name = node.func.id
+        arity = _FUNCTION_ARITY.get(name)
+        if arity is None or not arity[0] <= len(node.args) <= arity[1]:
+            raise ScratchComputeError("expression_not_allowed")
         values = tuple(self.evaluate(argument) for argument in node.args)
         try:
             with localcontext(_decimal_context()):
-                if name == "abs" and len(values) == 1:
+                if name == "abs":
                     value = abs(values[0])
-                elif name == "sqrt" and len(values) == 1 and values[0] >= 0:
+                elif name == "sqrt":
+                    if values[0] < 0:
+                        # Its own code, so "the square root of a negative
+                        # number" is not reported as a disallowed expression.
+                        raise ScratchComputeError("domain_error")
                     value = values[0].sqrt()
-                elif name == "min" and 2 <= len(values) <= 16:
+                elif name == "min":
                     value = min(values)
-                elif name == "max" and 2 <= len(values) <= 16:
+                elif name == "max":
                     value = max(values)
-                elif name == "round" and len(values) in {1, 2}:
+                elif name == "round":
                     places = 0
                     if len(values) == 2:
                         if values[1] != values[1].to_integral_value():

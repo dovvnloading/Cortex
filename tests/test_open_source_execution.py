@@ -14,6 +14,7 @@ import sys
 
 from fastapi.testclient import TestClient
 from PIL import Image
+import pytest
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
@@ -24,6 +25,7 @@ from cortex_backend.execution.scratch_compute import (
     evaluate_scratch_expression,
     extract_automatic_expression,
     scratch_worker_main,
+    validate_scratch_expression,
 )
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
@@ -366,3 +368,56 @@ def test_explicit_math_request_adds_a_verified_local_observation_to_generation()
     # stays reserved for the user's own standing policy.
     assert "9 * 9 = 81" in (captured[0].host_observations or "")
     assert "9 * 9 = 81" not in (captured[0].user_system_instructions or "")
+
+
+# -- The validator and the evaluator agree about what a call may look like ----------------
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["min(5)", "max(5)", "abs(1, 2)", "abs()", "sqrt(1, 2)", "sqrt()", "round(1, 2, 3)", "round()", "min()"],
+)
+def test_a_call_with_the_wrong_number_of_arguments_does_not_validate(expression: str):
+    """The validator accepted one to sixteen arguments for any allowed name.
+
+    ``min(5)`` and ``abs(1, 2)`` therefore validated and then failed inside the
+    worker, so asking "what is min(5)?" created a durable failed job in the
+    tray instead of falling back to ordinary chat.
+    """
+
+    with pytest.raises(ScratchComputeError) as validated:
+        validate_scratch_expression(expression)
+    assert validated.value.code == "expression_not_allowed"
+    # The evaluator refuses the same shapes with the same code.
+    with pytest.raises(ScratchComputeError) as evaluated:
+        evaluate_scratch_expression(expression)
+    assert evaluated.value.code == "expression_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["min(1, 2)", "max(1, 2, 3)", "abs(-3)", "sqrt(81)", "sqrt(0)", "sqrt(-0)", "sqrt(--4)", "round(2.5)", "round(2.567, 2)"],
+)
+def test_every_call_shape_the_evaluator_accepts_still_validates_and_evaluates(expression: str):
+    assert validate_scratch_expression(expression) == expression
+    assert evaluate_scratch_expression(expression).value
+
+
+def test_the_square_root_of_a_negative_number_has_its_own_error_code():
+    # A literal is refused before any job exists...
+    with pytest.raises(ScratchComputeError) as validated:
+        validate_scratch_expression("sqrt(-4)")
+    assert validated.value.code == "domain_error"
+    # ...and one only the evaluator can see is refused with the same code, not
+    # reported as a disallowed expression.
+    assert validate_scratch_expression("sqrt(2 - 6)") == "sqrt(2 - 6)"
+    with pytest.raises(ScratchComputeError) as evaluated:
+        evaluate_scratch_expression("sqrt(2 - 6)")
+    assert evaluated.value.code == "domain_error"
+
+
+def test_a_prompt_that_cannot_evaluate_falls_back_to_ordinary_chat():
+    for prompt in ("what is min(5)?", "what is abs(1, 2)", "what is sqrt(-4)?", "compute round()"):
+        assert extract_automatic_expression(prompt) is None
+    assert extract_automatic_expression("what is min(3, 5)?") == "min(3, 5)"
+    assert extract_automatic_expression("what is sqrt(16)") == "sqrt(16)"
