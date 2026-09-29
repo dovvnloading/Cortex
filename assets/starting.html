@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Cortex</title>
+<style>
+/* Shown by the native window while the backend starts. Plain CSS, no script and
+   nothing fetched: the grounds are the app's own --bg for each theme (a test
+   pins them to WINDOW_BACKGROUND_LIGHT and WINDOW_BACKGROUND_DARK) so the
+   window does not flash between this page and the app. */
+:root {
+  color-scheme: light dark;
+  --bg: #f3f1ec;
+  --text: #22201d;
+  --muted: #57534d;
+  --accent: #a64720;
+  --track: rgba(38, 34, 29, 0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101112;
+    --text: #f0ede7;
+    --muted: #aaa69f;
+    --accent: #e37b4e;
+    --track: rgba(240, 237, 231, 0.1);
+  }
+}
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+main { text-align: center; padding: 0 24px; }
+h1 { margin: 0 0 8px; font-size: 1.25rem; font-weight: 600; }
+p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+.bar {
+  width: 12rem;
+  height: 3px;
+  margin: 20px auto 0;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--track);
+}
+.bar::after {
+  content: "";
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--accent);
+  animation: slide 1.4s ease-in-out infinite;
+}
+@keyframes slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar::after { width: 100%; opacity: 0.5; animation: none; }
+}
+</style>
+</head>
+<body>
+<main role="status" aria-live="polite">
+  <h1>Starting Cortex</h1>
+  <p>The first launch can take a little longer.</p>
+  <div class="bar" aria-hidden="true"></div>
+</main>
+</body>
+</html>

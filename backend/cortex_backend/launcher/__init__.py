@@ -1,6 +1,7 @@
 """Process-owned launcher primitives for the Windows desktop web runtime."""
 
 from .desktop import (
+    FALLBACK_STARTING_HTML,
     WINDOW_TITLE,
     DesktopWindowConfig,
     DesktopWindowError,
@@ -8,6 +9,7 @@ from .desktop import (
     activate_process_window,
     process_is_alive,
     run_desktop_window,
+    show_startup_failure,
 )
 from .frontend import FrontendBuildError, ensure_frontend
 from .instance import InstanceLock, InstanceRecord
@@ -19,6 +21,7 @@ from .webview_runtime import (
 )
 
 __all__ = [
+    "FALLBACK_STARTING_HTML",
     "WEBVIEW2_DOWNLOAD_URL",
     "WINDOW_TITLE",
     "DesktopWindowConfig",
@@ -34,4 +37,5 @@ __all__ = [
     "ensure_webview2_runtime",
     "process_is_alive",
     "run_desktop_window",
+    "show_startup_failure",
 ]

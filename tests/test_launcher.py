@@ -711,11 +711,11 @@ def test_native_window_uses_private_isolated_edge_webview(
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(
-            url="http://127.0.0.1:8765",
             storage_path=storage,
             icon_path=icon,
+            starting_html="<p>starting</p>",
         ),
-        monitor=monitored.append,
+        worker=monitored.append,
     )
 
     assert storage.is_dir()
@@ -724,7 +724,11 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["private_mode"] is True
     assert calls["start"]["storage_path"] == str(storage)
     assert calls["start"]["icon"] == str(icon)
-    assert loaded_urls == ["http://127.0.0.1:8765"]
+    create_args, create_kwargs = calls["create"]
+    assert create_args == ("Cortex",), "the window opens on the starting page, not on a URL"
+    assert create_kwargs["html"] == "<p>starting</p>"
+    assert "url" not in create_kwargs
+    assert loaded_urls == [], "the app is loaded by the worker once it is ready, not before"
     assert dark_title_bar_calls == [
         {"pid": desktop_module.os.getpid(), "title": "Cortex", "dark": True}
     ]
@@ -765,7 +769,7 @@ def _run_window_against_pywebview_defaults(
     monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
     monkeypatch.setattr(desktop_module, "_apply_windows_title_bar_theme", lambda **kwargs: True)
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "webview")
+        DesktopWindowConfig(storage_path=tmp_path / "webview")
     )
     return webview_settings
 
@@ -835,7 +839,6 @@ def test_native_window_legacy_start_without_icon_option_still_launches(
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(
-            url="http://127.0.0.1:8765",
             storage_path=tmp_path / "private-webview",
             icon_path=icon,
         )
@@ -870,7 +873,7 @@ def test_native_window_rejects_legacy_windows_renderer(
 
     with pytest.raises(DesktopWindowError, match="legacy browser engine"):
         desktop_module.run_desktop_window(
-            DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path)
+            DesktopWindowConfig(storage_path=tmp_path)
         )
 
 
@@ -964,7 +967,7 @@ def test_native_window_follows_system_app_theme(
     monkeypatch.setattr(desktop_module, "_apply_windows_window_icon", lambda **_kwargs: True)
 
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
 
     # The pre-paint ground and the title bar both come from the system's mode.
@@ -1018,7 +1021,7 @@ def test_exposed_title_bar_switch_refuses_anything_but_a_boolean(
         lambda **kwargs: calls.append(kwargs) or True,
     )
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
     calls.clear()
 
@@ -1058,7 +1061,7 @@ def test_exposed_title_bar_switch_does_nothing_off_windows(
         lambda **kwargs: calls.append(kwargs) or True,
     )
     desktop_module.run_desktop_window(
-        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+        DesktopWindowConfig(storage_path=tmp_path / "private")
     )
 
     assert exposed[0](True) is False
@@ -1546,6 +1549,11 @@ def test_webview2_signature_check_uses_noninteractive_powershell(
 def test_default_runtime_starts_backend_then_native_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """The window opens first, on the starting page; the app is loaded once ready.
+
+    Nothing used to appear until the backend was ready, so a slow first launch
+    looked like Cortex had not started.
+    """
     reserved_port: list[int] = []
     real_reserve_port = launcher_main._reserve_port
 
@@ -1585,7 +1593,7 @@ def test_default_runtime_starts_backend_then_native_window(
             )
         )
     )
-    server = SimpleNamespace(should_exit=False)
+    server = SimpleNamespace(should_exit=False, force_exit=False)
     backend_instances: list[object] = []
 
     class FakeBackend:
@@ -1607,70 +1615,65 @@ def test_default_runtime_starts_backend_then_native_window(
             for listener in self.sockets:
                 listener.close()
 
-    calls: list[tuple[str, object]] = []
+    order: list[str] = []
     probed_urls: list[str] = []
+    windows: list[_FakeWindow] = []
+    backend_built_when_the_window_opened: list[bool] = []
     monkeypatch.setattr(launcher_main, "InstanceLock", FakeInstance)
     monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
     monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
     monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
 
     def fake_wait_for_http(url, *_args, **_kwargs):
         probed_urls.append(url)
+        order.append("ready" if url.endswith("/health/ready") else "live")
+        if url.endswith("/health/live"):
+            # The monitor's first liveness probe: the person closes the window.
+            windows[0].events.closed.set()
         return True
 
     monkeypatch.setattr(launcher_main, "wait_for_http", fake_wait_for_http)
     monkeypatch.setattr(
         launcher_main,
         "ensure_webview2_runtime",
-        lambda root, **_kwargs: calls.append(("runtime", root)),
+        lambda root, **_kwargs: order.append("runtime"),
     )
-    monkeypatch.setattr(
-        launcher_main,
-        "run_desktop_window",
-        lambda config, monitor: calls.append(("window", (config, monitor))),
-    )
+
+    def fake_run_desktop_window(config, *, worker):
+        order.append("window")
+        backend_built_when_the_window_opened.append(bool(backend_instances))
+        assert config.starting_html == (
+            launcher_main.ROOT / "assets" / "starting.html"
+        ).read_text(encoding="utf-8")
+        assert config.storage_path == tmp_path / "webview"
+        window = _FakeWindow(order, close_after_load=False)
+        windows.append(window)
+        worker(window)
+
+    monkeypatch.setattr(launcher_main, "run_desktop_window", fake_run_desktop_window)
 
     args = launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path)])
     assert launcher_main._run_web(args) == 0
 
-    assert [name for name, _value in calls] == ["runtime", "window"]
-    window_config, monitor = calls[1][1]
-    assert isinstance(window_config, DesktopWindowConfig)
-    assert window_config.url == (
+    # WebView2 first (it is the renderer), then the window on its starting
+    # page, and only then the backend's readiness gate and the app itself.
+    assert order == ["runtime", "window", "ready", "load_url", "live"]
+    assert backend_built_when_the_window_opened == [False]
+    assert windows[0].loaded_urls == [
         f"http://127.0.0.1:{reserved_port[0]}/#bootstrap=bootstrap-token&handoff=handoff-secret"
-    )
-    assert window_config.storage_path == tmp_path / "webview"
+    ]
     assert server.should_exit is True
     assert backend_instances[0].running is False
 
-    # Startup gate used the heavier readiness probe.
+    # Startup gate used the heavier readiness probe; the window's monitor, which
+    # runs for the app's lifetime, polls the cheap liveness route.
     assert probed_urls == [
-        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready"
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/ready",
+        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live",
     ]
-
-    # The ongoing native-window monitor should poll the cheap liveness route
-    # rather than the readiness route, since it runs for the app's lifetime.
-    closed_checks = {"count": 0}
-
-    def closed_is_set() -> bool:
-        closed_checks["count"] += 1
-        return closed_checks["count"] > 1
-
-    fake_window = SimpleNamespace(
-        events=SimpleNamespace(closed=SimpleNamespace(is_set=closed_is_set)),
-        destroy=lambda: None,
-    )
-    monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
-    # The window closing set should_exit above; a monitor that starts under an
-    # owned shutdown closes at once (covered separately), so make the backend
-    # look live again to exercise the probing path.
-    server.should_exit = False
-    monitor(fake_window)
-    assert probed_urls[-1] == (
-        f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
-    )
 
 
 def test_monitor_native_window_polls_slowly_and_grants_a_multi_second_grace_period(
@@ -2342,13 +2345,51 @@ def test_build_app_creates_one_ssl_context(tmp_path: Path, monkeypatch: pytest.M
     assert fresh_builds == 1
 
 
+class _FakeWindow:
+    """pywebview's window, reduced to what the launcher does with it.
+
+    By default the person closes the window as soon as the app has loaded into
+    it (``close_after_load``), which is what ends the launcher's monitor loop.
+    """
+
+    def __init__(self, calls: list[str], *, close_after_load: bool = True) -> None:
+        self.calls = calls
+        self.close_after_load = close_after_load
+        self.events = SimpleNamespace(closed=threading.Event())
+        self.loaded_urls: list[str] = []
+        self.pages: list[str] = []
+        self.exposed: dict[str, Callable[[], None]] = {}
+        self.destroyed = 0
+        self.fail_load_html = False
+
+    def load_url(self, url: str) -> None:
+        self.calls.append("load_url")
+        self.loaded_urls.append(url)
+        if self.close_after_load:
+            self.events.closed.set()
+
+    def load_html(self, page: str) -> None:
+        if self.fail_load_html:
+            raise RuntimeError("the window is gone")
+        self.calls.append("error_page")
+        self.pages.append(page)
+
+    def expose(self, *functions: Callable[[], None]) -> None:
+        for function in functions:
+            self.exposed[function.__name__] = function
+
+    def destroy(self) -> None:
+        self.destroyed += 1
+        self.events.closed.set()
+
+
 class _LaunchFakes:
     """What ``_run_web`` needs to run a whole launch without a window or a port.
 
     Everything that would touch the machine -- the instance lock, the frontend
     build, the server thread, WebView2 and the native window -- is replaced.
     ``calls`` records the order of the interesting steps, and ``on_window`` is
-    what runs in place of the GUI loop.
+    what runs in place of the GUI loop (by default: run the window's worker).
     """
 
     def __init__(
@@ -2363,9 +2404,14 @@ class _LaunchFakes:
     ) -> None:
         self.calls: list[str] = [] if calls is None else calls
         self.window_configs: list[DesktopWindowConfig] = []
+        self.windows: list[_FakeWindow] = []
+        self.backends: list[object] = []
+        self.signal_targets: list[tuple[object, bool]] = []
         self.server = SimpleNamespace(should_exit=False, force_exit=False)
         self.record = SimpleNamespace(pid=1234, port=0)
-        self.on_window: Callable[[DesktopWindowConfig, object], None] = lambda config, monitor: None
+        self.on_window: Callable[[DesktopWindowConfig, Callable[[object], None]], None] = (
+            lambda _config, worker: worker(self.windows[-1])
+        )
         fakes = self
         manager = session_manager or SimpleNamespace(
             issue_bootstrap_token=lambda: ("bootstrap-token", None),
@@ -2395,6 +2441,7 @@ class _LaunchFakes:
                 self.running = False
                 self.accepting_startup = True
                 self.error = None
+                fakes.backends.append(self)
 
             def start(self):
                 self.running = True
@@ -2406,18 +2453,30 @@ class _LaunchFakes:
                 if backend_stop_error is not None:
                     raise backend_stop_error
 
-        def window(config, monitor):
+        def window(config, *, worker):
             fakes.window_configs.append(config)
             fakes.calls.append("window")
-            fakes.on_window(config, monitor)
+            fakes.windows.append(_FakeWindow(fakes.calls))
+            fakes.on_window(config, worker)
+
+        def probe(url, **_kwargs):
+            if url.endswith("/health/ready"):
+                fakes.calls.append("ready")
+            return True
 
         monkeypatch.setattr(launcher_main, "InstanceLock", instance_class or FakeInstance)
         monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_a, **_k: tmp_path)
         monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
         monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_a, **_k: self.server)
-        monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
+        monkeypatch.setattr(
+            launcher_main,
+            "_install_shutdown_signals",
+            lambda target: self.signal_targets.append(
+                (target, threading.current_thread() is threading.main_thread())
+            ),
+        )
         monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
-        monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: True)
+        monkeypatch.setattr(launcher_main, "wait_for_http", probe)
         monkeypatch.setattr(
             launcher_main,
             "ensure_webview2_runtime",
@@ -2428,6 +2487,406 @@ class _LaunchFakes:
 
 def _launch_args(tmp_path: Path, *extra: str):
     return launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path), *extra])
+
+
+def test_a_failed_startup_is_shown_in_the_window_with_the_diagnostic_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failure behind the starting page used to leave it there, or nothing at all."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("synthetic migration failure token=do-not-show")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (window,) = fakes.windows
+    assert fakes.calls == ["runtime", "window", "error_page"]
+    assert window.loaded_urls == [], "the app must not load after a failed startup"
+    (page,) = window.pages
+    log_path = tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert str(log_path) in page
+    assert "synthetic migration failure" in page
+    assert "do-not-show" not in page
+    assert "{{" not in page, "every placeholder is filled"
+    assert list(window.exposed) == ["acknowledge_startup_failure"]
+    recorded = log_path.read_text(encoding="utf-8")
+    assert "stage=desktop startup/runtime error_type=RuntimeError" in recorded
+    assert "do-not-show" not in recorded
+    # The window already said it, so the message box must not say it again.
+    assert shown == []
+    # And the failure reaches the runtime log, redacted, for a bug report.
+    runtime_log = (tmp_path / "logs" / "cortex.log").read_text(encoding="utf-8")
+    assert "Cortex could not start (RuntimeError)" in runtime_log
+    assert "do-not-show" not in runtime_log
+
+
+def test_the_error_page_close_button_destroys_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (window,) = fakes.windows
+    assert window.destroyed == 0
+    window.exposed["acknowledge_startup_failure"]()
+    assert window.destroyed == 1
+
+
+def test_a_frontend_build_failure_is_shown_in_the_window_and_still_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_frontend(*_args, **_kwargs):
+        raise FrontendBuildError("npm is not installed")
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", failing_frontend)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    (window,) = fakes.windows
+    assert "npm is not installed" in window.pages[0]
+    startup_log = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=frontend preparation" in startup_log
+    assert fakes.backends == [], "no backend is started for a launch that has no frontend"
+
+
+def test_a_backend_that_never_becomes_ready_is_shown_in_the_window_and_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: False)
+    running_while_the_error_page_was_up: list[bool] = []
+
+    def worker_then_leave_the_page_up(_config, worker):
+        worker(fakes.windows[-1])
+        # The window is still open here, the way it is while the error is read.
+        running_while_the_error_page_was_up.append(fakes.backends[0].running)
+
+    fakes.on_window = worker_then_leave_the_page_up
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (window,) = fakes.windows
+    assert "did not become ready within 30 seconds" in window.pages[0]
+    assert window.loaded_urls == []
+    (backend,) = fakes.backends
+    assert backend.running is False, "the half-started backend was left running"
+    assert running_while_the_error_page_was_up == [False], "it should stop as soon as the page is up"
+
+
+def test_a_startup_failure_with_no_window_left_still_gets_the_message_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """If the error page cannot be shown, the person is not left with nothing."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_build_app(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(launcher_main, "build_app", failing_build_app)
+    original_window = fakes.on_window
+
+    def window_that_cannot_show_pages(config, worker):
+        fakes.windows[-1].fail_load_html = True
+        original_window(config, worker)
+
+    fakes.on_window = window_that_cannot_show_pages
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (dialog,) = shown
+    assert "Cortex could not start" in dialog
+
+
+def test_closing_the_window_while_starting_abandons_the_launch_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def close_during_the_gate(_url, **_kwargs):
+        fakes.windows[0].events.closed.set()
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", close_during_the_gate)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    (window,) = fakes.windows
+    assert window.loaded_urls == [] and window.pages == []
+    (backend,) = fakes.backends
+    assert backend.running is False
+    assert shown == []
+    startup_log = tmp_path / launcher_main.STARTUP_LOG_NAME
+    assert not startup_log.exists(), "closing the window is not a startup failure"
+
+
+def test_an_interrupt_while_starting_closes_the_window_and_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted_during_the_gate(_url, **_kwargs):
+        fakes.server.should_exit = True  # what Ctrl+C sets, once the server exists
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", interrupted_during_the_gate)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    (window,) = fakes.windows
+    assert window.destroyed == 1, "the starting window was left open"
+    assert window.pages == [] and window.loaded_urls == []
+    assert fakes.backends[0].running is False
+
+
+def test_an_interrupt_before_the_server_exists_is_remembered_and_stops_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ctrl+C can land while the frontend is being checked, before any server."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted_in_the_frontend_check(*_args, **_kwargs):
+        target, _on_main = fakes.signal_targets[0]
+        target.should_exit = True  # the handler's first action
+        return tmp_path
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", interrupted_in_the_frontend_check)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert fakes.backends == [], "a backend was started after an interrupt"
+    assert fakes.windows[0].destroyed == 1
+    assert fakes.windows[0].loaded_urls == []
+
+
+def test_signals_are_installed_on_the_main_thread_and_startup_runs_on_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Handlers can only be installed on the main thread, which the GUI loop then owns."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    build_threads: list[threading.Thread] = []
+    original_build = launcher_main.build_app
+
+    def recording_build_app(**kwargs):
+        build_threads.append(threading.current_thread())
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(launcher_main, "build_app", recording_build_app)
+
+    def worker_on_its_own_thread(_config, worker):
+        thread = threading.Thread(
+            target=worker, args=(fakes.windows[-1],), name="cortex-test-window-worker"
+        )
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    fakes.on_window = worker_on_its_own_thread
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((target, on_main_thread),) = fakes.signal_targets
+    assert on_main_thread
+    assert isinstance(target, launcher_main._ShutdownHandle)
+    assert [thread.name for thread in build_threads] == ["cortex-test-window-worker"]
+    # The interrupt state the main thread owns is the one the backend now obeys.
+    assert fakes.server.should_exit is True
+
+
+def test_the_shutdown_handle_remembers_an_interrupt_until_the_server_exists():
+    handle = launcher_main._ShutdownHandle()
+    assert (handle.should_exit, handle.force_exit) == (False, False)
+    saved = {signal.SIGINT: signal.getsignal(signal.SIGINT)}
+    try:
+        launcher_main._install_shutdown_signals(handle)
+        interrupt = signal.getsignal(signal.SIGINT)
+        interrupt(signal.SIGINT, None)
+        assert (handle.should_exit, handle.force_exit) == (True, False)
+        interrupt(signal.SIGINT, None)
+        assert handle.force_exit is True
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+    server = SimpleNamespace(should_exit=False, force_exit=False)
+    handle.bind(server)
+
+    assert (server.should_exit, server.force_exit) == (True, True)
+    server.should_exit = False
+    assert handle.should_exit is False, "reads go through to the server once bound"
+    handle.should_exit = True
+    assert server.should_exit is True, "and so do writes"
+
+
+def test_a_headless_launch_needs_no_window_and_no_webview2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    ran: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        launcher_main, "_run_headless", lambda **kwargs: ran.append(kwargs) or 0
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert fakes.calls == ["ready"]
+    assert len(ran) == 1 and ran[0]["backend"] is fakes.backends[0]
+    assert fakes.backends[0].running is False
+    startup_log = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=started" in startup_log
+
+
+def test_an_interrupted_headless_start_exits_zero_without_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def interrupted(_url, **_kwargs):
+        fakes.server.should_exit = True
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", interrupted)
+    monkeypatch.setattr(
+        launcher_main, "_run_headless", lambda **_kwargs: pytest.fail("nothing to serve")
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert fakes.backends[0].running is False
+
+
+def test_starting_page_is_plain_offline_html_on_the_windows_own_grounds():
+    page = launcher_main._starting_page()
+
+    assert page == (launcher_main.ROOT / "assets" / "starting.html").read_text(encoding="utf-8")
+    assert "Starting Cortex" in page
+    # Nothing to fetch, nothing to run: it is shown before anything is trusted.
+    for forbidden in ("http://", "https://", "<script", "@import", "url(", " src=", " href="):
+        assert forbidden not in page, forbidden
+    assert "default-src 'none'" in page
+    # The same two grounds as the window itself, so nothing flashes at the swap.
+    assert desktop_module.WINDOW_BACKGROUND_LIGHT in page
+    assert desktop_module.WINDOW_BACKGROUND_DARK in page
+
+
+def test_a_missing_starting_page_falls_back_to_inline_html(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: tmp_path)
+
+    assert launcher_main._starting_page() == desktop_module.FALLBACK_STARTING_HTML
+    assert "Starting Cortex" in desktop_module.FALLBACK_STARTING_HTML
+
+
+def test_the_failure_page_escapes_what_it_shows_and_fills_each_placeholder_once():
+    error = RuntimeError("<script>alert(1)</script> {{log}} password=hunter2")
+    log_path = Path("C:/Users/someone <b>/Cortex/startup.log")
+
+    page = launcher_main._startup_failure_page(error, log_path)
+
+    assert "<script>alert(1)" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "hunter2" not in page
+    assert "&lt;b&gt;" in page and "<b>" not in page
+    # The log path was substituted for the log placeholder only, not into the
+    # message that happens to contain the same braces.
+    assert page.count("startup.log") == 1
+    assert "{{log}}" in page
+
+
+def test_the_failure_page_template_and_its_close_hook_agree_with_the_launcher():
+    template = (launcher_main.ROOT / "assets" / "startup_failed.html").read_text(encoding="utf-8")
+
+    assert template.count("{{message}}") == 1 and template.count("{{log}}") == 1
+    assert "acknowledge_startup_failure" in template
+    for forbidden in ("http://", "https://", "@import", "url(", " src=", " href="):
+        assert forbidden not in template, forbidden
+
+
+def test_the_failure_page_falls_back_when_its_template_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: tmp_path)
+
+    page = launcher_main._startup_failure_page(RuntimeError("boom"), tmp_path / "startup.log")
+
+    assert "boom" in page and "startup.log" in page and "Cortex could not start" in page
+
+
+def test_show_startup_failure_exposes_its_close_hook_only_for_the_error_page():
+    window = _FakeWindow([])
+    exposed_when_the_page_loaded: list[list[str]] = []
+    original_load_html = window.load_html
+
+    def load_html(page: str) -> None:
+        exposed_when_the_page_loaded.append(list(window.exposed))
+        original_load_html(page)
+
+    window.load_html = load_html  # type: ignore[method-assign]
+
+    desktop_module.show_startup_failure(window, "<p>failed</p>")
+
+    assert window.pages == ["<p>failed</p>"]
+    assert exposed_when_the_page_loaded == [["acknowledge_startup_failure"]]
+    window.exposed["acknowledge_startup_failure"]()
+    assert window.destroyed == 1
+
+
+def test_a_successful_launch_exposes_nothing_extra_to_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The close hook exists only while the error page is up."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert fakes.windows[0].exposed == {}
+
+
+def test_importing_the_launcher_leaves_the_backend_for_the_worker_thread():
+    """The whole backend loads behind the starting page, not before the window.
+
+    ``app_factory`` is about a second of imports warm and far more on a first
+    run through antivirus; it used to be imported by ``main`` itself.
+    """
+    probe = (
+        "import sys; sys.path.insert(0, 'backend'); import main; "
+        "print('app_factory' in sys.modules, 'cortex_backend.api' in sys.modules)"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=launcher_main.ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+
+    assert result.stdout.split() == ["False", "False"]
+
+
+def test_build_app_is_imported_when_the_worker_first_needs_it(monkeypatch: pytest.MonkeyPatch):
+    import app_factory
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(app_factory, "build_app", lambda **kwargs: seen.append(kwargs) or "app")
+
+    assert launcher_main.build_app(serve_frontend=False) == "app"
+    assert seen == [{"serve_frontend": False}]
 
 
 def test_server_for_app_bounds_graceful_shutdown():
@@ -2607,7 +3066,7 @@ def test_run_web_does_not_exit_zero_when_the_backend_will_not_stop(
     assert launcher_main._backend_abandoned_at_exit is True
     recorded = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
     assert "stage=backend shutdown" in recorded
-    assert fakes.calls == ["runtime", "window"]
+    assert fakes.calls == ["runtime", "window", "ready", "load_url"]
 
 
 def test_run_web_exits_zero_when_the_backend_stops_cleanly(
@@ -2726,12 +3185,14 @@ def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
 
     assert launcher_main._run_web(_launch_args(tmp_path)) == 0
 
-    assert calls == ["runtime", "issue", "window"]
-    (config,) = fakes.window_configs
-    assert config.url == (
+    # Issued after the slow steps (backend, readiness gate), just before the
+    # app is loaded into the window -- and only once.
+    assert calls == ["runtime", "window", "ready", "issue", "load_url"]
+    (url,) = fakes.windows[0].loaded_urls
+    assert url == (
         f"http://127.0.0.1:{fakes.record.port}/#bootstrap=fresh-token&handoff=handoff-secret"
     )
-    assert "stale-token" not in config.url
+    assert "stale-token" not in url
 
 
 def _held_instance_class(acquired: list[bool], *, existing: object | None):
@@ -2856,7 +3317,12 @@ def test_second_launch_starts_normally_when_the_first_instance_died(
 
     assert len(attempts) == 1, "it kept looking for a window after the process was gone"
     assert len(held.attempts) == 2, "the lock was not retried after the first instance died"
-    assert fakes.calls == ["runtime", "window"], "the launch did not go on to open its own window"
+    assert fakes.calls == [
+        "runtime",
+        "window",
+        "ready",
+        "load_url",
+    ], "the launch did not go on to open its own window"
 
 
 def test_second_launch_gives_up_quietly_when_the_window_never_appears(

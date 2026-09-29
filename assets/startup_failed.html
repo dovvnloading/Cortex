@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Cortex</title>
+<style>
+/* Replaces the starting page when startup fails. The launcher fills in the two
+   double-brace placeholders in the body, HTML-escaped; nothing here is fetched. */
+:root {
+  color-scheme: light dark;
+  --bg: #f3f1ec;
+  --text: #22201d;
+  --muted: #57534d;
+  --line: rgba(38, 34, 29, 0.2);
+  --fill: #a64720;
+  --code: #e7e4dd;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101112;
+    --text: #f0ede7;
+    --muted: #aaa69f;
+    --line: rgba(240, 237, 231, 0.18);
+    --fill: #b0512a;
+    --code: #25272a;
+  }
+}
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+main { max-width: 34rem; padding: 0 24px; }
+h1 { margin: 0 0 12px; font-size: 1.25rem; font-weight: 600; }
+p { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; line-height: 1.5; }
+.detail, .log {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--code);
+  color: var(--text);
+  font: 0.8rem/1.45 Consolas, "Cascadia Mono", monospace;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+button {
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--fill);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+button:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+button[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main role="alert">
+  <h1>Cortex could not start</h1>
+  <p>Something went wrong while Cortex was starting.</p>
+  <div class="detail">{{message}}</div>
+  <p>A privacy-safe diagnostic log was written to:</p>
+  <div class="log">{{log}}</div>
+  <p>Close this window and start Cortex again. If it keeps happening, that log says what failed.</p>
+  <button id="close" type="button" hidden>Close</button>
+</main>
+<script>
+  // The launcher exposes this only while this page is up. Without it the
+  // button stays hidden and closing the window works just as well.
+  window.addEventListener("pywebviewready", function () {
+    var button = document.getElementById("close");
+    var api = window.pywebview && window.pywebview.api;
+    if (button && api && api.acknowledge_startup_failure) {
+      button.hidden = false;
+      button.addEventListener("click", function () { api.acknowledge_startup_failure(); });
+      button.focus();
+    }
+  });
+</script>
+</body>
+</html>

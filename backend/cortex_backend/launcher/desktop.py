@@ -23,9 +23,26 @@ class DesktopWindowError(RuntimeError):
     """Raised when the owned native webview cannot be created safely."""
 
 
+# What the window shows until the app is ready, if the launcher has nothing
+# better (the real page is assets/starting.html). Inline HTML, so nothing is
+# read from disk by the browser engine or fetched.
+FALLBACK_STARTING_HTML = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Cortex</title></head>"
+    "<body style=\"margin:0;display:grid;place-items:center;height:100vh;"
+    "font-family:Segoe UI,sans-serif;background:#101112;color:#f0ede7\">"
+    "<p>Starting Cortex&hellip;</p></body></html>"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class DesktopWindowConfig:
-    url: str
+    """The native window, before there is anything to show in it.
+
+    The window opens on ``starting_html`` at once; the app's own URL is not known
+    until the backend is ready and is loaded by the ``worker`` given to
+    ``run_desktop_window``.
+    """
+
     storage_path: Path
     title: str = WINDOW_TITLE
     icon_path: Path | None = None
@@ -34,6 +51,7 @@ class DesktopWindowConfig:
     min_width: int = 960
     min_height: int = 640
     debug: bool = False
+    starting_html: str = FALLBACK_STARTING_HTML
 
 
 _WINDOW_ICON_HANDLES: list[int] = []
@@ -88,12 +106,37 @@ def _start_accepts_icon(webview: Any) -> bool:
         return False
 
 
+def show_startup_failure(window: Any, page_html: str) -> None:
+    """Replace the starting page with an error page the person can dismiss.
+
+    Exposes ``acknowledge_startup_failure`` to that page only for as long as it
+    is up: the page's Close button calls it, and it destroys the window. It is
+    never exposed to the app, so nothing the app renders can close the window
+    this way.
+    """
+
+    def acknowledge_startup_failure() -> None:
+        window.destroy()
+
+    expose = getattr(window, "expose", None)
+    if callable(expose):
+        expose(acknowledge_startup_failure)
+    window.load_html(page_html)
+
+
 def run_desktop_window(
     config: DesktopWindowConfig,
     *,
-    monitor: Callable[[Any], None] | None = None,
+    worker: Callable[[Any], None] | None = None,
 ) -> None:
-    """Run the native GUI loop on the main thread until its window closes."""
+    """Run the native GUI loop on the main thread until its window closes.
+
+    The window opens on the starting page straight away. ``worker`` runs on a
+    thread of its own once the GUI loop is up: it does the slow work of getting
+    Cortex ready, then loads the app into the window with ``window.load_url``,
+    and keeps watching until the window closes. An exception from it is raised
+    here, as a ``DesktopWindowError``, once the loop has ended.
+    """
     try:
         webview = importlib.import_module("webview")
     except (ImportError, OSError) as exc:
@@ -129,7 +172,7 @@ def run_desktop_window(
 
     window = webview.create_window(
         config.title,
-        config.url,
+        html=config.starting_html,
         width=config.width,
         height=config.height,
         min_size=(config.min_width, config.min_height),
@@ -159,13 +202,6 @@ def run_desktop_window(
 
     def after_start() -> None:
         try:
-            # WebView2 can briefly restore the last in-memory surface before it
-            # processes the URL supplied to ``create_window``. Re-issue Cortex's
-            # one-time loopback URL after the owned window is initialized so a
-            # native launch never depends on a manual browser refresh.
-            load_url = getattr(window, "load_url", None)
-            if callable(load_url):
-                load_url(config.url)
             # pywebview 6 exposes ``renderer`` on its module. Older compatible
             # installations used by Visual Studio do not, but still select
             # EdgeChromium when the checked WebView2 Runtime is present.
@@ -189,8 +225,8 @@ def run_desktop_window(
                     title=config.title,
                     icon_path=icon_path,
                 )
-            if monitor is not None:
-                monitor(window)
+            if worker is not None:
+                worker(window)
         except Exception as exc:  # surfaced after the GUI loop exits
             startup_errors.append(exc)
             try:

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape as html_escape
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -13,9 +16,11 @@ import socket
 import signal
 import sys
 import tempfile
+import threading
 import time
 import re
 import secrets
+from typing import Any, Protocol
 
 
 ROOT = Path(__file__).resolve().parent
@@ -23,11 +28,11 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import uvicorn  # noqa: E402
 
-from app_factory import build_app  # noqa: E402
 from cortex_backend import __version__ as CORTEX_VERSION  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
     WINDOW_TITLE,
+    FALLBACK_STARTING_HTML,
     DesktopWindowConfig,
     DesktopWindowError,
     FrontendBuildError,
@@ -41,6 +46,7 @@ from cortex_backend.launcher import (  # noqa: E402
     ensure_webview2_runtime,
     process_is_alive,
     run_desktop_window,
+    show_startup_failure,
 )
 from cortex_backend.launcher.supervisor import (  # noqa: E402
     ChildProcessSupervisor,
@@ -48,6 +54,19 @@ from cortex_backend.launcher.supervisor import (  # noqa: E402
     ServerSupervisor,
     wait_for_http,
 )
+
+
+def build_app(**kwargs: Any) -> Any:
+    """``app_factory.build_app``, imported when it is first needed.
+
+    ``app_factory`` pulls in the whole backend: about a second when warm, and
+    far more on a first run through antivirus. Importing it at module load put
+    all of that before the native window could open; here it happens on the
+    window's worker thread, behind the starting page.
+    """
+    from app_factory import build_app as build
+
+    return build(**kwargs)
 
 
 # Normal launches must coexist with other loopback development servers.
@@ -72,11 +91,15 @@ MAX_LOG_TRACEBACK_CHARS = 8000
 # runtime teardown that follows. A whole number: uvicorn types it int | None.
 GRACEFUL_SHUTDOWN_SECONDS = 5
 # A second launch waits this long for the first instance's window (the first
-# opens it only after the frontend build and any WebView2 install); each
+# opens it, on a starting page, once any WebView2 install is done); each
 # attempt searches for the window for POLL seconds, then rests RETRY seconds.
 SECOND_LAUNCH_WAIT_SECONDS = 90.0
 SECOND_LAUNCH_POLL_SECONDS = 1.0
 SECOND_LAUNCH_RETRY_SECONDS = 0.25
+# Closing the window while Cortex is still starting cannot interrupt every step
+# (a frontend build, a migration), so teardown waits this long for the worker to
+# notice before it stops whatever exists.
+STARTUP_ABANDON_SECONDS = 120.0
 LOGGER = logging.getLogger("cortex.launcher")
 # What to tell the person, beyond the log path, when the launch fails for a
 # reason they can fix themselves; set where that reason is known.
@@ -87,6 +110,15 @@ DATA_PATH_REMEDY = (
 )
 _last_startup_log_path: Path | None = None
 _startup_dialog_hint: str | None = None
+# The window already showed the startup failure on its error page, so the
+# message box that follows a failed startup would only say it twice.
+_startup_failure_displayed = False
+# What the error page says if assets/startup_failed.html cannot be read.
+_STARTUP_FAILURE_FALLBACK = (
+    "<!doctype html><meta charset=utf-8><title>Cortex</title>"
+    "<h1>Cortex could not start</h1><p>{{message}}</p>"
+    "<p>A privacy-safe diagnostic log was written to:</p><p>{{log}}</p>"
+)
 # _launch records that stopping the backend failed; _run_web turns that into a
 # failing exit only when nothing else failed, and main() reads the result to
 # skip the startup dialog for it.
@@ -559,7 +591,12 @@ def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
     return server
 
 
-def _install_shutdown_signals(server: uvicorn.Server) -> None:
+class _ShutdownTarget(Protocol):
+    should_exit: bool
+    force_exit: bool
+
+
+def _install_shutdown_signals(server: _ShutdownTarget) -> None:
     """Translate console interrupts into the same owned graceful shutdown.
 
     These are the only handlers the process gets. Uvicorn installs its own in
@@ -666,10 +703,11 @@ def _acquire_or_hand_off(
     Returns ``(record, 0)`` when this process owns the lock and should start.
     Otherwise the launch is over and the second element is its exit code.
 
-    The first instance opens its window only after the frontend build, the
-    readiness gate and possibly a WebView2 install -- minutes, on a source tree
-    -- and the second launch is exactly what an impatient user does during
-    that. So it waits, bounded, for the window instead of reporting a failure.
+    The first instance opens its window (on a starting page) once any WebView2
+    install is done, but until the backend is ready that is all it shows -- a
+    frontend build can make that minutes, on a source tree -- and the second
+    launch is exactly what an impatient user does during that. So it waits,
+    bounded, for the window instead of reporting a failure.
     If the first instance dies meanwhile its lock is free, and this launch
     starts normally. Nothing on this path is an error: the app is running or
     starting, which is what the user asked for.
@@ -719,10 +757,12 @@ def _acquire_or_hand_off(
 
 def _run_web(args: argparse.Namespace) -> int:
     """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
-    global _backend_abandoned_at_exit, _backend_stop_failed, _startup_dialog_hint
+    global _backend_abandoned_at_exit, _backend_stop_failed
+    global _startup_dialog_hint, _startup_failure_displayed
     _backend_abandoned_at_exit = False
     _backend_stop_failed = False
     _startup_dialog_hint = None
+    _startup_failure_displayed = False
     try:
         result = _launch(args)
     finally:
@@ -733,8 +773,431 @@ def _run_web(args: argparse.Namespace) -> int:
     return result
 
 
+class _ShutdownHandle:
+    """Carries a console interrupt to a server that may not exist yet.
+
+    The signal handlers have to be installed on the main thread, which from the
+    moment the window opens is busy running the GUI loop; the server is only
+    built afterwards, on the window's worker thread. Until ``bind`` hands the
+    real server over, an interrupt is remembered here, and the worker stops at
+    its next checkpoint. Afterwards this reads and writes the server's own
+    flags, so it can stand in for the server anywhere one is expected.
+    """
+
+    def __init__(self) -> None:
+        self._server: Any = None
+        self._should_exit = False
+        self._force_exit = False
+
+    @property
+    def should_exit(self) -> bool:
+        return bool(self._server.should_exit) if self._server is not None else self._should_exit
+
+    @should_exit.setter
+    def should_exit(self, value: bool) -> None:
+        self._should_exit = value
+        if self._server is not None:
+            self._server.should_exit = value
+
+    @property
+    def force_exit(self) -> bool:
+        return bool(self._server.force_exit) if self._server is not None else self._force_exit
+
+    @force_exit.setter
+    def force_exit(self, value: bool) -> None:
+        self._force_exit = value
+        if self._server is not None:
+            self._server.force_exit = value
+
+    def bind(self, server: Any) -> None:
+        self._server = server
+        if self._should_exit:
+            server.should_exit = True
+        if self._force_exit:
+            server.force_exit = True
+
+
+@dataclass
+class _Runtime:
+    """What one launch has started, and so what its teardown must stop."""
+
+    app: Any = None
+    backend: ServerSupervisor | None = None
+    frontend: ChildProcessSupervisor | None = None
+    browser_port: int = 0
+
+
+@dataclass
+class _NativeSession:
+    """How the window's worker thread and the main thread hand a launch over.
+
+    ``started`` says the worker began at all; ``startup_done`` that it is past
+    startup (whether that ended in a page, a failure or an abandoned launch), so
+    teardown never stops a backend the worker is still in the middle of
+    building. ``failed`` and ``exit_code`` carry a startup failure that the
+    window has already shown back to the main thread.
+    """
+
+    started: threading.Event = field(default_factory=threading.Event)
+    startup_done: threading.Event = field(default_factory=threading.Event)
+    failed: bool = False
+    exit_code: int = 1
+
+
+def _read_asset_text(name: str) -> str | None:
+    try:
+        return (_app_asset_root() / "assets" / name).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
+def _starting_page() -> str:
+    """The page the window shows while Cortex starts (plain HTML, nothing fetched)."""
+    return _read_asset_text("starting.html") or FALLBACK_STARTING_HTML
+
+
+def _startup_failure_page(error: BaseException, log_path: Path | None) -> str:
+    """The page that replaces the starting page when startup fails.
+
+    Only the redacted, bounded detail the startup log gets is shown, and both
+    values are HTML-escaped and substituted in a single pass over the template.
+    """
+    template = _read_asset_text("startup_failed.html") or _STARTUP_FAILURE_FALLBACK
+    values = {
+        "message": html_escape(_redact_startup_detail(error)),
+        "log": html_escape(
+            str(log_path) if log_path is not None else "Cortex could not write its diagnostic log."
+        ),
+    }
+    return re.sub(r"\{\{(message|log)\}\}", lambda match: values[match.group(1)], template)
+
+
+def _show_startup_failure(
+    window: Any, error: BaseException, *, args: argparse.Namespace, session: _NativeSession
+) -> None:
+    """Record a startup failure and show it in the window in place of the starting page."""
+    global _startup_failure_displayed
+    stage = (
+        "frontend preparation"
+        if isinstance(error, FrontendBuildError)
+        else "desktop startup/runtime"
+    )
+    log_path = _write_startup_diagnostic(stage=stage, error=error, data_dir=args.data_dir)
+    LOGGER.error("Cortex could not start (%s).", type(error).__name__, exc_info=error)
+    print(f"Cortex startup/runtime error: {error}", file=sys.stderr)
+    session.exit_code = 2 if isinstance(error, FrontendBuildError) else 1
+    session.failed = True
+    try:
+        show_startup_failure(window, _startup_failure_page(error, log_path))
+    except Exception:
+        # No window to show it in: the message box after the loop takes over.
+        return
+    _startup_failure_displayed = True
+
+
+def _stop_runtime(runtime: _Runtime, args: argparse.Namespace) -> None:
+    """Stop what a launch started; safe to call again once it has been stopped."""
+    global _backend_stop_failed
+    if runtime.frontend is not None:
+        try:
+            runtime.frontend.stop()
+        except TimeoutError as exc:
+            print(str(exc), file=sys.stderr)
+    if runtime.backend is not None and runtime.backend.running:
+        try:
+            runtime.backend.stop()
+        except (RuntimeError, TimeoutError) as exc:
+            _backend_stop_failed = True
+            _write_startup_diagnostic(
+                stage="backend shutdown",
+                error=exc,
+                data_dir=args.data_dir,
+            )
+            print(str(exc), file=sys.stderr)
+
+
+def _start_runtime(
+    args: argparse.Namespace,
+    *,
+    paths: AppPaths,
+    packaged: bool,
+    frontend_root: Path,
+    handoff_secret: str,
+    backend_port: int,
+    backend_listener: socket.socket,
+    shutdown: _ShutdownHandle,
+    runtime: _Runtime,
+    keep_going: Callable[[], bool],
+) -> bool:
+    """Bring the backend (and, with --dev, Vite) up to ready.
+
+    Returns False when the launch was abandoned first -- ``keep_going`` turned
+    false at a checkpoint because of an interrupt or a closed window -- and
+    raises for a real failure. Everything started is recorded on ``runtime`` as
+    soon as it exists, so teardown can stop it whatever happens next.
+    """
+    dist: Path | None
+    if args.dev:
+        dist = None
+    else:
+        dist = ensure_frontend(
+            frontend_root,
+            skip_check=args.skip_build_check,
+            packaged=packaged,
+            cortex_version=CORTEX_VERSION,
+        )
+    if not keep_going():
+        return False
+
+    app = build_app(
+        paths=paths,
+        frontend_dist=dist,
+        serve_frontend=not args.dev,
+        handoff_secret=handoff_secret,
+    )
+    runtime.app = app
+    server = _server_for_app(app, port=backend_port, log_level=args.log_level)
+    shutdown.bind(server)
+    backend = ServerSupervisor(server, sockets=[backend_listener])
+    runtime.backend = backend
+    if not keep_going():
+        return False
+
+    backend.start()
+    if not wait_for_http(
+        f"http://127.0.0.1:{backend_port}/api/v1/health/ready",
+        timeout=30,
+        is_alive=lambda: backend.accepting_startup and keep_going(),
+    ):
+        if not keep_going():
+            return False
+        if backend.error is not None:
+            raise RuntimeError("Cortex backend failed during startup.") from backend.error
+        raise RuntimeError("Cortex backend did not become ready within 30 seconds.")
+
+    runtime.browser_port = backend_port
+    if args.dev:
+        frontend_port = _free_port()
+        dev_server_nonce = secrets.token_urlsafe(32)
+        environment = os.environ.copy()
+        environment["CORTEX_BACKEND_PORT"] = str(backend_port)
+        environment["CORTEX_FRONTEND_PORT"] = str(frontend_port)
+        environment["CORTEX_DEV_SERVER_NONCE"] = dev_server_nonce
+        npm = "npm.cmd" if os.name == "nt" else "npm"
+        frontend = ChildProcessSupervisor(
+            [npm, "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
+            cwd=frontend_root,
+            env=environment,
+        )
+        runtime.frontend = frontend
+        frontend.start()
+        if not wait_for_http(
+            f"http://127.0.0.1:{frontend_port}",
+            timeout=30,
+            is_alive=lambda: frontend.running and keep_going(),
+            expected_headers={DEV_SERVER_ID_HEADER: dev_server_nonce},
+        ):
+            if not keep_going():
+                return False
+            raise RuntimeError("Vite did not become ready within 30 seconds.")
+        runtime.browser_port = frontend_port
+
+    _record_startup_success(data_dir=args.data_dir, port=backend_port)
+    LOGGER.info("Cortex %s started (port %d).", CORTEX_VERSION, backend_port)
+    return True
+
+
+def _run_native(
+    args: argparse.Namespace,
+    *,
+    paths: AppPaths,
+    packaged: bool,
+    frontend_root: Path,
+    handoff_secret: str,
+    backend_port: int,
+    backend_listener: socket.socket,
+    shutdown: _ShutdownHandle,
+    runtime: _Runtime,
+    session: _NativeSession,
+) -> int:
+    """Open the window at once, and get Cortex ready behind it.
+
+    Nothing used to appear until the backend was ready, which after a slow
+    first-run disk scan meant a minute or more of an app that looked like it had
+    not started. Now the window opens on a starting page, and everything slow --
+    the frontend check, the migrations, the backend, the readiness gate --
+    happens on the window's worker thread, which then loads the app into it.
+    """
+    # WebView2 is the window's renderer, so it has to exist before there can be
+    # a window, the starting page included. It gets its own message boxes.
+    ensure_webview2_runtime(
+        _resource_root(),
+        packaged=packaged,
+        report=lambda note: _record_startup_note(
+            stage="webview2", detail=note, data_dir=args.data_dir
+        ),
+    )
+
+    def start(window: Any) -> bool:
+        closed = window.events.closed
+
+        def keep_going() -> bool:
+            return not shutdown.should_exit and not closed.is_set()
+
+        try:
+            ready = _start_runtime(
+                args,
+                paths=paths,
+                packaged=packaged,
+                frontend_root=frontend_root,
+                handoff_secret=handoff_secret,
+                backend_port=backend_port,
+                backend_listener=backend_listener,
+                shutdown=shutdown,
+                runtime=runtime,
+                keep_going=keep_going,
+            )
+            if not ready:
+                # An interrupt while starting: the window has nothing to wait for.
+                if not closed.is_set():
+                    window.destroy()
+                return False
+            # The token is good for five minutes from the moment it is issued
+            # and everything above may have taken longer than that, so it is
+            # issued here, immediately before the window needs it.
+            token, _expires_at = runtime.app.state.session_manager.issue_bootstrap_token()
+            print("Cortex is ready in its native desktop window.")
+            window.load_url(_desktop_url(runtime.browser_port, token, handoff_secret))
+            return True
+        except Exception as exc:  # shown in the window, not lost behind it
+            _show_startup_failure(window, exc, args=args, session=session)
+            # The page is up; a half-started backend has no use while it is read.
+            _stop_runtime(runtime, args)
+            return False
+
+    def worker(window: Any) -> None:
+        session.started.set()
+        try:
+            ready = start(window)
+        finally:
+            session.startup_done.set()
+        if not ready:
+            return
+        assert runtime.backend is not None
+        _monitor_native_window(
+            window,
+            backend=runtime.backend,
+            frontend=runtime.frontend,
+            server=shutdown,
+            readiness_url=f"http://127.0.0.1:{backend_port}/api/v1/health/live",
+        )
+
+    run_desktop_window(
+        DesktopWindowConfig(
+            storage_path=paths.webview_profile,
+            title=WINDOW_TITLE,
+            icon_path=_app_asset_root() / "assets" / "cortex.ico",
+            debug=args.dev,
+            starting_html=_starting_page(),
+        ),
+        worker=worker,
+    )
+    if session.failed:
+        return session.exit_code
+    shutdown.should_exit = True
+    return 0
+
+
+def _run_instance(
+    args: argparse.Namespace,
+    *,
+    paths: AppPaths,
+    packaged: bool,
+    frontend_root: Path,
+    handoff_secret: str,
+    backend_port: int,
+    backend_listener: socket.socket,
+) -> int:
+    """Start, supervise and stop one instance that already owns the instance lock."""
+    global _startup_dialog_hint
+    shutdown = _ShutdownHandle()
+    _install_shutdown_signals(shutdown)
+    runtime = _Runtime()
+    session = _NativeSession()
+    try:
+        if args.headless:
+            ready = _start_runtime(
+                args,
+                paths=paths,
+                packaged=packaged,
+                frontend_root=frontend_root,
+                handoff_secret=handoff_secret,
+                backend_port=backend_port,
+                backend_listener=backend_listener,
+                shutdown=shutdown,
+                runtime=runtime,
+                keep_going=lambda: not shutdown.should_exit,
+            )
+            if not ready:
+                return 0
+            assert runtime.backend is not None
+            return _run_headless(
+                backend=runtime.backend, frontend=runtime.frontend, server=shutdown
+            )
+        return _run_native(
+            args,
+            paths=paths,
+            packaged=packaged,
+            frontend_root=frontend_root,
+            handoff_secret=handoff_secret,
+            backend_port=backend_port,
+            backend_listener=backend_listener,
+            shutdown=shutdown,
+            runtime=runtime,
+            session=session,
+        )
+    except KeyboardInterrupt:
+        print("Stopping Cortex…")
+        return 0
+    except WebViewInstallDeclined:
+        # The person said no to the one thing Cortex cannot run without. That
+        # is an answer, not an error: no dialog, exit 0.
+        print("The WebView2 Runtime was not installed; Cortex is closing.")
+        return 0
+    except FrontendBuildError as exc:
+        _write_startup_diagnostic(stage="frontend preparation", error=exc, data_dir=args.data_dir)
+        print(f"Frontend preparation failed: {exc}", file=sys.stderr)
+        return 2
+    except (
+        DesktopWindowError,
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        WebViewRuntimeError,
+    ) as exc:
+        _write_startup_diagnostic(
+            stage="desktop startup/runtime",
+            error=exc,
+            data_dir=args.data_dir,
+        )
+        if isinstance(exc, WebViewRuntimeError):
+            # Fixed text that says what to do next, so show it.
+            _startup_dialog_hint = str(exc)
+        print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        # Whatever the window's worker is still doing should stop, and it is
+        # waited for (bounded) so this never stops a backend it is midway
+        # through building.
+        shutdown.should_exit = True
+        if session.started.is_set() and not session.startup_done.wait(
+            timeout=STARTUP_ABANDON_SECONDS
+        ):
+            LOGGER.warning("Startup was still running when Cortex closed; stopping what exists.")
+        _stop_runtime(runtime, args)
+
+
 def _launch(args: argparse.Namespace) -> int:
-    global _backend_stop_failed, _startup_dialog_hint
     packaged = _is_packaged()
     frontend_root = _frontend_root()
 
@@ -805,20 +1268,6 @@ def _launch(args: argparse.Namespace) -> int:
             _configure_logging(paths.data_dir, args.log_level)
             paths = _prepare_cache_dir(paths)
 
-            try:
-                if args.dev:
-                    dist = None
-                else:
-                    dist = ensure_frontend(
-                        frontend_root,
-                        skip_check=args.skip_build_check,
-                        packaged=packaged,
-                        cortex_version=CORTEX_VERSION,
-                    )
-            except FrontendBuildError as exc:
-                print(f"Frontend preparation failed: {exc}", file=sys.stderr)
-                return 2
-
             handoff_secret = instance.read_secret(record)
             if not handoff_secret:
                 print(
@@ -827,133 +1276,15 @@ def _launch(args: argparse.Namespace) -> int:
                 )
                 return 2
 
-            app = build_app(
+            return _run_instance(
+                args,
                 paths=paths,
-                frontend_dist=dist,
-                serve_frontend=not args.dev,
+                packaged=packaged,
+                frontend_root=frontend_root,
                 handoff_secret=handoff_secret,
+                backend_port=backend_port,
+                backend_listener=backend_listener,
             )
-            server = _server_for_app(app, port=backend_port, log_level=args.log_level)
-            _install_shutdown_signals(server)
-            backend = ServerSupervisor(server, sockets=[backend_listener])
-            frontend: ChildProcessSupervisor | None = None
-            frontend_port = FRONTEND_PORT
-            try:
-                backend.start()
-                if not wait_for_http(
-                    f"http://127.0.0.1:{backend_port}/api/v1/health/ready",
-                    timeout=30,
-                    is_alive=lambda: backend.accepting_startup,
-                ):
-                    if backend.error is not None:
-                        raise RuntimeError("Cortex backend failed during startup.") from backend.error
-                    raise RuntimeError("Cortex backend did not become ready within 30 seconds.")
-
-                browser_port = backend_port
-                if args.dev:
-                    frontend_port = _free_port()
-                    dev_server_nonce = secrets.token_urlsafe(32)
-                    environment = os.environ.copy()
-                    environment["CORTEX_BACKEND_PORT"] = str(backend_port)
-                    environment["CORTEX_FRONTEND_PORT"] = str(frontend_port)
-                    environment["CORTEX_DEV_SERVER_NONCE"] = dev_server_nonce
-                    npm = "npm.cmd" if os.name == "nt" else "npm"
-                    frontend = ChildProcessSupervisor(
-                        [npm, "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
-                        cwd=frontend_root,
-                        env=environment,
-                    )
-                    frontend.start()
-                    if not wait_for_http(
-                        f"http://127.0.0.1:{frontend_port}",
-                        timeout=30,
-                        is_alive=lambda: frontend.running,
-                        expected_headers={DEV_SERVER_ID_HEADER: dev_server_nonce},
-                    ):
-                        raise RuntimeError("Vite did not become ready within 30 seconds.")
-                    browser_port = frontend_port
-
-                _record_startup_success(data_dir=args.data_dir, port=backend_port)
-                LOGGER.info("Cortex %s started (port %d).", CORTEX_VERSION, backend_port)
-                if args.headless:
-                    return _run_headless(backend=backend, frontend=frontend, server=server)
-
-                ensure_webview2_runtime(
-                    _resource_root(),
-                    packaged=packaged,
-                    report=lambda note: _record_startup_note(
-                        stage="webview2", detail=note, data_dir=args.data_dir
-                    ),
-                )
-                # The token is good for five minutes from the moment it is
-                # issued, and everything above -- the readiness gate, the Vite
-                # gate, a WebView2 install that can run for ten minutes -- may
-                # have used that up if it had been issued when the app was
-                # built. Issue it here, immediately before the window needs it.
-                token, _expires_at = app.state.session_manager.issue_bootstrap_token()
-                print("Cortex is ready in its native desktop window.")
-                run_desktop_window(
-                    DesktopWindowConfig(
-                        url=_desktop_url(browser_port, token, handoff_secret),
-                        storage_path=paths.webview_profile,
-                        title=WINDOW_TITLE,
-                        icon_path=_app_asset_root() / "assets" / "cortex.ico",
-                        debug=args.dev,
-                    ),
-                    monitor=lambda window: _monitor_native_window(
-                        window,
-                        backend=backend,
-                        frontend=frontend,
-                        server=server,
-                        readiness_url=(
-                            f"http://127.0.0.1:{backend_port}/api/v1/health/live"
-                        ),
-                    ),
-                )
-                server.should_exit = True
-                return 0
-            except KeyboardInterrupt:
-                print("Stopping Cortex…")
-                return 0
-            except WebViewInstallDeclined:
-                # The person said no to the one thing Cortex cannot run
-                # without. That is an answer, not an error: no dialog, exit 0.
-                print("The WebView2 Runtime was not installed; Cortex is closing.")
-                return 0
-            except (
-                DesktopWindowError,
-                OSError,
-                RuntimeError,
-                TimeoutError,
-                WebViewRuntimeError,
-            ) as exc:
-                _write_startup_diagnostic(
-                    stage="desktop startup/runtime",
-                    error=exc,
-                    data_dir=args.data_dir,
-                )
-                if isinstance(exc, WebViewRuntimeError):
-                    # Fixed text that says what to do next, so show it.
-                    _startup_dialog_hint = str(exc)
-                print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
-                return 1
-            finally:
-                if frontend is not None:
-                    try:
-                        frontend.stop()
-                    except TimeoutError as exc:
-                        print(str(exc), file=sys.stderr)
-                if backend.running:
-                    try:
-                        backend.stop()
-                    except (RuntimeError, TimeoutError) as exc:
-                        _backend_stop_failed = True
-                        _write_startup_diagnostic(
-                            stage="backend shutdown",
-                            error=exc,
-                            data_dir=args.data_dir,
-                        )
-                        print(str(exc), file=sys.stderr)
     finally:
         if backend_listener is not None:
             backend_listener.close()
@@ -985,7 +1316,13 @@ def main(argv: list[str] | None = None) -> int:
         result = 1
     # A backend abandoned at exit is not a startup failure, and a modal box
     # would keep the process alive after the user has already quit.
-    if result and not _backend_abandoned_at_exit and _is_packaged() and os.name == "nt":
+    if (
+        result
+        and not _backend_abandoned_at_exit
+        and not _startup_failure_displayed
+        and _is_packaged()
+        and os.name == "nt"
+    ):
         try:
             import ctypes
 
