@@ -35,7 +35,7 @@ from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import httpx
 
@@ -425,6 +425,37 @@ default_launcher: ProcessLauncher = _JobObjectLauncher()
 
 _LISTENING_PORT_RE = re.compile(r"\blistening on http://127\.0\.0\.1:(\d+)\b", re.IGNORECASE)
 
+# llama-server gives every option an environment alias (LLAMA_ARG_*), and an
+# explicit argument only wins for the options Cortex actually passes. Anything
+# it does not pass -- slot count, KV cache type, a Hugging Face repo, extra
+# projector files -- would be steered by whatever the user's shell exports, so
+# these prefixes never reach the child. GGML_* and VK_* tuning variables are
+# legitimate user knobs and are kept. LLAMA_LOG_* is not read by the pinned
+# build, but a log file or prefix override would change the very output the
+# manager parses for the listening port, so it is dropped as well.
+_SCRUBBED_ENV_PREFIXES = ("LLAMA_ARG_", "LLAMA_LOG_")
+
+
+def _child_environment(
+    parent: Mapping[str, str], api_key: str
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Build the child's environment and report which inherited names were dropped.
+
+    Everything else is inherited (llama-server needs variables such as PATH to
+    run at all) and the per-launch API key replaces any inherited one. Windows
+    environment names are case-insensitive, so the prefixes are matched that
+    way. Only names are returned, never values.
+    """
+    env: dict[str, str] = {}
+    stripped: list[str] = []
+    for name, value in parent.items():
+        if name.upper().startswith(_SCRUBBED_ENV_PREFIXES):
+            stripped.append(name)
+        else:
+            env[name] = value
+    env["LLAMA_API_KEY"] = api_key
+    return env, tuple(sorted(stripped))
+
 
 def _drain_output(stream, sink: list[str], on_line: Callable[[str], None] | None = None) -> None:
     try:
@@ -507,6 +538,7 @@ class LlamaServerManager:
         self._failure_key: tuple[Path, int] | None = None
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
         self._api_key: str | None = None
+        self._scrubbed_env_noted = False
 
     def close(self) -> None:
         """Stop the managed process and close an HTTP client owned here."""
@@ -1227,7 +1259,8 @@ class LlamaServerManager:
             "--reasoning-format", "deepseek",
             "-ngl", "auto" if backend == "vulkan" else "0",
         ]
-        env = {**os.environ, "LLAMA_API_KEY": api_key}
+        env, scrubbed = _child_environment(os.environ, api_key)
+        self._note_scrubbed_environment(scrubbed)
         try:
             process = self._launcher(argv, cwd=executable.parent, env=env)
         except Exception as exc:
@@ -1332,6 +1365,20 @@ class LlamaServerManager:
                     else:
                         self._state = "stopping"
                         self._last_error = "The local model runtime did not exit cleanly; restart Cortex before trying again."
+
+    def _note_scrubbed_environment(self, names: tuple[str, ...]) -> None:
+        """Say once per manager which inherited variables were ignored (names only)."""
+        if not names:
+            return
+        with self._state_lock:
+            if self._scrubbed_env_noted:
+                return
+            self._scrubbed_env_noted = True
+        logger.info(
+            "Ignoring inherited llama.cpp environment variables so the local "
+            "runtime starts as Cortex configures it: %s",
+            ", ".join(names),
+        )
 
     def _raise_if_stopping(self, cancellation_event: _CancellationToken | None = None) -> None:
         if self._stop_event.is_set() or (
