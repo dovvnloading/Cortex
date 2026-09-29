@@ -721,6 +721,31 @@ class LlamaServerManager:
                         self._terminate_and_reset()
                 raise
 
+    def ready_handle(self, model_path: Path, *, num_ctx: int | None) -> ServerHandle | None:
+        """The running server's handle if it already serves ``model_path``; never starts one.
+
+        :meth:`ensure_ready` is the only thing that may launch or restart the
+        process, and a second call for the same message would count a failed
+        launch twice against the crash-loop guard. This is for a caller that
+        only wants to talk to a server that is already up -- counting a prompt's
+        tokens before sending it -- and is content with ``None`` when there is
+        none.
+        """
+        with self._state_lock:
+            if (
+                self._closed
+                or self._state != "ready"
+                or self._process is None
+                or self._base_url is None
+                or self._loaded_model_path != model_path
+            ):
+                return None
+            if num_ctx is not None and self._loaded_num_ctx is not None and num_ctx > self._loaded_num_ctx:
+                return None
+            if self._process.poll() is not None:
+                return None
+            return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+
     @property
     def status(self) -> LlamaCppRuntimeStatus:
         with self._state_lock:

@@ -21,6 +21,25 @@ ProgressPhase = Literal[
     # the turn still succeeded, and the text is kept. api/routes.py sends it as
     # a plain generation.status carrying ``truncated`` and ``stop_reason``.
     "answer_truncated",
+    # Notices about what the model was and was not shown. Each is a plain
+    # generation.status carrying ``notice: true``, which the frontend shows as
+    # a toast; the phase names what happened and the data carries the numbers.
+    #
+    # ``history_truncated``: whole older exchanges were left out of the prompt,
+    # or the newest answer was cut down, to fit the context window.
+    "history_truncated",
+    # ``attachment_truncated``: document text was cut to fit the window.
+    "attachment_truncated",
+    # ``prompt_trimmed``: the memory instructions, the code-task instructions,
+    # or both, were left out of this turn because the window could not hold
+    # them beside the system prompt and the message.
+    "prompt_trimmed",
+    # ``context_full``: the runtime reported a prompt that filled the window,
+    # so it may have discarded the oldest part of it on its own.
+    "context_full",
+    # The translated answer, replacing the untranslated one already streamed.
+    # Mapped to its own event, generation.content_replace.
+    "content_replace",
     # Live model output, published as it arrives. api/routes.py maps these to
     # generation.content_delta / generation.thinking_delta, the event names the
     # frontend already renders incrementally.

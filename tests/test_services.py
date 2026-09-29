@@ -11,6 +11,7 @@ import unittest
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationSnapshot,
     GenerationStats,
@@ -55,6 +56,12 @@ class _FakeEngine:
     def set_status_callback(self, callback) -> None:
         self._status_callback = callback
 
+    def plan_fixed_prompt(self, *, memories_enabled, code_execution_eligible, **kwargs):
+        del kwargs
+        return FixedPromptPlan(
+            memories_enabled=memories_enabled, code_execution_eligible=code_execution_eligible
+        )
+
     def fit_memories_to_context(
         self,
         memories: list[str],
@@ -65,8 +72,9 @@ class _FakeEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations=(),
+        model: str | None = None,
     ) -> list[str]:
-        del code_execution_eligible, bypass_system_prompt, host_observations
+        del code_execution_eligible, bypass_system_prompt, host_observations, model
         self.memory_inputs = list(memories)
         return list(memories)
 
@@ -83,8 +91,9 @@ class _FakeEngine:
         bypass_system_prompt: bool = False,
         host_observations=(),
         attachments=(),
+        model: str | None = None,
     ) -> str:
-        del code_execution_eligible, bypass_system_prompt, host_observations, attachments
+        del code_execution_eligible, bypass_system_prompt, host_observations, attachments, model
         self.history_messages = messages
         return "formatted history"
 
@@ -1027,6 +1036,102 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertEqual(streamed_text, "Hello world")
         self.assertEqual(result.response, "translated")
 
+    def test_a_streamed_answer_is_replaced_by_its_translation_with_one_event(self):
+        recorder = _ProgressRecorder()
+        engine = self._StreamingEngine([("content", "Hello "), ("content", "world")])
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        phases = [event.phase for event in recorder.events]
+        replacements = [event for event in recorder.events if event.phase == "content_replace"]
+        self.assertEqual(len(replacements), 1)
+        self.assertEqual(replacements[0].data, {"content": "translated"})
+        self.assertEqual(result.response, "translated")
+        # After the last streamed word and after the translation began, so the
+        # client shows the original while it waits and swaps once.
+        self.assertGreater(phases.index("content_replace"), max(
+            index for index, phase in enumerate(phases) if phase == "content_delta"
+        ))
+        self.assertGreater(phases.index("content_replace"), phases.index("translation"))
+
+    def test_nothing_is_replaced_when_the_answer_was_not_streamed(self):
+        """A non-streaming engine's answer is replayed by the API after it is
+        translated, so there is no untranslated text on screen to replace."""
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _FakeEngine(),
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        self.assertFalse(result.streamed)
+        self.assertEqual(result.response, "translated")
+        self.assertEqual([e for e in recorder.events if e.phase == "content_replace"], [])
+
+    def test_nothing_is_replaced_when_the_translation_fails_or_is_off(self):
+        for label, snapshot, translation in (
+            ("failed", _snapshot(), TranslationResult.failed("Translation failed.")),
+            ("empty", _snapshot(), TranslationResult.succeeded("   ")),
+            ("off", _snapshot(translation_enabled=False), None),
+        ):
+            with self.subTest(case=label):
+                recorder = _ProgressRecorder()
+                engine = self._StreamingEngine(
+                    [("content", "Hello world")],
+                    **({"translation": translation} if translation is not None else {}),
+                )
+                service = GenerationService(
+                    history_loader=lambda thread_id: [],
+                    memory_loader=lambda: [],
+                    engine_factory=lambda snapshot, engine=engine: engine,
+                )
+
+                result = service.generate(snapshot, progress_sink=recorder)
+
+                self.assertEqual([e for e in recorder.events if e.phase == "content_replace"], [])
+                # The untranslated answer that was streamed is the one kept.
+                self.assertEqual(result.response, "Hello world")
+                if label == "off":
+                    self.assertIsNone(result.translation_error)
+                else:
+                    self.assertIsNotNone(result.translation_error)
+
+    def test_an_engine_notice_reaches_the_user_as_a_notice_and_never_as_answer_text(self):
+        class _NoticingEngine(self._StreamingEngine):
+            def generate(self, **kwargs):
+                on_delta = kwargs["on_delta"]
+                on_delta("content", "Hello ")
+                on_delta("notice", "Two more exchanges were left out.")
+                on_delta("content", "world")
+                return super().generate(**kwargs)
+
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _NoticingEngine([]),
+        )
+
+        service.generate(_snapshot(translation_enabled=False), progress_sink=recorder)
+
+        notices = [e for e in recorder.events if e.phase == "history_truncated"]
+        self.assertEqual([e.message for e in notices], ["Two more exchanges were left out."])
+        self.assertEqual(notices[0].data, {"notice": True})
+        streamed = "".join(
+            (e.data or {}).get("delta", "") for e in recorder.events if e.phase == "content_delta"
+        )
+        self.assertEqual(streamed, "Hello world")
+        # In order: the text before it is published before it, not after.
+        phases = [e.phase for e in recorder.events]
+        self.assertLess(phases.index("content_delta"), phases.index("history_truncated"))
+
     def test_a_non_streaming_engine_leaves_the_replay_to_the_api(self):
         """The deterministic double returns a whole answer, as before.
 
@@ -1162,3 +1267,54 @@ class StreamingGenerationTests(unittest.TestCase):
         result = service.generate(_snapshot(), progress_sink=_ProgressRecorder())
 
         self.assertFalse(result.streamed)
+
+
+class ContextWindowNoticeTests(unittest.TestCase):
+    """A prompt that fills the window is never silent about it."""
+
+    class _CountingEngine(_FakeEngine):
+        def __init__(self, prompt_tokens):
+            super().__init__()
+            self._prompt_tokens = prompt_tokens
+
+        def generate(self, **kwargs):
+            answer, thoughts, command, _ = super().generate(**kwargs)
+            stats = GenerationStats(
+                prompt_eval_count=self._prompt_tokens, eval_count=10, eval_duration_ms=100.0
+            )
+            return answer, thoughts, command, stats
+
+    def _run(self, prompt_tokens, *, num_ctx=4096):
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: self._CountingEngine(prompt_tokens),
+        )
+        snapshot = _snapshot(
+            translation_enabled=False,
+            model_options={"num_ctx": num_ctx, "seed": -1},
+        )
+        service.generate(snapshot, progress_sink=recorder)
+        return [event for event in recorder.events if event.phase == "context_full"]
+
+    def test_a_prompt_that_used_the_whole_window_is_reported(self):
+        for reported in (4096, 4090, 3990):
+            with self.subTest(prompt_tokens=reported):
+                notices = self._run(reported)
+                self.assertEqual(len(notices), 1)
+                self.assertTrue(notices[0].data["notice"])
+                self.assertEqual(notices[0].data["prompt_tokens"], reported)
+                self.assertEqual(notices[0].data["context_tokens"], 4096)
+                self.assertIn("discarded", notices[0].message)
+
+    def test_a_prompt_with_room_to_spare_is_not_reported(self):
+        self.assertEqual(self._run(3000), [])
+        self.assertEqual(self._run(0), [])
+
+    def test_a_runtime_that_reported_no_count_is_not_reported(self):
+        self.assertEqual(self._run(None), [])
+
+    def test_the_threshold_follows_the_configured_window(self):
+        self.assertEqual(len(self._run(7900, num_ctx=8192)), 0)
+        self.assertEqual(len(self._run(8000, num_ctx=8192)), 1)

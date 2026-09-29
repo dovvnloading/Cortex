@@ -889,6 +889,54 @@ def test_ensure_ready_restarts_when_model_changes(tmp_path: Path) -> None:
     assert len(launcher.launch_args) == 2
 
 
+def test_ready_handle_only_reports_a_server_that_is_already_up_and_never_starts_one(tmp_path: Path) -> None:
+    """Counting a prompt's tokens must not be the thing that launches the model.
+
+    ``ensure_ready`` records a failed launch against the crash-loop guard, so a
+    caller that used it for a second, optional request would count one bad
+    launch twice for one message.
+    """
+    fetcher = _FakeFetcher()
+    popen = _FakePopen()
+    launcher = _QueueLauncher([popen])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+
+    # Nothing running: no handle, and nothing was started or fetched.
+    assert manager.ready_handle(model_path, num_ctx=4096) is None
+    assert launcher.launch_args == []
+
+    started = manager.ensure_ready(model_path, num_ctx=4096)
+    handle = manager.ready_handle(model_path, num_ctx=4096)
+    assert handle is not None
+    assert handle.base_url == started.base_url
+    assert handle.api_key == started.api_key
+    # A smaller or unspecified window is served by the running server; a larger
+    # one would need a relaunch, which is not this method's to do.
+    assert manager.ready_handle(model_path, num_ctx=2048) is not None
+    assert manager.ready_handle(model_path, num_ctx=None) is not None
+    assert manager.ready_handle(model_path, num_ctx=8192) is None
+    # A different model is not the one that is up.
+    assert manager.ready_handle(tmp_path / "other.gguf", num_ctx=4096) is None
+    assert len(launcher.launch_args) == 1
+
+    # A process that has since died is not a server that is up.
+    popen.exit_code = 1
+    assert manager.ready_handle(model_path, num_ctx=4096) is None
+    assert len(launcher.launch_args) == 1
+
+
+def test_ready_handle_is_none_once_the_manager_is_closed(tmp_path: Path) -> None:
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient())
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    manager.close()
+
+    assert manager.ready_handle(model_path, num_ctx=4096) is None
+
+
 def test_vulkan_failure_falls_back_to_cpu_and_is_cached(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     launcher = _QueueLauncher([_FakePopen(exit_immediately=True), _FakePopen()])

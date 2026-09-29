@@ -1580,3 +1580,304 @@ def test_close_when_cancelled_does_not_leak_or_raise_when_close_fails(
         )
 
     assert "synthetic-secret-detail" not in caplog.text
+
+
+class _ReadyProvider(_StaticProvider):
+    """A provider that can also say whether a server is already up.
+
+    ``ensure_calls`` is what the tokenizing tests watch: counting a prompt's
+    tokens must never be the thing that launches the model.
+    """
+
+    def __init__(self, base_url: str, *, api_key: str | None = None, up: bool = True) -> None:
+        super().__init__(base_url, api_key=api_key)
+        self.up = up
+        self.ensure_calls = 0
+
+    def ensure_ready(self, model_path: Path, **kwargs) -> ServerHandle:
+        self.ensure_calls += 1
+        return super().ensure_ready(model_path, **kwargs)
+
+    def ready_handle(self, model_path: Path, *, num_ctx: int | None) -> ServerHandle | None:
+        del num_ctx
+        if not self.up:
+            return None
+        return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+
+
+def _tokenizing_client(
+    tmp_path: Path, handler, provider: _StaticProvider
+) -> tuple[LlamaCppChatClient, str]:
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = LlamaCppChatClient(provider, models_directory=lambda: tmp_path, http_client=http_client)
+    return client, f"gguf:{model_path.name}"
+
+
+def test_llamacpp_tokenize_counts_with_the_running_servers_own_tokenizer(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"tokens": [11, 12, 13, 14, 15]})
+
+    provider = _ReadyProvider("http://fakellama", api_key="runtime-secret")
+    client, model = _tokenizing_client(tmp_path, handler, provider)
+
+    assert client.tokenize(model=model, text="synthetic prompt text", options={"num_ctx": 4096}) == 5
+
+    assert [request.url.path for request in seen] == ["/tokenize"]
+    assert seen[0].headers["Authorization"] == "Bearer runtime-secret"
+    assert json.loads(seen[0].content) == {"content": "synthetic prompt text"}
+    assert provider.ensure_calls == 0
+
+
+def test_llamacpp_tokenize_never_starts_the_runtime(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"tokens": [1]})
+
+    provider = _ReadyProvider("http://fakellama", up=False)
+    client, model = _tokenizing_client(tmp_path, handler, provider)
+
+    assert client.tokenize(model=model, text="anything", options={}) is None
+
+    assert requests == []
+    assert provider.ensure_calls == 0
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404, json={"error": "no such endpoint"}),
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"tokens": "not a list"}),
+        httpx.Response(200, json={}),
+    ],
+    ids=["no-endpoint", "server-error", "not-json", "not-an-object", "bad-tokens", "no-tokens"],
+)
+def test_llamacpp_tokenize_is_none_for_any_reply_it_cannot_use(tmp_path: Path, response: httpx.Response) -> None:
+    """Counting is optional: whatever goes wrong, the chat call reports it."""
+    provider = _ReadyProvider("http://fakellama")
+    client, model = _tokenizing_client(tmp_path, lambda request: response, provider)
+
+    assert client.tokenize(model=model, text="anything", options={}) is None
+
+
+def test_llamacpp_tokenize_is_none_when_the_connection_fails(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client, model = _tokenizing_client(tmp_path, handler, _ReadyProvider("http://fakellama"))
+
+    assert client.tokenize(model=model, text="anything", options={}) is None
+
+
+def test_llamacpp_tokenize_is_none_without_a_provider_that_can_say_the_runtime_is_up(tmp_path: Path) -> None:
+    """A provider written before ``ready_handle`` existed must keep working."""
+    client, model = _tokenizing_client(
+        tmp_path,
+        lambda request: httpx.Response(200, json={"tokens": [1, 2]}),
+        _StaticProvider("http://fakellama"),
+    )
+
+    assert client.tokenize(model=model, text="anything", options={}) is None
+
+
+def test_llamacpp_tokenize_is_none_for_a_model_that_is_not_on_disk_or_a_closed_client(tmp_path: Path) -> None:
+    provider = _ReadyProvider("http://fakellama")
+    client, model = _tokenizing_client(
+        tmp_path, lambda request: httpx.Response(200, json={"tokens": [1, 2]}), provider
+    )
+
+    assert client.tokenize(model="gguf:missing.gguf", text="anything", options={}) is None
+    assert client.tokenize(model="gguf:../escape.gguf", text="anything", options={}) is None
+
+    client.close()
+    assert client.tokenize(model=model, text="anything", options={}) is None
+
+
+def test_llamacpp_tokenize_stops_waiting_when_the_turn_is_cancelled(tmp_path: Path) -> None:
+    """Stop must not sit behind the tokenizer's own ten-second timeout."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    cancellation = Event()
+    entered = Event()
+
+    class _HangingResponse:
+        def __init__(self) -> None:
+            self.closed = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.close()
+
+        def close(self) -> None:
+            # What actually releases a read that is in flight.
+            self.closed.set()
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def read(self) -> bytes:
+            # A busy server that has not answered yet. Only closing the response
+            # frees this thread; the bound is there so a broken test cannot hang.
+            entered.set()
+            self.closed.wait(3.0)
+            raise httpx.ReadError("closed by the caller")
+
+        def json(self):
+            raise AssertionError("no body was ever read")
+
+    response = _HangingResponse()
+
+    class _HangingHttp:
+        def post(self, *_args, **_kwargs):
+            # The request the client used to make: nothing could stop it.
+            entered.set()
+            response.closed.wait(3.0)
+            raise httpx.ReadTimeout("the tokenizer never answered")
+
+        def stream(self, *_args, **_kwargs):
+            return response
+
+        def close(self) -> None:
+            return None
+
+    client = LlamaCppChatClient(
+        _ReadyProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=_HangingHttp(),  # type: ignore[arg-type]
+    )
+    result: list[int | None] = []
+    worker = Thread(
+        target=lambda: result.append(
+            client.tokenize(
+                model=f"gguf:{model_path.name}",
+                text="synthetic prompt text",
+                options={},
+                cancellation_event=cancellation,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(timeout=2.0)
+
+    cancellation.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive(), "Stop waited for the tokenizer"
+    assert result == [None]
+
+
+def test_llamacpp_tokenize_does_not_count_a_turn_that_was_already_cancelled(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"tokens": [1, 2, 3]})
+
+    client, model = _tokenizing_client(tmp_path, handler, _ReadyProvider("http://fakellama"))
+    cancelled = Event()
+    cancelled.set()
+
+    assert client.tokenize(model=model, text="anything", options={}, cancellation_event=cancelled) is None
+    assert requests == []
+
+
+def test_llamacpp_tokenize_still_counts_when_a_cancellation_event_is_never_set(tmp_path: Path) -> None:
+    client, model = _tokenizing_client(
+        tmp_path,
+        lambda request: httpx.Response(200, json={"tokens": [1, 2, 3, 4]}),
+        _ReadyProvider("http://fakellama"),
+    )
+
+    assert client.tokenize(model=model, text="anything", options={}, cancellation_event=Event()) == 4
+
+
+def test_routing_tokenize_asks_only_the_llamacpp_client() -> None:
+    class _Counting(_RecordingLlamaCppClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.asked: list[str] = []
+
+        def tokenize(self, *, model: str, text: str, options: dict, cancellation_event=None) -> int | None:
+            del options, cancellation_event
+            self.asked.append(model)
+            return len(text)
+
+    ollama = _RecordingOllamaClient()
+    llama = _Counting()
+    routing = RoutingChatClient(ollama, llama)
+
+    assert routing.tokenize(model="gguf:m.gguf", text="four", options={}) == 4
+    # Ollama has no tokenizing endpoint: never asked, never guessed at.
+    assert routing.tokenize(model="qwen3:8b", text="four", options={}) is None
+    assert llama.asked == ["gguf:m.gguf"]
+
+    # A llama.cpp client that predates tokenize() is not an error either.
+    assert (
+        RoutingChatClient(ollama, _RecordingLlamaCppClient()).tokenize(
+            model="gguf:m.gguf", text="four", options={}
+        )
+        is None
+    )
+
+
+def test_the_adapter_reports_the_whole_prompt_beside_the_part_the_server_evaluated() -> None:
+    """A cached prefix makes ``prompt_n`` a fraction of the prompt.
+
+    ``prompt_eval_count`` keeps its meaning (what was evaluated); calibrating
+    the token estimate needs the whole prompt, which only ``usage`` carries.
+    """
+    adapted = _adapt_to_ollama_shape(
+        {
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 3},
+            "timings": {"prompt_n": 7, "predicted_n": 3, "prompt_ms": 5.0, "predicted_ms": 30.0},
+        },
+        elapsed_seconds=1.0,
+    )
+    assert adapted["prompt_eval_count"] == 7
+    assert adapted["prompt_token_count"] == 120
+
+    # No usage block, or a malformed one: the key is simply absent.
+    for usage in (None, {}, {"prompt_tokens": "many"}, {"prompt_tokens": True}):
+        adapted = _adapt_to_ollama_shape(
+            {"choices": [{"message": {"content": "hi"}}], "usage": usage}, elapsed_seconds=1.0
+        )
+        assert "prompt_token_count" not in adapted
+
+
+def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                b'data: {"choices":[],"usage":{"prompt_tokens":321,"completion_tokens":2},'
+                b'"timings":{"prompt_n":9,"predicted_n":2,"prompt_ms":1.0,"predicted_ms":2.0}}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    client, model = _tokenizing_client(tmp_path, handler, _StaticProvider("http://fakellama"))
+
+    response = client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=Event(),
+    )
+
+    assert response["prompt_eval_count"] == 9
+    assert response["prompt_token_count"] == 321

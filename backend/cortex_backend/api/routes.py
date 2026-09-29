@@ -421,6 +421,12 @@ async def _start_generation_job(
             compute_observation=compute_observation,
             attachments=resolved_attachments,
         )
+        # A message the model's window cannot hold is refused here, before the
+        # user turn is saved or a job starts. The client gets a rejected request
+        # rather than a failed job, so the text is still in the composer to
+        # shorten and the chat has nothing added to it. The prompt is otherwise
+        # sent to a runtime that truncates it silently, system prompt first.
+        await asyncio.to_thread(deps.generation.ensure_prompt_fits, generation_snapshot)
 
         user_message_id: str | None = None
         prepared_revision: int | None = None
@@ -1031,6 +1037,13 @@ class _ShownAnswer:
         return getattr(self._sink, name)
 
     def _record(self, phase: str, data: Mapping[str, Any] | None) -> None:
+        if phase == "content_replace":
+            # What the user now sees is the replacement, so that is what a
+            # Stop pressed from here on keeps.
+            replacement = (data or {}).get("content")
+            if isinstance(replacement, str):
+                self._content = [replacement]
+            return
         delta = (data or {}).get("delta")
         if not isinstance(delta, str):
             return
@@ -1061,6 +1074,7 @@ def _event_cursor(request: Request, value: str | None = None) -> int:
 _GENERATION_PHASE_EVENTS = {
     "thinking_delta": "generation.thinking_delta",
     "content_delta": "generation.content_delta",
+    "content_replace": "generation.content_replace",
     "translation": "generation.translation_started",
     "translation_failed": "generation.translation_failed",
     "memory_proposed": "generation.memory_proposed",

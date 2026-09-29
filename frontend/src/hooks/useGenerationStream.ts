@@ -308,6 +308,24 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (event.event === "generation.content_delta" && typeof data.delta === "string" && !gap) {
                   contentFlusher.push(data.delta);
                 }
+                if (event.event === "generation.content_replace" && typeof data.content === "string") {
+                  // The untranslated answer was streamed live; this is the
+                  // translation that supersedes it. Whatever is still buffered
+                  // belongs to the text being replaced, so land it first and
+                  // then swap the whole answer. An older client that does not
+                  // know this event simply keeps the streamed text until the
+                  // saved message loads.
+                  contentFlusher.flushNow();
+                  useChatStore.getState().replaceContent(job.jobId, data.content);
+                }
+                // The backend flags what the user should be told about how
+                // this turn was assembled (older history left out, attachment
+                // text cut, a window that filled up). The same message is in
+                // the status line, but that is overwritten by the first
+                // token, so it is also raised as a toast.
+                if (data.notice === true && typeof data.message === "string" && data.message) {
+                  useUiStore.getState().notify(data.message, "info");
+                }
                 if (event.event === "generation.persisting") {
                   // Every token has been sent; only backend bookkeeping
                   // (saving the message, generating a chat title) remains.

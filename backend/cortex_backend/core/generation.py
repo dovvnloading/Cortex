@@ -182,6 +182,39 @@ class GenerationAttachment:
     image_base64: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class FixedPromptPlan:
+    """What the fixed part of a turn's prompt keeps so that it fits the context window.
+
+    The fixed part is everything a turn sends except the conversation history
+    and attached documents, which are sized afterwards to whatever room is left:
+    Cortex's own system prompt, the user's standing instructions, the memory
+    and code-task instructions when they are on, tool observations, and the
+    message itself. When it is larger than the window can hold, the runtime
+    truncates the prompt on its own -- Ollama drops from the front, the system
+    prompt first -- and says nothing, so it is settled before anything is sent:
+    the optional parts go first, and a turn that still does not fit is refused.
+    """
+
+    # What the turn keeps. Both are ``False`` when they were dropped, and never
+    # ``True`` when the caller had them off.
+    memories_enabled: bool
+    code_execution_eligible: bool
+    # ``False`` when even the system prompt and the message cannot fit: nothing
+    # optional is left to drop, so the turn must not be sent.
+    fits: bool = True
+    dropped_memories: bool = False
+    dropped_code_contract: bool = False
+
+
+def prompt_too_long_message(context_tokens: int) -> str:
+    """The refusal shown when a message cannot fit the context window at all."""
+    return (
+        f"This message is too long for the model's context window of {context_tokens} tokens. "
+        "Shorten it, or raise the context size in Settings."
+    )
+
+
 @dataclass(frozen=True)
 class TranslationResult:
     """Outcome of the optional translation model call."""

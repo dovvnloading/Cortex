@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     CodeProposalRejection,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationStats,
     MemoryCommand,
@@ -137,6 +138,27 @@ class FakeGenerationEngine:
     def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
         self._status_callback = callback
 
+    def plan_fixed_prompt(
+        self,
+        *,
+        query: str,
+        user_system_instructions: str | None,
+        memories_enabled: bool,
+        code_execution_eligible: bool,
+        bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
+        num_ctx: int,
+        model: str | None = None,
+    ) -> FixedPromptPlan:
+        """Keep everything: the fake has no real context pressure."""
+
+        del query, user_system_instructions, bypass_system_prompt, host_observations
+        del num_ctx, model
+        return FixedPromptPlan(
+            memories_enabled=memories_enabled,
+            code_execution_eligible=code_execution_eligible,
+        )
+
     def fit_memories_to_context(
         self,
         memories: list[str],
@@ -147,9 +169,10 @@ class FakeGenerationEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         del query, user_system_instructions, code_execution_eligible, bypass_system_prompt
-        del host_observations
+        del host_observations, model
         budget = max(1, num_ctx // 4)
         retained: list[str] = []
         used = 0
@@ -174,6 +197,7 @@ class FakeGenerationEngine:
         code_execution_eligible: bool | None = None,
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
+        model: str | None = None,
     ) -> tuple[GenerationAttachment, ...]:
         """Keep every attachment; the fake has no real context pressure.
 
@@ -184,7 +208,7 @@ class FakeGenerationEngine:
 
         del query, chat_history, permanent_memories, memories_enabled
         del user_system_instructions, num_ctx, code_execution_eligible
-        del bypass_system_prompt, host_observations
+        del bypass_system_prompt, host_observations, model
         return tuple(attachments)
 
     def fit_history_to_context(
@@ -200,8 +224,10 @@ class FakeGenerationEngine:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> str:
         del (
+            model,
             query,
             permanent_memories,
             memories_enabled,
@@ -230,6 +256,7 @@ class FakeGenerationEngine:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         attachments: Sequence[GenerationAttachment] = (),
+        model: str | None = None,
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the messages that produced it."""
 
@@ -244,6 +271,7 @@ class FakeGenerationEngine:
             bypass_system_prompt=bypass_system_prompt,
             host_observations=host_observations,
             attachments=attachments,
+            model=model,
         )
         return flattened, list(messages)
 

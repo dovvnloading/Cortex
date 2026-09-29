@@ -122,6 +122,12 @@ class ChatClient(Protocol):
     return value is unchanged either way, so a caller that passes nothing
     behaves exactly as before.
 
+    A client may also offer ``tokenize(model=, text=, options=,
+    cancellation_event=) -> int | None``: the runtime's own token count for
+    ``text``, or ``None`` when it cannot say. It is optional -- Ollama has no
+    such endpoint -- so callers look for it rather than require it (see
+    ``SynthesisAgent._exact_prompt_tokens``).
+
     ``think`` is a request about reasoning, not an option a caller may rely
     on: ``False`` asks a thinking model to answer without its reasoning pass,
     ``None`` (the default) leaves the model's own default alone. Calls that
@@ -331,6 +337,29 @@ class RoutingChatClient:
         if think is not None:
             extra["think"] = think
         return target.chat(model=model, messages=messages, options=options, **extra)
+
+    def tokenize(
+        self,
+        *,
+        model: str,
+        text: str,
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> int | None:
+        """The runtime's own token count for ``text``, or ``None`` when it has no way to say.
+
+        Only a locally managed llama-server can be asked; Ollama has no
+        tokenizing endpoint, so its prompts are sized from calibrated estimates.
+        """
+        if not model.startswith(GGUF_PREFIX):
+            return None
+        tokenize = getattr(self._llamacpp, "tokenize", None)
+        if not callable(tokenize):
+            return None
+        count = tokenize(
+            model=model, text=text, options=options, cancellation_event=cancellation_event
+        )
+        return count if isinstance(count, int) else None
 
     def set_status_callback(self, callback: Any) -> None:
         """Forward to whichever underlying client supports it (today, only

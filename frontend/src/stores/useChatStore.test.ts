@@ -169,6 +169,24 @@ describe("useChatStore", () => {
     expect(useChatStore.getState().generation).toBe(stopping);
   });
 
+  it("replaceContent swaps the whole streamed answer, and only for the active job", () => {
+    useChatStore.getState().beginGeneration("job-replace", "thread-replace");
+    useChatStore.getState().appendContentToken("job-replace", "Hola mundo");
+
+    useChatStore.getState().replaceContent("job-replace", "Hello world");
+    expect(useChatStore.getState().generation.partialContent).toBe("Hello world");
+
+    // A stale job's replacement must not overwrite the answer now on screen.
+    useChatStore.getState().replaceContent("some-other-job", "wrong");
+    expect(useChatStore.getState().generation.partialContent).toBe("Hello world");
+
+    // Replacing with what is already there is not a change, so it must not
+    // rebuild the slice the transcript subscribes to.
+    const before = useChatStore.getState().generation;
+    useChatStore.getState().replaceContent("job-replace", "Hello world");
+    expect(useChatStore.getState().generation).toBe(before);
+  });
+
   it("still applies a per-frame write that does change something", () => {
     useChatStore.getState().beginGeneration("job-advance", "thread-advance");
     const initial = useChatStore.getState().generation;

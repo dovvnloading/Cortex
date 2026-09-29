@@ -104,6 +104,8 @@ interface ChatStoreState {
   beginGeneration: (jobId: string, threadId: string) => void;
   appendContentToken: (jobId: string, delta: string) => void;
   appendThinkingToken: (jobId: string, delta: string) => void;
+  /** Swap the whole visible answer, e.g. for its translation after the original was streamed. */
+  replaceContent: (jobId: string, content: string) => void;
   setGenerationCursor: (jobId: string, eventId: number) => void;
   setStatusText: (jobId: string, text: string) => void;
   markContentReady: (jobId: string) => void;
@@ -207,6 +209,12 @@ export const useChatStore = create<ChatStoreState>((set) => ({
     set((state) =>
       state.generation.jobId === jobId
         ? { generation: { ...state.generation, phase: "streaming", partialThoughts: state.generation.partialThoughts + delta } }
+        : state,
+    ),
+  replaceContent: (jobId, content) =>
+    set((state) =>
+      state.generation.jobId === jobId && content !== state.generation.partialContent
+        ? { generation: { ...state.generation, phase: "streaming", partialContent: content } }
         : state,
     ),
   // The two reducers below run on *every* SSE frame, and both used to build a
