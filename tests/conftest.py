@@ -8,12 +8,14 @@ per file. Plain helpers that are not fixtures live in ``support.py``.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+import os
 from pathlib import Path
 import threading
 import time
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from hypothesis import HealthCheck, settings
 import pytest
 
 from cortex_backend.api import create_app
@@ -27,6 +29,35 @@ from support import CoordinatorPool, FrozenClock, live_cortex_threads, parse_sse
 
 # The superset of the host tuples the suite used to spell out file by file.
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
+
+# Hypothesis profiles for the property tests under tests/property/.
+#
+# ``ci`` is the default, so a plain run, the pre-push hook and CI all execute the
+# same examples: derandomised (every run draws the same inputs until the test,
+# Hypothesis or Python changes), with no example database to carry state between
+# runs, a bounded example count, and no per-example deadline or "too slow" health
+# check -- those two are the ones that fail on a busy machine for reasons that are
+# not the code's. ``explore`` is for hunting: random, many examples, failures kept
+# in the git-ignored ``.hypothesis`` directory. Pick it with
+# ``HYPOTHESIS_PROFILE=explore python -m pytest tests/property``.
+_TIMING_HEALTH_CHECKS = [HealthCheck.too_slow]
+settings.register_profile(
+    "ci",
+    max_examples=100,
+    derandomize=True,
+    database=None,
+    deadline=None,
+    suppress_health_check=_TIMING_HEALTH_CHECKS,
+    print_blob=True,
+)
+settings.register_profile(
+    "explore",
+    max_examples=2000,
+    deadline=None,
+    suppress_health_check=_TIMING_HEALTH_CHECKS,
+    print_blob=True,
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci"))
 
 # How long a background thread started by the code under test may take to
 # finish after its last test before it counts as leaked.

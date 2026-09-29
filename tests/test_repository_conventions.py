@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -229,6 +230,60 @@ def test_check_script_never_calls_npm_or_npx_directly() -> None:
 
     assert not offenders, f"check.ps1 invokes npm/npx without its .cmd shim workaround: {offenders}"
     assert "$npx" in script, "check.ps1 no longer defines $npx"
+
+
+# -- Running the suite ---------------------------------------------------------
+
+# What the ``pytest`` console script, an IDE runner and ``py.test`` have in common
+# is that none of them puts the working directory on ``sys.path`` -- only
+# ``python -m pytest`` does. This child drops it (and any spelling of it) from
+# ``sys.path`` before importing pytest, which is the same starting point on every
+# interpreter the suite supports (``python -P`` is 3.11+).
+_BARE_PYTEST = """
+import importlib.util
+import os
+import sys
+
+root = os.path.normcase(os.path.realpath(os.getcwd()))
+sys.path[:] = [
+    entry for entry in sys.path
+    if os.path.normcase(os.path.realpath(entry or os.getcwd())) != root
+]
+if importlib.util.find_spec("app_factory") is not None:
+    raise SystemExit(97)  # the repository root is importable some other way
+import pytest
+raise SystemExit(pytest.main(sys.argv[1:]))
+"""
+_ROOT_IMPORTABLE_ANYWAY = 97
+
+
+def test_collection_works_without_cwd_on_sys_path() -> None:
+    """The whole suite must collect under a bare ``pytest``, not only ``python -m pytest``.
+
+    Several tests import top-level repository modules (``main``,
+    ``app_factory``, ``tools``). Those are importable under ``python -m pytest``
+    only because that puts the working directory on ``sys.path``; anywhere else
+    -- an IDE test runner, the ``pytest`` executable -- collection failed with
+    ``ModuleNotFoundError`` unless ``pythonpath`` in pyproject.toml names the
+    repository root itself.
+    """
+
+    environment = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+    result = subprocess.run(
+        [sys.executable, "-c", _BARE_PYTEST, "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if result.returncode == _ROOT_IMPORTABLE_ANYWAY:
+        pytest.skip("the repository root is importable on this machine without pytest's help")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, f"a bare pytest could not collect the suite:\n{output[-3000:]}"
+    assert re.search(r"\b\d+ tests? collected\b", output), output[-1000:]
 
 
 # -- Linting and type checking cover the same code ---------------------------
