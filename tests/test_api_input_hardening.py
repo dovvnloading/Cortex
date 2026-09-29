@@ -7,15 +7,19 @@ gigabytes before failing.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 import httpx
 import pytest
 
 from cortex_backend.api import create_app
+from cortex_backend.api.app import MAX_REQUEST_BODY_BYTES, RequestBodyLimitMiddleware
 from cortex_backend.execution.recipes import (
     MAX_PIXELS,
     RecipeValidationError,
@@ -30,7 +34,10 @@ from cortex_backend.testing import (
     build_demo_dependencies,
     install_execution_preview,
 )
-from cortex_backend.services.attachments import MAX_CHAT_ATTACHMENT_BYTES
+from cortex_backend.services.attachments import (
+    MAX_CHAT_ATTACHMENT_BYTES,
+    ChatAttachmentService,
+)
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 from support import session_headers
 
@@ -392,3 +399,235 @@ def test_invalid_json_is_reported_without_the_body(
 
     _assert_issues_carry_only_where_and_why(response)
     assert "BODY-MARKER" not in response.text
+
+
+class _RecordingAttachments(ChatAttachmentService):
+    """The real attachment service, plus a record of every attempt to stage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.staged: list[str] = []
+
+    def stage(self, **kwargs: Any):
+        self.staged.append(kwargs["request_id"])
+        return super().stage(**kwargs)
+
+
+def _app_with_recording_attachments() -> tuple[Any, _RecordingAttachments]:
+    dependencies = build_demo_dependencies()
+    recorder = _RecordingAttachments()
+    dependencies.attachments = recorder
+    return create_app(dependencies, allowed_hosts=("testserver",)), recorder
+
+
+def _stage_request(content_base64: str) -> dict[str, str]:
+    return {"request_id": "limit-1", "filename": "notes.txt", "content_base64": content_base64}
+
+
+def test_an_oversized_body_is_a_413_before_the_route_runs() -> None:
+    """Field limits only apply once the body has been buffered and decoded, so
+    without a ceiling a single request could make the backend hold as much as
+    a client cared to send."""
+    app, attachments = _app_with_recording_attachments()
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.post(
+            "/api/v1/attachments",
+            content=b"x" * (17 * 1024 * 1024),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 413, response.text[:200]
+    assert response.json() == {"detail": "Request body is too large."}
+    assert response.headers["connection"] == "close"
+    assert attachments.staged == []
+
+
+def test_an_oversized_body_without_a_length_is_cut_off_too() -> None:
+    """A chunked upload declares no length, so only the running total can stop it."""
+    app, attachments = _app_with_recording_attachments()
+    chunk = b"x" * (1024 * 1024)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.post(
+            "/api/v1/attachments",
+            content=(chunk for _ in range(17)),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 413, response.text[:200]
+    assert attachments.staged == []
+
+
+def test_a_refusal_carries_the_cors_headers_a_browser_needs_to_read_it() -> None:
+    app, _ = _app_with_recording_attachments()
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.post(
+            "/api/v1/attachments",
+            content=b"x" * (MAX_REQUEST_BODY_BYTES + 1),
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Origin": "http://localhost:5173",
+            },
+        )
+
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_the_largest_legitimate_attachment_is_still_accepted() -> None:
+    """The ceiling has to sit above the biggest body the API is meant to take:
+    a full-size file, base64-encoded."""
+    app, attachments = _app_with_recording_attachments()
+    encoded = base64.b64encode(b"a" * MAX_CHAT_ATTACHMENT_BYTES).decode("ascii")
+    assert len(encoded) < MAX_REQUEST_BODY_BYTES
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.post(
+            "/api/v1/attachments", json=_stage_request(encoded), headers=headers
+        )
+
+    assert response.status_code == 201, response.text[:200]
+    assert attachments.staged == ["limit-1"]
+
+
+class _Downstream:
+    """An ASGI app that reads its body and answers, noting what it saw."""
+
+    def __init__(self) -> None:
+        self.called = False
+        self.received = 0
+        self.saw_disconnect = False
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        self.called = True
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                self.saw_disconnect = True
+                break
+            self.received += len(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+def _drive(
+    app: Any,
+    *,
+    chunks: list[bytes],
+    path: str = "/api/v1/echo",
+    content_length: bytes | None = None,
+    scope_type: str = "http",
+) -> list[dict[str, Any]]:
+    """Run ``app`` once over a scripted request; nothing here can wait forever."""
+    sent: list[dict[str, Any]] = []
+    script = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive() -> dict[str, Any]:
+        return script.pop(0) if script else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    headers = [(b"content-length", content_length)] if content_length is not None else []
+    scope = {"type": scope_type, "path": path, "headers": headers}
+    asyncio.run(app(scope, receive, send))
+    return sent
+
+
+def _statuses(sent: list[dict[str, Any]]) -> list[int]:
+    return [message["status"] for message in sent if message["type"] == "http.response.start"]
+
+
+def test_a_declared_length_over_the_ceiling_never_reaches_the_app() -> None:
+    downstream = _Downstream()
+    limited = RequestBodyLimitMiddleware(downstream, max_body_bytes=10)
+
+    sent = _drive(limited, chunks=[b"x" * 11], content_length=b"11")
+
+    assert _statuses(sent) == [413]
+    assert downstream.called is False
+
+
+def test_a_body_at_the_ceiling_passes_and_one_byte_more_does_not() -> None:
+    at_ceiling = _Downstream()
+    over = _Downstream()
+
+    passed = _drive(
+        RequestBodyLimitMiddleware(at_ceiling, max_body_bytes=10),
+        chunks=[b"x" * 5, b"x" * 5],
+        content_length=b"10",
+    )
+    refused = _drive(
+        RequestBodyLimitMiddleware(over, max_body_bytes=10),
+        chunks=[b"x" * 5, b"x" * 6],
+    )
+
+    assert _statuses(passed) == [200] and at_ceiling.received == 10
+    assert _statuses(refused) == [413] and over.saw_disconnect is True
+
+
+def test_a_body_that_understates_its_length_is_cut_off_at_the_ceiling() -> None:
+    downstream = _Downstream()
+    limited = RequestBodyLimitMiddleware(downstream, max_body_bytes=10)
+
+    sent = _drive(limited, chunks=[b"x" * 6, b"x" * 6], content_length=b"5")
+
+    assert _statuses(sent) == [413]
+    assert downstream.saw_disconnect is True
+
+
+def test_only_one_response_is_sent_when_the_body_is_cut_off() -> None:
+    """The app sees a disconnect and answers it; that answer must not follow
+    the 413 onto the wire."""
+    limited = RequestBodyLimitMiddleware(_Downstream(), max_body_bytes=10)
+
+    sent = _drive(limited, chunks=[b"x" * 6, b"x" * 6, b"x" * 6])
+
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert _statuses(sent) == [413]
+
+
+def test_paths_outside_the_api_and_other_protocols_are_not_limited() -> None:
+    static = _Downstream()
+    lifespan = _Downstream()
+
+    outside = _drive(
+        RequestBodyLimitMiddleware(static, max_body_bytes=10),
+        chunks=[b"x" * 11],
+        path="/assets/app.js",
+        content_length=b"11",
+    )
+    other_protocol = _drive(
+        RequestBodyLimitMiddleware(lifespan, max_body_bytes=10),
+        chunks=[b"x" * 11],
+        scope_type="websocket",
+    )
+
+    assert _statuses(outside) == [200] and static.received == 11
+    assert _statuses(other_protocol) == [200] and lifespan.received == 11
+
+
+def test_a_malformed_length_header_falls_back_to_counting_the_bytes() -> None:
+    downstream = _Downstream()
+    limited = RequestBodyLimitMiddleware(downstream, max_body_bytes=10)
+
+    fine = _drive(limited, chunks=[b"x" * 4], content_length=b"not-a-number")
+    too_much = _drive(limited, chunks=[b"x" * 11], content_length=b"-3")
+
+    assert _statuses(fine) == [200]
+    assert _statuses(too_much) == [413]
