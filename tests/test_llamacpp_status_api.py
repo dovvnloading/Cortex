@@ -127,3 +127,22 @@ def test_status_route_reports_unknown_offload_as_null_not_zero() -> None:
     ):
         assert status.gpu_layers_offloaded is None
         assert status.gpu_layers_total is None
+
+
+def test_status_route_reports_that_the_context_window_was_limited() -> None:
+    note = "The context window was limited to 4096 tokens, the most this model was trained for (32768 were requested)."
+    live = LlamaCppRuntimeStatus(
+        state="ready",
+        binary_present=True,
+        loaded_model="gguf:model.gguf",
+        last_error=None,
+        models_directory="C:/synthetic/models",
+        active_backend="cpu",
+        loaded_context=4096,
+        context_note=note,
+    )
+
+    status = _llamacpp_status(_request_with_manager(SimpleNamespace(status=live)))
+
+    assert status.context_note == note
+    assert _llamacpp_status(_request_with_manager(None)).context_note is None

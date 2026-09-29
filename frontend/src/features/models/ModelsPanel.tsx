@@ -27,11 +27,14 @@ type GGUFControls = {
   onListFiles?: ListGGUFFiles;
 };
 
-/** How the local runtime uses memory. */
+/** How the local runtime uses memory, and the advanced options it is launched with. */
 export type RuntimeControls = {
   /** Minutes without a request after which the loaded model is released; 0 keeps it loaded. */
   idleUnloadMinutes: number;
   onIdleUnloadMinutesChange: (minutes: number) => void;
+  /** Advanced runtime options as words, e.g. `["-ctk", "q8_0", "-t", "8"]`. */
+  extraArgs: readonly string[];
+  onExtraArgsChange: (args: string[]) => void;
   /** Absent when this build cannot unload a model; the button is then left out. */
   onUnload?: () => Promise<void>;
 };
@@ -168,6 +171,7 @@ function GGUFRuntimeSection({ llamacppStatus, gguf, runtime }: { llamacppStatus:
         </p>
       )}
       {llamacppStatus.backend_note && <p className="muted-note" role="status">{llamacppStatus.backend_note}</p>}
+      {llamacppStatus.context_note && <p className="muted-note" role="status">{llamacppStatus.context_note}</p>}
       {runtime && <RuntimeMemoryControls status={llamacppStatus} runtime={runtime} />}
       <div className="gguf-runtime-directory">
         <FolderOpen aria-hidden="true" size={15} />
@@ -212,6 +216,7 @@ const MAX_IDLE_UNLOAD_MINUTES = 1440;
 function RuntimeMemoryControls({ status, runtime }: { status: LlamaCppRuntimeStatus; runtime: RuntimeControls }) {
   const [unloading, setUnloading] = useState(false);
   const [idleText, setIdleText] = useState(String(runtime.idleUnloadMinutes));
+  const [optionsText, setOptionsText] = useState(runtime.extraArgs.join(" "));
 
   // Follow a value that changed elsewhere (a save, a reset) without fighting
   // what is being typed: text that already means the same thing is left alone.
@@ -221,6 +226,12 @@ function RuntimeMemoryControls({ status, runtime }: { status: LlamaCppRuntimeSta
   if (seenMinutes !== runtime.idleUnloadMinutes) {
     setSeenMinutes(runtime.idleUnloadMinutes);
     if (parseIdleMinutes(idleText) !== runtime.idleUnloadMinutes) setIdleText(String(runtime.idleUnloadMinutes));
+  }
+  const argsKey = runtime.extraArgs.join(" ");
+  const [seenArgs, setSeenArgs] = useState(argsKey);
+  if (seenArgs !== argsKey) {
+    setSeenArgs(argsKey);
+    if (splitWords(optionsText).join(" ") !== argsKey) setOptionsText(argsKey);
   }
 
   const unload = async () => {
@@ -276,6 +287,28 @@ function RuntimeMemoryControls({ status, runtime }: { status: LlamaCppRuntimeSta
           0 keeps the model loaded until Cortex closes. A response in progress is never interrupted.
         </small>
       </div>
+      <div className="gguf-runtime-field">
+        <label className="field-label" htmlFor="gguf-extra-args">
+          Advanced runtime options
+          <input
+            id="gguf-extra-args"
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            value={optionsText}
+            placeholder="-ctk q8_0 -ctv q8_0 -fa on -t 8"
+            aria-describedby="gguf-extra-args-hint"
+            onChange={(event) => {
+              setOptionsText(event.target.value);
+              runtime.onExtraArgsChange(splitWords(event.target.value));
+            }}
+          />
+        </label>
+        <small id="gguf-extra-args-hint" className="gguf-runtime-directory-hint">
+          KV-cache types (-ctk, -ctv), flash attention (-fa) and thread counts (-t, -tb) only. Applied the next time the
+          model loads; Cortex keeps setting the model, context window and address itself.
+        </small>
+      </div>
     </div>
   );
 }
@@ -285,4 +318,8 @@ function parseIdleMinutes(text: string): number | null {
   if (!/^\d{1,4}$/.test(text.trim())) return null;
   const minutes = Number(text.trim());
   return minutes <= MAX_IDLE_UNLOAD_MINUTES ? minutes : null;
+}
+
+function splitWords(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean);
 }

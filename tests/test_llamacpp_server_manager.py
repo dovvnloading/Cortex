@@ -3016,6 +3016,324 @@ def test_the_offload_counts_are_the_only_thing_taken_from_the_line(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# Advanced runtime options and a context window the model was trained for (RT-22)
+# ---------------------------------------------------------------------------
+
+
+def _write_gguf(path: Path, *, context_length: int | None, architecture: str = "llama") -> None:
+    import gguf
+    import numpy as np
+
+    writer = gguf.GGUFWriter(str(path), architecture)
+    if context_length is not None:
+        writer.add_context_length(context_length)
+    writer.add_name(path.stem)
+    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
+def _manager_for_a_real_file(tmp_path: Path, model_path: Path, processes: list[_FakePopen], **overrides):
+    client = _RecordingAttestationClient({"model_path": str(model_path), "build_info": "b10311-test"})
+    launcher = _QueueLauncher(processes)
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=client, **overrides)
+    return manager, launcher
+
+
+def _context_argument(argv: list[str]) -> str:
+    return argv[argv.index("-c") + 1]
+
+
+def test_the_advanced_options_are_appended_after_the_fixed_launch_contract(tmp_path: Path) -> None:
+    options = ("-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on", "-t", "8")
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: options,
+    )
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    argv = launcher.launch_args[0]
+    assert tuple(argv[-len(options):]) == options
+    fixed = argv[: -len(options)]
+    # The contract in front of them is untouched, and appears exactly once.
+    assert fixed[fixed.index("--host") + 1] == "127.0.0.1"
+    assert fixed[fixed.index("--port") + 1] == "0"
+    assert fixed.count("--host") == fixed.count("--port") == fixed.count("-c") == fixed.count("-m") == 1
+    assert "--api-key" not in argv
+
+
+def test_no_advanced_options_leaves_the_launch_exactly_as_it_was(tmp_path: Path) -> None:
+    plain = _QueueLauncher([_FakePopen()])
+    empty = _QueueLauncher([_FakePopen()])
+    _manager(tmp_path, fetcher=_FakeFetcher(), launcher=plain, http_client=_AlwaysHealthyClient()).ensure_ready(
+        tmp_path / "model.gguf", num_ctx=4096
+    )
+    _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=empty, http_client=_AlwaysHealthyClient(), extra_args=lambda: ()
+    ).ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert plain.launch_args == empty.launch_args
+
+
+def test_changing_the_advanced_options_restarts_the_server_and_says_why(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-t", "4")]
+    first, second = _FakePopen(), _FakePopen()
+    launcher = _QueueLauncher([first, second])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 1  # unchanged options reuse the server
+
+    current[0] = ("-t", "8")
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert launcher.launch_args[1][-2:] == ["-t", "8"]
+    assert first.terminated
+    assert manager.status.last_restart_reason == "the advanced runtime options changed"
+
+
+def test_clearing_the_advanced_options_relaunches_without_them(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-fa", "off")]
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    current[0] = ()
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert "-fa" not in launcher.launch_args[1]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--host", "0.0.0.0"),
+        ("--port", "8080"),
+        ("--api-key", "secret"),
+        ("-m", "other.gguf"),
+        ("-c", "999999"),
+        ("-ngl", "99"),
+        ("--unknown-flag",),
+        ("-t", "4", "--host", "0.0.0.0"),
+    ],
+)
+def test_options_that_would_change_the_launch_contract_never_reach_the_child(
+    tmp_path: Path, options: tuple[str, ...]
+) -> None:
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: options,
+    )
+
+    with pytest.raises(LlamaCppError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert launcher.launch_args == []
+    assert "not valid" in str(raised.value)
+    # The message is Cortex's own; it does not repeat what was configured.
+    for word in options:
+        assert word not in str(raised.value)
+
+
+def test_changing_the_advanced_options_gives_a_failing_launch_a_fresh_start(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-t", "4")]
+    launcher = _QueueLauncher([_FakePopen(exit_immediately=True) for _ in range(3)] + [_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=4096)
+    with pytest.raises(CrashLoopError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 3
+
+    current[0] = ("-t", "2")  # the option that was making it fail, fixed
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 4
+    assert manager.status.state == "ready"
+
+
+def test_a_window_above_the_trained_context_is_lowered_and_the_status_says_so(tmp_path: Path) -> None:
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+    messages: list[str] = []
+
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+
+    assert _context_argument(launcher.launch_args[0]) == "4096"
+    note = manager.status.context_note
+    assert note is not None
+    assert "4096" in note and "32768" in note
+    # Said once, through the progress callback, when the launch happened.
+    assert messages.count(note) == 1
+
+
+def test_asking_for_the_same_oversized_window_again_reuses_the_server(tmp_path: Path) -> None:
+    """The reuse decision must see the lowered value, or every message would reload the model."""
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen(), _FakePopen()])
+    messages: list[str] = []
+
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=16384, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=2048, on_status=messages.append)
+
+    assert len(launcher.launch_args) == 1
+    assert sum("limited to 4096" in message for message in messages) == 1
+    assert manager.ready_handle(model_path, num_ctx=32768) is not None
+
+
+def test_a_window_within_the_trained_context_is_used_as_asked_and_carries_no_note(tmp_path: Path) -> None:
+    model_path = tmp_path / "long.gguf"
+    _write_gguf(model_path, context_length=131072)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    assert _context_argument(launcher.launch_args[0]) == "32768"
+    assert manager.status.context_note is None
+
+
+def test_the_note_goes_away_when_a_later_request_fits(tmp_path: Path) -> None:
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, _launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+    manager.ensure_ready(model_path, num_ctx=32768)
+    assert manager.status.context_note is not None
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.context_note is None
+
+
+def test_a_model_that_does_not_say_what_it_was_trained_for_is_not_limited(tmp_path: Path) -> None:
+    model_path = tmp_path / "silent.gguf"
+    _write_gguf(model_path, context_length=None)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    assert _context_argument(launcher.launch_args[0]) == "32768"
+    assert manager.status.context_note is None
+
+
+def test_an_implausibly_small_trained_context_is_treated_as_unknown(tmp_path: Path) -> None:
+    model_path = tmp_path / "odd.gguf"
+    _write_gguf(model_path, context_length=64)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert _context_argument(launcher.launch_args[0]) == "8192"
+
+
+def test_a_file_that_cannot_be_read_as_gguf_is_not_limited_and_not_reread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    model_path = tmp_path / "broken.gguf"
+    model_path.write_bytes(b"not a gguf file at all")
+    reads: list[Path] = []
+
+    def unreadable(path: Path):
+        reads.append(path)
+        return None
+
+    monkeypatch.setattr(module, "read_gguf_metadata", unreadable)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=8192)
+    manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert _context_argument(launcher.launch_args[0]) == "8192"
+    assert reads == [model_path]  # read once for this version of the file
+
+
+def test_a_changed_model_file_is_read_again(tmp_path: Path) -> None:
+    model_path = tmp_path / "grows.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen(), _FakePopen()])
+    manager.ensure_ready(model_path, num_ctx=32768)
+    assert _context_argument(launcher.launch_args[0]) == "4096"
+
+    model_path.unlink()
+    # A different architecture name also makes the file a different size, so the
+    # change is seen even if the two writes share a timestamp tick.
+    _write_gguf(model_path, context_length=16384, architecture="llamax")
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    # A different file (the model was replaced), so the window is re-derived and
+    # the larger trained context needs a bigger server than the one running.
+    assert _context_argument(launcher.launch_args[1]) == "16384"
+
+
+def test_a_request_with_no_preference_is_still_held_to_the_trained_context(tmp_path: Path) -> None:
+    model_path = tmp_path / "tiny.gguf"
+    _write_gguf(model_path, context_length=2048)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=None)
+
+    assert _context_argument(launcher.launch_args[0]) == "2048"
+    assert manager.status.context_note is None
+
+
+def test_the_trained_context_limit_is_applied_before_the_crash_loop_key(tmp_path: Path) -> None:
+    """Three failures at an oversized request count against the value actually launched."""
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(
+        tmp_path, model_path, [_FakePopen(exit_immediately=True) for _ in range(3)]
+    )
+
+    for requested in (8192, 32768, 65536):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=requested)
+    with pytest.raises(CrashLoopError):
+        manager.ensure_ready(model_path, num_ctx=16384)
+
+    assert [_context_argument(argv) for argv in launcher.launch_args] == ["4096"] * 3
+
+
+# ---------------------------------------------------------------------------
 # Unloading the model: on request and after an idle period (RT-07)
 # ---------------------------------------------------------------------------
 

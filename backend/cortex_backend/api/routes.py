@@ -1125,6 +1125,7 @@ def _llamacpp_status(request: Request) -> LlamaCppRuntimeStatus:
         gpu_layers_offloaded=live.gpu_layers_offloaded,
         gpu_layers_total=live.gpu_layers_total,
         backend_note=live.backend_note,
+        context_note=live.context_note,
     )
 
 

@@ -31,6 +31,8 @@ function runtimeControls(overrides: Partial<RuntimeControls> = {}): RuntimeContr
   return {
     idleUnloadMinutes: 30,
     onIdleUnloadMinutesChange: vi.fn(),
+    extraArgs: [],
+    onExtraArgsChange: vi.fn(),
     onUnload: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -116,6 +118,20 @@ describe("ModelsPanel GPU skip note", () => {
     expect(screen.queryByText(/No Vulkan graphics loader/)).not.toBeInTheDocument();
   });
 
+});
+
+describe("ModelsPanel context note", () => {
+  it("shows that the context window was limited", () => {
+    renderPanel({ ...readyStatus, context_note: "The context window was limited to 4096 tokens." });
+
+    expect(screen.getByText("The context window was limited to 4096 tokens.")).toBeVisible();
+  });
+
+  it("shows no context note when the window is as requested", () => {
+    renderPanel(readyStatus);
+
+    expect(screen.queryByText(/context window was limited/)).not.toBeInTheDocument();
+  });
 });
 
 describe("ModelsPanel unload control", () => {
@@ -224,5 +240,44 @@ describe("ModelsPanel idle period", () => {
     view.rerenderWith(idleStatus, runtimeControls({ idleUnloadMinutes: 5 }));
 
     expect(screen.getByLabelText(/Unload an unused model after/)).toHaveValue(5);
+  });
+});
+
+describe("ModelsPanel advanced options", () => {
+  it("reports the words typed, keeping the spaces while they are typed", async () => {
+    const user = userEvent.setup();
+    const runtime = runtimeControls();
+    renderPanel(idleStatus, runtime);
+    const field = screen.getByLabelText("Advanced runtime options");
+
+    await user.type(field, "-ctk q8_0 -t 8");
+
+    expect(field).toHaveValue("-ctk q8_0 -t 8");
+    expect(runtime.onExtraArgsChange).toHaveBeenLastCalledWith(["-ctk", "q8_0", "-t", "8"]);
+  });
+
+  it("shows the options already set, and follows a change made elsewhere", () => {
+    const view = renderPanel(idleStatus, runtimeControls({ extraArgs: ["-fa", "on"] }));
+    expect(screen.getByLabelText("Advanced runtime options")).toHaveValue("-fa on");
+
+    view.rerenderWith(idleStatus, runtimeControls({ extraArgs: [] }));
+
+    expect(screen.getByLabelText("Advanced runtime options")).toHaveValue("");
+  });
+
+  it("clearing the field reports no options", async () => {
+    const user = userEvent.setup();
+    const runtime = runtimeControls({ extraArgs: ["-t", "8"] });
+    renderPanel(idleStatus, runtime);
+
+    await user.clear(screen.getByLabelText("Advanced runtime options"));
+
+    expect(runtime.onExtraArgsChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it("says what may be set and that the launch contract stays with Cortex", () => {
+    renderPanel(idleStatus, runtimeControls());
+
+    expect(screen.getByText(/KV-cache types/)).toHaveTextContent("Cortex keeps setting the model, context window and address itself");
   });
 });

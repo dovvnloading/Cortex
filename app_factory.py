@@ -129,6 +129,7 @@ def build_app(
         models_directory=gguf_directory,
         verify=ssl_context,
         idle_unload_minutes=lambda: settings_repository.load().settings.llamacpp.idle_unload_minutes,
+        extra_args=lambda: settings_repository.load().settings.llamacpp.extra_args,
     )
     gguf_model_directory = GGUFModelDirectory(gguf_directory)
     # ollama.Client.pull is overloaded on a Literal `stream`, one overload per

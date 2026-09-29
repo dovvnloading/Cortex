@@ -392,11 +392,13 @@ export interface LlamaCppRuntimeStatus {
   gpu_layers_offloaded?: number | null;
   gpu_layers_total?: number | null;
   backend_note?: string | null;
+  context_note?: string | null;
 }
 
 export interface LlamaCppSettings {
   gpu_backend?: "auto" | "vulkan" | "cpu";
   idle_unload_minutes?: number;
+  extra_args?: Array<string>;
 }
 
 export interface MemoryResponse {

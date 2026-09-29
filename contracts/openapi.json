@@ -2350,6 +2350,17 @@
             "title": "Binary Present",
             "type": "boolean"
           },
+          "context_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Note"
+          },
           "gpu_layers_offloaded": {
             "anyOf": [
               {
@@ -2470,6 +2481,14 @@
       "LlamaCppSettings": {
         "additionalProperties": false,
         "properties": {
+          "extra_args": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Args",
+            "type": "array"
+          },
           "gpu_backend": {
             "default": "auto",
             "enum": [

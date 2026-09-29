@@ -71,6 +71,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 
 const valuesEqual = (left: unknown, right: unknown): boolean => {
   if (Object.is(left, right)) return true;
+  // A list is equal to another list holding equal items: a list of words that is
+  // edited and saved comes back from the server as a new array.
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((item, index) => valuesEqual(item, right[index]));
+  }
   if (!isRecord(left) || !isRecord(right)) return false;
   const leftKeys = Object.keys(left);
   const rightKeys = Object.keys(right);
@@ -498,6 +503,8 @@ export function SettingsPanel({
               runtime={{
                 idleUnloadMinutes: llamacpp.idle_unload_minutes ?? DEFAULT_IDLE_UNLOAD_MINUTES,
                 onIdleUnloadMinutesChange: (minutes) => update({ llamacpp: { ...llamacpp, idle_unload_minutes: minutes } }),
+                extraArgs: llamacpp.extra_args ?? [],
+                onExtraArgsChange: (args) => update({ llamacpp: { ...llamacpp, extra_args: args } }),
                 onUnload: onUnloadModel,
               }}
             />

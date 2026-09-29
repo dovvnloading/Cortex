@@ -9,12 +9,13 @@ an error, until Cortex is restarted.
 
 Lifecycle policy, stated explicitly because it is the whole point of this
 class: a loaded model stays resident until (a) a different model is
-requested, (b) a larger context window is requested, (c) the app shuts
-down, (d) the process itself dies, (e) the user unloads it, or (f) it has
-sat unused for the configured idle period (never while a request is in
-flight or a model is loading).  Nothing here ever unloads a model "between
-messages" for any other reason -- if that appears to happen, one of those
-causes fired, and this class records which one (see ``last_restart_reason``).
+requested, (b) a larger context window is requested, (c) different advanced
+runtime options are requested, (d) the app shuts down, (e) the process itself
+dies, (f) the user unloads it, or (g) it has sat unused for the configured idle
+period (never while a request is in flight or a model is loading).  Nothing
+here ever unloads a model "between messages" for any other reason -- if that
+appears to happen, one of those causes fired, and this class records which one
+(see ``last_restart_reason``).
 
 This is a small, dedicated subprocess manager built directly on
 ``subprocess.Popen``. Running a binary Cortex itself downloaded and pinned
@@ -40,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 
 import httpx
 
@@ -64,6 +65,8 @@ from .errors import (
     ServerLaunchError,
     ServerStartTimeoutError,
 )
+from .extra_args import validate_extra_args
+from .gguf_metadata import read_gguf_metadata
 from .launch_failure import (
     LaunchFailureCode,
     classify_child_exit,
@@ -133,11 +136,19 @@ _IDLE_CHECK_INTERVAL_SECONDS = 30.0
 # re-verification holds it briefly) before it reports the runtime as busy; a
 # model load holds it for minutes, and answering "busy" is the honest reply.
 _UNLOAD_LOCK_TIMEOUT_SECONDS = 2.0
+# A trained context below this is not a plausible model, more likely a damaged
+# or unusual header; it is treated as unknown rather than used to shrink the
+# window to something unusable.
+_MIN_TRAINED_CONTEXT = 256
 _UNLOADED_AT_REQUEST = "the model was unloaded at your request"
 _NO_VULKAN_LOADER_NOTE = (
     "No Vulkan graphics loader was found on this computer, so the GPU build was "
     "not downloaded and the CPU build is used. Install or update the graphics "
     "driver to use the GPU."
+)
+_ADVANCED_OPTIONS_CHANGED = "the advanced runtime options changed"
+_INVALID_ADVANCED_OPTIONS = (
+    "The saved advanced runtime options are not valid. Fix or clear them in System settings."
 )
 
 
@@ -174,6 +185,8 @@ def _safe_restart_reason(reason: str) -> str:
     """Classify a restart without retaining model filenames or child text."""
     if reason.startswith("the selected model changed"):
         return "the selected model changed"
+    if reason == _ADVANCED_OPTIONS_CHANGED:
+        return reason
     if reason == _UNLOADED_AT_REQUEST or reason.startswith("the model was unloaded after "):
         return reason
     if reason.startswith("the context window increased"):
@@ -281,6 +294,9 @@ class LlamaCppRuntimeStatus:
     # Fixed text saying why the GPU build was not used when it would have been
     # the default (no Vulkan loader on this machine). Never carries child text.
     backend_note: str | None = None
+    # Fixed text saying the context window was limited to what the model was
+    # trained for. None when the window is as requested.
+    context_note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,6 +623,7 @@ class LlamaServerManager:
         http_client: httpx.Client | None = None,
         verify: ssl.SSLContext | bool = True,
         idle_unload_minutes: Callable[[], int] | None = None,
+        extra_args: Callable[[], Sequence[str]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         idle_check_interval_seconds: float = _IDLE_CHECK_INTERVAL_SECONDS,
         vulkan_loader_probe: Callable[[], bool] = _vulkan_loader_present,
@@ -638,6 +655,7 @@ class LlamaServerManager:
         # without restarting Cortex. None means this manager never unloads on
         # its own (and starts no watcher thread).
         self._idle_unload_minutes = idle_unload_minutes
+        self._extra_args = extra_args
         # Only the idle clock reads this; every deadline that guards a launch
         # keeps using time.monotonic directly. A test moves it by hand.
         self._clock = clock
@@ -690,9 +708,14 @@ class LlamaServerManager:
         self._last_used = self._clock()
         self._idle_stop = threading.Event()
         self._idle_thread: threading.Thread | None = None
+        # The advanced options the most recent launch was given. While a server
+        # is ready these are what it is running with.
+        self._launch_extra_args: tuple[str, ...] = ()
         # The layer counts the running server reported (see _offloaded_layers).
         self._gpu_layers: tuple[int, int] | None = None
         self._backend_note: str | None = None
+        self._context_note: str | None = None
+        self._trained_context_cache: dict[Path, tuple[tuple[int, int], int | None]] = {}
 
     def close(self) -> None:
         """Stop the managed process and close an HTTP client owned here."""
@@ -750,6 +773,11 @@ class LlamaServerManager:
         forces a relaunch, since ``-c`` is a launch-time flag (unlike
         Ollama, where it's a per-request option).
 
+        A ``num_ctx`` above what the model was trained for is lowered to that
+        (see ``context_note`` on the status); the reuse decision and the launch
+        both use the lowered value, so asking for the same too-large window
+        again reuses the server instead of reloading it every time.
+
         ``on_status`` is called with short, user-facing progress strings only
         while real work is happening (binary download, process start) -- an
         already-warm reused server never fires it, so no message flashes for
@@ -761,7 +789,18 @@ class LlamaServerManager:
             with self._state_lock:
                 if self._closed:
                     raise LlamaCppError("The local model runtime manager is closed.")
-            verdict = self._reuse_verdict(model_path, num_ctx, token)
+            extra_args = self._current_extra_args()
+            trained_context = self._trained_context(model_path)
+            num_ctx, context_note = self._limit_to_trained_context(num_ctx, trained_context)
+            with self._state_lock:
+                if num_ctx is not None:
+                    self._context_note = context_note
+                if extra_args != self._launch_extra_args:
+                    # A changed option may be exactly what fixes a launch that
+                    # kept failing; the new configuration starts with a clean slate.
+                    self._failure_times.clear()
+                    self._failure_key = None
+            verdict = self._reuse_verdict(model_path, num_ctx, token, extra_args=extra_args)
             if verdict.reusable:
                 self._raise_if_stopping(token)
                 with self._state_lock:
@@ -783,6 +822,10 @@ class LlamaServerManager:
                         else _DEFAULT_NUM_CTX
                     )
                 )
+            if trained_context is not None:
+                # No preference was given, so a model trained for less than the
+                # default is still not asked for more than it knows.
+                effective_num_ctx = min(effective_num_ctx, trained_context)
 
             if verdict.reason is not None:
                 self._record_restart(verdict, model_path, effective_num_ctx)
@@ -793,8 +836,10 @@ class LlamaServerManager:
                 raise LlamaCppError(
                     "The previous local model runtime did not exit cleanly; restart Cortex before trying again."
                 )
+            if context_note is not None and on_status is not None:
+                on_status(context_note)
             try:
-                handle = self._start(model_path, effective_num_ctx, on_status, token)
+                handle = self._start(model_path, effective_num_ctx, extra_args, on_status, token)
                 self._touch()
                 self._ensure_idle_watcher()
                 return handle
@@ -847,6 +892,9 @@ class LlamaServerManager:
         tokens before sending it -- and is content with ``None`` when there is
         none.
         """
+        # The same limit ensure_ready applies, or a window that will be lowered
+        # anyway would look too big for the server that is already running.
+        num_ctx, _ = self._limit_to_trained_context(num_ctx, self._trained_context(model_path))
         with self._state_lock:
             if (
                 self._closed
@@ -878,6 +926,7 @@ class LlamaServerManager:
             loaded_context = self._loaded_context if state == "ready" else None
             gpu_layers = self._gpu_layers if state == "ready" else None
             backend_note = self._backend_note
+            context_note = self._context_note
         # The expensive parts -- hashing the cached binary directory and a
         # settings read for the models folder -- run outside every lock, so
         # a status poll never stalls behind (or holds up) a model load.
@@ -896,6 +945,7 @@ class LlamaServerManager:
             gpu_layers_offloaded=gpu_layers[0] if gpu_layers is not None else None,
             gpu_layers_total=gpu_layers[1] if gpu_layers is not None else None,
             backend_note=backend_note,
+            context_note=context_note,
         )
 
     @contextmanager
@@ -1022,6 +1072,59 @@ class LlamaServerManager:
             except Exception:
                 logger.exception("The idle check for the local model runtime failed.")
 
+    def _current_extra_args(self) -> tuple[str, ...]:
+        """The advanced options to launch with, re-checked against the allow-list."""
+        if self._extra_args is None:
+            return ()
+        try:
+            return validate_extra_args(self._extra_args())
+        except ValueError as exc:
+            # Settings validate this on save, so this is a value that was
+            # injected or edited around them. Fail closed rather than launch
+            # with an option nobody approved.
+            raise LlamaCppError(_INVALID_ADVANCED_OPTIONS) from exc
+
+    def _trained_context(self, model_path: Path) -> int | None:
+        """The context length the model file says it was trained for, if it says.
+
+        Read from the GGUF header and remembered per file version, so a chat
+        message does not reopen the file. A file that cannot be read yields
+        None and is not retried until it changes.
+        """
+        try:
+            stat = model_path.stat()
+        except OSError:
+            return None
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        with self._state_lock:
+            cached = self._trained_context_cache.get(model_path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        metadata = read_gguf_metadata(model_path)
+        length = metadata.context_length if metadata is not None else None
+        if length is not None and length < _MIN_TRAINED_CONTEXT:
+            length = None
+        with self._state_lock:
+            self._trained_context_cache[model_path] = (stamp, length)
+        return length
+
+    @staticmethod
+    def _limit_to_trained_context(
+        num_ctx: int | None, trained_context: int | None
+    ) -> tuple[int | None, str | None]:
+        """``num_ctx`` lowered to the trained context, with the note that says so.
+
+        A window past the trained length costs KV-cache memory for positions
+        the model never saw, and degrades its answers once a conversation
+        reaches them.
+        """
+        if num_ctx is None or trained_context is None or num_ctx <= trained_context:
+            return num_ctx, None
+        return trained_context, (
+            f"The context window was limited to {trained_context} tokens, the most this model "
+            f"was trained for ({num_ctx} were requested)."
+        )
+
     def stop(self) -> None:
         """Terminate any running process. Idempotent; safe to call from app shutdown."""
         # Signal first, before taking the slow-path lock.  The startup path
@@ -1123,7 +1226,12 @@ class LlamaServerManager:
     # -- reuse & teardown ---------------------------------------------------
 
     def _reuse_verdict(
-        self, model_path: Path, num_ctx: int | None, cancellation_event: _CancellationToken
+        self,
+        model_path: Path,
+        num_ctx: int | None,
+        cancellation_event: _CancellationToken,
+        *,
+        extra_args: tuple[str, ...] | None = None,
     ) -> _ReuseVerdict:
         with self._state_lock:
             if self._state != "ready" or self._process is None:
@@ -1145,6 +1253,8 @@ class LlamaServerManager:
                         f"to {num_ctx} tokens"
                     ),
                 )
+            if extra_args is not None and extra_args != self._launch_extra_args:
+                return _ReuseVerdict(reusable=False, reason=_ADVANCED_OPTIONS_CHANGED)
             exit_code = self._process.poll()
             if exit_code is not None:
                 return _ReuseVerdict(
@@ -1417,6 +1527,7 @@ class LlamaServerManager:
         self,
         model_path: Path,
         num_ctx: int,
+        extra_args: tuple[str, ...],
         on_status: StatusCallback | None,
         cancellation_event: _CancellationToken,
     ) -> ServerHandle:
@@ -1427,8 +1538,9 @@ class LlamaServerManager:
             raise LlamaCppError("The local GGUF runtime is not yet configured.")
 
         with self._state_lock:
-            # What was decided about the GPU build for this launch (see
-            # _backend_order) describes the launch that is starting now.
+            # What this launch is given, and what was decided about the GPU
+            # build for it: both describe the launch that is starting now.
+            self._launch_extra_args = extra_args
             self._backend_note = None
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
@@ -1446,7 +1558,7 @@ class LlamaServerManager:
             for backend in self._backend_order(requested_backend, model_path, num_ctx):
                 try:
                     handle = self._start_with_backend(
-                        model_path, num_ctx, backend, on_status, cancellation_event
+                        model_path, num_ctx, backend, extra_args, on_status, cancellation_event
                     )
                 except (ServerLaunchError, BinaryVerificationError, OSError) as exc:
                     # Not just launch failures. A backend whose archive fails its
@@ -1586,6 +1698,7 @@ class LlamaServerManager:
         model_path: Path,
         num_ctx: int,
         backend: GpuBackend,
+        extra_args: tuple[str, ...],
         on_status: StatusCallback | None,
         cancellation_event: _CancellationToken,
     ) -> ServerHandle:
@@ -1665,6 +1778,11 @@ class LlamaServerManager:
             # spelling; ``--no-webui`` is the deprecated alias of the same
             # switch in the pinned build.
             "--no-ui",
+            # The user's advanced options go last. They were checked against an
+            # allow-list that excludes every flag above, so none of them can
+            # replace a launch setting, and a build that lets a later flag win
+            # has nothing to win against.
+            *extra_args,
         ]
         env, scrubbed = _child_environment(os.environ, api_key)
         self._note_scrubbed_environment(scrubbed)

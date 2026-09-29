@@ -122,6 +122,9 @@ class LlamaCppRuntimeStatus(APIModel):
     # Fixed text on why the GPU build was not used when it would have been the
     # default (no Vulkan loader on this machine). Null otherwise.
     backend_note: str | None = None
+    # Fixed text saying the context window was limited to what the model was
+    # trained for. Null when the window is as requested.
+    context_note: str | None = None
 
 
 class SystemResponse(APIModel):
