@@ -5,12 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import itertools
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import stat
 from collections.abc import Iterator, Mapping
@@ -53,6 +55,20 @@ _SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 # The name cleanup gives an artifact's file in quarantine: ``<artifact id>-<uuid hex>.artifact``.
 _QUARANTINE_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[0-9a-f]{32}\.artifact")
+# What a crash leaves under the artifact root, by name. Each pattern is exact so
+# the sweep only ever touches something this repository (or the recipe
+# coordinator's staging) created.
+_TEMPORARY_ARTIFACT_NAME = re.compile(r"\.tmp-[0-9a-f]{32}")
+_ARTIFACT_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+_RECIPE_STAGING_NAME = re.compile(r"\.recipe-(?P<job_id>.+)-[a-z0-9_]{8}")
+# Written by an earlier build, never read, and left empty under every artifact root.
+_LEGACY_QUARANTINE_NAME = ".artifact_quarantine"
+# A file this new may still belong to a publish in flight, so the sweep leaves it.
+_STRAY_FILE_GRACE_SECONDS = 600.0
+# Bounds on one sweep: how many entries it looks at, and how many files inside a
+# single job directory.
+_SWEEP_ENTRY_BUDGET = 2_000
+_SWEEP_CHILD_LIMIT = 64
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
@@ -226,6 +242,12 @@ class ExecutionRepository:
         # Moves whenever an approval is decided or expires, so a job waiting
         # for one can sleep instead of polling the store.
         self.approval_changes = ChangeSignal()
+        # Held while a job directory is created and given its first file, and
+        # while one is removed, so a publish that has just made its directory
+        # is never undone by the removal of an "empty" one.
+        self._directory_lock = RLock()
+        # Where the artifact-root sweep resumes; see sweep_artifact_root().
+        self._sweep_cursor = ""
         self._ensure_schema()
 
     @property
@@ -1640,18 +1662,23 @@ class ExecutionRepository:
         job_root = self.artifact_root / job_id
         if job_root.exists() and _is_reparse_point(job_root):
             raise ExecutionRepositoryError("Artifact root is unavailable.")
-        job_root.mkdir(parents=True, exist_ok=True)
         root = self.artifact_root.resolve()
-        resolved_job_root = job_root.resolve(strict=True)
-        if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
-            raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
         target = job_root / f"{artifact_id}-{name}"
         temporary = target.with_name(f".tmp-{artifact_id}")
         digest = hashlib.sha256(content).hexdigest()
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=retention_seconds)
+        stream: Any = None
         try:
-            with temporary.open("xb") as stream:
+            with self._directory_lock:
+                job_root.mkdir(parents=True, exist_ok=True)
+                resolved_job_root = job_root.resolve(strict=True)
+                if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
+                    raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
+                # The temporary file exists before the lock is released, so the
+                # directory is never empty for a sweep to remove.
+                stream = temporary.open("xb")
+            with stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -1687,8 +1714,12 @@ class ExecutionRepository:
                     ),
                 )
         except Exception:
+            if stream is not None:
+                stream.close()
             target.unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
+            # The directory this call created (or found empty) is not left behind.
+            self._remove_empty_artifact_directory(job_root)
             raise
         return ExecutionArtifact(
             artifact_id=artifact_id,
@@ -1738,7 +1769,14 @@ class ExecutionRepository:
         )
 
     def delete_artifact(self, artifact_id: str) -> None:
-        """Remove one unpublished/rolled-back artifact record and file safely."""
+        """Remove one unpublished/rolled-back artifact record and file safely.
+
+        The row goes first and the file after it, the order the retention
+        cleanup uses. Removing the file first left a row pointing at nothing
+        whenever the row's delete then failed to commit; the other way round
+        the worst case is a file no row names, which the artifact-root sweep
+        reclaims.
+        """
 
         with self.connect() as connection:
             row = connection.execute(
@@ -1747,22 +1785,16 @@ class ExecutionRepository:
             ).fetchone()
             if row is None:
                 return
-            path = Path(row["path"])
-            root = self.artifact_root.resolve()
-            try:
-                resolved = path.resolve(strict=False)
-            except (OSError, RuntimeError):
-                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
-            if not resolved.is_relative_to(root) or _is_reparse_point(path):
-                raise ExecutionRepositoryError("Artifact path is unavailable.")
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
+            path = self._validated_cleanup_path(Path(row["path"]))
             connection.execute(
                 "DELETE FROM execution_artifacts WHERE artifact_id = ?",
                 (artifact_id,),
             )
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
+        self._remove_empty_artifact_directory(path.parent)
 
     def read_artifact(self, artifact_id: str) -> bytes:
         with self.connect() as connection:
@@ -2183,18 +2215,152 @@ class ExecutionRepository:
         return removed
 
     def _remove_empty_artifact_directory(self, directory: Path) -> None:
-        """Remove one artifact's now-empty job directory, never a root."""
+        """Remove one artifact's now-empty job directory, never a root.
+
+        Only a job directory qualifies: a direct child of the artifact root
+        whose name is not a reserved dot-name (``.quarantine``,
+        ``.code_workspaces``, a recipe staging directory).
+        """
 
         try:
             resolved = directory.resolve()
+            root = self.artifact_root.resolve()
         except (OSError, RuntimeError):
             return
-        if resolved in {self.artifact_root.resolve(), self.quarantine_root.resolve()}:
+        if resolved.parent != root or resolved.name.startswith("."):
             return
+        self._remove_empty_directory(directory)
+
+    def _remove_empty_directory(self, directory: Path) -> bool:
+        """``rmdir`` under the directory lock; False if it was not empty or not removable."""
+
+        with self._directory_lock:
+            try:
+                directory.rmdir()
+            except OSError:
+                return False
+        return True
+
+    def sweep_artifact_root(self, *, now: datetime | None = None, limit: int = 100) -> int:
+        """Reclaim what a crash leaves under the artifact root; return how many things went.
+
+        Three things are stranded by a hard kill and were never reclaimed: a
+        ``.tmp-*`` file from a publish that died before its rename, a recipe
+        staging directory, and a job directory left empty. A file that
+        finished its rename but never got its row is reclaimed too. Each is
+        matched by exact name, is only touched when nothing can still need it,
+        and is left alone otherwise:
+
+        * a temporary or unreferenced file must be older than
+          ``_STRAY_FILE_GRACE_SECONDS`` (a publish in flight is milliseconds),
+          and an unreferenced file must have no artifact row by its id --
+          matched by id, not path, so a moved data directory cannot make live
+          artifacts look unreferenced;
+        * a staging directory goes only when its job is finished or gone;
+        * a job directory goes only when empty and no artifact row names its
+          job; and
+        * a link, a reparse point or anything of another name is never touched.
+
+        The pass is bounded: it removes at most ``limit`` things and looks at
+        at most ``_SWEEP_ENTRY_BUDGET`` entries, resuming where it stopped on
+        the next call. Best effort: a failure on one entry never stops the pass.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        stale_before = moment.timestamp() - _STRAY_FILE_GRACE_SECONDS
         try:
-            directory.rmdir()
+            names = sorted(entry.name for entry in self.artifact_root.iterdir())
         except OSError:
-            pass
+            return 0
+        removed = 0
+        examined = 0
+        finished = True
+        with self.connect() as connection:
+            for name in names:
+                if name <= self._sweep_cursor:
+                    continue
+                if removed >= limit or examined >= _SWEEP_ENTRY_BUDGET:
+                    finished = False
+                    break
+                gone, looked_at = self._sweep_entry(connection, self.artifact_root / name, stale_before)
+                removed += gone
+                examined += looked_at
+                self._sweep_cursor = name
+        if finished:
+            self._sweep_cursor = ""
+        return removed
+
+    def _sweep_entry(
+        self, connection: sqlite3.Connection, entry: Path, stale_before: float
+    ) -> tuple[int, int]:
+        """Sweep one entry directly under the artifact root; return (removed, examined)."""
+
+        name = entry.name
+        try:
+            if _is_reparse_point(entry) or not stat.S_ISDIR(entry.lstat().st_mode):
+                return 0, 1
+        except OSError:
+            return 0, 1
+        if name == _LEGACY_QUARANTINE_NAME:
+            return int(self._remove_empty_directory(entry)), 1
+        staging = _RECIPE_STAGING_NAME.fullmatch(name)
+        if staging is not None:
+            job_id = staging["job_id"]
+            if _SAFE_NAME.fullmatch(job_id) is None:
+                return 0, 1
+            job = connection.execute(
+                "SELECT status FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if job is not None and job["status"] not in TerminalExecutionStatus:
+                return 0, 1  # its worker may still be writing here
+            try:
+                shutil.rmtree(entry)
+            except OSError:
+                return 0, 1
+            return 1, 1
+        if name.startswith(".") or _SAFE_NAME.fullmatch(name) is None:
+            return 0, 1
+        return self._sweep_job_directory(connection, entry, stale_before)
+
+    def _sweep_job_directory(
+        self, connection: sqlite3.Connection, directory: Path, stale_before: float
+    ) -> tuple[int, int]:
+        removed = 0
+        examined = 1
+        try:
+            children = list(itertools.islice(directory.iterdir(), _SWEEP_CHILD_LIMIT))
+        except OSError:
+            return 0, examined
+        for child in children:
+            examined += 1
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime > stale_before:
+                continue
+            if _TEMPORARY_ARTIFACT_NAME.fullmatch(child.name) is None:
+                stored = _ARTIFACT_FILE_NAME.fullmatch(child.name)
+                if stored is None or connection.execute(
+                    "SELECT 1 FROM execution_artifacts WHERE artifact_id = ?",
+                    (stored["artifact_id"],),
+                ).fetchone() is not None:
+                    continue
+            try:
+                child.unlink()
+            except OSError:
+                continue
+            removed += 1
+        named = connection.execute(
+            "SELECT 1 FROM execution_artifacts WHERE job_id = ? LIMIT 1", (directory.name,)
+        ).fetchone()
+        if named is None and self._remove_empty_directory(directory):
+            removed += 1
+        return removed, examined
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:

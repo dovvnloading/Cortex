@@ -34,6 +34,9 @@ class CleanupMetrics:
     # artifact root, a link, a failed move). Non-zero means files may be
     # accumulating that retention will not remove on its own.
     artifacts_skipped: int = 0
+    # Stray files and directories the artifact-root sweep removed: what a crash
+    # leaves behind (see ExecutionRepository.sweep_artifact_root).
+    swept: int = 0
     last_error: str | None = None
 
 
@@ -173,12 +176,18 @@ class ExecutionCleanupSupervisor:
                     raise RuntimeError("cleanup lease lost")
                 if not isinstance(result, ExecutionCleanupResult):
                     raise RuntimeError("cleanup returned an invalid result")
+                # After the rows, so a directory the pass just emptied is
+                # already gone by the time the sweep looks at it.
+                swept = self.repository.sweep_artifact_root(limit=self.batch_size)
+                if self._lease_lost.is_set():
+                    raise RuntimeError("cleanup lease lost")
                 self._increment(
                     successes=1,
                     artifacts=result.artifacts,
                     jobs=result.jobs,
                     events=result.events,
                     artifacts_skipped=result.skipped,
+                    swept=swept,
                 )
                 if result.skipped:
                     _LOGGER.warning(
