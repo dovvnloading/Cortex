@@ -436,6 +436,13 @@ a { color: inherit; text-decoration: none; }
 .message-bubble { width: 100%; min-width: 0; max-width: 100%; }
 .message-assistant .message-bubble, .message-pending .message-bubble { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .message-user .message-bubble { width: fit-content; max-width: min(76%, 620px); padding: 11px 15px; border: 1px solid transparent; border-radius: var(--radius-md); background: var(--user-start); color: var(--text); box-shadow: none; }
+.memory-proposals { display: grid; gap: 6px; width: 100%; min-width: 0; margin: 12px 0 2px; }
+.memory-proposals-heading { margin: 0; color: var(--text-faint); font-size: var(--text-2xs); font-weight: 690; letter-spacing: 0.08em; line-height: 1.2; }
+.memory-proposals-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.memory-proposal { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; padding: 5px 6px 5px 11px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-soft); }
+.memory-proposal-text { flex: 1 1 220px; min-width: 0; color: var(--text); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.memory-proposal-actions { display: inline-flex; gap: 6px; }
+.memory-proposal-actions .button { min-height: 30px; padding: 0 11px; border-radius: 9px; font-size: var(--text-xs); }
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0 0 14px; }
 .message-attachment { display: inline-flex; align-items: center; min-width: 0; max-width: min(100%, 250px); gap: 6px; min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-soft); color: var(--text-muted); font-size: var(--text-xs); }
 .message-attachment > svg { flex: 0 0 auto; color: var(--accent); }

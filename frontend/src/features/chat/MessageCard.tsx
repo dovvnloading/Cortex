@@ -3,6 +3,7 @@ import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide
 import type { ChatAttachment, ChatMessage, GenerationStats } from "../../../../contracts/cortex-api";
 import { formatMessageTime } from "../../lib/messageTime";
 import { useChatStore } from "../../stores/useChatStore";
+import { MemoryProposals } from "./MemoryProposals";
 import { MessageStats } from "./MessageStats";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
 
@@ -35,6 +36,12 @@ type MessageCardProps = {
    */
   onRegenerate: (message: ChatMessage, index: number) => void;
   onFork: (message: ChatMessage) => void;
+  /**
+   * Stores one memory the model suggested under this answer. Without it the
+   * suggestions are not offered, because there would be no way to accept one.
+   * Keep it referentially stable, like the callbacks above.
+   */
+  onSaveMemory?: (memo: string) => Promise<boolean>;
 };
 
 /**
@@ -42,9 +49,10 @@ type MessageCardProps = {
  * its own busy/final/forking state changes, not whenever the transcript around
  * it does. That is what keeps a long chat cheap while a reply streams in.
  */
-export const MessageCard = memo(function MessageCard({ message, index, isFinalAssistant, busy, forking, onRegenerate, onFork }: MessageCardProps) {
+export const MessageCard = memo(function MessageCard({ message, index, isFinalAssistant, busy, forking, onRegenerate, onFork, onSaveMemory }: MessageCardProps) {
   const [copied, setCopied] = useState(false);
   const untranslated = useChatStore((state) => (message.id ? state.untranslatedMessageIds[message.id] === true : false));
+  const proposedMemories = useChatStore((state) => (message.id ? state.proposedMemoriesByMessage[message.id] : undefined));
   const copy = async () => {
     if (!navigator.clipboard) return;
     try {
@@ -68,6 +76,9 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
         {message.role === "assistant" && untranslated && <p className="muted-note" role="note">Couldn't translate this answer; showing the original.</p>}
         {message.sources && message.sources.length > 0 && <details className="sources"><summary><span>Sources</span><span className="disclosure-hint">{message.sources.length} {message.sources.length === 1 ? "item" : "items"}</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></div></div></details>}
       </div>
+      {message.role === "assistant" && message.id && onSaveMemory && proposedMemories && proposedMemories.length > 0 && (
+        <MemoryProposals messageId={message.id} memos={proposedMemories} onSave={onSaveMemory} />
+      )}
       {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary><span>Reasoning</span><span className="disclosure-hint">Show details</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}
       {/* Metadata sits below the message and stays quiet. The speaker is
           already unambiguous from the form -- unframed text on the left is

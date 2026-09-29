@@ -321,6 +321,20 @@ export function ChatPage({
     setMemoryClearPromptOpen(true);
   }, [onClearMemory, reconcileChat]);
 
+  // A memory the model suggested is stored only here, when the user presses
+  // Save. It goes through the same memories API as the Settings panel, so the
+  // store applies its own limits and de-duplication.
+  const saveProposedMemory = useCallback(async (memo: string): Promise<boolean> => {
+    try {
+      await api.addMemory(memo);
+      useUiStore.getState().notify("Memory saved.", "success");
+      return true;
+    } catch (error) {
+      useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not save memory.", "error");
+      return false;
+    }
+  }, [api]);
+
   const cancelMemoryClear = useCallback(() => {
     setMemoryClearPromptOpen(false);
     useUiStore.getState().notify("Permanent memories were not cleared.", "info");
@@ -901,6 +915,7 @@ export function ChatPage({
         forkingMessageId={forkingMessage}
         onRegenerate={regenerateFrom}
         onFork={forkFrom}
+        onSaveMemory={saveProposedMemory}
         onNearEndChange={handleNearEndChange}
         trailingContent={activeJobForCurrentThread ? <PendingAssistantMessage key={generation.jobId} onOutputChange={followStreamedOutput} /> : null}
       />

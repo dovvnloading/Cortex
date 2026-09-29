@@ -50,6 +50,13 @@ interface ChatStoreState {
    * result, not on the stored message, so the note lasts for this session.
    */
   untranslatedMessageIds: Record<string, true>;
+  /**
+   * Memories the model suggested, by the assistant message they were made
+   * under. A suggestion is only a suggestion: nothing is stored until the user
+   * saves it from the card. The backend reports it on the job, not on the
+   * stored message, so like the note above it lasts for this session.
+   */
+  proposedMemoriesByMessage: Record<string, readonly string[]>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
   upsertChatSummary: (chat: ChatResponse) => void;
@@ -73,6 +80,10 @@ interface ChatStoreState {
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
   markUntranslated: (messageId: string) => void;
+  /** Replace a message's pending suggestions; an empty list forgets them (a regenerated answer has new ones). */
+  setProposedMemories: (messageId: string, memos: readonly string[]) => void;
+  /** Drop one suggestion, whether it was saved or declined. */
+  dismissProposedMemory: (messageId: string, memo: string) => void;
 }
 
 const idleGeneration: GenerationState = {
@@ -100,6 +111,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   generationCursor: 0,
   generationOptionsByThread: {},
   untranslatedMessageIds: {},
+  proposedMemoriesByMessage: {},
 
   setChats: (next) =>
     set((state) => ({ chats: typeof next === "function" ? (next as (current: ChatSummary[]) => ChatSummary[])(state.chats) : next })),
@@ -206,4 +218,26 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? state
         : { untranslatedMessageIds: { ...state.untranslatedMessageIds, [messageId]: true } }
     )),
+  setProposedMemories: (messageId, memos) =>
+    set((state) => {
+      const current = state.proposedMemoriesByMessage[messageId];
+      if (memos.length === 0) {
+        if (!current) return state;
+        const next = { ...state.proposedMemoriesByMessage };
+        delete next[messageId];
+        return { proposedMemoriesByMessage: next };
+      }
+      if (current && current.length === memos.length && current.every((memo, index) => memo === memos[index])) return state;
+      return { proposedMemoriesByMessage: { ...state.proposedMemoriesByMessage, [messageId]: [...memos] } };
+    }),
+  dismissProposedMemory: (messageId, memo) =>
+    set((state) => {
+      const current = state.proposedMemoriesByMessage[messageId];
+      if (!current?.includes(memo)) return state;
+      const remaining = current.filter((item) => item !== memo);
+      const next = { ...state.proposedMemoriesByMessage };
+      if (remaining.length > 0) next[messageId] = remaining;
+      else delete next[messageId];
+      return { proposedMemoriesByMessage: next };
+    }),
 }));

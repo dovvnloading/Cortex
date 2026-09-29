@@ -980,4 +980,212 @@ describe("useGenerationStream", () => {
       act(() => result.current.stop());
     }
   });
+
+  describe("memories the model suggested", () => {
+    afterEach(() => {
+      useChatStore.setState({ proposedMemoriesByMessage: {} });
+    });
+
+    async function startJob(jobId: string, threadId: string) {
+      const { streamGeneration, emitEvent } = terminalAwareStream();
+      const api = fakeApi({ streamGeneration });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+      const onCompleted = vi.fn().mockResolvedValue(undefined);
+      act(() => {
+        result.current.start(jobId, threadId, onCompleted, vi.fn());
+      });
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+      return { emitEvent, onCompleted };
+    }
+
+    it("records the suggestions announced while the answer is being saved, and does not treat them as a clear", async () => {
+      const { emitEvent, onCompleted } = await startJob("job-propose", "thread-propose");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.memory_proposed",
+          job_id: "job-propose",
+          thread_id: "thread-propose",
+          data: { message: "Cortex suggested a change.", assistant_message_id: "assistant-1", proposed_memories: ["Likes tea.", "Lives in Oslo."], clear_requested: false },
+        });
+      });
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "assistant-1": ["Likes tea.", "Lives in Oslo."] });
+      expect(onCompleted).not.toHaveBeenCalled();
+
+      act(() => {
+        emitEvent({
+          event_id: 2,
+          event: "generation.completed",
+          job_id: "job-propose",
+          thread_id: "thread-propose",
+          data: { assistant_message_id: "assistant-1", proposed_memories: ["Likes tea.", "Lives in Oslo."], clear_requested: false },
+        });
+      });
+      await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-propose"));
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "assistant-1": ["Likes tea.", "Lives in Oslo."] });
+    });
+
+    it("takes the suggestions from the finished result when no event announced them", async () => {
+      const { emitEvent, onCompleted } = await startJob("job-result-only", "thread-result-only");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: "job-result-only",
+          thread_id: "thread-result-only",
+          data: { assistant_message_id: "assistant-2", proposed_memories: ["Likes tea."] },
+        });
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "assistant-2": ["Likes tea."] });
+    });
+
+    it("forgets an earlier answer's suggestions when a regenerated one has none", async () => {
+      useChatStore.getState().setProposedMemories("assistant-3", ["Stale suggestion."]);
+      const { emitEvent, onCompleted } = await startJob("job-regenerated", "thread-regenerated");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: "job-regenerated",
+          thread_id: "thread-regenerated",
+          data: { assistant_message_id: "assistant-3", proposed_memories: [] },
+        });
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({});
+    });
+
+    it("leaves suggestions alone when the result does not mention them at all", async () => {
+      useChatStore.getState().setProposedMemories("assistant-4", ["Kept."]);
+      const { emitEvent, onCompleted } = await startJob("job-older-backend", "thread-older-backend");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: "job-older-backend",
+          thread_id: "thread-older-backend",
+          data: { assistant_message_id: "assistant-4" },
+        });
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "assistant-4": ["Kept."] });
+    });
+
+    it("bounds and cleans what it accepts, since the list is model output", async () => {
+      const { emitEvent, onCompleted } = await startJob("job-hostile", "thread-hostile");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.completed",
+          job_id: "job-hostile",
+          thread_id: "thread-hostile",
+          data: {
+            assistant_message_id: "assistant-5",
+            proposed_memories: [
+              "  Likes tea.  ",
+              "Likes tea.",
+              "   ",
+              "x".repeat(501),
+              42,
+              null,
+              { text: "nested" },
+              "Fact 1",
+              "Fact 2",
+              "Fact 3",
+              "Fact 4",
+              "Fact 5",
+            ],
+          },
+        });
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({
+        "assistant-5": ["Likes tea.", "Fact 1", "Fact 2", "Fact 3", "Fact 4"],
+      });
+    });
+
+    it("ignores a suggestion list with no answer to attach it to, or that is not a list", async () => {
+      const { emitEvent, onCompleted } = await startJob("job-malformed", "thread-malformed");
+
+      act(() => {
+        emitEvent({
+          event_id: 1,
+          event: "generation.memory_proposed",
+          job_id: "job-malformed",
+          thread_id: "thread-malformed",
+          data: { proposed_memories: ["Orphaned."] },
+        });
+        emitEvent({
+          event_id: 2,
+          event: "generation.memory_proposed",
+          job_id: "job-malformed",
+          thread_id: "thread-malformed",
+          data: { assistant_message_id: "assistant-6", proposed_memories: "Likes tea." },
+        });
+        emitEvent({
+          event_id: 3,
+          event: "generation.completed",
+          job_id: "job-malformed",
+          thread_id: "thread-malformed",
+          data: { assistant_message_id: "assistant-6" },
+        });
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({});
+    });
+
+    it("takes the suggestions from the status fallback when the stream drops before completion", async () => {
+      const generationStatus = vi.fn().mockResolvedValue({
+        job_id: "job-status-propose",
+        kind: "generation",
+        status: "succeeded",
+        sequence: 3,
+        result: { assistant_message_id: "assistant-7", proposed_memories: ["Likes tea."] },
+      });
+      const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+      const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+      act(() => {
+        result.current.start("job-status-propose", "thread-status-propose", onCompleted, vi.fn());
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "assistant-7": ["Likes tea."] });
+    });
+
+    it("offers nothing when the job failed, whatever its result carried", async () => {
+      const generationStatus = vi.fn().mockResolvedValue({
+        job_id: "job-status-failed",
+        kind: "generation",
+        status: "failed",
+        sequence: 3,
+        error: "Generation failed.",
+        result: { assistant_message_id: "assistant-8", proposed_memories: ["Must not appear."] },
+      });
+      const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+      const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+      act(() => {
+        result.current.start("job-status-failed", "thread-status-failed", onCompleted, vi.fn());
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({});
+    });
+  });
 });

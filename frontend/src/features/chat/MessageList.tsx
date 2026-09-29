@@ -18,6 +18,8 @@ type Props = {
   /** Keep this and `onFork` referentially stable; a new function each render re-renders every card. */
   onRegenerate: (message: ChatMessage, index: number) => void;
   onFork: (message: ChatMessage) => void;
+  /** Stores a memory the model suggested. Keep it stable, like the two above. */
+  onSaveMemory?: (memo: string) => Promise<boolean>;
   onNearEndChange: (isNearEnd: boolean) => void;
   /** The in-flight streaming bubble, rendered inside the same scroll container so it participates in auto-scroll. */
   trailingContent?: ReactNode;
@@ -32,7 +34,7 @@ type Props = {
  * container is actually in play so the caller doesn't need to know.
  */
 export const MessageList = forwardRef<MessageListHandle, Props>(function MessageList(
-  { messages, isStreaming, finalAssistantId, busy, forkingMessageId, onRegenerate, onFork, onNearEndChange, trailingContent },
+  { messages, isStreaming, finalAssistantId, busy, forkingMessageId, onRegenerate, onFork, onSaveMemory, onNearEndChange, trailingContent },
   ref,
 ) {
   const plainRef = useRef<HTMLDivElement>(null);
@@ -108,6 +110,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       // these stable (useCallback).
       onRegenerate={onRegenerate}
       onFork={onFork}
+      onSaveMemory={onSaveMemory}
       forking={forkingMessageId === message.id}
     />
   );
