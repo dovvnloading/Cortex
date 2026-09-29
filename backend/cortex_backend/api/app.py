@@ -11,10 +11,12 @@ import tempfile
 from pathlib import Path
 from collections.abc import Callable
 from collections.abc import Iterable
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -34,6 +36,39 @@ from .routers import build_router
 from .security import SessionManager
 
 logger = logging.getLogger(__name__)
+
+# A rejected request can report where it went wrong and why, never what the
+# caller sent: that would put prompts and attachment bodies into error
+# responses, where devtools, proxies and logs keep them. What is left is
+# bounded as well, so an absurd field name or a huge batch of errors cannot
+# turn the report into an echo of its own.
+_MAX_VALIDATION_ISSUES = 50
+_MAX_VALIDATION_TEXT = 300
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= _MAX_VALIDATION_TEXT else text[:_MAX_VALIDATION_TEXT] + "..."
+
+
+def redact_validation_errors(errors: Iterable[Any]) -> list[dict[str, Any]]:
+    """Keep each issue's location, message and type; drop ``input``, ``ctx`` and ``url``."""
+    return [
+        {
+            "loc": [part if isinstance(part, int) else _clip(str(part)) for part in error.get("loc", ())],
+            "msg": _clip(str(error.get("msg", ""))),
+            "type": str(error.get("type", "")),
+        }
+        for error in list(errors)[:_MAX_VALIDATION_ISSUES]
+    ]
+
+
+async def _validation_error_response(request: Request, exc: Exception) -> JSONResponse:
+    del request
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else ()
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content={"detail": redact_validation_errors(errors)},
+    )
 
 
 @dataclass(slots=True)
@@ -207,6 +242,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    app.add_exception_handler(RequestValidationError, _validation_error_response)
     app.state.dependencies = dependencies
     app.state.chat_attachment_service = getattr(
         app.state.dependencies, "attachments", None

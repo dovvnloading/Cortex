@@ -30,6 +30,7 @@ from cortex_backend.testing import (
     build_demo_dependencies,
     install_execution_preview,
 )
+from cortex_backend.services.attachments import MAX_CHAT_ATTACHMENT_BYTES
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 from support import session_headers
 
@@ -319,3 +320,75 @@ def test_a_job_that_does_not_exist_is_still_a_404_for_approval_and_cancel(tmp_pa
 
     assert decision.status_code == 404
     assert cancel.status_code == 404
+
+
+def _assert_issues_carry_only_where_and_why(response: httpx.Response) -> list[dict]:
+    """The shape the SPA reads (``loc`` and ``msg``), and nothing that could
+    carry what the caller sent (``input``, ``ctx``, ``url``)."""
+    assert response.status_code == 422, response.text
+    issues = response.json()["detail"]
+    assert issues
+    for issue in issues:
+        assert set(issue) == {"loc", "msg", "type"}, issue
+        assert issue["loc"] and isinstance(issue["msg"], str) and issue["msg"]
+    return issues
+
+
+def test_validation_errors_do_not_echo_the_offending_input(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """An invalid PUT /settings echoed the whole settings object, system
+    instructions included, and an over-long attachment echoed its entire base64
+    body. Prompts are not meant to reach anything a proxy or a log can keep."""
+    prompt = "PRIVATE-PROMPT-" + "x" * 600
+
+    memory = client.post("/api/v1/memories", json={"memo": prompt}, headers=headers)
+    memory_issues = _assert_issues_carry_only_where_and_why(memory)
+    assert memory_issues[0]["loc"] == ["body", "memo"]
+    assert "PRIVATE-PROMPT" not in memory.text
+
+    current = client.get("/api/v1/settings", headers=headers).json()["settings"]
+    current["generation"]["system_instructions"] = prompt
+    current["generation"]["num_ctx"] = 1  # invalid: below the minimum
+    settings = client.put("/api/v1/settings", json={"settings": current}, headers=headers)
+    settings_issues = _assert_issues_carry_only_where_and_why(settings)
+    assert ["body", "settings", "generation", "num_ctx"] in [
+        issue["loc"] for issue in settings_issues
+    ]
+    assert "PRIVATE-PROMPT" not in settings.text
+
+    oversized = "Q" * ((MAX_CHAT_ATTACHMENT_BYTES * 4) // 3 + 1024)
+    attachment = client.post(
+        "/api/v1/attachments",
+        json={"request_id": "echo-1", "filename": "notes.txt", "content_base64": oversized},
+        headers=headers,
+    )
+    _assert_issues_carry_only_where_and_why(attachment)
+    assert "QQQQQQQQ" not in attachment.text
+    assert len(attachment.content) < 2_000
+
+
+def test_a_validation_report_is_bounded_too(client: TestClient, headers: dict[str, str]) -> None:
+    """The location is a field name, and the caller chose that as well."""
+    response = client.post(
+        "/api/v1/memories",
+        json={"memo": "fine", "K" * 5_000: "unknown field"},
+        headers=headers,
+    )
+
+    issues = _assert_issues_carry_only_where_and_why(response)
+    assert all(len(str(part)) <= 303 for issue in issues for part in issue["loc"])
+    assert len(response.content) < 2_000
+
+
+def test_invalid_json_is_reported_without_the_body(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/memories",
+        content=b'{"memo": "BODY-MARKER", oops',
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    _assert_issues_carry_only_where_and_why(response)
+    assert "BODY-MARKER" not in response.text
