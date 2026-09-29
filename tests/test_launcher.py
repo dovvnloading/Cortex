@@ -390,7 +390,8 @@ def _run_window_against_pywebview_defaults(
         lambda name: FakeWebview if name == "webview" else None,
     )
     monkeypatch.setattr(desktop_module.sys, "platform", "win32")
-    monkeypatch.setattr(desktop_module, "_apply_windows_dark_title_bar", lambda **kwargs: True)
+    monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
+    monkeypatch.setattr(desktop_module, "_apply_windows_title_bar_theme", lambda **kwargs: True)
     desktop_module.run_desktop_window(
         DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "webview")
     )
