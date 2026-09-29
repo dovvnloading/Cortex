@@ -1085,21 +1085,70 @@ class DatabaseManager:
         os.makedirs(archive_dir, exist_ok=True)
         return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
 
+    def _retire_legacy_directory(self) -> None:
+        """Take the legacy history directory out of the way once it holds nothing.
+
+        Migrated files move to ``<dir>_migrated_<time>`` and unreadable ones to
+        ``<dir>/quarantine``, so the directory itself outlives every pass, and
+        with it the "legacy history found" warning on every launch. It is
+        removed only when it is empty (an empty ``quarantine`` folder counts as
+        empty), and only with ``rmdir``, which the operating system refuses for
+        a directory that holds anything: no chat file, quarantined or not, and
+        no stray file of the user's is ever moved or deleted here. A directory
+        that still holds any of them is left exactly as it is.
+        """
+        directory = self.legacy_history_dir
+        quarantine = os.path.join(directory, "quarantine")
+        try:
+            others = [name for name in os.listdir(directory) if name != "quarantine"]
+            # A link is somebody's arrangement, not ours to look through or remove.
+            has_quarantine = os.path.lexists(quarantine)
+            quarantined = (
+                os.listdir(quarantine)
+                if has_quarantine and os.path.isdir(quarantine) and not os.path.islink(quarantine)
+                else None
+            )
+            if others or (has_quarantine and quarantined is None):
+                return
+            if quarantined:
+                logging.info(
+                    "Legacy chat files that could not be migrated are kept in the quarantine "
+                    "folder of the old chat history directory."
+                )
+                return
+            if has_quarantine:
+                os.rmdir(quarantine)
+            os.rmdir(directory)
+        except OSError as exc:
+            logging.info(
+                "The old chat history directory was left where it is (%s).", type(exc).__name__
+            )
+            return
+        logging.info("The old chat history directory held nothing more and was removed.")
+
     def migrate_from_json_if_needed(self) -> MigrationResult:
         """Migrate valid legacy files transactionally and isolate invalid files."""
         if not os.path.isdir(self.legacy_history_dir):
+            return MigrationResult()
+
+        pending = [
+            filename
+            for filename in sorted(os.listdir(self.legacy_history_dir))
+            if filename.lower().endswith('.json')
+            and os.path.isfile(os.path.join(self.legacy_history_dir, filename))
+        ]
+        if not pending:
+            # Nothing to import: an earlier pass already did, or the directory
+            # was never used. Stay quiet rather than warn at every launch.
+            self._retire_legacy_directory()
             return MigrationResult()
 
         logging.warning("Legacy JSON chat history found. Starting migration to SQLite...")
         migrated = skipped = quarantined = 0
         archive_dir = f"{self.legacy_history_dir}_migrated_{int(datetime.now().timestamp())}"
 
-        for filename in sorted(os.listdir(self.legacy_history_dir)):
-            if not filename.lower().endswith('.json'):
-                continue
+        for filename in pending:
             file_path = os.path.join(self.legacy_history_dir, filename)
-            if not os.path.isfile(file_path):
-                continue
 
             try:
                 chat_data = self._parse_legacy_chat(self._load_legacy_chat_file(file_path))
@@ -1178,6 +1227,7 @@ class DatabaseManager:
             result.skipped,
             result.quarantined,
         )
+        self._retire_legacy_directory()
         return result
 
     def create_chat(self, thread_id: str, title: str):

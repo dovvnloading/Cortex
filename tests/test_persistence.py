@@ -2,6 +2,7 @@
 
 import errno
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -577,3 +578,119 @@ def test_the_memory_backup_copy_is_flushed_to_disk_before_it_replaces_the_backup
     monkeypatch.undo()
 
     assert flushed_before_backup_replaced == [2]
+
+
+# -- the legacy JSON directory is retired once it is empty ---------------------------
+
+
+def _legacy_chat(directory: Path, name: str, *, valid: bool = True) -> Path:
+    path = directory / f"{name}.json"
+    if valid:
+        path.write_text(
+            json.dumps({"id": name, "title": name, "messages": [{"role": "user", "content": "hi"}]}),
+            encoding="utf-8",
+        )
+    else:
+        path.write_text("{not json", encoding="utf-8")
+    return path
+
+
+def _legacy_manager(tmp_path: Path) -> tuple[DatabaseManager, Path]:
+    legacy = tmp_path / "chat_history"
+    legacy.mkdir()
+    return DatabaseManager(db_path=str(tmp_path / "chats.sqlite"), legacy_history_dir=str(legacy)), legacy
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+def test_a_second_migration_pass_is_silent_and_retires_the_source_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    _legacy_chat(legacy, "one")
+    _legacy_chat(legacy, "two")
+
+    with caplog.at_level(logging.INFO):
+        first = manager.migrate_from_json_if_needed()
+    assert first.migrated == 2
+    assert len(_warnings(caplog)) == 1  # the one-time "legacy history found"
+    archives = list(tmp_path.glob("chat_history_migrated_*"))
+    assert len(archives) == 1
+    assert sorted(entry.name for entry in archives[0].iterdir()) == ["one.json", "two.json"]
+    assert not legacy.exists()  # nothing left in it, so it is gone
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        second = manager.migrate_from_json_if_needed()
+
+    assert second == storage.MigrationResult()
+    assert caplog.records == []
+    assert sorted(entry.name for entry in archives[0].iterdir()) == ["one.json", "two.json"]
+    assert {chat["id"] for chat in manager.get_all_chats_summary()} == {"one", "two"}
+
+
+def test_an_empty_legacy_directory_is_retired_without_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    (legacy / "quarantine").mkdir()  # left empty by an earlier pass
+
+    with caplog.at_level(logging.INFO):
+        result = manager.migrate_from_json_if_needed()
+
+    assert result == storage.MigrationResult()
+    assert _warnings(caplog) == []
+    assert not legacy.exists()
+
+
+def test_quarantined_files_keep_the_legacy_directory_and_are_never_touched(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    _legacy_chat(legacy, "good")
+    _legacy_chat(legacy, "broken", valid=False)
+    manager.migrate_from_json_if_needed()
+    quarantined = legacy / "quarantine" / "broken.json"
+    assert quarantined.read_text(encoding="utf-8") == "{not json"
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        again = manager.migrate_from_json_if_needed()
+
+    assert again == storage.MigrationResult()
+    assert _warnings(caplog) == []
+    assert any("quarantine" in record.getMessage() for record in caplog.records)
+    assert quarantined.read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_stray_file_keeps_the_legacy_directory(tmp_path: Path) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    _legacy_chat(legacy, "one")
+    (legacy / "notes.txt").write_text("mine", encoding="utf-8")
+
+    manager.migrate_from_json_if_needed()
+    manager.migrate_from_json_if_needed()
+
+    assert (legacy / "notes.txt").read_text(encoding="utf-8") == "mine"
+
+
+def test_a_chat_file_that_could_not_be_archived_stays_and_keeps_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    source = _legacy_chat(legacy, "one")
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "held by another program")
+
+    monkeypatch.setattr(manager, "_archive_legacy_file", refuse)
+    manager.migrate_from_json_if_needed()
+    monkeypatch.undo()
+
+    assert source.exists()  # the source is what the next launch imports again
+    again = manager.migrate_from_json_if_needed()
+    assert again.skipped == 1  # already imported, so it is archived rather than duplicated
+    assert not source.exists()
+    assert len(manager.get_all_chats_summary()) == 1
