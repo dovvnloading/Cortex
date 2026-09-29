@@ -57,6 +57,15 @@ _WIDE_CHAR = re.compile(f"[{chr(WIDE_CHAR_START)}-{chr(0x10FFFF)}]")
 SAFETY_MARGIN = 1.10
 # What a chat template adds around every message (role markers, separators).
 MESSAGE_OVERHEAD_TOKENS = 4
+# What one attached image is assumed to cost. This is an allowance, not a
+# measurement: an image's token count depends on the vision model and on the
+# picture (a few hundred for some, well over a thousand for others), and
+# neither Ollama nor llama-server's text tokenizer reports it before the turn
+# runs. Without any figure an image took no room in the budget at all, so a
+# prompt with a picture in it could be sized to the brim and then overflow.
+# Deliberately on the high side; a model that needs less only keeps a little
+# less history.
+IMAGE_TOKEN_ALLOWANCE = 1024
 
 # When the runtime reports a prompt at least this close to the whole window, it
 # was truncated or filled to the brim, which is not a reading to learn from.
@@ -202,6 +211,7 @@ TOKEN_RATIOS = TokenRatioRegistry()
 
 __all__ = [
     "DEFAULT_CHARS_PER_TOKEN",
+    "IMAGE_TOKEN_ALLOWANCE",
     "MAX_CHARS_PER_TOKEN",
     "MESSAGE_OVERHEAD_TOKENS",
     "MIN_CHARS_PER_TOKEN",

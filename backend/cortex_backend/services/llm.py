@@ -700,14 +700,28 @@ class SynthesisAgent:
         )
 
     @staticmethod
+    def _image_tokens(prompt: Sequence[Mapping[str, Any]]) -> int:
+        """What the images in a prompt are assumed to cost; an allowance, not a count.
+
+        The text tokenizer does not see an image, and no runtime reports what
+        one costs before the turn runs, so each takes the fixed allowance in
+        ``token_budget`` and every budget decision leaves that room.
+        """
+        return token_budget.IMAGE_TOKEN_ALLOWANCE * sum(
+            len(item.get("images") or ()) for item in prompt
+        )
+
+    @staticmethod
     def estimate_prompt_tokens(prompt: Sequence[Mapping[str, Any]], model: str | None = None) -> int:
-        """Estimated size of a whole prompt: chat-template overhead and the safety margin included.
+        """Estimated size of a whole prompt: template overhead, images and the safety margin included.
 
         Every "does it fit" decision below goes through this one function, so
         the margin lives in exactly one place.
         """
         ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
-        return token_budget.with_safety_margin(SynthesisAgent._raw_prompt_tokens(prompt, ratio))
+        return token_budget.with_safety_margin(
+            SynthesisAgent._raw_prompt_tokens(prompt, ratio) + SynthesisAgent._image_tokens(prompt)
+        )
 
     @classmethod
     def output_token_reservation(cls, num_ctx: int) -> int:
@@ -855,9 +869,19 @@ class SynthesisAgent:
             host_observations=host_observations,
         )
         ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
+        # The base prompt above is built without the attachments, so the images
+        # among them are not in its estimate: they take their share of the
+        # window before any document does.
+        image_tokens = token_budget.with_safety_margin(
+            token_budget.IMAGE_TOKEN_ALLOWANCE
+            * sum(1 for item in attachments if item.kind == "image" and item.image_base64)
+        )
         available_tokens = max(
             0,
-            int(num_ctx) - cls.output_token_reservation(num_ctx) - cls.estimate_prompt_tokens(base_prompt, model),
+            int(num_ctx)
+            - cls.output_token_reservation(num_ctx)
+            - cls.estimate_prompt_tokens(base_prompt, model)
+            - image_tokens,
         )
         # One maximal document (its text plus the notice the resolver appends
         # when it had to cut it) always fits a window with room for it.
@@ -1121,7 +1145,7 @@ class SynthesisAgent:
         # count. Rebuilding and rescanning the whole prompt for every candidate
         # made the walk quadratic, and much worse for any text that is not
         # plain ASCII (a single em dash sends every scan down the slow path).
-        *leading, holder = PromptTemplate.build_synthesis_prompt(
+        base_prompt = PromptTemplate.build_synthesis_prompt(
             query,
             "",
             permanent_memories,
@@ -1132,8 +1156,11 @@ class SynthesisAgent:
             bypass_system_prompt=bypass_system_prompt,
             host_observations=host_observations,
         )
-        fixed_tokens = token_budget.MESSAGE_OVERHEAD_TOKENS * (len(leading) + 1) + sum(
-            token_budget.estimate_tokens(str(message.get("content", "")), ratio) for message in leading
+        *leading, holder = base_prompt
+        fixed_tokens = (
+            token_budget.MESSAGE_OVERHEAD_TOKENS * (len(leading) + 1)
+            + sum(token_budget.estimate_tokens(str(message.get("content", "")), ratio) for message in leading)
+            + cls._image_tokens(base_prompt)
         )
         holder_text = str(holder.get("content", ""))
         holder_length = len(holder_text)
@@ -1663,7 +1690,12 @@ class SynthesisAgent:
         # not turned into a ratio.
         token_budget.TOKEN_RATIOS.observe(self.gen_model, texts, measured_tokens)
         limit = max(256, num_ctx) - self.output_token_reservation(num_ctx)
-        if measured_tokens <= limit or not turns:
+        # The tokenizer counts the text of the prompt and nothing else, so the
+        # images in it are added at the allowance: a prompt with a picture in it
+        # can pass on its text and still not fit.
+        image_tokens = self._image_tokens(prompt_messages)
+        total_tokens = measured_tokens + image_tokens
+        if total_tokens <= limit or not turns:
             return prompt_messages, 0
         # The count is exact, so it is believed however far the estimate was off.
         # It used to be turned into a characters-per-token ratio for ordinary
@@ -1676,12 +1708,12 @@ class SynthesisAgent:
         scale = measured_tokens / self._raw_prompt_tokens(prompt_messages, ratio)
         remaining: list[dict[str, Any]] = [dict(turn) for turn in turns]
         dropped = 0
-        while remaining and measured_tokens > limit:
+        while remaining and total_tokens > limit:
             remaining = drop_oldest_exchange(remaining)
             dropped += 1
             prompt_messages = build_prompt(remaining)
-            measured_tokens = token_budget.with_safety_margin(
-                math.ceil(scale * self._raw_prompt_tokens(prompt_messages, ratio))
+            total_tokens = token_budget.with_safety_margin(
+                math.ceil(scale * self._raw_prompt_tokens(prompt_messages, ratio)) + image_tokens
             )
         return prompt_messages, dropped
 

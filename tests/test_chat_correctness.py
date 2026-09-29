@@ -697,6 +697,116 @@ class MeasuredPromptTests(unittest.TestCase):
         self.assertEqual({kind for kind, _ in seen}, {"thinking", "content"})
 
 
+class ImageBudgetTests(unittest.TestCase):
+    """A picture takes room in the window, and every budget decision leaves it.
+
+    Nothing reports what an image costs before the turn runs, so it is budgeted
+    at a fixed allowance (``token_budget.IMAGE_TOKEN_ALLOWANCE``). That is not a
+    measurement, and these tests only hold the budget to it: without a figure an
+    image took no room at all, and a prompt with a picture in it could be sized
+    to the brim and then overflow.
+    """
+
+    BUDGET = {"query": "next", "num_ctx": 8192, **_NO_MEMORY}
+    MODEL = "gguf:test.gguf"
+
+    @staticmethod
+    def _image(name: str = "cat") -> GenerationAttachment:
+        return GenerationAttachment(
+            attachment_id=name, filename=f"{name}.png", mime_type="image/png", kind="image", image_base64="AAAA"
+        )
+
+    @staticmethod
+    def _prompt(*attachments: GenerationAttachment) -> list[dict]:
+        return PromptTemplate.build_synthesis_prompt(
+            "q", "h", [], False, None, attachments, code_execution_eligible=False
+        )
+
+    def test_an_image_takes_its_allowance_out_of_the_estimate(self):
+        none = SynthesisAgent.estimate_prompt_tokens(self._prompt())
+        one = SynthesisAgent.estimate_prompt_tokens(self._prompt(self._image("a")))
+        two = SynthesisAgent.estimate_prompt_tokens(self._prompt(self._image("a"), self._image("b")))
+
+        allowance = token_budget.IMAGE_TOKEN_ALLOWANCE
+        self.assertGreaterEqual(one - none, allowance)
+        self.assertGreaterEqual(two - one, allowance)
+        # A generous, fixed figure: several hundred tokens at least, and not a window's worth.
+        self.assertTrue(512 <= allowance <= 2048)
+
+    def test_history_leaves_room_for_an_attached_image(self):
+        messages = _exchanges(60, size=400)
+        without = SynthesisAgent.select_history_messages(list(messages), **self.BUDGET)
+        with_image = SynthesisAgent.select_history_messages(
+            list(messages), **self.BUDGET, attachments=(self._image(),)
+        )
+
+        self.assertLess(len(with_image), len(without))
+        # And what remains, picture included, fits the limit the way any prompt does.
+        transcript = SynthesisAgent.fit_history_to_context(
+            list(messages), **self.BUDGET, attachments=(self._image(),)
+        )
+        prompt = PromptTemplate.build_synthesis_prompt(
+            "next", transcript, [], False, None, (self._image(),), code_execution_eligible=False
+        )
+        limit = 8192 - SynthesisAgent.output_token_reservation(8192)
+        self.assertLessEqual(SynthesisAgent.estimate_prompt_tokens(prompt), limit)
+
+    def test_a_document_gets_less_room_beside_an_image(self):
+        document = GenerationAttachment(
+            attachment_id="doc", filename="doc.md", mime_type="text/markdown", kind="document",
+            text_content="important text. " * 10_000,
+        )
+        budget = {
+            "query": "Summarize.",
+            "chat_history": "No history available.",
+            "permanent_memories": [],
+            "memories_enabled": False,
+            "user_system_instructions": None,
+            "num_ctx": 8192,
+        }
+
+        alone = SynthesisAgent.fit_attachments_to_context((document,), **budget)
+        beside = SynthesisAgent.fit_attachments_to_context((document, self._image()), **budget)
+
+        self.assertLess(len(beside[0].text_content or ""), len(alone[0].text_content or ""))
+        self.assertEqual(beside[1].kind, "image")
+
+    def _generate(self, client: _TokenizingClient, *attachments: GenerationAttachment) -> list[str]:
+        notices: list[str] = []
+        agent = SynthesisAgent(self.MODEL, "title", "translate", client)
+        history = SynthesisAgent._paired_history_messages(_exchanges(28, size=1000))
+        agent.generate(
+            "question", "unused", [], False, None, options={"num_ctx": 16384},
+            history_messages=history, attachments=attachments,
+            on_delta=lambda kind, text: notices.append(text) if kind == "notice" else None,
+        )
+        return notices
+
+    def test_a_prompt_that_passes_on_its_text_alone_is_trimmed_for_the_image_it_carries(self):
+        """The tokenizer counts text. The picture is added at the allowance, or the prompt overflows."""
+        limit = 16384 - SynthesisAgent.output_token_reservation(16384)
+        allowance = token_budget.IMAGE_TOKEN_ALLOWANCE
+
+        plain_client = _TokenizingClient(2.0)
+        self.assertEqual(self._generate(plain_client), [])
+        sent = plain_client.sent or []
+        text_tokens = sum(int(len(m["content"]) / 2.0) + 4 for m in sent)
+        # The setup is only a test of the picture if the text alone just fits.
+        self.assertLessEqual(text_tokens, limit)
+        self.assertGreater(text_tokens + allowance, limit)
+
+        token_budget.TOKEN_RATIOS.reset()
+        seeing_client = _TokenizingClient(2.0)
+        notices = self._generate(seeing_client, self._image())
+
+        self.assertEqual(len(notices), 1)
+        kept = (seeing_client.sent or [])[1:-1]
+        self.assertLess(len(kept), len(sent) - 2)
+        self.assertLessEqual(
+            sum(int(len(m["content"]) / 2.0) + 4 for m in seeing_client.sent or []) + allowance, limit
+        )
+
+
 class HistoryRetentionTests(unittest.TestCase):
     """What is kept of a long conversation, and how the model and the user are told."""
 
