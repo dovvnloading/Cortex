@@ -70,6 +70,13 @@ def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: A
 _DELTA_FLUSH_CHARS = 80
 _DELTA_FLUSH_SECONDS = 0.08
 
+# What the user is told when the model ran into the context ceiling. Kept here,
+# not in the API layer, because the service is what decides that it happened.
+TRUNCATED_ANSWER_MESSAGE = (
+    "The answer was cut short by the context limit. "
+    "Start a new chat, or raise the context window in Settings."
+)
+
 
 class GenerationEngine(Protocol):
     """Model-facing operations required by the generation use case.
@@ -424,6 +431,20 @@ class GenerationService:
                     "Generation returned an invalid memory command.",
                     operation="generation",
                 )
+            # An answer the context ceiling cut off looks exactly like a
+            # finished one, and on a reasoning model it can be empty: the
+            # thinking used up what was left. The runtime says so
+            # (``done_reason`` / ``finish_reason``); tell the user, beside the
+            # answer, while there is still a live stream to tell them on. The
+            # stats saved with the message carry the same reason.
+            if stats is not None and stats.stop_reason == "length":
+                self._publish(
+                    sink,
+                    snapshot,
+                    "answer_truncated",
+                    TRUNCATED_ANSWER_MESSAGE,
+                    data={"truncated": True, "stop_reason": stats.stop_reason},
+                )
             if not snapshot.memories_enabled:
                 memory_command = MemoryCommand()
 
@@ -575,6 +596,7 @@ class GenerationService:
         snapshot: GenerationSnapshot,
         phase: ProgressPhase,
         message: str,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
         sink.publish(
             ProgressEvent(
@@ -582,6 +604,7 @@ class GenerationService:
                 thread_id=snapshot.thread_id,
                 phase=phase,
                 message=message,
+                data=data,
             )
         )
 

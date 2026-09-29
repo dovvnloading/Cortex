@@ -29,6 +29,9 @@ class FakeLlamaCppState:
     fail_chat_mid_stream: bool = False
     generation_response: str | None = None
     generation_thoughts: str | None = None
+    # What the fake server reports as ``finish_reason`` on a completed reply;
+    # "length" is how a real one says the context ceiling cut the answer off.
+    finish_reason: str = "stop"
     installed_files: set[str] = field(
         default_factory=lambda: {"tiny-test-model.q4_k_m.gguf"}
     )
@@ -122,7 +125,7 @@ def create_fake_llamacpp_app(state: FakeLlamaCppState | None = None) -> FastAPI:
                 for piece in _fake_llamacpp_chunks(content):
                     yield _sse({"choices": [{"delta": {"content": piece}}]})
                 yield _sse({
-                    "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    "choices": [{"delta": {}, "finish_reason": fake_state.finish_reason}],
                     "usage": usage,
                     "timings": timings,
                 })
@@ -133,7 +136,7 @@ def create_fake_llamacpp_app(state: FakeLlamaCppState | None = None) -> FastAPI:
         if fake_state.generation_thoughts:
             message["reasoning_content"] = fake_state.generation_thoughts
         return {
-            "choices": [{"message": message, "finish_reason": "stop"}],
+            "choices": [{"message": message, "finish_reason": fake_state.finish_reason}],
             "usage": usage,
             "timings": timings,
         }

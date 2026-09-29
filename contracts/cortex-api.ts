@@ -315,6 +315,7 @@ export interface GenerationStats {
   total_duration_ms?: number | null;
   tokens_per_second?: number | null;
   stopped?: boolean | null;
+  stop_reason?: string | null;
 }
 
 export interface GrayscaleStep {

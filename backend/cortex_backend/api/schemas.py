@@ -163,6 +163,10 @@ class GenerationStats(APIModel):
     # True when the user pressed Stop and this is the part of the answer they
     # had already seen. The model reported no usage for an unfinished turn.
     stopped: bool | None = None
+    # Why the model stopped. "length" means it hit the context limit and the
+    # answer is cut off; "stop" is a normal finish. Absent when the runtime did
+    # not say, and on messages saved before it was recorded.
+    stop_reason: str | None = None
 
 
 class ChatMessage(APIModel):

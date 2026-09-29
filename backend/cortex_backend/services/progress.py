@@ -16,6 +16,11 @@ ProgressPhase = Literal[
     # failure there is reported rather than raised: the answer is kept and the
     # user is told it was not translated.
     "translation_failed",
+    # The model stopped because it ran into the context ceiling, so the answer
+    # that follows is cut off. Reported beside the answer, not instead of it:
+    # the turn still succeeded, and the text is kept. api/routes.py sends it as
+    # a plain generation.status carrying ``truncated`` and ``stop_reason``.
+    "answer_truncated",
     # Live model output, published as it arrives. api/routes.py maps these to
     # generation.content_delta / generation.thinking_delta, the event names the
     # frontend already renders incrementally.

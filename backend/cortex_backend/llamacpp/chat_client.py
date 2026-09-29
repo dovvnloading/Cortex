@@ -253,6 +253,7 @@ class LlamaCppChatClient:
         reasoning_parts: list[str] = []
         usage: dict | None = None
         timings: dict | None = None
+        finish_reason: str | None = None
         self._begin_http_request()
         try:
             with self._http.stream(
@@ -293,6 +294,10 @@ class LlamaCppChatClient:
                                 raise LlamaCppError(_stream_error_detail(stream_error))
                             choices = chunk.get("choices") or []
                             if choices:
+                                # Arrives once, on the last content chunk; the
+                                # usage-only chunk after it has no choices.
+                                if choices[0].get("finish_reason"):
+                                    finish_reason = choices[0]["finish_reason"]
                                 delta = choices[0].get("delta") or {}
                                 content_piece = delta.get("content")
                                 if content_piece:
@@ -337,6 +342,7 @@ class LlamaCppChatClient:
                     "content": "".join(content_parts),
                     "reasoning_content": "".join(reasoning_parts) or None,
                 },
+                "finish_reason": finish_reason,
             }],
             "usage": usage,
             "timings": timings,
@@ -482,7 +488,7 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
         # approximate eval duration from the call's own wall-clock latency
         # rather than surfacing no stats at all.
         predicted_ms = elapsed_seconds * 1000
-    return {
+    adapted: dict[str, Any] = {
         "message": {
             "content": message.get("content") or "",
             "thinking": message.get("reasoning_content"),
@@ -493,3 +499,12 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
         "eval_duration": int(predicted_ms * 1_000_000),
         "total_duration": int(((prompt_ms or 0) + predicted_ms) * 1_000_000),
     }
+    # llama-server's ``finish_reason`` is Ollama's ``done_reason``: "stop" for a
+    # finished answer, "length" for one cut off by the context ceiling. Carried
+    # under Ollama's name so the code that reads stats never has to ask which
+    # runtime answered. Left out when the server said nothing (a cancelled
+    # stream, an older build), so the dict keeps its old shape in that case.
+    finish_reason = choices[0].get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason:
+        adapted["done_reason"] = finish_reason
+    return adapted

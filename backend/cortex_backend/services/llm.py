@@ -67,11 +67,20 @@ def _extract_stats(response: dict) -> GenerationStats | None:
     Ollama reports these fields at the top level of the response, not under
     ``message``. A fresh/unsupported backend may omit them entirely, in
     which case there is nothing meaningful to show and this returns None.
+
+    ``done_reason`` is why the model stopped. The llama.cpp adapter reports
+    its ``finish_reason`` under the same name, so nothing here needs to know
+    which runtime answered. ``"length"`` -- the answer hit the context ceiling
+    -- is kept even when no usage numbers came with it.
     """
     eval_count = response.get("eval_count")
     eval_duration = response.get("eval_duration")
     total_duration = response.get("total_duration")
-    if eval_count is None and total_duration is None:
+    reason = response.get("done_reason")
+    stop_reason = reason if isinstance(reason, str) and reason else None
+    # A cut-off answer is worth reporting even when the runtime sent no usage
+    # numbers with it; an ordinary finish with no numbers still is not.
+    if eval_count is None and total_duration is None and stop_reason != "length":
         return None
     tokens_per_second = None
     if isinstance(eval_count, (int, float)) and isinstance(eval_duration, (int, float)) and eval_duration:
@@ -83,6 +92,7 @@ def _extract_stats(response: dict) -> GenerationStats | None:
         eval_duration_ms=_ns_to_ms(eval_duration),
         total_duration_ms=_ns_to_ms(total_duration),
         tokens_per_second=tokens_per_second,
+        stop_reason=stop_reason,
     )
 
 
