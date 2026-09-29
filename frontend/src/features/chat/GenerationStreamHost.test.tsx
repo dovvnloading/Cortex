@@ -163,6 +163,30 @@ describe("GenerationStreamHost", () => {
     expect(streamGeneration.mock.calls[1][2]).toMatchObject({ afterEventId: 0 });
   });
 
+  it("keeps following a job when the stream is cut by an abort that was not the host's own", async () => {
+    // The host will not attach to a job it already attached to, so a consumer
+    // that gave up on such an abort would leave the job tracked with nothing
+    // reading it. The consumer must check the job and open the stream again.
+    const streamGeneration = vi.fn((_jobId: string, _onEvent: unknown, options: { signal?: AbortSignal } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) return Promise.reject(new ApiError(0, "The request was cancelled.", "aborted"));
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-1", kind: "generation", status: "running", sequence: 1 });
+    const { api } = fakeStreamApi({
+      streamGeneration: streamGeneration as unknown as CortexApi["streamGeneration"],
+      generationStatus,
+    });
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+
+    act(() => trackGeneration("job-1", "thread-a"));
+
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    expect((streamGeneration.mock.calls[1][2] as { signal: AbortSignal }).signal.aborted).toBe(false);
+    expect(useChatStore.getState().generation.jobId).toBe("job-1");
+  });
+
   it("does not adopt a stored job when its effect re-runs with the store idle after a first look found nothing", async () => {
     const { api, attachments } = fakeStreamApi();
     const { rerender } = render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);

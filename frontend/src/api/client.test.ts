@@ -770,6 +770,42 @@ describe("CortexApi failure kinds", () => {
     await expect(api.generationStatus("job-1", { signal: controller.signal })).rejects.toMatchObject({ kind: "aborted" });
   });
 
+  it("does not call an AbortError the caller did not ask for a cancellation", async () => {
+    // `aborted` means the caller cancelled. An AbortError while the caller's own
+    // signal is still live, or with no signal at all, came from somewhere else
+    // and is a request that got no answer, like any other lost connection.
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    const api = new CortexApi("/api/v1", fetcher);
+    const controller = new AbortController();
+
+    const withLiveSignal = await api.generationStatus("job-1", { signal: controller.signal }).catch((error: unknown) => error);
+    const withoutSignal = await api.health().catch((error: unknown) => error);
+
+    expect(controller.signal.aborted).toBe(false);
+    for (const failure of [withLiveSignal, withoutSignal]) {
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure).toMatchObject({ status: 0, kind: "network" });
+      expect(isAbortedError(failure)).toBe(false);
+    }
+  });
+
+  it("does not call an AbortError in the middle of an event stream a cancellation unless the caller aborted", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new DOMException("Aborted", "AbortError");
+      },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    const api = new CortexApi("/api/v1", fetcher);
+    const controller = new AbortController();
+
+    await expect(api.streamGeneration("job-1", vi.fn(), { signal: controller.signal })).rejects.toMatchObject({
+      status: 0,
+      kind: "network",
+    });
+  });
+
   it("does not disguise a non-transport failure as a network error", async () => {
     const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new RangeError("not a transport problem"));
     const api = new CortexApi("/api/v1", fetcher);

@@ -113,16 +113,22 @@ export function isDefinitiveRejection(error: unknown): boolean {
 
 /**
  * Give a transport failure a kind. fetch rejects with a bare `TypeError` when
- * the backend cannot be reached and with an `AbortError` when the caller
- * cancels; neither says which it was in a way call sites can rely on, and both
- * used to reach the UI as an unclassified exception. Anything else is not a
- * transport failure and passes through unchanged.
+ * the backend cannot be reached and with an `AbortError` when a signal aborts;
+ * neither says which it was in a way call sites can rely on, and both used to
+ * reach the UI as an unclassified exception. Anything else is not a transport
+ * failure and passes through unchanged.
+ *
+ * A request is `aborted` only when the caller's own signal is the one that
+ * aborted. An AbortError with that signal still live, or with no signal at all,
+ * came from somewhere else and left the request unanswered, which is a
+ * `network` failure: reporting it as a cancellation would tell the caller to
+ * stop work it never asked to stop.
  */
 function transportError(error: unknown, signal?: AbortSignal | null): unknown {
   if (error instanceof ApiError) return error;
+  if (signal?.aborted) return new ApiError(0, ABORTED_ERROR_DETAIL, "aborted");
   const name = typeof error === "object" && error !== null ? (error as { name?: unknown }).name : undefined;
-  if (signal?.aborted || name === "AbortError") return new ApiError(0, ABORTED_ERROR_DETAIL, "aborted");
-  if (error instanceof TypeError) return new ApiError(0, NETWORK_ERROR_DETAIL, "network");
+  if (error instanceof TypeError || name === "AbortError") return new ApiError(0, NETWORK_ERROR_DETAIL, "network");
   return error;
 }
 

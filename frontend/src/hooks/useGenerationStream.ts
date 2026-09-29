@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import type { CortexApi } from "../api/client";
-import { ApiError, isAbortedError } from "../api/client";
+import { ApiError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useUiStore } from "../stores/useUiStore";
 
@@ -365,7 +365,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               reconnectAttempt += 1;
             }
           } catch (streamError) {
-            if (controller.signal.aborted || isAbortedError(streamError)) return;
+            // Only this consumer's own signal means "stop". An abort from
+            // anywhere else is a dropped connection like any other: returning
+            // here would leave the job tracked with nothing reading it, and the
+            // host will not attach to a job it already attached to.
+            if (controller.signal.aborted) return;
             if (streamError instanceof ApiError && streamError.kind === "auth") {
               sessionExpired = true;
               break;
@@ -398,7 +402,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               // the pending message bubble reporting "Generating" forever
               // with no live connection left to correct it. Treat it like
               // any other dropped connection instead: keep retrying.
-              if (controller.signal.aborted || isAbortedError(statusError)) return;
+              if (controller.signal.aborted) return;
               if (statusError instanceof ApiError && statusError.kind === "auth") {
                 sessionExpired = true;
                 break;
