@@ -1170,18 +1170,32 @@ class _WindowsJobExtendedLimitInformation(ctypes.Structure):
     ]
 
 
+class _WindowsJobUiRestrictions(ctypes.Structure):
+    _fields_ = [("ui_restrictions_class", wintypes.DWORD)]
+
+
 class _WindowsProcessJob:
     """Kill-on-close Job Object for one brokered child process.
 
     The handle lives in the code worker, so terminating that worker also closes
     the job and tears down any descendants spawned by the approved process.
+
+    This module has to stay importable without its siblings or
+    ``cortex_backend.core`` (see ``test_code_execution_worker_import_stays_lean``),
+    so it carries its own small copy of the Win32 job definitions that
+    ``cortex_backend.core.win_jobs`` also has. The limits are the same ones:
+    kill-on-close, per-process and job-wide committed memory, a live-process
+    count, per-process CPU time, and every user-interface restriction.
     """
 
     _PROCESS_TIME = 0x00000002
     _ACTIVE_PROCESS = 0x00000008
     _PROCESS_MEMORY = 0x00000100
+    _JOB_MEMORY = 0x00000200
     _KILL_ON_CLOSE = 0x00002000
     _EXTENDED_LIMIT_INFORMATION = 9
+    _BASIC_UI_RESTRICTIONS = 4
+    _UILIMIT_ALL = 0x000000FF
 
     def __init__(
         self,
@@ -1220,10 +1234,15 @@ class _WindowsProcessJob:
             | self._PROCESS_TIME
             | self._ACTIVE_PROCESS
             | self._PROCESS_MEMORY
+            | self._JOB_MEMORY
         )
         limits.basic_limit_information.per_process_user_time = int(cpu_seconds * 10_000_000)
         limits.basic_limit_information.active_process_limit = active_process_limit
         limits.process_memory_limit = memory_limit
+        # The job as a whole is held to the same figure, so descendants cannot
+        # each take a per-process share of memory on top of the child's own.
+        limits.job_memory_limit = memory_limit
+        ui_restrictions = _WindowsJobUiRestrictions(self._UILIMIT_ALL)
         process_handle = getattr(process, "_handle", None)
         if process_handle is None:
             process_handle = getattr(getattr(process, "_popen", None), "_handle", None)
@@ -1233,12 +1252,21 @@ class _WindowsProcessJob:
             self.close()
             raise CodeExecutionError("process_isolation_unavailable")
         try:
-            if not kernel32.SetInformationJobObject(
-                handle,
-                self._EXTENDED_LIMIT_INFORMATION,
-                ctypes.byref(limits),
-                ctypes.sizeof(limits),
-            ) or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process_handle)):
+            if (
+                not kernel32.SetInformationJobObject(
+                    handle,
+                    self._EXTENDED_LIMIT_INFORMATION,
+                    ctypes.byref(limits),
+                    ctypes.sizeof(limits),
+                )
+                or not kernel32.SetInformationJobObject(
+                    handle,
+                    self._BASIC_UI_RESTRICTIONS,
+                    ctypes.byref(ui_restrictions),
+                    ctypes.sizeof(ui_restrictions),
+                )
+                or not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process_handle))
+            ):
                 raise CodeExecutionError("process_isolation_unavailable")
         except Exception:
             self.close()
@@ -1250,12 +1278,58 @@ class _WindowsProcessJob:
             self._kernel32.CloseHandle(handle)
 
 
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _resume_suspended_process(process: Any) -> None:
+    """Let a process created with ``CREATE_SUSPENDED`` start running.
+
+    ``NtResumeProcess`` is exported by ntdll but not documented by Microsoft;
+    psutil resumes processes with it too. It was chosen over walking a Toolhelp
+    thread snapshot because a process that has never run has exactly one
+    thread and this resumes it without having to find it. Anything but success
+    is reported as isolation being unavailable, and the caller ends the still
+    suspended process.
+    """
+
+    if os.name != "nt":
+        raise CodeExecutionError("process_isolation_unavailable")
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise CodeExecutionError("process_isolation_unavailable")
+    try:
+        ntdll = ctypes.WinDLL("ntdll.dll", use_last_error=True)
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        status = ntdll.NtResumeProcess(wintypes.HANDLE(int(handle)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        raise CodeExecutionError("process_isolation_unavailable") from None
+    # An NTSTATUS: negative values are failures.
+    if status < 0:
+        raise CodeExecutionError("process_isolation_unavailable")
+
+
+def _minimal_worker_environment() -> dict[str, str]:
+    """``SystemRoot`` on Windows, which most binaries cannot run without, and nothing else."""
+
+    system_root = os.environ.get("SystemRoot") if os.name == "nt" else None
+    return {"SystemRoot": system_root} if system_root else {}
+
+
 def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -> dict[str, Any]:
-    """Run one approved process with bounded output and descendant cleanup."""
+    """Run one approved process with bounded output and descendant cleanup.
+
+    On Windows the child is created suspended, placed in its job object while it
+    has executed nothing, and only then resumed, so it cannot start a
+    descendant that escapes the job's kill-on-close and limits. What remains: a
+    job constrains memory, process count and the user interface, not files or
+    the network, and nested jobs need Windows 8 or later (this worker is
+    itself in a job).
+    """
 
     kwargs: dict[str, Any] = {
         "cwd": str(workspace),
-        "env": {},
+        "env": _minimal_worker_environment(),
         "shell": False,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
@@ -1265,6 +1339,7 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
         kwargs["creationflags"] = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | _CREATE_SUSPENDED
         )
     else:
         kwargs["start_new_session"] = True
@@ -1274,6 +1349,7 @@ def _run_brokered_process(args: list[str], *, workspace: Path, timeout: float) -
     try:
         if os.name == "nt":
             job = _WindowsProcessJob(process)
+            _resume_suspended_process(process)
         output_lock = ThreadLock()
         output_exceeded = ThreadEvent()
         remaining = MAX_CODE_OUTPUT_BYTES
@@ -1718,8 +1794,27 @@ class _LineGuard:
         return self.trace
 
 
-def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = None, workspace: str | None = None) -> CodeExecutionResult:
-    """Execute validated source inside a child process boundary."""
+def execute_validated_source(
+    source: str,
+    capabilities: Mapping[str, Any] | None = None,
+    workspace: str | None = None,
+) -> CodeExecutionResult:
+    """Validate ``source`` and run it in *the calling process*.
+
+    This is not a process boundary. It starts no process and sets no memory or
+    CPU limit; what confines the program is the validator's allow-list, the
+    restricted builtins, the brokered ``cortex`` object and a cooperative line
+    and clock guard, none of which stops a single long-running operation. It
+    replaces ``sys.stdout``, ``sys.stderr`` and the trace function for the
+    duration of the call, so it is not safe to call from a process that
+    depends on those, and it relies on the caller for isolation.
+
+    The boundary is the worker child: ``LocalCodeAttempt`` starts one, and its
+    entry point, :func:`code_worker_main`, clears the environment, applies the
+    POSIX limits, and only calls this once the parent has attached the job
+    object that carries the Windows memory, CPU and process-count limits. Call
+    this directly only from that entry point or from a test.
+    """
 
     required = capabilities_required_by_source(source)
     grants = CodeCapabilities.from_mapping(capabilities)
@@ -1729,7 +1824,6 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     stdout = _BoundedTextWriter()
     stderr = _BoundedTextWriter()
     runtime = _CapabilityRuntime(grants, workspace or os.getcwd())
-    _apply_resource_limits()
     # One namespace, used as both globals and locals. Passing two distinct
     # mappings makes top-level names locals, which a comprehension or generator
     # expression cannot see: its implicit function scope resolves free names
@@ -1775,8 +1869,21 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     )
 
 
+# The name this function had while its docstring called it a child-process
+# boundary. It is the same in-process function; new code should use the honest
+# name. Kept so existing callers and tests keep working.
+run_code_in_worker = execute_validated_source
+
+
 def _apply_resource_limits() -> None:
-    """Apply portable best-effort worker limits before evaluating source."""
+    """Apply portable best-effort worker limits before evaluating source.
+
+    Called by the worker's entry point, not by ``execute_validated_source``:
+    these are process-wide limits and belong to the process that is the
+    boundary. ``execution/local_process.py`` has the same function for the
+    scratch and image workers; this module keeps its own copy so it imports
+    nothing from its siblings.
+    """
 
     try:
         import resource  # Unix only; unavailable on the Windows desktop build.
@@ -1791,24 +1898,24 @@ def _apply_resource_limits() -> None:
             (int(MAX_CODE_TIMEOUT_SECONDS) + 1, int(MAX_CODE_TIMEOUT_SECONDS) + 2),
         )
     except (ImportError, OSError, ValueError):
-        # Windows is bounded by the parent wall-clock watchdog and process
-        # termination. The platform-specific job object can be added without
-        # changing the worker protocol.
+        # Windows has no in-process equivalent: its memory, process-count and
+        # CPU limits are the job object the parent attaches while this worker
+        # is held at its "ready" checkpoint (LocalCodeAttempt.evaluate).
         return
 
 
 def _scrub_worker_environment() -> None:
     """Remove inherited credentials/proxy settings before broker calls."""
 
-    system_root = os.environ.get("SystemRoot") if os.name == "nt" else None
+    kept = _minimal_worker_environment()
     os.environ.clear()
-    if system_root:
-        os.environ["SystemRoot"] = system_root
+    os.environ.update(kept)
 
 
 def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, Any], workspace: str) -> None:
     try:
         _scrub_worker_environment()
+        _apply_resource_limits()
         # Let the parent distinguish a slow process bootstrap from a program
         # that exceeded its execution budget. This is especially important for
         # frozen desktop launches, where importing the worker can be slower
@@ -1827,7 +1934,7 @@ def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, An
             return
         if not isinstance(go, Mapping) or go.get("go") is not True:
             return
-        result = run_code_in_worker(source, capabilities, workspace)
+        result = execute_validated_source(source, capabilities, workspace)
         connection.send({"ok": True, "result": result.as_payload()})
     except CodeExecutionError as exc:
         connection.send({"ok": False, "code": exc.code})
@@ -1853,6 +1960,7 @@ __all__ = [
     "MAX_CODE_SOURCE_BYTES",
     "MAX_CODE_TIMEOUT_SECONDS",
     "code_worker_main",
+    "execute_validated_source",
     "run_code_in_worker",
     "validate_code_source",
 ]

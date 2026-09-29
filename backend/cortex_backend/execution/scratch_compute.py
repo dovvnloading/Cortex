@@ -16,10 +16,17 @@ from decimal import Context, Decimal, DivisionByZero, InvalidOperation, Overflow
 import re
 from typing import Final, Any
 
+from .local_process import announce_ready_and_wait, apply_resource_limits, scrub_worker_environment
+
 
 SCRATCH_COMPUTE_PROFILE: Final = "scratch.auto.v1"
 SCRATCH_PAYLOAD_SCHEMA = "scratch.compute.v1"
 SCRATCH_RESULT_SCHEMA = "scratch.result.v1"
+# Committed-memory ceiling for the scratch worker. A worker child measures
+# about 60 MiB when it is ready, with the desktop entry point's imports
+# included; a bounded decimal expression needs a small fraction of what is
+# left, so this is a runaway stop, not a working budget.
+SCRATCH_WORKER_MEMORY_BYTES = 256 * 1024 * 1024
 MAX_EXPRESSION_CHARS = 512
 MAX_AST_NODES = 96
 MAX_AST_DEPTH = 16
@@ -380,10 +387,16 @@ def scratch_worker_main(
     """Process entrypoint. It returns a compact, redacted message only."""
 
     try:
+        scrub_worker_environment()
+        apply_resource_limits(memory_bytes=SCRATCH_WORKER_MEMORY_BYTES)
         # Keep process bootstrap separate from the small expression's wall-clock
         # budget.  On a busy Windows desktop, importing the worker can take
-        # longer than evaluating a bounded expression.
-        connection.send({"ok": True, "event": "ready"})
+        # longer than evaluating a bounded expression.  The worker also holds
+        # here until the parent confirms the job that carries its memory and
+        # process-count limits is attached, so the expression is never
+        # evaluated outside them.
+        if not announce_ready_and_wait(connection):
+            return
         result = evaluate_scratch_expression(
             expression,
             cancel_check=lambda: bool(cancel_event.is_set()),
@@ -411,6 +424,7 @@ __all__ = [
     "SCRATCH_COMPUTE_PROFILE",
     "SCRATCH_PAYLOAD_SCHEMA",
     "SCRATCH_RESULT_SCHEMA",
+    "SCRATCH_WORKER_MEMORY_BYTES",
     "ScratchComputeError",
     "ScratchComputeRequest",
     "ScratchComputeResult",
