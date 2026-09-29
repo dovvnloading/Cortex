@@ -58,7 +58,18 @@ def run_desktop_window(
         ) from exc
 
     config.storage_path.mkdir(parents=True, exist_ok=True)
-    webview.settings["ALLOW_DOWNLOADS"] = False
+    # Cortex's own "Download artifact" button saves through an anchor with the
+    # ``download`` attribute. pywebview's Edge backend cancels every download
+    # unless this is true, which made that button do nothing at all. Enabling
+    # it puts a native Save As dialog in front of every download, so nothing is
+    # written without the user choosing a destination. Nothing model-generated
+    # can start one: the Markdown renderer drops the ``download`` attribute and
+    # opens links in the system browser.
+    webview.settings["ALLOW_DOWNLOADS"] = True
+    # pywebview defaults this to true, which starts WebView2 with
+    # ``--allow-file-access-from-files``. Cortex is served from the loopback
+    # backend and reads no ``file:`` URL, so leave that access off.
+    webview.settings["ALLOW_FILE_URLS"] = False
     # External links are only opened after an explicit click. The Cortex UI itself
     # always remains in this owned window and never uses a browser profile.
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
