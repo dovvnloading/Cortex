@@ -92,7 +92,14 @@ transcript.](.github/images/workspace-light.png)
   the bytes already stored, a split model (`-00001-of-00003`) is fetched whole or
   not at all, and a gated Hugging Face repository works once its access token is
   in the `HF_TOKEN` environment variable (it is sent to huggingface.co only,
-  never stored or logged).
+  never stored or logged). Links must be `https://` and must resolve to public
+  addresses; that is checked before every request and redirect. One limit: the
+  check looks the host name up itself and the connection then looks it up again,
+  so a DNS server that answers differently the second time (DNS rebinding) is not
+  stopped by the check alone. TLS still applies, because the connection is
+  verified against the requested host name and no request is sent before that
+  succeeds, but Cortex does not pin the connection to the address it checked, so
+  only download from hosts you trust.
 - **Composer model control.** Inspect the local inventory, switch models without
   leaving the composer, refresh the inventory, and stage local image or text
   attachments.

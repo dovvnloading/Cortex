@@ -10,16 +10,18 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import queue
 import re
 import shutil
 import socket
+import ssl
 import struct
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -28,12 +30,29 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# How much of the body is gathered before the loop below runs once. Small on
-# purpose: ``iter_bytes(n)`` waits for ``n`` bytes, so at one mebibyte a slow
-# link went minutes between progress updates -- and between cancellation checks.
-# 64 KiB is also the most a single socket read returns, so on a fast link this
-# costs nothing over a larger value.
+# How much of the body is gathered before the loop below runs once: the unit
+# that is written, checked against the size and free-space limits, and
+# reported. Small on purpose so a slow link does not go minutes between
+# progress updates. 64 KiB is also the most a single socket read returns, so on
+# a fast link this costs nothing over a larger value. It does not decide how
+# soon a cancel is noticed: the body is read as the network delivers it (see
+# ``_GGUFTransfer._receive``), and cancellation is polled while waiting.
 _DOWNLOAD_READ_BYTES = 64 * 1024
+# Wait tuning for the body (see ``_GGUFTransfer._receive``). Cancellation is
+# noticed within one poll interval however quiet the server is. A link that
+# delivers fewer than ``_STALL_MIN_BYTES`` in a whole window is declared
+# stalled -- a failed attempt that is retried like any other -- so a server that
+# sends a byte just often enough to dodge the 60 s read timeout cannot hold a
+# job. The window sits under that read timeout; 1 KiB per 30 s is about 34
+# bytes a second, far below any link that is really moving data.
+_CANCEL_POLL_SECONDS = 0.25
+_STALL_WINDOW_SECONDS = 30.0
+_STALL_MIN_BYTES = 1024
+# Pieces the reader thread may hold ahead of the consumer. Small so memory stays
+# bounded and a cancel does not leave much unread network data behind.
+_BODY_QUEUE_DEPTH = 2
+# How often a reader that is waiting for the consumer looks at its stop flag.
+_BODY_HANDOVER_SECONDS = 0.1
 # Forward progress at most this often (see ``_ProgressReporter``).
 _PROGRESS_INTERVAL_SECONDS = 0.5
 _MAX_DOWNLOAD_REDIRECTS = 5
@@ -130,6 +149,15 @@ class _HostResolutionError(GGUFDownloadError):
     Kept distinct so that a transfer which already holds gigabytes retries
     through a dropped connection (DNS is usually the first thing to fail) while
     a mistyped host on the first request still fails immediately.
+    """
+
+
+class _DownloadStalled(Exception):
+    """The server stopped sending data (or sends it far too slowly to be useful).
+
+    Not a ``GGUFDownloadError``: like a dropped connection it is an attempt that
+    failed for a reason the next attempt may not share, so ``_GGUFTransfer.run``
+    retries it under the usual budget instead of failing the job at once.
     """
 
 
@@ -445,8 +473,38 @@ def _explain_http_status(status_code: int, *, url: httpx.URL) -> str:
     return f"The download server answered with an unexpected error (HTTP {status_code})."
 
 
+_TLS_FAILURE_MESSAGE = (
+    "The secure connection to the server could not be verified, so nothing was downloaded. "
+    "Check the link and your computer's clock, and whether a proxy or security software "
+    "is intercepting HTTPS traffic."
+)
+_MAX_CAUSE_DEPTH = 8
+
+
+def _tls_failure(exc: BaseException) -> ssl.SSLError | None:
+    """The TLS error behind ``exc`` when the server's identity or handshake was rejected.
+
+    Certificate and handshake failures reach the caller as a plain
+    ``httpx.ConnectError`` with the ``ssl`` error somewhere down its cause chain
+    (httpx wraps httpcore's error, which wraps the ssl one). They are final: the
+    same server presents the same certificate on the next attempt. A handshake
+    that was merely cut off (``SSLEOFError``, ``SSLZeroReturnError``) is the
+    network dropping the connection and stays retryable like any other.
+    """
+    cause: BaseException | None = exc
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if cause is None:
+            return None
+        if isinstance(cause, ssl.SSLError) and not isinstance(cause, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+            return cause
+        cause = cause.__cause__ or cause.__context__
+    return None
+
+
 def _explain_transport_error(exc: httpx.TransportError) -> str:
     """A specific, safe-to-show reason for a network-level failure."""
+    if isinstance(exc, httpx.ConnectError) and _tls_failure(exc) is not None:
+        return _TLS_FAILURE_MESSAGE
     if isinstance(exc, httpx.TimeoutException):
         return "The connection timed out. Check your internet connection and try again."
     if isinstance(exc, httpx.ConnectError):
@@ -543,7 +601,7 @@ def download_gguf(
         _validate_gguf_file(temp_path)
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
     finally:
-        temp_path.unlink(missing_ok=True)
+        _remove_quietly(temp_path)
     reporter.success(destination.stat().st_size)
     return destination
 
@@ -629,11 +687,14 @@ def download_gguf_set(
             published.append(destination)
         complete = True
     finally:
+        # Best effort, and every file gets its turn: a file that cannot be
+        # removed (antivirus holding it open, say) must neither stop the rest
+        # being removed nor replace the reason the download failed.
         if not complete:
             for path in published:
-                path.unlink(missing_ok=True)
+                _remove_quietly(path)
         for path in staged:
-            path.unlink(missing_ok=True)
+            _remove_quietly(path)
     reporter.success(fetched_bytes)
     return tuple(destinations)
 
@@ -670,7 +731,19 @@ def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
             raise GGUFDownloadError(
                 "Could not save the downloaded model to its destination folder."
             ) from replace_exc
-    staged.unlink(missing_ok=True)
+    # The model is in place from here on. Removing the staging name is only
+    # tidying, and the caller removes it again: if it fails (antivirus can hold
+    # a freshly linked file open on Windows), raising would report a failure for
+    # a file that is published, and a split set would not know to roll it back.
+    _remove_quietly(staged)
+
+
+def _remove_quietly(path: Path) -> None:
+    """Delete ``path`` if it exists; a failure is logged, never raised."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove a temporary download file; it can be deleted by hand.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,7 +774,10 @@ class _GGUFTransfer:
     is a hard backstop. Every attempt re-validates the URL and every redirect
     hop, so the public-host policy in ``_validate_download_url`` holds on a
     retry exactly as on the first request. Cancellation is checked before each
-    attempt, between chunks, and during the wait before a retry.
+    attempt, between chunks, while waiting for a quiet server, and during the
+    wait before a retry. A server that stops sending, or sends a trickle, is a
+    stalled attempt (``_DownloadStalled``) and is retried like a dropped
+    connection.
     """
 
     def __init__(
@@ -752,7 +828,18 @@ class _GGUFTransfer:
                     raise GGUFDownloadError(reason) from exc
                 failure, retry_after = exc, _retry_after_seconds(exc.response)
             except httpx.TransportError as exc:
+                tls_error = _tls_failure(exc) if isinstance(exc, httpx.ConnectError) else None
+                if tls_error is not None:
+                    # Final, so not retried (five attempts and half a minute of
+                    # waiting would only end in advice about the internet
+                    # connection). Only the error's class is logged and nothing of
+                    # it is shown: its text is whatever the server's certificate
+                    # says, and it is not part of the raised error.
+                    logger.info("GGUF download stopped: TLS verification failed (%s).", type(tls_error).__name__)
+                    raise GGUFDownloadError(_TLS_FAILURE_MESSAGE) from None
                 failure, reason = exc, _explain_transport_error(exc)
+            except _DownloadStalled as exc:
+                failure, reason = exc, str(exc)
             except httpx.HTTPError as exc:
                 raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
 
@@ -837,7 +924,11 @@ class _GGUFTransfer:
             if resume is not None and response.status_code == 416:
                 # "Range not satisfiable": either every byte is already stored
                 # (the connection dropped after the last one), or the file changed.
-                return _unsatisfied_range_length(response) == resume.offset
+                # It is only "all of it" if the server's length is what is stored
+                # and does not contradict the length the first response gave: a
+                # file that changed to exactly this size is a different file.
+                reported = _unsatisfied_range_length(response)
+                return reported == resume.offset and self.total in (None, reported)
             response.raise_for_status()
             if response.status_code == 206:
                 if resume is None:
@@ -865,6 +956,60 @@ class _GGUFTransfer:
             self._store(response, base=0, total=_content_length(response))
             return True
 
+    def _receive(self, response: httpx.Response) -> Generator[bytes, None, None]:
+        """The body's pieces as the network delivers them, staying cancellable while it is quiet.
+
+        ``iter_bytes`` blocks in a socket read until the server sends something,
+        and a read timeout only fires when the server sends *nothing* for its
+        whole length: a server that sends a byte every 59 seconds waits out
+        neither, and a caller could neither stop it nor give up on it. So the
+        body is read by a helper thread and handed over through a small queue,
+        and this side polls the queue: cancellation is noticed within one poll
+        interval whatever the server is doing, and a window that delivered less
+        than ``_STALL_MIN_BYTES`` raises ``_DownloadStalled``.
+
+        Closing the generator closes the response, which is what wakes a reader
+        parked in a socket read, and only then releases the reader thread, so
+        that the thread never touches the response's stream at the same time as
+        the close. Nothing joins the thread: a transport that does not wake on
+        close leaves it to end at its read timeout, and it is a daemon thread.
+        """
+        handover: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=_BODY_QUEUE_DEPTH)
+        stop = Event()
+        Thread(
+            target=_pump_body,
+            args=(response, handover, stop),
+            name="cortex-gguf-body",
+            daemon=True,
+        ).start()
+        window_started = time.monotonic()
+        window_bytes = 0
+        try:
+            while True:
+                self._raise_if_cancelled()
+                try:
+                    item = handover.get(timeout=_CANCEL_POLL_SECONDS)
+                except queue.Empty:
+                    item = b""  # nothing arrived this interval
+                if item is None:
+                    return  # the whole body has been read
+                if isinstance(item, Exception):
+                    raise item
+                window_bytes += len(item)
+                now = time.monotonic()
+                if now - window_started >= _STALL_WINDOW_SECONDS:
+                    if window_bytes < _STALL_MIN_BYTES:
+                        raise _DownloadStalled("The download stalled: the server stopped sending data.")
+                    window_started, window_bytes = now, 0
+                if item:
+                    yield item
+        finally:
+            try:
+                response.close()
+            except Exception:  # the way out must not replace the reason for it
+                logger.debug("Closing a download response failed.")
+            stop.set()
+
     def _store(self, response: httpx.Response, *, base: int, total: int | None) -> None:
         """Write the body after byte ``base`` of the staging file and check it is whole."""
         if total is not None:
@@ -880,34 +1025,94 @@ class _GGUFTransfer:
         self.completed = base
         # A resumed file's first bytes were re-read from disk before asking.
         prefix = bytearray(GGUF_MAGIC if base else b"")
-        with self._staging_path.open("ab" if base else "wb") as handle:
-            for chunk in response.iter_bytes(_DOWNLOAD_READ_BYTES):
-                self._raise_if_cancelled()
-                if chunk:
-                    if len(prefix) < len(GGUF_MAGIC):
-                        prefix.extend(chunk[: len(GGUF_MAGIC) - len(prefix)])
-                    if len(prefix) == len(GGUF_MAGIC) and bytes(prefix) != GGUF_MAGIC:
+        pieces = self._receive(response)
+        try:
+            with self._staging_path.open("ab" if base else "wb") as handle:
+                for chunk in _in_units(pieces, _DOWNLOAD_READ_BYTES):
+                    self._raise_if_cancelled()
+                    if chunk:
+                        if len(prefix) < len(GGUF_MAGIC):
+                            prefix.extend(chunk[: len(GGUF_MAGIC) - len(prefix)])
+                        if len(prefix) == len(GGUF_MAGIC) and bytes(prefix) != GGUF_MAGIC:
+                            raise GGUFDownloadError(
+                                "This link did not return a GGUF model file (got something else, such as a "
+                                "web page, instead). Use the file's direct download link, not the page you "
+                                "view it on."
+                            )
+                    if self.completed + len(chunk) > self._limit:
                         raise GGUFDownloadError(
-                            "This link did not return a GGUF model file (got something else, such as a "
-                            "web page, instead). Use the file's direct download link, not the page you "
-                            "view it on."
+                            "This file is larger than the "
+                            f"{_format_byte_limit(self._limit)} download limit."
                         )
-                if self.completed + len(chunk) > self._limit:
-                    raise GGUFDownloadError(
-                        "This file is larger than the "
-                        f"{_format_byte_limit(self._limit)} download limit."
-                    )
-                _require_free_space(self._directory, len(chunk), self._reserve)
-                handle.write(chunk)
-                self.completed += len(chunk)
-                self._reporter.downloading(self.completed, total)
-            handle.flush()
-            os.fsync(handle.fileno())
+                    _require_free_space(self._directory, len(chunk), self._reserve)
+                    handle.write(chunk)
+                    self.completed += len(chunk)
+                    self._reporter.downloading(self.completed, total)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            pieces.close()  # stops the reader thread, however the loop ended
         self._reporter.downloading(self.completed, total, final=True)
         if self.completed == 0:
             raise GGUFDownloadError("The download returned no data.")
         if total is not None and self.completed != total:
             raise GGUFDownloadError("The download size did not match the advertised Content-Length.")
+
+
+def _pump_body(
+    response: httpx.Response,
+    handover: queue.Queue[bytes | Exception | None],
+    stop: Event,
+) -> None:
+    """The reader thread of ``_GGUFTransfer._receive``.
+
+    Passes on each piece as it arrives, then ``None`` for the end of the body or
+    the exception that ended it (so the consumer sees the very same
+    ``httpx.TransportError`` that iterating the response itself would raise).
+    The queue is short, so a consumer that has stopped taking pieces stops this
+    thread too, and it quits once ``stop`` is set.
+    """
+
+    def hand_over(item: bytes | Exception | None) -> bool:
+        while not stop.is_set():
+            try:
+                handover.put(item, timeout=_BODY_HANDOVER_SECONDS)
+            except queue.Full:
+                continue
+            return True
+        return False
+
+    try:
+        for piece in response.iter_bytes():
+            if not hand_over(piece):
+                return
+        hand_over(None)
+    except Exception as exc:
+        hand_over(exc)
+
+
+def _in_units(pieces: Iterator[bytes], size: int) -> Iterator[bytes]:
+    """Regroup ``pieces`` into chunks of exactly ``size`` bytes; only the last may be shorter.
+
+    A partial chunk that is pending when the pieces end with an error is
+    dropped, so a resumed transfer continues from a whole-chunk boundary.
+    """
+    pending = bytearray()
+    for piece in pieces:
+        offset = 0
+        if pending:
+            offset = size - len(pending)  # what this piece must give to complete the chunk
+            pending += piece[:offset]
+            if len(pending) < size:
+                continue
+            yield bytes(pending)
+            pending.clear()
+        while len(piece) - offset >= size:
+            yield piece[offset : offset + size]
+            offset += size
+        pending += piece[offset:]
+    if pending:
+        yield bytes(pending)
 
 
 def _request_headers(url: str, resume: _ResumePoint | None) -> dict[str, str]:
@@ -1140,6 +1345,21 @@ def _validate_download_url(url: str) -> str:
     without giving this module a chance to enforce its HTTPS-only and
     public-host policy.  Resolve hostnames before each request so a redirect
     cannot point the downloader at Cortex or another private service.
+
+    Known limit (DNS rebinding, stated in the README's download notes and pinned
+    by ``test_the_request_is_addressed_by_name_not_to_the_address_that_was_checked``):
+    this resolves the name to *check* it, and the request is still addressed by
+    name, so the HTTP stack resolves it again when it connects. A DNS server that
+    answers a public address here and a private one there is not stopped by this
+    check. What still holds is TLS: the connection is verified against the
+    requested host name (``httpx``'s default), and no HTTP request, so no Hugging
+    Face token, is sent before that succeeds, so the swapped-in address can only
+    be answered by a server with a valid certificate for that name. Connecting to
+    the address checked here (pinning it, with the original name kept for the
+    ``Host`` header and TLS) is not done: it would have to reimplement the
+    fallback across a host's several addresses that ``httpx`` provides, would not
+    apply behind a system proxy (which resolves the name itself), and touches
+    every real connection in a path whose TLS behaviour a unit test cannot exercise.
     """
     if not isinstance(url, str) or _contains_control_character(url):
         raise GGUFDownloadError("The download URL contains invalid control characters.")

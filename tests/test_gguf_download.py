@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import itertools
+import os
 import socket
+import ssl
 import struct
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpcore
 import httpx
 import pytest
 from pydantic import ValidationError
@@ -283,6 +286,42 @@ def test_download_gguf_rejects_private_dns_on_initial_url(tmp_path: Path, monkey
             tmp_path,
             http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"GGUF"))),
         )
+
+
+def test_the_request_is_addressed_by_name_not_to_the_address_that_was_checked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Documents a known limit (README, "Bring your own GGUF"; the note in
+    ``_validate_download_url``): the host is resolved here to be *checked*, but
+    the request itself goes to the name, so the HTTP stack resolves it again when
+    it connects and an answer that changed in between (DNS rebinding) is not seen
+    by the check. TLS verification against the name is what still applies.
+
+    If the connection is ever pinned to the checked address this test fails on
+    purpose: update it, the README and that note together."""
+    content = _valid_gguf_content(tmp_path)
+    resolved: list[tuple[str, int]] = []
+
+    def getaddrinfo(host, port, **kwargs):
+        resolved.append((host, port))
+        return [(0, 0, 0, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(download_module.socket, "getaddrinfo", getaddrinfo)
+    seen: list[tuple[str, str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers["host"], request.extensions.get("sni_hostname")))
+        return httpx.Response(200, content=content)
+
+    download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert resolved and {host for host, _port in resolved} == {"example.com"}  # looked up here, to be checked
+    assert seen == [("example.com", "example.com", None)]  # and the request still names the host, not 93.184.216.34
 
 
 def test_download_gguf_rejects_redirect_loop(tmp_path: Path) -> None:
@@ -1277,6 +1316,8 @@ def test_a_weak_etag_is_not_used_to_resume(tmp_path: Path) -> None:
         ("bytes 0-255/256", '"v1"'),  # starts at the beginning, not where the file ends
         ("bytes 32-255/256", '"v1"'),  # starts inside the stored bytes
         ("bytes 96-255/999", '"v1"'),  # a different total than the first response gave
+        ("bytes 96-256/256", '"v1"'),  # ends one byte past the end of the file
+        ("bytes 96-300/256", '"v1"'),  # ends well past the end of the file
         ("bytes 96-95/256", '"v1"'),  # inverted
         ("garbage", '"v1"'),
         (None, '"v1"'),
@@ -1328,6 +1369,144 @@ def test_a_206_the_client_did_not_ask_for_is_rejected(tmp_path: Path) -> None:
     assert _leftovers(tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("bytes 0-9/10", (0, 9, 10)),  # the last byte of a 10-byte file is byte 9
+        ("bytes 0-0/1", (0, 0, 1)),
+        ("bytes 96-255/256", (96, 255, 256)),
+        ("bytes 96-255/*", (96, 255, None)),  # the total may be unknown
+        (" bytes 96-255/256 ", (96, 255, 256)),
+        ("bytes 0-10/10", None),  # ends one byte past the end
+        ("bytes 0-11/10", None),  # ends further past it
+        ("bytes 5-4/10", None),  # inverted
+        ("bytes 0-9", None),
+        ("bytes 0-9/x", None),
+        ("garbage", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_content_range_accepts_only_a_well_formed_span_inside_the_file(value, expected) -> None:
+    span = download_module._content_range(value)
+
+    assert (None if span is None else (span.start, span.end, span.total)) == expected
+
+
+@pytest.mark.usefixtures("small_reads")
+@pytest.mark.parametrize("with_length", [True, False])
+def test_a_resumed_206_that_does_not_know_the_total_still_completes(tmp_path: Path, with_length: bool) -> None:
+    """``bytes 96-255/*``: the total is unknown, so it comes from the length of
+    this body (offset + Content-Length) or, failing that, from the first response."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+    tail = content[96:]
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            headers = {"ETag": '"v1"', "Content-Range": f"bytes 96-{len(content) - 1}/*"}
+            if with_length:
+                headers["Content-Length"] = str(len(tail))
+            return httpx.Response(206, headers=headers, content=iter([tail]))
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    assert _fetch(tmp_path, server).read_bytes() == content
+    assert server.range_starts() == [None, 96]  # accepted, not restarted
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_206_with_an_unknown_total_is_held_to_the_first_responses_total(tmp_path: Path) -> None:
+    """With ``*`` and no Content-Length the only total there is comes from the
+    first response, and a body that ends short of it must not be accepted."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            headers = {"ETag": '"v1"', "Content-Range": f"bytes 96-{len(content) - 1}/*"}
+            return httpx.Response(206, headers=headers, content=iter([content[96:-40]]))  # ends 40 bytes early
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="did not match the advertised Content-Length"):
+        _fetch(tmp_path, server)
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_206_takes_its_total_from_content_range_when_the_first_response_had_none(
+    tmp_path: Path,
+) -> None:
+    """The first response gave no Content-Length, so ``Content-Range: .../256``
+    is the only source of the total, and a body that ends short of it is refused."""
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("range"):
+            headers = {"ETag": '"v1"', "Content-Range": f"bytes 96-{len(content) - 1}/{len(content)}"}
+            return httpx.Response(206, headers=headers, content=iter([content[96:-40]]))  # no Content-Length
+        return httpx.Response(200, headers={"ETag": '"v1"'}, content=_body_then_error(content, drop_after=100))
+
+    with pytest.raises(GGUFDownloadError, match="did not match the advertised Content-Length"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_206_that_ends_short_of_its_content_range_is_refused(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            headers = {"ETag": '"v1"', "Content-Range": f"bytes 96-{len(content) - 1}/{len(content)}"}
+            return httpx.Response(206, headers=headers, content=iter([content[96:-40]]))
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="did not match the advertised Content-Length"):
+        _fetch(tmp_path, server)
+    assert len(server.requests) == 2  # a refusal, not something to retry
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("delta", [10, -10], ids=["body-shorter-than-advertised", "body-longer-than-advertised"])
+def test_a_body_that_disagrees_with_its_content_length_is_refused(tmp_path: Path, delta: int) -> None:
+    """A body that ends short of, or runs past, the length it advertised is not
+    the file that was promised, whichever way it is off."""
+    content = _valid_gguf_content(tmp_path)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, headers={"Content-Length": str(len(content) + delta)}, content=content)
+
+    with pytest.raises(GGUFDownloadError, match="did not match the advertised Content-Length"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 1  # permanent: not retried
+    assert not (tmp_path / "model.gguf").exists()
+    assert _leftovers(tmp_path) == []
+
+
 def test_a_416_for_bytes_already_stored_completes_the_download(tmp_path: Path, monkeypatch) -> None:
     """The connection can drop after the last byte but before the body ends;
     asking for the rest then answers 416, and everything is already on disk."""
@@ -1364,6 +1543,56 @@ def test_a_416_for_a_file_that_is_not_complete_restarts(tmp_path: Path) -> None:
 
     assert _fetch(tmp_path, server).read_bytes() == content
     assert server.range_starts() == [None, 96, None]
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_416_that_matches_the_offset_but_not_the_recorded_total_restarts(tmp_path: Path) -> None:
+    """``bytes */96`` says the file is 96 bytes long. The first response said
+    256, and 96 bytes are stored: the file has changed since, so what is stored
+    is not "all of it" and must not be published as such."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": "bytes */96"})
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    assert _fetch(tmp_path, server).read_bytes() == content
+    assert server.range_starts() == [None, 96, None]  # asked once for the rest, then started over
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_416_for_bytes_already_stored_is_accepted_when_no_total_was_advertised(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without a Content-Length there is no recorded total to contradict, so a
+    ``bytes */N`` that matches what is stored still completes the download."""
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 1)
+    content = _valid_gguf_content(tmp_path)
+    ranges: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ranges.append(request.headers.get("range"))
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": f"bytes */{len(content)}"})
+        # A chunked body (no Content-Length) that is cut after its last byte.
+        return httpx.Response(
+            200, headers={"ETag": '"v1"'}, content=_body_then_error(content, drop_after=len(content))
+        )
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert destination.read_bytes() == content
+    assert ranges == [None, f"bytes={len(content)}-"]  # completed by the 416; no restart
 
 
 @pytest.mark.usefixtures("small_reads")
@@ -1591,6 +1820,328 @@ def test_cancelling_mid_body_stops_the_retry_loop(tmp_path: Path) -> None:
     assert _leftovers(tmp_path) == []
 
 
+# -- cancellation and stalls while waiting on the server ------------------------
+#
+# The fake "network" below never sleeps for real beyond a few milliseconds: a
+# silent server is a generator blocked on an Event with a short bound, released
+# in ``finally`` so that no test can leave a reader thread behind.
+
+
+def _streaming_client(body_factory) -> httpx.Client:
+    """A client whose every response streams ``body_factory()``."""
+    return httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body_factory()))
+    )
+
+
+@pytest.fixture
+def fast_stall_guard(monkeypatch) -> None:
+    """Shrink the wait tuning so a stall is declared in milliseconds, not half a minute."""
+    monkeypatch.setattr(download_module, "_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(download_module, "_STALL_WINDOW_SECONDS", 0.05)
+
+
+def test_cancelling_stops_reading_the_body_within_a_piece_or_two(tmp_path: Path) -> None:
+    """The body used to be gathered in 64 KiB chunks before anything looked at
+    the cancel flag: Stop pressed at 3 KiB still read 64 KiB. Pieces are now
+    taken as the network delivers them."""
+    cancel = threading.Event()
+    delivered = 0
+
+    def body():
+        nonlocal delivered
+        for index in range(200):
+            piece = (b"GGUF" if index == 0 else b"") + bytes(1024 - (4 if index == 0 else 0))
+            delivered += len(piece)
+            if delivered >= 3 * 1024:
+                cancel.set()  # Stop is pressed while the third KiB arrives
+            yield piece
+
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            cancellation_event=cancel,
+            http_client=_streaming_client(body),
+        )
+
+    assert delivered <= 8 * 1024  # a few pieces at most, not the 64 KiB a chunk used to hold
+    assert _leftovers(tmp_path) == []
+
+
+def test_cancelling_works_while_the_server_is_silent(tmp_path: Path) -> None:
+    """A server that stops sending must not be able to hold the job: cancelling
+    is noticed while waiting for the next bytes, not only when they arrive."""
+    cancel = threading.Event()
+    release = threading.Event()  # the fake network: nothing more arrives until this is set
+
+    def body():
+        yield b"GGUF" + bytes(60)
+        cancel.set()  # Stop is pressed while the client waits for bytes that never come
+        release.wait(3)  # bounded, so a regression fails the assertion below instead of hanging
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(GGUFDownloadError, match="cancelled"):
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                cancellation_event=cancel,
+                http_client=_streaming_client(body),
+            )
+        elapsed = time.monotonic() - started
+        assert not release.is_set()  # it stopped while the server was still silent
+    finally:
+        release.set()
+
+    assert elapsed < 2.0
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fast_stall_guard")
+def test_a_server_that_goes_silent_is_a_failed_attempt_not_a_hang(tmp_path: Path) -> None:
+    release = threading.Event()
+    requests = 0
+
+    def body():
+        yield b"GGUF" + bytes(60)
+        release.wait(3)
+
+    def counted_body():
+        nonlocal requests
+        requests += 1
+        return body()
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(GGUFDownloadError, match="stopped sending data") as raised:
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                http_client=_streaming_client(counted_body),
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert "Gave up after 5 attempts" in str(raised.value)  # the usual retry budget, then a clear failure
+    assert requests == 5
+    assert elapsed < 2.0
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fast_stall_guard")
+def test_a_trickling_server_is_a_stall_even_though_bytes_keep_arriving(tmp_path: Path) -> None:
+    """One byte now and then never trips a "no data for N seconds" timeout, so
+    the guard is a minimum rate over a window instead."""
+
+    def body():
+        yield b"GGUF" + bytes(20)
+        for _ in range(1000):
+            time.sleep(0.002)
+            yield b"x"
+
+    started = time.monotonic()
+    with pytest.raises(GGUFDownloadError, match="stopped sending data"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=_streaming_client(body),
+        )
+
+    assert time.monotonic() - started < 2.0  # the trickle would take two seconds per attempt
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fast_stall_guard")
+def test_a_stall_after_a_healthy_start_is_still_detected(tmp_path: Path) -> None:
+    """Each window is judged on its own: a link that was fine for a while and
+    then dies is caught in the next window, not excused by the bytes before it."""
+    release = threading.Event()
+
+    def body():
+        yield b"GGUF" + bytes(2044)
+        for _ in range(8):  # 80 ms or more of healthy delivery: over one window
+            time.sleep(0.01)
+            yield bytes(2048)
+        release.wait(3)  # then nothing more
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(GGUFDownloadError, match="stopped sending data"):
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                http_client=_streaming_client(body),
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < 6.0  # five attempts that each waited out the silent server would take 15 s
+    assert _leftovers(tmp_path) == []
+
+
+def test_closing_the_body_stream_closes_the_response_and_ends_the_reader(tmp_path: Path) -> None:
+    """Closing the response is what wakes a reader that is parked in a socket
+    read, so the way out of the body loop must do it before releasing the reader."""
+    before = set(threading.enumerate())
+    release = threading.Event()  # keeps the fake server "mid-body" until the test lets go
+
+    def body():
+        yield b"GGUF"
+        release.wait(3)
+
+    transfer = download_module._GGUFTransfer(
+        url="https://example.com/model.gguf",
+        directory=tmp_path,
+        staging_path=tmp_path / ".download-probe.part",
+        client=None,
+        limit=1 << 30,
+        reserve=0,
+        cancellation_event=None,
+        reporter=SimpleNamespace(),
+    )
+    response = httpx.Response(200, content=body())
+
+    try:
+        pieces = transfer._receive(response)
+        assert next(pieces) == b"GGUF"
+        assert not response.is_closed  # the reader is still parked inside the body
+        pieces.close()
+
+        assert response.is_closed  # closed by the way out, not left to the caller
+    finally:
+        release.set()
+    wait_until(
+        lambda: not [thread for thread in threading.enumerate() if thread not in before and thread.is_alive()],
+        timeout=5.0,
+        describe="the body reader thread to end",
+    )
+
+
+def test_receive_yields_only_pieces_that_arrived(tmp_path: Path, monkeypatch) -> None:
+    """Polling a quiet server must not turn into empty pieces for the caller."""
+    monkeypatch.setattr(download_module, "_CANCEL_POLL_SECONDS", 0.005)
+
+    def body():
+        yield b"GGUF"
+        time.sleep(0.05)  # ten polls with nothing to hand over
+        yield b"more"
+
+    transfer = download_module._GGUFTransfer(
+        url="https://example.com/model.gguf",
+        directory=tmp_path,
+        staging_path=tmp_path / ".download-probe.part",
+        client=None,
+        limit=1 << 30,
+        reserve=0,
+        cancellation_event=None,
+        reporter=SimpleNamespace(),
+    )
+
+    assert list(transfer._receive(httpx.Response(200, content=body()))) == [b"GGUF", b"more"]
+
+
+@pytest.mark.parametrize(
+    ("pieces", "size", "expected"),
+    [
+        ([b"abcdefgh"], 4, [b"abcd", b"efgh"]),
+        ([b"abcdefghij"], 4, [b"abcd", b"efgh", b"ij"]),  # only the last chunk may be short
+        ([b"abcd"], 4, [b"abcd"]),
+        ([b"ab", b"cd", b"ef"], 4, [b"abcd", b"ef"]),
+        ([b"a", b"bcdefg", b"h"], 4, [b"abcd", b"efgh"]),
+        ([b"abcdef", b"gh"], 4, [b"abcd", b"efgh"]),  # a remainder is completed by the next piece
+        ([b"abc", b"defgh", b"i"], 4, [b"abcd", b"efgh", b"i"]),
+        ([b"", b"ab", b""], 4, [b"ab"]),
+        ([b"abc"], 1, [b"a", b"b", b"c"]),
+        ([], 4, []),  # no body: no empty chunk either
+    ],
+)
+def test_pieces_are_regrouped_into_whole_chunks(pieces, size, expected) -> None:
+    assert list(download_module._in_units(iter(pieces), size)) == expected
+
+
+def test_a_partial_chunk_is_dropped_when_the_body_ends_in_an_error() -> None:
+    """A resumed transfer must continue from a whole-chunk boundary, so bytes
+    that never completed a chunk are not passed on when the connection fails."""
+
+    def pieces():
+        yield b"abcdef"
+        raise httpx.ReadError("connection reset")
+
+    seen: list[bytes] = []
+    with pytest.raises(httpx.ReadError):
+        for chunk in download_module._in_units(pieces(), 4):
+            seen.append(chunk)
+
+    assert seen == [b"abcd"]
+
+
+def test_a_slow_but_steady_link_is_not_a_stall(tmp_path: Path, monkeypatch) -> None:
+    """The guard is about a dead link, not a slow one: data keeps arriving here
+    for several windows, so the download must finish."""
+    monkeypatch.setattr(download_module, "_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(download_module, "_STALL_WINDOW_SECONDS", 0.25)
+    content = _big_gguf(tmp_path)
+    piece = 128 * 1024
+
+    def body():
+        for offset in range(0, len(content), piece):
+            time.sleep(0.02)
+            yield content[offset : offset + piece]
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=_streaming_client(body),
+    )
+
+    assert destination.read_bytes() == content
+
+
+def test_a_failed_download_does_not_leave_its_body_reader_running(tmp_path: Path) -> None:
+    """The reader is a helper thread; it must end when the transfer does, even
+    while it is holding a piece the consumer will never take."""
+    before = set(threading.enumerate())
+
+    def body():
+        yield b"GGUF" + bytes(1020)
+        for _ in range(100_000):
+            yield bytes(1024)
+
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            max_download_bytes=64 * 1024,
+            http_client=_streaming_client(body),
+        )
+
+    wait_until(
+        lambda: not [
+            thread for thread in threading.enumerate() if thread not in before and thread.is_alive()
+        ],
+        timeout=5.0,
+        describe="the body reader thread to end",
+    )
+
+
+def test_the_wait_tuning_stays_bounded() -> None:
+    """Cancellation must be noticed within about a second, and a dead link
+    must be declared before the 60 s read timeout it exists to beat."""
+    assert 0 < download_module._CANCEL_POLL_SECONDS <= 0.5
+    assert 0 < download_module._STALL_WINDOW_SECONDS < download_module._DOWNLOAD_TIMEOUT.read
+    assert download_module._STALL_MIN_BYTES >= 1
+
+
 @pytest.mark.usefixtures("small_reads")
 def test_the_public_host_policy_is_rechecked_on_every_attempt(tmp_path: Path, monkeypatch) -> None:
     """A retry must not be a way around the SSRF policy: if the name now
@@ -1649,6 +2200,126 @@ def test_a_mistyped_host_fails_at_once_instead_of_retrying(tmp_path: Path, monke
     with pytest.raises(GGUFDownloadError, match="Could not resolve"):
         download_gguf("https://exmaple.invalid/model.gguf", "model.gguf", tmp_path)
     assert lookups == 1
+
+
+# A TLS failure reaches the caller as httpx.ConnectError with the ssl error
+# somewhere down its cause chain. The certificate text below is synthetic and
+# stands for whatever a hostile or misconfigured server makes Python report.
+_CERTIFICATE_TEXT = "certificate is not valid for 'synthetic-host.example.net'"
+
+
+def _tls_connect_error(request: httpx.Request, how: str = "direct", cause: BaseException | None = None):
+    """A ``ConnectError`` caused by a TLS error, wired the way each layer wires it."""
+    tls = cause or ssl.SSLCertVerificationError(
+        1, f"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: {_CERTIFICATE_TEXT}"
+    )
+    error = httpx.ConnectError(f"[SSL: CERTIFICATE_VERIFY_FAILED] {_CERTIFICATE_TEXT}", request=request)
+    if how == "direct":
+        error.__cause__ = tls
+    elif how == "via-httpcore":  # httpx wraps httpcore's error, which wraps the ssl one
+        inner = httpcore.ConnectError("connect failed")
+        inner.__cause__ = tls
+        error.__cause__ = inner
+    else:  # raised while handling the ssl error, without an explicit cause
+        try:
+            raise tls
+        except ssl.SSLError:
+            try:
+                raise error
+            except httpx.ConnectError as raised:
+                return raised
+    return error
+
+
+@pytest.mark.parametrize("how", ["direct", "via-httpcore", "implicit-context"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        None,  # a rejected certificate
+        ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),  # a handshake the server refused
+    ],
+)
+def test_a_tls_failure_fails_at_once_without_leaking_certificate_text(
+    tmp_path: Path, how: str, cause: BaseException | None
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise _tls_connect_error(request, how, cause)
+
+    with pytest.raises(GGUFDownloadError) as raised:
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    message = str(raised.value)
+    assert calls == 1  # not five attempts and half a minute of waiting
+    assert "secure connection" in message and "could not be verified" in message
+    assert "internet connection" not in message  # the old, misleading advice
+    assert "Gave up" not in message
+    assert _CERTIFICATE_TEXT not in message and "CERTIFICATE_VERIFY_FAILED" not in message
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__  # no certificate text rides along
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_tls_failure_on_a_resume_also_fails_at_once(tmp_path: Path) -> None:
+    """A server whose identity can no longer be verified is not carried on with,
+    however many bytes are already stored."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            raise _tls_connect_error(request)
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="could not be verified"):
+        _fetch(tmp_path, server)
+    assert len(server.requests) == 2  # the first request and the one resume, not five
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("cause", [ssl.SSLEOFError(8, "EOF occurred in violation of protocol"), ssl.SSLZeroReturnError()])
+def test_a_tls_connection_that_is_merely_dropped_is_still_retried(tmp_path: Path, cause: BaseException) -> None:
+    """Only a failure to *verify* the server is final: a handshake cut off by
+    the network is the same transient failure as a refused connection."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise _tls_connect_error(request, cause=cause)
+
+    with pytest.raises(GGUFDownloadError, match="Gave up after 5 attempts"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 5
+
+
+def test_listing_reports_a_tls_failure_as_such() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise _tls_connect_error(request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError) as raised:
+            list_huggingface_gguf_files("owner/model", http_client=client)
+
+    assert "could not be verified" in str(raised.value)
+    assert "internet connection" not in str(raised.value)
+    assert _CERTIFICATE_TEXT not in str(raised.value)
 
 
 @pytest.mark.usefixtures("small_reads")
@@ -2034,6 +2705,127 @@ def test_a_part_that_appears_during_the_download_rolls_the_whole_set_back(tmp_pa
 
     assert last.read_bytes() == b"theirs"
     assert sorted(path.name for path in models.iterdir()) == sorted(["other.gguf", server.names[2]])
+
+
+def _deny_unlink(monkeypatch, denied) -> list[Path]:
+    """Make ``Path.unlink`` fail for the paths ``denied`` picks, as antivirus
+    holding a file open does on Windows. Returns the paths that were refused."""
+    refused: list[Path] = []
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if denied(self):
+            refused.append(self)
+            raise PermissionError(13, "The process cannot access the file: it is used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    return refused
+
+
+def _staging_files_linked_to(monkeypatch, destination_name: str) -> set[str]:
+    """Record the staging file that ``os.link`` publishes as ``destination_name``."""
+    linked: set[str] = set()
+    real_link = os.link
+
+    def link(source, destination, *args, **kwargs) -> None:
+        real_link(source, destination, *args, **kwargs)
+        if Path(destination).name == destination_name:
+            linked.add(str(source))
+
+    monkeypatch.setattr(download_module.os, "link", link)
+    return linked
+
+
+def test_a_part_whose_staging_file_cannot_be_removed_is_still_rolled_back(tmp_path: Path, monkeypatch) -> None:
+    """The staging file is deleted right after its part is linked into place,
+    and that delete can fail. The part is already published by then, so a later
+    failure must remove it too, and a failing cleanup must not replace the
+    reason the download failed."""
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, server.names[1])
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+    last = models / server.names[2]
+
+    def someone_else_saves_the_last_part() -> None:
+        last.write_bytes(b"theirs")  # taken while part 3 downloads
+
+    server.on_request[server.names[2]] = someone_else_saves_the_last_part
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused  # the scenario really happened
+    assert last.read_bytes() == b"theirs"  # a file this call did not publish is never removed
+    assert sorted(path.name for path in models.iterdir() if not path.name.startswith(".download-")) == sorted(
+        ["other.gguf", server.names[2]]
+    )
+
+    # Nothing of the failed attempt is left to make a retry refuse as "already exists".
+    last.unlink()
+    server.on_request.clear()
+    retried = download_gguf_set(server.parts(), models, http_client=server.client())
+    assert [path.name for path in retried] == server.names
+
+
+def test_a_set_is_published_even_if_a_staging_file_cannot_be_removed(tmp_path: Path, monkeypatch) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, server.names[1])
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+
+    paths = download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused
+    assert [path.name for path in paths] == server.names
+    for path in paths:
+        assert path.read_bytes() == server.shards[path.name]
+    # Only the file that could not be deleted is left over, and it is not a model.
+    extras = [path.name for path in models.iterdir() if path.name not in {*server.names, "other.gguf"}]
+    assert len(extras) == 1 and extras[0].startswith(".download-") and extras[0].endswith(".part")
+
+
+def test_a_single_model_is_published_even_if_its_staging_file_cannot_be_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    content = _valid_gguf_content(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, "model.gguf")
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content))
+        ),
+    )
+
+    assert refused
+    assert destination.read_bytes() == content
+
+
+def test_rollback_keeps_going_when_one_removal_fails(tmp_path: Path, monkeypatch) -> None:
+    """One part that cannot be removed must not stop the others being removed,
+    or hide why the download failed."""
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    first = models / server.names[0]
+    refused = _deny_unlink(monkeypatch, lambda path: path == first)
+    last = models / server.names[2]
+
+    def someone_else_saves_the_last_part() -> None:
+        last.write_bytes(b"theirs")
+
+    server.on_request[server.names[2]] = someone_else_saves_the_last_part
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused == [first]
+    assert not (models / server.names[1]).exists()  # removed although the first one could not be
+    assert last.read_bytes() == b"theirs"
 
 
 def test_each_part_of_a_split_model_honours_the_size_ceiling(tmp_path: Path) -> None:
