@@ -87,6 +87,15 @@ class ExecutionRepositoryError(RuntimeError):
     """Safe repository boundary error."""
 
 
+class ExecutionIntegrityError(ExecutionRepositoryError):
+    """The store refused a write because a uniqueness or reference rule failed.
+
+    This is the only failure that can mean "that row already exists". A locked
+    database, a disk error or a failed append are the store being unable to
+    write, which says nothing about whether the row is there.
+    """
+
+
 class ExecutionStoreUnavailable(ExecutionRepositoryError):
     """The store could not be read right now; nothing on disk was changed.
 
@@ -246,6 +255,10 @@ class ExecutionRepository:
             connection = self._new_connection()
             yield connection
             connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if connection is not None:
+                connection.rollback()
+            raise ExecutionIntegrityError("SQLite execution constraint failed.") from exc
         except sqlite3.Error as exc:
             if connection is not None:
                 connection.rollback()
@@ -658,7 +671,12 @@ class ExecutionRepository:
                 if row is None:
                     raise ExecutionRepositoryError("job row vanished after insert")
                 return self._job_from_row(row), True
-        except ExecutionRepositoryError as exc:
+        except ExecutionIntegrityError as exc:
+            # Only a constraint failure can mean this request already has a job.
+            # Every other store error -- a locked database, a disk error, a
+            # failed event append -- propagates as itself: falling back to a
+            # lookup for those reported a store that could not write as a
+            # duplicate, and a caller told "already created" does not retry.
             with self.connect() as connection:
                 existing = connection.execute(
                     "SELECT job_id FROM execution_jobs WHERE owner = ? AND request_id = ?",

@@ -6,12 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import sqlite3
 import time
 
 import pytest
 
 from cortex_backend.execution.repository import (
     ArtifactLimitError,
+    ExecutionIntegrityError,
     ExecutionRepository,
     ExecutionRepositoryError,
     LeaseConflict,
@@ -892,3 +894,80 @@ def test_supervisor_lease_expiry_is_reclaimable(tmp_path, frozen_clock):
     frozen_clock.advance(31)
     repository.claim_supervisor_lease(lease_owner="new-supervisor", ttl_seconds=10)
     repository.release_supervisor_lease(lease_owner="new-supervisor")
+
+
+def test_a_store_failure_is_not_reported_as_a_duplicate_request(tmp_path, monkeypatch):
+    """Only a constraint failure may mean "this request already has a job".
+
+    ``connect()`` turns every ``sqlite3.Error`` into one repository error, and
+    ``create_job`` answered any of them by looking the request id up. With a job
+    already stored for that id, a database that merely could not write (locked,
+    disk error) was therefore reported as ``created=False`` -- success, with an
+    existing job -- so the caller was told its request was accepted when the
+    write had failed.
+    """
+
+    repository = _repository(tmp_path)
+    first, _ = repository.create_job(
+        job_id="job-1",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+    real_connect = sqlite3.connect
+
+    class RefusesJobInserts(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if "INSERT INTO execution_jobs" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *args, **kwargs: real_connect(*args, factory=RefusesJobInserts, **kwargs),
+    )
+    with pytest.raises(ExecutionRepositoryError) as failure:
+        repository.create_job(
+            job_id="job-2",
+            owner="session-a",
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+    assert not isinstance(failure.value, ExecutionIntegrityError)
+    monkeypatch.undo()
+
+    # A genuine duplicate is still answered with the job that already exists.
+    duplicate, created = repository.create_job(
+        job_id="job-3",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+    assert created is False
+    assert duplicate.job_id == first.job_id
+
+
+def test_a_job_id_collision_is_an_integrity_error_not_a_duplicate_request(tmp_path):
+    repository = _repository(tmp_path)
+    repository.create_job(
+        job_id="job-1",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+
+    # Same job id, different request: nothing is stored for request-2, so there
+    # is no existing job to hand back and the constraint failure must surface.
+    with pytest.raises(ExecutionIntegrityError):
+        repository.create_job(
+            job_id="job-1",
+            owner="session-a",
+            request_id="request-2",
+            profile="fake.v1",
+            payload={},
+        )
