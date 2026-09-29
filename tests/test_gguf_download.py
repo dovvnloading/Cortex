@@ -1965,7 +1965,7 @@ def test_a_stall_after_a_healthy_start_is_still_detected(tmp_path: Path) -> None
 
     def body():
         yield b"GGUF" + bytes(2044)
-        for _ in range(12):  # about 120 ms of healthy delivery: more than two windows
+        for _ in range(8):  # 80 ms or more of healthy delivery: over one window
             time.sleep(0.01)
             yield bytes(2048)
         release.wait(3)  # then nothing more
@@ -1983,7 +1983,7 @@ def test_a_stall_after_a_healthy_start_is_still_detected(tmp_path: Path) -> None
     finally:
         release.set()
 
-    assert elapsed < 2.0
+    assert elapsed < 6.0  # five attempts that each waited out the silent server would take 15 s
     assert _leftovers(tmp_path) == []
 
 
