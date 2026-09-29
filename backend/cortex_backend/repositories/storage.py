@@ -1556,13 +1556,14 @@ class DatabaseManager:
         """Append a group after every existing one."""
         try:
             with self.connect() as conn:
-                next_position = conn.execute(
-                    "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_groups"
-                ).fetchone()[0]
+                # One statement, so choosing the next position and inserting it
+                # cannot be split by another writer. Reading the maximum first
+                # and inserting afterwards let two groups made at the same
+                # moment (routes run on a thread pool) take the same position.
                 conn.execute(
                     "INSERT INTO chat_groups (id, name, position, collapsed, timestamp) "
-                    "VALUES (?, ?, ?, 0, ?)",
-                    (group_id, name, next_position, _utc_now_iso()),
+                    "SELECT ?, ?, COALESCE(MAX(position), -1) + 1, 0, ? FROM chat_groups",
+                    (group_id, name, _utc_now_iso()),
                 )
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1632,6 +1633,11 @@ class DatabaseManager:
         """Move a chat into a group, or out of every group when ``group_id`` is None."""
         try:
             with self.connect() as conn:
+                # The write lock is taken before the group is looked at. Without
+                # it, a delete_group landing between this check and the UPDATE
+                # left the chat filed under a group that no longer exists, and
+                # the sidebar hid it until the next startup sweep.
+                conn.execute("BEGIN IMMEDIATE")
                 if group_id is not None and conn.execute(
                     "SELECT 1 FROM chat_groups WHERE id = ?", (group_id,)
                 ).fetchone() is None:

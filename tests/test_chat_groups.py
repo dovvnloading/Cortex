@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,97 @@ def test_moving_an_unknown_chat_reports_miss_without_raising(tmp_path: Path) -> 
     for repository in _repositories(tmp_path):
         repository.create_group("g1", "Research")
         assert repository.set_chat_group("missing-thread", "g1") is False
+
+
+class _InterleavingConnection(sqlite3.Connection):
+    """A connection that lets a test run another writer at a chosen statement.
+
+    ``before`` is called with each statement's text just before it executes, so
+    a test can land a second connection's write exactly between two statements
+    of the operation under test instead of hoping two threads collide.
+    """
+
+    before = None
+
+    def execute(self, sql, *args):
+        hook = type(self).before
+        if hook is not None:
+            hook(sql)
+        return super().execute(sql, *args)
+
+
+def test_concurrent_group_creation_never_produces_duplicate_positions(tmp_path: Path) -> None:
+    database = DatabaseManager(db_path=str(tmp_path / "chats.sqlite"))
+    workers = 8
+    start = threading.Barrier(workers)
+    failures: list[BaseException] = []
+
+    def create(index: int) -> None:
+        try:
+            start.wait(timeout=10)
+            database.create_group(f"g{index}", f"Group {index}")
+        except BaseException as exc:  # reported below, from the test thread
+            failures.append(exc)
+
+    threads = [threading.Thread(target=create, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "a group-creating thread did not finish"
+
+    assert failures == []
+    assert sorted(group["position"] for group in database.list_groups()) == list(range(workers))
+
+
+def test_a_group_deleted_while_a_chat_is_being_moved_cannot_orphan_the_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check that the group exists and the move must be one atomic step.
+
+    A second connection deletes the group at the moment the move is about to be
+    written. Whether that delete is held off until the move commits, or lands
+    first and refuses the move, the chat must never end up filed under a group
+    that is gone -- the sidebar hides such a chat until the next startup sweep.
+    """
+    path = str(tmp_path / "chats.sqlite")
+    database = DatabaseManager(db_path=path)
+    database.create_chat("t1", "Alpha")
+    database.create_group("g1", "Research")
+    real_connect = sqlite3.connect
+    interleaved: list[str] = []
+
+    def delete_the_group_now(sql: str) -> None:
+        if interleaved or not sql.lstrip().upper().startswith("UPDATE THREADS SET GROUP_ID = ?"):
+            return
+        interleaved.append("tried")
+        other = real_connect(path, timeout=0.05)
+        try:
+            other.execute("UPDATE threads SET group_id = NULL WHERE group_id = 'g1'")
+            other.execute("DELETE FROM chat_groups WHERE id = 'g1'")
+            other.commit()
+            interleaved[0] = "deleted"
+        except sqlite3.OperationalError:
+            interleaved[0] = "held off"
+        finally:
+            other.close()
+
+    def connect(*args, **kwargs):
+        kwargs.setdefault("factory", _InterleavingConnection)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    monkeypatch.setattr(_InterleavingConnection, "before", staticmethod(delete_the_group_now))
+    try:
+        database.set_chat_group("t1", "g1")
+    except PersistenceError:
+        pass  # a refused move is acceptable; an orphaned chat is not
+    monkeypatch.undo()
+
+    assert interleaved, "the second writer never got a chance to run"
+    known = {group["id"] for group in database.list_groups()}
+    filed_under = database.get_all_chats_summary()[0]["group_id"]
+    assert filed_under is None or filed_under in known
 
 
 # -- schema migration ------------------------------------------------------
