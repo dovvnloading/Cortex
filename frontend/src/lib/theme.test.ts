@@ -165,7 +165,9 @@ describe("the page ground colours", () => {
 });
 
 describe("the inline script in index.html", () => {
-  const source = /<script>([\s\S]*?)<\/script>/.exec(indexHtml)?.[1];
+  // Case-insensitive and tolerant of attributes and a spaced closing tag, so this
+  // finds the inline script however the markup is written.
+  const source = /<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script\s*>/i.exec(indexHtml)?.[1];
 
   const runInlineScript = () => {
     if (!source) throw new Error("index.html has no inline script");
