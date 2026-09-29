@@ -763,6 +763,9 @@ GenerationEventName = Literal[
     "generation.translation_started",
     # The answer is kept untranslated; the completion carries translation_error.
     "generation.translation_failed",
+    # The model suggested memories to keep (or to clear). Nothing has been
+    # written; the client asks the user and calls the memories API itself.
+    "generation.memory_proposed",
     "generation.loading_model",
     "generation.persisting",
     "generation.completed",

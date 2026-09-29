@@ -41,7 +41,11 @@ tokens, or local database files.
   Windows account and back up this directory before upgrades.
 - External links and rendered model content are validated by the frontend.
 - Model-produced memory actions are validated and destructive clears require
-  explicit user confirmation.
+  explicit user confirmation. A memory the model proposes is only shown under
+  its answer; it is stored when the user presses Save for that one fact, and
+  nothing is written on the model's say-so. Proposals are bounded in number and
+  length and are kept for the session only, so an unanswered one is lost when
+  the page is reloaded.
 - Model-proposed code runs only after the user approves that one run, in a
   short-lived worker process with source, time, memory, output and
   child-process limits. That worker clears the environment variables it

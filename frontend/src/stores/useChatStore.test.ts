@@ -191,4 +191,48 @@ describe("useChatStore", () => {
     useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.9 });
     expect(useChatStore.getState().generationOptionsByThread["thread-a"]).toEqual({ temperature: 0.9 });
   });
+
+  describe("suggested memories", () => {
+    beforeEach(() => {
+      useChatStore.setState({ proposedMemoriesByMessage: {} });
+    });
+
+    it("keeps a message's suggestions and replaces them wholesale", () => {
+      useChatStore.getState().setProposedMemories("m-1", ["Likes tea.", "Lives in Oslo."]);
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "m-1": ["Likes tea.", "Lives in Oslo."] });
+
+      useChatStore.getState().setProposedMemories("m-1", ["Likes coffee."]);
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "m-1": ["Likes coffee."] });
+    });
+
+    it("forgets a message's suggestions when the new list is empty", () => {
+      useChatStore.getState().setProposedMemories("m-1", ["Likes tea."]);
+      useChatStore.getState().setProposedMemories("m-2", ["Lives in Oslo."]);
+
+      useChatStore.getState().setProposedMemories("m-1", []);
+
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "m-2": ["Lives in Oslo."] });
+    });
+
+    it("does not rebuild state when nothing changed", () => {
+      useChatStore.getState().setProposedMemories("m-1", ["Likes tea."]);
+      const before = useChatStore.getState().proposedMemoriesByMessage;
+
+      useChatStore.getState().setProposedMemories("m-1", ["Likes tea."]);
+      useChatStore.getState().setProposedMemories("m-none", []);
+      useChatStore.getState().dismissProposedMemory("m-1", "Not a suggestion.");
+
+      expect(useChatStore.getState().proposedMemoriesByMessage).toBe(before);
+    });
+
+    it("dismisses one suggestion at a time and drops the message when none remain", () => {
+      useChatStore.getState().setProposedMemories("m-1", ["Likes tea.", "Lives in Oslo."]);
+
+      useChatStore.getState().dismissProposedMemory("m-1", "Likes tea.");
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({ "m-1": ["Lives in Oslo."] });
+
+      useChatStore.getState().dismissProposedMemory("m-1", "Lives in Oslo.");
+      expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({});
+    });
+  });
 });

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
@@ -6,6 +6,7 @@ import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-
 import { ApiError, CortexApi } from "../../api/client";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
+import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
 
 describe("humanizeGenerationStatus", () => {
@@ -68,7 +69,8 @@ describe("ChatPage composer integration", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     window.sessionStorage.clear();
-    useChatStore.setState({ generationOptionsByThread: {} });
+    useChatStore.setState({ generationOptionsByThread: {}, proposedMemoriesByMessage: {} });
+    useUiStore.setState({ toasts: [] });
   });
 
   it("keeps a blank conversation focused on the composer", async () => {
@@ -174,6 +176,118 @@ describe("ChatPage composer integration", () => {
     expect(clearMemory).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Clear permanent memories?" })).not.toBeInTheDocument());
+  });
+
+  /**
+   * Sends one prompt, then finishes the job with the given completion payload.
+   * The reloaded transcript is what the page shows once the job is over.
+   */
+  async function completeWithMemorySuggestions(
+    completedData: Record<string, unknown>,
+    apiOverrides: Partial<CortexApi> = {},
+    assistantMessageId = "assistant-memory",
+  ) {
+    const user = userEvent.setup();
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    const transcript: ChatResponse = {
+      id: "thread-a",
+      title: "Tea",
+      timestamp: "2026-01-01T00:00:00Z",
+      revision: 2,
+      messages: [
+        { id: "user-memory", role: "user", content: "I like tea." },
+        { id: assistantMessageId, role: "assistant", content: "Good to know." },
+      ],
+    };
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => (emit ? transcript : emptyChat(id))),
+      generate: vi.fn().mockResolvedValue({
+        job_id: "job-memory-ui",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "user-memory",
+      }),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+      addMemory: vi.fn(async (memo: string) => ({ memos: [memo] })),
+      ...apiOverrides,
+    });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "I like tea.");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(emit).not.toBeNull());
+    await act(async () => {
+      emit!({
+        event_id: 1,
+        event: "generation.completed",
+        job_id: "job-memory-ui",
+        thread_id: "thread-a",
+        data: { assistant_message_id: assistantMessageId, ...completedData },
+      });
+      resolveStream?.();
+    });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    return { user, api };
+  }
+
+  it("shows what the model suggested remembering and saves it only when the user says so", async () => {
+    useUiStore.setState({ toasts: [] });
+    const { user, api } = await completeWithMemorySuggestions({ proposed_memories: ["User likes tea.", "User lives in Oslo."] });
+
+    const region = await screen.findByRole("region", { name: "Cortex suggests remembering" });
+    expect(region).toHaveTextContent("User likes tea.");
+    expect(region).toHaveTextContent("User lives in Oslo.");
+    // Being shown is not being saved.
+    expect(api.addMemory).not.toHaveBeenCalled();
+
+    await user.click(within(screen.getAllByRole("listitem")[0]).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.addMemory).toHaveBeenCalledWith("User likes tea."));
+    expect(api.addMemory).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("User likes tea.")).not.toBeInTheDocument());
+    expect(screen.getByText("User lives in Oslo.")).toBeVisible();
+    expect(useUiStore.getState().toasts.map((toast) => toast.message)).toContain("Memory saved.");
+  });
+
+  it("forgets a dismissed suggestion without saving it", async () => {
+    const { user, api } = await completeWithMemorySuggestions({ proposed_memories: ["User likes tea."] });
+
+    await user.click(await screen.findByRole("button", { name: "Dismiss" }));
+
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Cortex suggests remembering" })).not.toBeInTheDocument());
+    expect(api.addMemory).not.toHaveBeenCalled();
+  });
+
+  it("keeps a suggestion on screen and reports the reason when saving it fails", async () => {
+    useUiStore.setState({ toasts: [] });
+    const addMemory = vi.fn().mockRejectedValue(new ApiError(409, "Memory limit reached."));
+    const { user } = await completeWithMemorySuggestions(
+      { proposed_memories: ["User likes tea."] },
+      { addMemory } as Partial<CortexApi>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(addMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(useUiStore.getState().toasts.map((toast) => toast.message)).toContain("Memory limit reached."));
+    expect(screen.getByText("User likes tea.")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeEnabled());
+  });
+
+  it("offers nothing when the answer carried no suggestions", async () => {
+    const { api } = await completeWithMemorySuggestions({ proposed_memories: [] });
+
+    expect(await screen.findByText("Good to know.")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Cortex suggests remembering" })).not.toBeInTheDocument();
+    expect(api.addMemory).not.toHaveBeenCalled();
   });
 
   it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {

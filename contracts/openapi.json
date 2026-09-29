@@ -1596,6 +1596,7 @@
               "generation.content_delta",
               "generation.translation_started",
               "generation.translation_failed",
+              "generation.memory_proposed",
               "generation.loading_model",
               "generation.persisting",
               "generation.completed",

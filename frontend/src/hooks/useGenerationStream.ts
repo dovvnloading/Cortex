@@ -143,6 +143,35 @@ function noteTranslationFailure(value: unknown): void {
   useChatStore.getState().markUntranslated(result.assistant_message_id);
 }
 
+// Mirrors the backend's bounds (api/routes.py). The list is data from a model,
+// so it is bounded again before it reaches the screen.
+const MAX_PROPOSED_MEMORIES = 5;
+const MAX_PROPOSED_MEMORY_LENGTH = 500;
+
+/**
+ * Remember the memories the model suggested under a saved answer.
+ *
+ * Accepts either payload that carries them -- the `generation.memory_proposed`
+ * event or the finished job result -- so the same call serves the live stream
+ * and the reconnect fallback. A payload with no `proposed_memories` list at all
+ * (an older backend) changes nothing; an empty list forgets what an earlier
+ * answer in the same slot had suggested, which is what a regenerated answer
+ * with no suggestions needs.
+ */
+function noteProposedMemories(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const result = value as { assistant_message_id?: unknown; proposed_memories?: unknown };
+  if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
+  if (!Array.isArray(result.proposed_memories)) return;
+  const memos = new Set<string>();
+  for (const candidate of result.proposed_memories) {
+    if (typeof candidate !== "string") continue;
+    const memo = candidate.trim();
+    if (memo && memo.length <= MAX_PROPOSED_MEMORY_LENGTH) memos.add(memo);
+  }
+  useChatStore.getState().setProposedMemories(result.assistant_message_id, [...memos].slice(0, MAX_PROPOSED_MEMORIES));
+}
+
 /**
  * Coalesces many rapid push() calls into at most one flush per animation
  * frame, so a fast token stream doesn't trigger a store update (and every
@@ -274,6 +303,9 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   rejectionNotified = true;
                   useUiStore.getState().notify((rejection as { message: string }).message, "info");
                 }
+                if (event.event === "generation.memory_proposed" || event.event === "generation.completed") {
+                  noteProposedMemories(data);
+                }
                 if (event.event === "generation.completed") {
                   terminal = true;
                   noteTranslationFailure(data);
@@ -317,6 +349,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 } else {
                   noteTranslationFailure(snapshot.result);
+                  noteProposedMemories(snapshot.result);
                 }
                 const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
                 completion = clearRequested
