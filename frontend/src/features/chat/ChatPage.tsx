@@ -8,6 +8,7 @@ import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readC
 import { useShallow } from "zustand/react/shallow";
 import { useFileDropZone } from "../../hooks/useFileDropZone";
 import { trackGeneration } from "../../hooks/useGenerationStream";
+import { usePageEscape } from "../../hooks/usePageEscape";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { useUiStore } from "../../stores/useUiStore";
@@ -636,6 +637,14 @@ export function ChatPage({
       stoppingRef.current = false;
     }
   };
+
+  // Escape stops a response from anywhere on the page, not only from the
+  // composer -- which is where focus is not, for a person who is reading the
+  // answer. Dialogs, menus and other text fields keep their own Escape, and the
+  // composer's own handling (which prevents default) is not repeated here.
+  // Only while a response is actually running: Stopping and Finishing have
+  // nothing left to stop.
+  usePageEscape(() => { void cancel(); }, composerPhase === "generating");
 
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
