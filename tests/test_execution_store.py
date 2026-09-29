@@ -1022,10 +1022,13 @@ def test_retire_abandoned_job_fails_only_a_job_nothing_is_working_on(tmp_path, f
     repository.transition(
         done.job_id, status="succeeded", event="completed", phase="completed", data={}, result={"v": 1}
     )
+    # Asked for while the clock is still at the start, so by the time it has
+    # moved on the job has been quiet for longer than the idle limit and only
+    # the pending approval keeps it from being retired.
+    repository.request_approval(awaiting.job_id, owner="session-a", scope_digest="digest", reason="run")
     frozen_clock.advance(200)
     young = _job(repository, "job-young")
     repository.claim_lease(leased.job_id, lease_owner="worker", ttl_seconds=30)
-    repository.request_approval(awaiting.job_id, owner="session-a", scope_digest="digest", reason="run")
 
     def retire(job_id):
         return repository.retire_abandoned_job(
