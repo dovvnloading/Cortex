@@ -450,7 +450,9 @@ def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
     @app.get("/{path:path}", include_in_schema=False)
     async def frontend_route(path: str):
         if path.startswith("api/"):
-            return FileResponse(index, status_code=404)
+            # The same body a headless app answers with: an API client asked
+            # for JSON and must not be handed the SPA shell with a 404.
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         candidate = (dist / path).resolve()
         if candidate.is_relative_to(dist) and candidate.is_file():
             return FileResponse(candidate)
