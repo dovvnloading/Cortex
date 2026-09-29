@@ -51,6 +51,30 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 
 
+GENERATIONS_TAG = "generations"
+JOBS_TAG = "jobs"
+
+# Shown in the OpenAPI document (see create_app). The two families overlap on
+# purpose only one way: /jobs is generic, /generations is a strict subset.
+OPENAPI_TAGS = [
+    {
+        "name": GENERATIONS_TAG,
+        "description": (
+            "Chat turns. Status, cancel and events answer only for a job of "
+            "kind generation; the id of any other kind of job is a 404 here."
+        ),
+    },
+    {
+        "name": JOBS_TAG,
+        "description": (
+            "The generic job family: status, cancel and events for a job of "
+            "any kind (generation, models, gguf_download). Model and GGUF "
+            "download progress is read here; chat clients use /generations."
+        ),
+    },
+]
+
+
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     """Attach the generations routes to ``router``."""
 
@@ -59,6 +83,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         "/generations",
         response_model=JobAccepted,
         status_code=status.HTTP_202_ACCEPTED,
+        tags=[GENERATIONS_TAG],
     )
     async def create_generation(
         payload: GenerationRequest,
@@ -92,23 +117,33 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         return _accepted(snapshot, user_message_id=user_message_id)
 
 
-    @router.get("/generations/{job_id}", response_model=JobStatusResponse)
+    @router.get(
+        "/generations/{job_id}",
+        response_model=JobStatusResponse,
+        tags=[GENERATIONS_TAG],
+    )
     def generation_status(
         job_id: str,
         request: Request,
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobStatusResponse:
-        return _job_response(_job_status(request, job_id, principal))
+        return _job_response(
+            _job_status(request, job_id, principal, kind="generation")
+        )
 
 
     @router.post(
-        "/generations/{job_id}/cancel", response_model=JobStatusResponse
+        "/generations/{job_id}/cancel",
+        response_model=JobStatusResponse,
+        tags=[GENERATIONS_TAG],
     )
     def cancel_generation(
         job_id: str,
         request: Request,
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobStatusResponse:
+        # Checked first: a job of another kind must not be stopped from here.
+        _job_status(request, job_id, principal, kind="generation")
         try:
             snapshot = request.app.state.jobs.cancel(job_id, owner=_durable_owner(principal))
         except (JobNotFound, JobOwnershipError) as exc:
@@ -120,6 +155,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         "/generations/{job_id}/events",
         response_model=GenerationEvent,
         response_class=StreamingResponse,
+        tags=[GENERATIONS_TAG],
         responses={
             200: {
                 "description": "Server-sent generation events.",
@@ -142,8 +178,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
         cursor = _event_cursor(request, last_event_id)
+        _job_status(request, job_id, principal, kind="generation")
         try:
-            request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
             event_stream = request.app.state.jobs.events(
                 job_id,
                 owner=_durable_owner(principal),
@@ -179,7 +215,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         )
 
 
-    @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
+    @router.get(
+        "/jobs/{job_id}", response_model=JobStatusResponse, tags=[JOBS_TAG]
+    )
     def get_job(
         job_id: str,
         request: Request,
@@ -189,7 +227,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         return _job_response(snapshot)
 
 
-    @router.post("/jobs/{job_id}/cancel", response_model=JobStatusResponse)
+    @router.post(
+        "/jobs/{job_id}/cancel", response_model=JobStatusResponse, tags=[JOBS_TAG]
+    )
     def cancel_job(
         job_id: str,
         request: Request,
@@ -206,6 +246,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         "/jobs/{job_id}/events",
         response_model=SSEEvent,
         response_class=StreamingResponse,
+        tags=[JOBS_TAG],
         responses={
             200: {
                 "description": "Server-sent job events.",

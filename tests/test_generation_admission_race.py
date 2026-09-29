@@ -313,12 +313,7 @@ def test_exact_regeneration_retry_replays_after_chat_advances():
             ("user", "a later turn"),
             ("assistant", "a later answer"),
         ):
-            advanced = client.post(
-                f"/api/v1/chats/{thread_id}/messages",
-                json={"role": role, "content": content},
-                headers=headers,
-            )
-            assert advanced.status_code == 200
+            app.state.dependencies.chats.add_message(thread_id, role, content)
         calls_before_replay = len(coordinator.calls)
 
         replay = client.post(

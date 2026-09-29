@@ -101,6 +101,24 @@ class ExecutionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionJobListing:
+    """One job as the task list reports it, with what the list would look up.
+
+    The task tray needs, for every job, the newest event's phase and message and
+    the approval's public details. Fetching each with its own connection made
+    the list cost two extra connections per job, so the listing query returns
+    them alongside the job. ``latest_event`` and ``approval`` are exactly what
+    ``ExecutionRepository.events`` and ``get_approval`` would return for the
+    job (the newest event, or none; the approval with its effective state, or
+    none when the job never asked for one).
+    """
+
+    job: ExecutionJob
+    latest_event: ExecutionEvent | None
+    approval: ExecutionApproval | None
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionArtifact:
     artifact_id: str
     job_id: str

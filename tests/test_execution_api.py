@@ -8,7 +8,9 @@ running real work.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
+import threading
 import time
 
 from fastapi.testclient import TestClient
@@ -279,6 +281,187 @@ def test_task_list_does_not_prioritize_expired_approval_rows(tmp_path):
         assert len(task_ids) == 20
         assert task_ids[0] == "older-actionable-approval"
         assert "newer-expired-approval-19" in task_ids
+
+
+def _count_connections(repository, monkeypatch) -> list[str]:
+    """Record every connection the repository opens off a ``cortex-*`` background thread.
+
+    Each ``connect()`` opens a fresh SQLite connection and re-issues its pragmas,
+    so the count is the cost of a request. Supervisor threads (retention cleanup,
+    leases) share the repository and would add unrelated connections while a
+    request runs, so only the request's own threads are counted.
+    """
+
+    opened: list[str] = []
+    real_connect = repository.connect
+
+    @contextmanager
+    def counting_connect():
+        if not threading.current_thread().name.startswith("cortex-"):
+            opened.append(threading.current_thread().name)
+        with real_connect() as connection:
+            yield connection
+
+    monkeypatch.setattr(repository, "connect", counting_connect)
+    return opened
+
+
+def _seed_jobs_in_every_state(app, owner: str, repository) -> list[str]:
+    """One job in each state the tray has to describe; returns their ids."""
+
+    def make(job_id: str, profile: str = "fake.v1"):
+        repository.create_job(
+            job_id=job_id,
+            owner=owner,
+            request_id=f"request-{job_id}",
+            profile=profile,
+            payload={},
+        )
+
+    make("state-queued")
+    make("state-running")
+    repository.transition(
+        "state-running",
+        status="running",
+        event="started",
+        phase="running",
+        data={"message": "Working on it."},
+    )
+    make("state-succeeded")
+    repository.transition(
+        "state-succeeded",
+        status="succeeded",
+        event="completed",
+        phase="completed",
+        data={"message": "All done."},
+        result={"value": 42},
+    )
+    make("state-failed")
+    repository.transition(
+        "state-failed",
+        status="failed",
+        event="failed",
+        phase="failed",
+        data={"message": "It broke."},
+        error="worker_timeout",
+    )
+    make("state-cancelling")
+    repository.request_cancel("state-cancelling")
+    _pending_approval(app, owner=owner, job_id="state-approval-pending")
+    _pending_approval(app, owner=owner, job_id="state-approval-approved")
+    repository.decide_approval("state-approval-approved", owner=owner, decision="approved")
+    _pending_approval(app, owner=owner, job_id="state-approval-expired")
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_approvals SET expires_at = ? WHERE job_id = ?",
+            ("2000-01-01T00:00:00+00:00", "state-approval-expired"),
+        )
+    return [
+        "state-queued",
+        "state-running",
+        "state-succeeded",
+        "state-failed",
+        "state-cancelling",
+        "state-approval-pending",
+        "state-approval-approved",
+        "state-approval-expired",
+    ]
+
+
+def test_listing_tasks_opens_a_bounded_number_of_connections(tmp_path, monkeypatch):
+    """The tray refresh cost two extra connections per task.
+
+    Each job's newest event and approval were looked up with their own
+    connection, so twenty jobs cost forty-one and ``include_terminal`` lists of
+    two hundred cost four hundred and one. They now come back with the list.
+    """
+
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        owner = _owner(app, headers)
+        repository = _pending_approval(app, owner=owner, job_id="pending-approval")
+        for index in range(19):
+            job_id = f"terminal-{index:02d}"
+            repository.create_job(
+                job_id=job_id,
+                owner=owner,
+                request_id=f"request-{job_id}",
+                profile="fake.v1",
+                payload={},
+            )
+            repository.transition(
+                job_id,
+                status="succeeded",
+                event="completed",
+                phase="completed",
+                data={"message": "Terminal history."},
+                result={"index": index},
+            )
+        opened = _count_connections(repository, monkeypatch)
+
+        tasks = client.get(
+            "/api/v1/execution/tasks?include_terminal=true&limit=50", headers=headers
+        )
+
+        assert tasks.status_code == 200
+        assert len(tasks.json()["tasks"]) == 20
+        assert 1 <= len(opened) <= 2, opened
+
+
+def test_the_task_list_describes_each_job_exactly_as_its_own_status_does(tmp_path):
+    """Batching the reads must not change what the tray says about a job.
+
+    Compared field by field against ``GET /execution/{id}``, which still looks
+    the event and approval up per request, across every state a job can be in.
+    """
+
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        owner = _owner(app, headers)
+        repository = app.state.execution_coordinator.repository
+        job_ids = _seed_jobs_in_every_state(app, owner, repository)
+
+        listed = {
+            task["job_id"]: task
+            for task in client.get(
+                "/api/v1/execution/tasks?include_terminal=true&limit=50", headers=headers
+            ).json()["tasks"]
+        }
+        assert sorted(listed) == sorted(job_ids)
+
+        compared = (
+            "profile",
+            "status",
+            "sequence",
+            "phase",
+            "message",
+            "approval_state",
+            "approval_reason",
+            "approval_expires_at",
+            "can_cancel",
+            "error",
+        )
+        for job_id in job_ids:
+            single = client.get(f"/api/v1/execution/{job_id}", headers=headers).json()
+            assert {key: listed[job_id][key] for key in compared} == {
+                key: single[key] for key in compared
+            }, job_id
+
+        # And the states are the ones this test set out to cover.
+        assert listed["state-running"]["message"] == "Working on it."
+        assert listed["state-running"]["can_cancel"] is True
+        assert listed["state-succeeded"]["message"] == "All done."
+        assert listed["state-failed"]["error"] == "worker_timeout"
+        assert listed["state-cancelling"]["status"] == "cancelling"
+        assert listed["state-approval-pending"]["approval_state"] == "pending"
+        assert listed["state-approval-pending"]["approval_reason"] == (
+            "Create a larger staged image preview."
+        )
+        assert listed["state-approval-pending"]["can_cancel"] is False
+        assert listed["state-approval-approved"]["approval_state"] == "approved"
+        assert listed["state-approval-expired"]["approval_state"] == "expired"
 
 
 def test_approval_api_is_owner_scoped_exactly_once_and_redacted(tmp_path):
