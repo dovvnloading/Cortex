@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -39,10 +40,18 @@ class LlamaCppChatClient:
         *,
         models_directory: Callable[[], Path],
         http_client: httpx.Client | None = None,
+        verify: ssl.SSLContext | bool = True,
     ) -> None:
         self._provider = provider
         self._models_directory = models_directory
-        self._http = http_client if http_client is not None else httpx.Client(timeout=_DEFAULT_TIMEOUT)
+        # ``verify`` only shapes the client this adapter owns; the app passes
+        # one shared TLS context so each client does not parse the
+        # certificate bundle again.
+        self._http = (
+            http_client
+            if http_client is not None
+            else httpx.Client(timeout=_DEFAULT_TIMEOUT, verify=verify)
+        )
         self._owns_http_client = http_client is None
         self._close_lock = Lock()
         self._closed = False
