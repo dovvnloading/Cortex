@@ -2,7 +2,8 @@
 
 Evaluates one safe decimal expression in a short-lived child under a hard
 wall-clock deadline. The child receives an already-validated expression and
-nothing else.
+nothing else. On Windows it is held at a checkpoint until the parent has put it
+in a job object with memory and process-count limits, and only then evaluates.
 """
 
 from __future__ import annotations
@@ -13,14 +14,16 @@ from threading import Event, Lock
 import time
 from typing import Any
 
-from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
+from cortex_backend.core.win_jobs import JobLimits, JobObjectError, KillOnCloseJob
 
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     _contain_worker,
+    _release_worker,
     _stop_process,
 )
 from .scratch_compute import (
+    SCRATCH_WORKER_MEMORY_BYTES,
     ScratchComputeError,
     ScratchComputeResult,
     scratch_worker_main,
@@ -28,6 +31,14 @@ from .scratch_compute import (
 
 DEFAULT_SCRATCH_TIMEOUT_SECONDS = 3.0
 DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS = 15.0
+# The worker evaluates one expression and starts nothing, so the job allows it
+# exactly one process and no more memory than the worker itself is held to.
+SCRATCH_WORKER_JOB_LIMITS = JobLimits(
+    process_memory_bytes=SCRATCH_WORKER_MEMORY_BYTES,
+    job_memory_bytes=SCRATCH_WORKER_MEMORY_BYTES,
+    active_processes=1,
+    restrict_ui=True,
+)
 
 
 class LocalScratchAttempt:
@@ -57,7 +68,9 @@ class LocalScratchAttempt:
         receiver = sender = process = None
         worker_job: KillOnCloseJob | None = None
         try:
-            receiver, sender = self._context.Pipe(duplex=False)
+            # Duplex: the worker waits at its "ready" checkpoint for this end's
+            # go-ahead, which is only sent once the job is attached.
+            receiver, sender = self._context.Pipe()
             process = self._context.Process(
                 target=scratch_worker_main,
                 args=(sender, self._cancel_event, expression),
@@ -69,15 +82,12 @@ class LocalScratchAttempt:
                     raise ScratchComputeError("worker_closed")
                 self._process = process
             process.start()
-            try:
-                worker_job = _contain_worker(process)
-            except JobObjectError:
-                raise ScratchComputeError("process_isolation_unavailable") from None
             sender.close()
             sender = None
             startup_deadline = time.monotonic() + self._startup_timeout_seconds
             deadline: float | None = None
             cancelled_at: float | None = None
+            released = False
             while True:
                 if cancel_event.is_set() or self._cancel_event.is_set():
                     self._cancel_event.set()
@@ -90,13 +100,25 @@ class LocalScratchAttempt:
                     if not isinstance(message, Mapping):
                         raise ScratchComputeError("worker_output_invalid")
                     if message.get("ok") is True and message.get("event") == "ready":
-                        deadline = time.monotonic() + self._timeout_seconds
+                        if not released:
+                            released = True
+                            try:
+                                worker_job = _contain_worker(process, SCRATCH_WORKER_JOB_LIMITS)
+                            except JobObjectError:
+                                raise ScratchComputeError("process_isolation_unavailable") from None
+                            if not _release_worker(receiver):
+                                raise ScratchComputeError("worker_failed")
+                            deadline = time.monotonic() + self._timeout_seconds
                         continue
                     if message.get("ok") is not True:
                         code = message.get("code")
                         raise ScratchComputeError(
                             "cancelled" if code == "cancelled" else "worker_failed"
                         )
+                    if not released:
+                        # An answer from a worker that was never released is
+                        # not one this attempt asked for.
+                        raise ScratchComputeError("worker_output_invalid")
                     try:
                         return ScratchComputeResult(value=message["value"])
                     except (KeyError, TypeError, ValueError):
@@ -143,4 +165,5 @@ __all__ = [
     "DEFAULT_SCRATCH_STARTUP_TIMEOUT_SECONDS",
     "DEFAULT_SCRATCH_TIMEOUT_SECONDS",
     "LocalScratchAttempt",
+    "SCRATCH_WORKER_JOB_LIMITS",
 ]

@@ -180,6 +180,15 @@ choice for that run. It is never silently enabled or persisted. If the required
 worker boundary cannot be established, Cortex fails closed and ordinary chat
 remains available.
 
+The calculator and the image transform run the same way as code: a short-lived
+child that clears its inherited environment and then waits at a checkpoint,
+touching nothing it was given, until Cortex has put it in a Windows job object.
+The job ends the child if Cortex exits, caps the memory the child can commit,
+allows the calculator and image workers exactly one process (the code worker a
+handful), and blocks clipboard, desktop and other-window access. That is a
+resource and lifetime boundary, not a sandbox: a job does not limit which files
+or network addresses a process running as you could otherwise reach.
+
 What the capabilities reach today is deliberately narrow:
 
 - **Files:** a scratch folder created empty for that one run and deleted

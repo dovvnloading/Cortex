@@ -8,23 +8,45 @@ children, which nothing else on the machine would do.
 
 The definitions here are the stable, documented Win32 surface for that, kept
 in one place so the llama-server launcher, the dev-server supervisor and the
-execution workers share them. What this does *not* contain: a process that is
-assigned only after it has started may already have spawned children of its
-own, and those are outside the job.
+execution workers share them.
+
+A job can also carry :class:`JobLimits`: a ceiling on committed memory (per
+process and for the job as a whole), on the number of live processes, and on
+CPU time, plus the user-interface restrictions that stop a contained process
+reaching the clipboard, other windows' handles, the desktop or the display
+settings. The memory limits are commit-charge limits, not working-set limits:
+an allocation that would exceed them fails inside the process.
+
+What this does *not* contain: a process that is assigned only after it has
+started may already have spawned children of its own, and those are outside
+the job (the execution workers hold their child at a checkpoint until the job
+is attached for exactly that reason). A job says nothing about files or the
+network: a contained process can still read and write whatever its user can,
+and open sockets. It is a resource and lifetime boundary, not a sandbox.
 """
 
 from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 import logging
+import math
 from typing import Any, Protocol
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
+JOBOBJECT_BASIC_UI_RESTRICTIONS_CLASS = 4
 JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002
+JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# Every JOB_OBJECT_UILIMIT_* flag: handles, both clipboard directions, system
+# parameters, display settings, global atoms, the desktop and exit-windows.
+JOB_OBJECT_UILIMIT_ALL = 0x000000FF
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_TERMINATE = 0x0001
 
@@ -69,6 +91,44 @@ class JobObjectExtendedLimitInformation(ctypes.Structure):
     ]
 
 
+class JobBasicUiRestrictions(ctypes.Structure):
+    _fields_ = [("ui_restrictions_class", wintypes.DWORD)]
+
+
+@dataclass(frozen=True)
+class JobLimits:
+    """What a job enforces beyond kill-on-close. ``None`` leaves a limit off.
+
+    ``process_memory_bytes`` caps the committed memory of each process in the
+    job and ``job_memory_bytes`` the sum over the job. ``active_processes``
+    caps how many processes may be alive in it at once, the assigned one
+    included: creating a process past the cap fails (``ERROR_NOT_ENOUGH_QUOTA``
+    from ``CreateProcess``, as the real-job tests observe). ``cpu_seconds``
+    is per-process user-mode CPU time. ``restrict_ui`` applies every
+    ``JOB_OBJECT_UILIMIT_*`` restriction.
+    """
+
+    process_memory_bytes: int | None = None
+    job_memory_bytes: int | None = None
+    active_processes: int | None = None
+    cpu_seconds: float | None = None
+    restrict_ui: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("process_memory_bytes", "job_memory_bytes", "active_processes"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+                raise ValueError(f"{name} must be a positive integer")
+        cpu_seconds = self.cpu_seconds
+        if cpu_seconds is not None and (
+            isinstance(cpu_seconds, bool)
+            or not isinstance(cpu_seconds, (int, float))
+            or not math.isfinite(cpu_seconds)
+            or cpu_seconds <= 0
+        ):
+            raise ValueError("cpu_seconds must be a positive number")
+
+
 class JobWin32(Protocol):
     """The handful of kernel32 entry points needed to assign a kill-on-close
     Job Object -- small and injectable so tests can verify the exact call
@@ -96,32 +156,73 @@ def real_job_win32() -> JobWin32:
     return kernel32
 
 
+def _extended_limits(limits: JobLimits) -> JobObjectExtendedLimitInformation:
+    """The extended limit block for kill-on-close plus whatever ``limits`` sets."""
+
+    info = JobObjectExtendedLimitInformation()
+    flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if limits.process_memory_bytes is not None:
+        flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        info.process_memory_limit = limits.process_memory_bytes
+    if limits.job_memory_bytes is not None:
+        flags |= JOB_OBJECT_LIMIT_JOB_MEMORY
+        info.job_memory_limit = limits.job_memory_bytes
+    if limits.active_processes is not None:
+        flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        info.basic_limit_information.active_process_limit = limits.active_processes
+    if limits.cpu_seconds is not None:
+        flags |= JOB_OBJECT_LIMIT_PROCESS_TIME
+        # 100-nanosecond units.
+        info.basic_limit_information.per_process_user_time = int(limits.cpu_seconds * 10_000_000)
+    info.basic_limit_information.limit_flags = flags
+    return info
+
+
 class KillOnCloseJob:
     """A job object whose processes die when it is closed or Cortex exits.
 
-    Creating the object creates and configures the job; :meth:`assign` puts a
-    running process in it; :meth:`close` closes the handle, which ends every
-    process still assigned. The owner keeps the object for as long as its
-    processes should live -- if it is never closed, the handle goes when the
-    process does, which is the point.
+    Creating the object creates and configures the job (kill-on-close, and any
+    :class:`JobLimits`); :meth:`assign` puts a running process in it;
+    :meth:`close` closes the handle, which ends every process still assigned.
+    The owner keeps the object for as long as its processes should live -- if
+    it is never closed, the handle goes when the process does, which is the
+    point.
     """
 
-    def __init__(self, *, win32_factory: Callable[[], JobWin32] = real_job_win32) -> None:
+    def __init__(
+        self,
+        limits: JobLimits | None = None,
+        *,
+        win32_factory: Callable[[], JobWin32] = real_job_win32,
+    ) -> None:
         self._win32: JobWin32 | None = None
         self._handle: int | None = None
+        wanted = limits if limits is not None else JobLimits()
         try:
             win32 = win32_factory()
             handle = win32.CreateJobObjectW(None, None)
             if not handle:
                 raise JobObjectError("could not create a process containment job")
-            limits = JobObjectExtendedLimitInformation()
-            limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            if not win32.SetInformationJobObject(
-                handle,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-                ctypes.byref(limits),
-                ctypes.sizeof(limits),
-            ):
+            info = _extended_limits(wanted)
+            configured = bool(
+                win32.SetInformationJobObject(
+                    handle,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                    ctypes.byref(info),
+                    ctypes.sizeof(info),
+                )
+            )
+            if configured and wanted.restrict_ui:
+                restrictions = JobBasicUiRestrictions(JOB_OBJECT_UILIMIT_ALL)
+                configured = bool(
+                    win32.SetInformationJobObject(
+                        handle,
+                        JOBOBJECT_BASIC_UI_RESTRICTIONS_CLASS,
+                        ctypes.byref(restrictions),
+                        ctypes.sizeof(restrictions),
+                    )
+                )
+            if not configured:
                 win32.CloseHandle(handle)
                 raise JobObjectError("could not configure the process containment job")
         except JobObjectError:
@@ -172,10 +273,18 @@ class KillOnCloseJob:
 
 
 __all__ = [
+    "JOBOBJECT_BASIC_UI_RESTRICTIONS_CLASS",
     "JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS",
+    "JOB_OBJECT_LIMIT_ACTIVE_PROCESS",
+    "JOB_OBJECT_LIMIT_JOB_MEMORY",
     "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
+    "JOB_OBJECT_LIMIT_PROCESS_MEMORY",
+    "JOB_OBJECT_LIMIT_PROCESS_TIME",
+    "JOB_OBJECT_UILIMIT_ALL",
     "PROCESS_SET_QUOTA",
     "PROCESS_TERMINATE",
+    "JobBasicUiRestrictions",
+    "JobLimits",
     "JobObjectBasicLimitInformation",
     "JobObjectError",
     "JobObjectExtendedLimitInformation",

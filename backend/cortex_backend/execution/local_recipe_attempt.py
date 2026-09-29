@@ -3,6 +3,11 @@
 Runs the fixed image provider in a short-lived child process. The child is
 handed immutable bytes and an already-validated plan -- never a path, a
 command, or model source -- and returns compact validated output.
+
+The child imports the imaging stack, then holds at a checkpoint until the parent
+has put it in a job object with memory and process-count limits. Only then does
+it look at the untrusted bytes. The startup wait and the transform budget are
+separate, so a slow cold start is not reported as a slow image.
 """
 
 from __future__ import annotations
@@ -13,20 +18,57 @@ from threading import Event, Lock
 import time
 from typing import Any
 
-from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
+from cortex_backend.core.win_jobs import JobLimits, JobObjectError, KillOnCloseJob
 
 from .lifecycle import RuntimeHealth
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     _contain_worker,
+    _release_worker,
     _stop_process,
+    announce_ready_and_wait,
+    apply_resource_limits,
+    scrub_worker_environment,
 )
 from .models import ExecutionJob
 from .recipe_coordinator import RecipeExecutionError, RecipeWorkerOutput
-from .recipe_provider import RecipeImageProvider, RecipeProviderError, pin_plugin_registry
+from .recipe_provider import (
+    MAX_DECODED_BYTES,
+    MAX_INPUT_BYTES,
+    MAX_OUTPUT_BYTES,
+    RecipeImageProvider,
+    RecipeProviderError,
+    pin_plugin_registry,
+)
 from .recipes import RecipeValidationError, parse_image_transform
 
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
+# Importing Pillow and its codecs in a frozen desktop process can take longer
+# than transforming a small image, so the child gets its own start-up budget
+# before the transform clock starts.
+DEFAULT_IMAGE_STARTUP_TIMEOUT_SECONDS = 15.0
+# The provider's 256 MiB decode budget is an estimate for one image, not an
+# operating-system ceiling. A step such as contrast holds its source, an
+# intermediate and its result at once, so three decoded images, and the
+# encoded input stays in memory throughout. The encoded output is added too,
+# although it is never held at the same time as all three, and 256 MiB covers
+# the interpreter, the imports and allocator overhead. Measured on a real
+# worker, a 64-megapixel RGBA image through eight contrast steps peaks at
+# about 800 MiB of committed job memory, so a legitimate input at the
+# provider's own ceiling fits with room to spare while a decoder that runs away
+# is still stopped by the operating system.
+_WORKER_HEADROOM_BYTES = 256 * 1024 * 1024
+RECIPE_WORKER_MEMORY_BYTES = (
+    3 * MAX_DECODED_BYTES + MAX_INPUT_BYTES + MAX_OUTPUT_BYTES + _WORKER_HEADROOM_BYTES
+)
+# The worker decodes untrusted bytes and starts nothing, so the job allows it
+# exactly one process.
+RECIPE_WORKER_JOB_LIMITS = JobLimits(
+    process_memory_bytes=RECIPE_WORKER_MEMORY_BYTES,
+    job_memory_bytes=RECIPE_WORKER_MEMORY_BYTES,
+    active_processes=1,
+    restrict_ui=True,
+)
 
 _RECIPE_PROCESS_ERROR = "worker_provider_failed"
 
@@ -40,6 +82,8 @@ def _recipe_worker_main(
     """Run only the fixed provider in a child process and return bytes/metadata."""
 
     try:
+        scrub_worker_environment()
+        apply_resource_limits(memory_bytes=RECIPE_WORKER_MEMORY_BYTES)
         provider = RecipeImageProvider()
         health = provider.start(
             RuntimeHealth.ready("The local image worker dependency check passed.")
@@ -52,6 +96,11 @@ def _recipe_worker_main(
         # the flag is process-global, and the backend process needs the wider
         # set for chat attachments.
         pin_plugin_registry()
+        # Everything above is this worker's own bootstrap. Hold here until the
+        # parent confirms the job carrying the memory and process-count limits
+        # is attached: the plan and the image bytes are read only after that.
+        if not announce_ready_and_wait(connection):
+            return
         plan = parse_image_transform(plan_payload)
         result = provider.transform(
             plan,
@@ -94,13 +143,15 @@ class LocalRecipeWorkerAttempt:
         _job: ExecutionJob,
         *,
         timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
+        startup_timeout_seconds: float = DEFAULT_IMAGE_STARTUP_TIMEOUT_SECONDS,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
     ) -> None:
-        if timeout_seconds <= 0 or cancel_grace_seconds <= 0:
+        if timeout_seconds <= 0 or startup_timeout_seconds <= 0 or cancel_grace_seconds <= 0:
             raise ValueError("worker timeouts must be positive")
         self._context = multiprocessing.get_context("spawn")
         self._cancel_event = self._context.Event()
         self._timeout_seconds = float(timeout_seconds)
+        self._startup_timeout_seconds = float(startup_timeout_seconds)
         self._cancel_grace_seconds = float(cancel_grace_seconds)
         self._lock = Lock()
         self._process: Any | None = None
@@ -125,7 +176,9 @@ class LocalRecipeWorkerAttempt:
         receiver = sender = process = None
         worker_job: KillOnCloseJob | None = None
         try:
-            receiver, sender = self._context.Pipe(duplex=False)
+            # Duplex: the worker waits at its "ready" checkpoint for this end's
+            # go-ahead, which is only sent once the job is attached.
+            receiver, sender = self._context.Pipe()
             process = self._context.Process(
                 target=_recipe_worker_main,
                 args=(sender, self._cancel_event, plan_payload, content),
@@ -137,14 +190,12 @@ class LocalRecipeWorkerAttempt:
                     raise RecipeExecutionError("worker_closed")
                 self._process = process
             process.start()
-            try:
-                worker_job = _contain_worker(process)
-            except JobObjectError:
-                raise RecipeExecutionError("process_isolation_unavailable") from None
             sender.close()
             sender = None
-            deadline = time.monotonic() + self._timeout_seconds
+            startup_deadline = time.monotonic() + self._startup_timeout_seconds
+            deadline: float | None = None
             cancelled_at: float | None = None
+            released = False
             while True:
                 if cancel_event.is_set() or self._cancel_event.is_set():
                     self._cancel_event.set()
@@ -154,11 +205,32 @@ class LocalRecipeWorkerAttempt:
                         message = receiver.recv()
                     except (EOFError, OSError):
                         raise RecipeExecutionError("worker_failed") from None
+                    if (
+                        isinstance(message, Mapping)
+                        and message.get("ok") is True
+                        and message.get("event") == "ready"
+                    ):
+                        if not released:
+                            released = True
+                            try:
+                                worker_job = _contain_worker(process, RECIPE_WORKER_JOB_LIMITS)
+                            except JobObjectError:
+                                raise RecipeExecutionError("process_isolation_unavailable") from None
+                            if not _release_worker(receiver):
+                                raise RecipeExecutionError("worker_failed")
+                            deadline = time.monotonic() + self._timeout_seconds
+                        continue
+                    if not released and isinstance(message, Mapping) and message.get("ok") is True:
+                        # A result from a worker that was never released is not
+                        # one this attempt asked for.
+                        raise RecipeExecutionError("worker_output_invalid")
                     return self._output_from_message(message)
                 now = time.monotonic()
                 if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
                     raise RecipeExecutionError("cancelled")
-                if now >= deadline:
+                if deadline is None and now >= startup_deadline:
+                    raise RecipeExecutionError("worker_startup_timeout")
+                if deadline is not None and now >= deadline:
                     raise RecipeExecutionError("worker_timeout")
         finally:
             if sender is not None:
@@ -213,6 +285,9 @@ class LocalRecipeWorkerAttempt:
 
 
 __all__ = [
+    "DEFAULT_IMAGE_STARTUP_TIMEOUT_SECONDS",
     "DEFAULT_IMAGE_TIMEOUT_SECONDS",
     "LocalRecipeWorkerAttempt",
+    "RECIPE_WORKER_JOB_LIMITS",
+    "RECIPE_WORKER_MEMORY_BYTES",
 ]

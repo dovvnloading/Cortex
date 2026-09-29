@@ -17,6 +17,7 @@ from PIL import Image
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
+from cortex_backend.execution import scratch_compute
 from cortex_backend.execution.profiles import build_execution_lifecycle
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.execution.scratch_compute import (
@@ -96,26 +97,73 @@ def _app(tmp_path):
     )
 
 
-def test_scratch_worker_announces_readiness_before_evaluating():
-    class _Connection:
-        def __init__(self) -> None:
-            self.messages: list[dict[str, object]] = []
-            self.closed = False
+_GO_AHEAD = {"go": True}
 
-        def send(self, message: dict[str, object]) -> None:
-            self.messages.append(message)
 
-        def close(self) -> None:
-            self.closed = True
+class _ScratchConnection:
+    """A worker pipe that records what the worker says and answers its checkpoint."""
 
-    connection = _Connection()
-    scratch_worker_main(connection, SimpleNamespace(is_set=lambda: False), "12 * 7")
+    def __init__(self, go: object = _GO_AHEAD) -> None:
+        self._go = go
+        self.messages: list[dict[str, object]] = []
+        self.closed = False
+
+    def send(self, message: dict[str, object]) -> None:
+        self.messages.append(message)
+
+    def recv(self) -> object:
+        return self._go
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _run_scratch_worker_in_process(monkeypatch, connection, expression="12 * 7"):
+    """Drive ``scratch_worker_main`` in this process without clearing its environment.
+
+    The entry point scrubs ``os.environ`` and applies process-wide limits, which
+    is right in a worker child and would wreck the test runner, so those two
+    are recorded instead of run.
+    """
+
+    events: list[str] = []
+    monkeypatch.setattr(scratch_compute, "scrub_worker_environment", lambda: events.append("scrub"))
+    monkeypatch.setattr(
+        scratch_compute, "apply_resource_limits", lambda **_kwargs: events.append("limits")
+    )
+    scratch_worker_main(connection, SimpleNamespace(is_set=lambda: False), expression)
+    return events
+
+
+def test_scratch_worker_announces_readiness_before_evaluating(monkeypatch):
+    connection = _ScratchConnection()
+
+    events = _run_scratch_worker_in_process(monkeypatch, connection)
 
     assert connection.messages == [
         {"ok": True, "event": "ready"},
         {"ok": True, "value": "84"},
     ]
     assert connection.closed is True
+    # Its own environment and limits are dealt with before it says ready.
+    assert events == ["scrub", "limits"]
+
+
+def test_scratch_worker_does_not_evaluate_until_it_is_released(monkeypatch):
+    evaluated: list[str] = []
+    monkeypatch.setattr(
+        scratch_compute,
+        "evaluate_scratch_expression",
+        lambda expression, **_kwargs: evaluated.append(expression),
+    )
+
+    for denied_go in ({"go": False}, {}, None, "go"):
+        connection = _ScratchConnection(go=denied_go)
+        _run_scratch_worker_in_process(monkeypatch, connection)
+        assert connection.messages == [{"ok": True, "event": "ready"}]
+        assert connection.closed is True
+
+    assert evaluated == []
 
 
 def test_safe_expression_language_rejects_python_and_host_capabilities():

@@ -2,7 +2,8 @@
 
 Runs one validated, user-approved program in a short-lived child process under
 a memory cap, an output cap, and a wall-clock limit. On Windows the child is
-placed in a job object so its own descendants cannot outlive it.
+placed in a job object so its own descendants cannot outlive it, and it is held
+at a checkpoint until that job is attached.
 """
 
 from __future__ import annotations
@@ -10,10 +11,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 import multiprocessing
-import os
 from threading import Event, Lock
 import time
 from typing import Any
+
+from cortex_backend.core.win_jobs import JobLimits, JobObjectError, KillOnCloseJob
 
 from .code_execution import (
     CODE_EXECUTION_RESULT_SCHEMA,
@@ -24,12 +26,13 @@ from .code_execution import (
     MAX_CODE_OUTPUT_BYTES,
     MAX_CODE_TIMEOUT_SECONDS,
     MAX_CODE_VALUE_BYTES,
-    _WindowsProcessJob,
     code_worker_main,
     validate_code_source,
 )
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
+    _contain_worker,
+    _release_worker,
     _stop_process,
 )
 
@@ -38,6 +41,21 @@ DEFAULT_CODE_TIMEOUT_SECONDS = MAX_CODE_TIMEOUT_SECONDS
 # program. Keep that bootstrap grace separate from the code's wall-clock limit
 # so a healthy worker is not reported as a code timeout while it is starting.
 DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS = 15.0
+# The worker starts nothing itself. The allowance above one is for the brokered
+# program the process capability may start (which has a job of its own inside
+# this one) and a few descendants of it.
+CODE_WORKER_ACTIVE_PROCESS_LIMIT = 4
+
+
+def code_worker_job_limits(timeout_seconds: float) -> JobLimits:
+    """The job limits for a code worker with this wall-clock budget."""
+
+    return JobLimits(
+        process_memory_bytes=MAX_CODE_MEMORY_BYTES,
+        active_processes=CODE_WORKER_ACTIVE_PROCESS_LIMIT,
+        cpu_seconds=timeout_seconds + 1.0,
+        restrict_ui=True,
+    )
 
 
 class LocalCodeAttempt:
@@ -72,9 +90,9 @@ class LocalCodeAttempt:
             raise CodeExecutionError("worker_closed")
         validate_code_source(source)
         receiver = sender = process = None
-        worker_job: _WindowsProcessJob | None = None
+        worker_job: KillOnCloseJob | None = None
         try:
-            # Duplex, unlike the scratch/recipe workers: the child must be
+            # Duplex, like the scratch and recipe workers: the child must be
             # held at its "ready" checkpoint (after environment scrubbing,
             # before running any of the source) until this end confirms the
             # Job Object is attached, so job_sent below can tell it to go.
@@ -112,16 +130,20 @@ class LocalCodeAttempt:
                     ):
                         if not job_sent:
                             job_sent = True
-                            if os.name == "nt":
-                                worker_job = _WindowsProcessJob(
-                                    process,
-                                    memory_limit=MAX_CODE_MEMORY_BYTES,
-                                    active_process_limit=4,
-                                    cpu_seconds=self._timeout_seconds + 1.0,
+                            try:
+                                worker_job = _contain_worker(
+                                    process, code_worker_job_limits(self._timeout_seconds)
                                 )
-                            receiver.send({"go": True})
-                        deadline = time.monotonic() + self._timeout_seconds
+                            except JobObjectError:
+                                raise CodeExecutionError("process_isolation_unavailable") from None
+                            if not _release_worker(receiver):
+                                raise CodeExecutionError("worker_failed")
+                            deadline = time.monotonic() + self._timeout_seconds
                         continue
+                    if not job_sent and isinstance(message, Mapping) and message.get("ok") is True:
+                        # A result from a worker that was never released is not
+                        # one this attempt asked for.
+                        raise CodeExecutionError("worker_output_invalid")
                     return self._result_from_message(message)
                 now = time.monotonic()
                 if cancelled_at is not None and now - cancelled_at >= self._cancel_grace_seconds:
