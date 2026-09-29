@@ -15,6 +15,7 @@ const ChatPage = lazy(loadChatPage);
 import { Onboarding } from "../features/shell/Onboarding";
 const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
+import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
@@ -233,6 +234,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const saving = useSettingsStore((state) => state.saving);
   const setSaving = useSettingsStore((state) => state.setSaving);
   const [memos, setMemos] = useState<string[]>([]);
+  const [memoryLoad, setMemoryLoad] = useState<MemoryLoadState>({ status: "loading" });
   const models = useModelStore((state) => state.models);
   const setModels = useModelStore((state) => state.setModels);
   const [memoryBusy, setMemoryBusy] = useState(false);
@@ -255,6 +257,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const workspaceLoadGenerationRef = useRef(0);
   const groupLoadGenerationRef = useRef(0);
   const modelGenerationRef = useRef(0);
+  const memoryGenerationRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -263,6 +266,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       workspaceLoadGenerationRef.current += 1;
       groupLoadGenerationRef.current += 1;
       modelGenerationRef.current += 1;
+      memoryGenerationRef.current += 1;
       // The model job itself is durable on the backend, but its UI ownership
       // ends with this authenticated workspace. Do not strand a busy flag in
       // the process-wide store after logout or a remount.
@@ -285,11 +289,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setLoading(true);
     setLoadError(null);
     try {
-      const [systemResponse, chatResponse, settingsResponse, memoryResponse] = await Promise.all([
+      // Memories are not here on purpose: they render only inside Settings, so
+      // an unreadable memory store must not stand between the user and chat.
+      // They load when the settings route opens.
+      const [systemResponse, chatResponse, settingsResponse] = await Promise.all([
         api.system(),
         api.chats(),
         api.settings(),
-        api.memories(),
       ]);
       if (!isCurrentLoad()) return;
       setSystem(systemResponse);
@@ -308,7 +314,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
-      setMemos(memoryResponse.memos);
       if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
       void api.models()
         .then((nextModels) => {
@@ -331,6 +336,36 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
     return () => window.clearTimeout(timer);
   }, [loadWorkspace]);
+
+  // Memories are read for the Settings screen only, so they load when that
+  // route opens, with their own error state, rather than gating the workspace.
+  // Opening Settings again refreshes them: the assistant can add memories from
+  // a chat, and saving an edited copy of a stale list would erase those.
+  const loadMemories = useCallback(async () => {
+    const generation = ++memoryGenerationRef.current;
+    const isCurrentLoad = () => mountedRef.current && memoryGenerationRef.current === generation;
+    // Keep showing the last list during a refresh; only a first load, or a
+    // retry after a failure, has nothing to show.
+    setMemoryLoad((current) => (current.status === "ready" ? current : { status: "loading" }));
+    try {
+      const response = await api.memories();
+      if (!isCurrentLoad()) return;
+      setMemos(response.memos);
+      setMemoryLoad({ status: "ready" });
+    } catch (error) {
+      if (isCurrentLoad()) {
+        setMemoryLoad({ status: "error", message: apiMessage(error, "Could not load your saved memories.") });
+      }
+    }
+  }, [api]);
+
+  // A mutation's response is the authoritative list. Invalidate any load still
+  // in flight so it cannot overwrite it with an older read.
+  const applyMemories = (nextMemos: string[]) => {
+    ++memoryGenerationRef.current;
+    setMemos(nextMemos);
+    setMemoryLoad({ status: "ready" });
+  };
 
   useEffect(() => {
     const mediaQuery = theme === "system" && typeof window.matchMedia === "function"
@@ -588,7 +623,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response = await api.addMemory(memo);
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Memory saved.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not save memory."), "error");
@@ -601,7 +636,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response: MemoryResponse = await api.clearMemories();
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Permanent memories cleared.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not clear memories."), "error");
@@ -614,7 +649,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response = await api.replaceMemories(next);
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Memory changes saved.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not save memory changes."), "error");
@@ -805,7 +840,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
-            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
+            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
             : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
         </Suspense>
       </AppShell>
@@ -838,9 +873,12 @@ function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, s
   return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} onSessionExpired={onSessionExpired} />;
 }
 
-function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
+function SettingsRoute({ activeChatId, onLoadMemories, ...props }: Omit<SettingsPanelProps, "onClose" | "onRetryMemory"> & { activeChatId: string | null; onLoadMemories: () => Promise<void> }) {
   const navigate = useNavigate();
-  return <SettingsPanel {...props} onClose={() => navigate(activeChatId ? chatPath(activeChatId) : "/chat/new")} />;
+  useEffect(() => {
+    void onLoadMemories();
+  }, [onLoadMemories]);
+  return <SettingsPanel {...props} onRetryMemory={() => void onLoadMemories()} onClose={() => navigate(activeChatId ? chatPath(activeChatId) : "/chat/new")} />;
 }
 
 const ACTIVE_EXECUTION_STATUSES = new Set<ExecutionTaskSummary["status"]>([

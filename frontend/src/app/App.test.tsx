@@ -442,6 +442,82 @@ describe("App", () => {
     }
   });
 
+  it("opens the workspace when the memory store fails to load", async () => {
+    // Memories are read only by Settings. An unreadable memory store used to
+    // fail the workspace load and put "Workspace unavailable" between the user
+    // and chat -- the one place they could still get on.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    let memoryFails = true;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/memories")) {
+        return memoryFails
+          ? respond({ detail: "Cortex could not load memories." }, 500)
+          : respond({ memos: ["Likes tea"] });
+      }
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Workspace unavailable" })).not.toBeInTheDocument();
+    expect(callsTo(fetcher, "/memories")).toHaveLength(0);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "Memory" }, { timeout: 10_000 }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cortex could not load memories.");
+    // Nothing loaded, so nothing editable that could be mistaken for the store.
+    expect(screen.queryByText("No permanent memories stored.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "New memory" })).not.toBeInTheDocument();
+
+    memoryFails = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("textbox", { name: "Memory 1" })).toHaveValue("Likes tea");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not let a slow memory refresh overwrite a memory saved meanwhile", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    let releaseRefresh!: (response: Response) => void;
+    const slowRefresh = new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+    let memoryReads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/memories") && init?.method === "POST") return respond({ memos: ["First", "Second"] });
+      if (url.endsWith("/memories")) {
+        memoryReads += 1;
+        return memoryReads === 1 ? respond({ memos: ["First"] }) : slowRefresh;
+      }
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "Memory" }, { timeout: 10_000 }));
+    expect(await screen.findByRole("textbox", { name: "Memory 1" })).toHaveValue("First");
+
+    // Leave Settings and come back: the list is refreshed, and while that read
+    // is slow the last list stays on screen and stays editable.
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    await user.click(await screen.findByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "Memory" }, { timeout: 10_000 }));
+    expect(await screen.findByRole("textbox", { name: "Memory 1" })).toHaveValue("First");
+    await waitFor(() => expect(memoryReads).toBe(2));
+
+    await user.type(screen.getByRole("textbox", { name: "New memory" }), "Second");
+    await user.click(screen.getByRole("button", { name: "Add memory" }));
+    expect(await screen.findByRole("textbox", { name: "Memory 2" })).toHaveValue("Second");
+
+    // The older read finishes last and must not erase what was just saved.
+    await act(async () => { releaseRefresh(respond({ memos: ["First"] })); });
+    expect(screen.getByRole("textbox", { name: "Memory 2" })).toHaveValue("Second");
+  });
+
   it("opens the workspace when the model service is unavailable", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
