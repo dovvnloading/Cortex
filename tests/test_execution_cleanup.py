@@ -206,7 +206,13 @@ def test_cleanup_retains_tombstone_when_database_finalize_fails(tmp_path, monkey
         repository.cleanup_expired(
             now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
         )
-    assert repository.get_artifact(artifact.artifact_id) is not None
+    # Read the row directly: get_artifact reads the real clock and reports an artifact whose
+    # one-second retention has lapsed as absent, which would make this depend on the test
+    # finishing within a second of publishing.
+    with original_connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM execution_artifacts WHERE artifact_id = ?", (artifact.artifact_id,)
+        ).fetchone() is not None
     assert quarantine.exists()
 
     monkeypatch.setattr(repository, "connect", original_connect)
