@@ -489,7 +489,10 @@ def test_start_strips_llama_arg_environment(
     monkeypatch.setenv("LLAMA_ARG_HF_REPO", "synthetic/repo-name")
     monkeypatch.setenv("LLAMA_ARG_MMPROJ", "C:/synthetic/projector.gguf")
     monkeypatch.setenv("LLAMA_LOG_FILE", "C:/synthetic/child.log")
+    monkeypatch.setenv("LLAMA_SERVER_CHILD_MODE", "synthetic-mode")
     monkeypatch.setenv("LLAMA_API_KEY", "inherited-synthetic-key")
+    monkeypatch.setenv("LLAMA_CACHE", "C:/synthetic/cache")
+    monkeypatch.setenv("LLAMA_TRACE", "1")
     monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")
     monkeypatch.setenv("VK_ICD_FILENAMES", "C:/synthetic/icd.json")
     launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
@@ -505,11 +508,18 @@ def test_start_strips_llama_arg_environment(
     assert len(launcher.launch_envs) == 2
     for env in launcher.launch_envs:
         assert env is not None
-        assert not [name for name in env if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_"))]
+        assert not [
+            name
+            for name in env
+            if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_", "LLAMA_SERVER_"))
+        ]
         # Tuning knobs users legitimately set for the GPU stack survive, as
-        # does everything the child needs to run at all.
+        # does everything the child needs to run at all, and so do the other
+        # LLAMA_* names: none of them overrides an option Cortex passes.
         assert env["GGML_VK_VISIBLE_DEVICES"] == "0"
         assert env["VK_ICD_FILENAMES"] == "C:/synthetic/icd.json"
+        assert env["LLAMA_CACHE"] == "C:/synthetic/cache"
+        assert env["LLAMA_TRACE"] == "1"
         assert env.get("PATH") == os.environ.get("PATH")
     first_env = launcher.launch_envs[0]
     assert first_env is not None
@@ -520,12 +530,19 @@ def test_start_strips_llama_arg_environment(
     notices = [r for r in caplog.records if "environment variables" in r.getMessage()]
     assert len(notices) == 1
     message = notices[0].getMessage()
-    for name in ("LLAMA_ARG_HF_REPO", "LLAMA_ARG_MMPROJ", "LLAMA_ARG_N_PARALLEL", "LLAMA_LOG_FILE"):
+    for name in (
+        "LLAMA_ARG_HF_REPO",
+        "LLAMA_ARG_MMPROJ",
+        "LLAMA_ARG_N_PARALLEL",
+        "LLAMA_LOG_FILE",
+        "LLAMA_SERVER_CHILD_MODE",
+    ):
         assert name in message
-    # Names only: never the values, and never the key that stays.
-    for value in ("synthetic/repo-name", "projector.gguf", "child.log", "inherited-synthetic-key"):
+    # Names only: never the values, and never a name that stays.
+    for value in ("synthetic/repo-name", "projector.gguf", "child.log", "synthetic-mode", "inherited-synthetic-key"):
         assert value not in caplog.text
-    assert "LLAMA_API_KEY" not in message
+    for kept in ("LLAMA_API_KEY", "LLAMA_CACHE", "LLAMA_TRACE"):
+        assert kept not in message
 
 
 def test_child_environment_matches_prefixes_case_insensitively_and_keeps_the_rest() -> None:
@@ -534,20 +551,25 @@ def test_child_environment_matches_prefixes_case_insensitively_and_keeps_the_res
     parent = {
         "llama_arg_ctx_size": "1",
         "Llama_Log_Prefix": "1",
+        "llama_server_child_mode": "1",
         "LLAMA_ARG": "not-a-prefix-match",
         "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_SERVERLESS": "not-a-prefix-match",
         "LLAMA_CACHE": "C:/synthetic/cache",
+        "LLAMA_TRACE": "1",
         "GGML_THREADS": "2",
         "PATH": "C:/synthetic/bin",
     }
 
     env, stripped = _child_environment(parent, "fresh-key")
 
-    assert stripped == ("Llama_Log_Prefix", "llama_arg_ctx_size")
+    assert stripped == ("Llama_Log_Prefix", "llama_arg_ctx_size", "llama_server_child_mode")
     assert env == {
         "LLAMA_ARG": "not-a-prefix-match",
         "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_SERVERLESS": "not-a-prefix-match",
         "LLAMA_CACHE": "C:/synthetic/cache",
+        "LLAMA_TRACE": "1",
         "GGML_THREADS": "2",
         "PATH": "C:/synthetic/bin",
         "LLAMA_API_KEY": "fresh-key",
@@ -560,7 +582,7 @@ def test_start_without_inherited_llama_variables_logs_no_notice(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     for name in list(os.environ):
-        if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_")):
+        if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_", "LLAMA_SERVER_")):
             monkeypatch.delenv(name)
     manager = _manager(
         tmp_path,

@@ -436,11 +436,23 @@ _LISTENING_PORT_RE = re.compile(r"\blistening on http://127\.0\.0\.1:(\d+)\b", r
 # explicit argument only wins for the options Cortex actually passes. Anything
 # it does not pass -- slot count, KV cache type, a Hugging Face repo, extra
 # projector files -- would be steered by whatever the user's shell exports, so
-# these prefixes never reach the child. GGML_* and VK_* tuning variables are
-# legitimate user knobs and are kept. LLAMA_LOG_* is not read by the pinned
+# these prefixes never reach the child. LLAMA_LOG_* is not read by the pinned
 # build, but a log file or prefix override would change the very output the
 # manager parses for the listening port, so it is dropped as well.
-_SCRUBBED_ENV_PREFIXES = ("LLAMA_ARG_", "LLAMA_LOG_")
+# LLAMA_SERVER_* is what a llama-server router sets for the children it spawns
+# (child mode, router port) plus a slot-debugging switch. Cortex runs no router
+# and never reads /slots, so no legitimate setup depends on inheriting them,
+# while a stray value inherited from a parent llama-server could put the child
+# into a mode Cortex does not manage.
+#
+# Deliberately NOT scrubbed, because each is something a user may set on
+# purpose and none overrides an option Cortex passes: GGML_* and VK_* (GPU
+# tuning), PATH and the rest of the system environment, LLAMA_CACHE (where the
+# runtime keeps downloads; Cortex passes a local -m path and the LLAMA_ARG_*
+# download options are dropped above) and the remaining LLAMA_* names the pinned
+# build contains, such as LLAMA_TRACE and its per-feature debug switches, which
+# are diagnostics.
+_SCRUBBED_ENV_PREFIXES = ("LLAMA_ARG_", "LLAMA_LOG_", "LLAMA_SERVER_")
 
 
 def _child_environment(
@@ -448,10 +460,12 @@ def _child_environment(
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """Build the child's environment and report which inherited names were dropped.
 
-    Everything else is inherited (llama-server needs variables such as PATH to
-    run at all) and the per-launch API key replaces any inherited one. Windows
-    environment names are case-insensitive, so the prefixes are matched that
-    way. Only names are returned, never values.
+    Exactly the names starting with one of ``_SCRUBBED_ENV_PREFIXES`` are
+    removed. Everything else is inherited (llama-server needs variables such
+    as PATH to run at all, and other LLAMA_* names such as LLAMA_CACHE are
+    left alone), and the per-launch API key replaces any inherited one.
+    Windows environment names are case-insensitive, so the prefixes are
+    matched that way. Only names are returned, never values.
     """
     env: dict[str, str] = {}
     stripped: list[str] = []
@@ -1298,9 +1312,10 @@ class LlamaServerManager:
         # equivalents), which would hand out the secret to anything with
         # process-list access. The pinned llama-server build accepts the
         # same value via the LLAMA_API_KEY environment variable instead,
-        # which is not visible through a plain process listing. Merge with
-        # the parent's environment rather than replacing it -- llama-server
-        # needs inherited variables such as PATH to run at all.
+        # which is not visible through a plain process listing. Start from
+        # the parent's environment rather than an empty one -- llama-server
+        # needs inherited variables such as PATH to run at all -- minus only
+        # the names _child_environment drops (see _SCRUBBED_ENV_PREFIXES).
         api_key = secrets.token_urlsafe(32)
         argv = [
             str(executable),
