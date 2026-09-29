@@ -18,9 +18,9 @@ from cortex_backend.execution.code_execution import (
 )
 from cortex_backend.execution import code_execution
 from cortex_backend.execution.local_process import _stop_process
-from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
-from cortex_backend.execution.repository import ExecutionRepository, LeaseConflict
+from cortex_backend.execution.repository import LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
+from support import wait_until
 
 
 class _StubbornProcess:
@@ -333,9 +333,8 @@ def test_network_broker_pins_the_vetted_address_against_dns_rebinding(monkeypatc
     assert connection.host == "rebind.test"
 
 
-def test_code_execution_waits_for_one_time_approval_and_returns_structured_output(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+def test_code_execution_waits_for_one_time_approval_and_returns_structured_output(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     request = CodeExecutionRequest(
         owner=owner,
@@ -360,13 +359,14 @@ def test_code_execution_waits_for_one_time_approval_and_returns_structured_outpu
     assert duplicate.job_id == job.job_id
     time.sleep(0.15)
     assert len(repository.events(job.job_id)) == event_count
+    # Shut down explicitly: the workspace must be gone once the coordinator is
+    # stopped. The fixture's own teardown shutdown is then a harmless repeat.
     coordinator.shutdown()
     assert not (repository.artifact_root / ".code_workspaces" / job.job_id).exists()
 
 
-def test_approval_is_bound_to_the_exact_source_digest(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+def test_approval_is_bound_to_the_exact_source_digest(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -385,12 +385,10 @@ def test_approval_is_bound_to_the_exact_source_digest(tmp_path) -> None:
     completed = coordinator.wait(job.job_id, timeout=5.0)
     assert completed.status == "failed"
     assert completed.error == "approval_scope_mismatch"
-    coordinator.shutdown()
 
 
-def test_denied_code_never_starts(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository)
+def test_denied_code_never_starts(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -406,12 +404,10 @@ def test_denied_code_never_starts(tmp_path) -> None:
     assert current is not None
     assert current.status == "cancelled"
     assert current.result is None
-    coordinator.shutdown()
 
 
-def test_cancelling_pending_code_revokes_approval_and_finishes(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository)
+def test_cancelling_pending_code_revokes_approval_and_finishes(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -424,17 +420,15 @@ def test_cancelling_pending_code_revokes_approval_and_finishes(tmp_path) -> None
     cancelled = coordinator.cancel(job.job_id, owner=owner)
     assert cancelled.status == "cancelled"
     assert cancelled.approval_state == "denied"
-    coordinator.shutdown()
 
 
-def test_cancelling_an_approved_but_unleased_code_job_reaches_a_terminal_status(tmp_path) -> None:
+def test_cancelling_an_approved_but_unleased_code_job_reaches_a_terminal_status(coordinator) -> None:
     """Regression guard: cancelling between approval and lease claim used to
     leave the job stuck in "cancelling" forever. request_cancel() alone only
     reaches that non-terminal status; _run_code()'s own early returns for an
     already-cancelling job did not finish it, and no lease was ever claimed
     for recover_expired_leases() to later find and retry."""
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository)
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -448,20 +442,12 @@ def test_cancelling_an_approved_but_unleased_code_job_reaches_a_terminal_status(
     cancelled = coordinator.cancel(job.job_id, owner=owner)
     assert cancelled.status in {"cancelling", "cancelled"}
 
-    current = None
-    for _ in range(200):
-        current = repository.get_job(job.job_id)
-        if current is not None and current.status == "cancelled":
-            break
-        time.sleep(0.01)
-    assert current is not None
+    current = coordinator.wait(job.job_id, timeout=10.0)
     assert current.status == "cancelled"
-    coordinator.shutdown()
 
 
-def test_pending_code_approval_expires_while_coordinator_is_live(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository)
+def test_pending_code_approval_expires_while_coordinator_is_live(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -476,20 +462,57 @@ def test_pending_code_approval_expires_while_coordinator_is_live(tmp_path) -> No
             "UPDATE execution_approvals SET expires_at = ? WHERE job_id = ?",
             ("2000-01-01T00:00:00+00:00", job.job_id),
         )
-    for _ in range(100):
-        current = repository.get_job(job.job_id)
-        if current is not None and current.status == "cancelled":
-            break
-        time.sleep(0.01)
-    assert current is not None
+    current = coordinator.wait(job.job_id, timeout=10.0)
     assert current.status == "cancelled"
     assert current.approval_state == "expired"
-    coordinator.shutdown()
 
 
-def test_process_capability_fails_closed_before_a_job_is_created(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+def test_wait_timeout_names_the_job_and_its_last_observed_status(coordinator) -> None:
+    """A stuck job must fail with something to read, not a bare "did not reach"."""
+    repository = coordinator.repository
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=repository.installation_principal_id,
+            request_id="code-wait-timeout",
+            source="print('never approved')",
+            intent_summary="Leave the approval pending.",
+        )
+    )
+
+    with pytest.raises(TimeoutError) as timed_out:
+        coordinator.wait(job.job_id, timeout=0.05)
+
+    message = str(timed_out.value)
+    assert job.job_id in message
+    assert "last status: queued" in message
+    assert "0.05s" in message
+
+
+def test_active_code_job_ids_reports_a_job_until_its_thread_has_exited(coordinator) -> None:
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    assert coordinator.active_code_job_ids() == frozenset()
+    job = coordinator.start_code(
+        CodeExecutionRequest(
+            owner=owner,
+            request_id="code-active-ids",
+            source="print('never approved')",
+            intent_summary="Keep the launched thread waiting for approval.",
+        )
+    )
+    assert coordinator.active_code_job_ids() == frozenset({job.job_id})
+
+    coordinator.cancel(job.job_id, owner=owner)
+    coordinator.wait(job.job_id, timeout=10.0)
+
+    wait_until(
+        lambda: not coordinator.active_code_job_ids(),
+        describe=lambda: f"the code thread to exit (still active: {sorted(coordinator.active_code_job_ids())})",
+    )
+
+
+def test_process_capability_fails_closed_before_a_job_is_created(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     with pytest.raises(CodeExecutionError, match="process_capability_unavailable"):
         CodeExecutionRequest(
@@ -512,14 +535,12 @@ def test_process_capability_fails_closed_before_a_job_is_created(tmp_path) -> No
             {"process": True},
         )
     assert repository.list_jobs(owner=owner, include_terminal=True) == []
-    coordinator.shutdown()
 
 
 def test_cancellation_wins_if_requested_before_code_completion_commits(
-    tmp_path, monkeypatch
+    coordinator, monkeypatch
 ) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     completion_started = Event()
     release_completion = Event()
@@ -553,14 +574,12 @@ def test_cancellation_wins_if_requested_before_code_completion_commits(
     events = repository.events(job.job_id)
     assert events[-1].event == "code.cancelled"
     assert not any(event.event == "code.completed" for event in events)
-    coordinator.shutdown()
 
 
 def test_cancellation_wins_if_requested_before_code_failure_commits(
-    tmp_path, monkeypatch
+    coordinator, monkeypatch
 ) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     failure_started = Event()
     release_failure = Event()
@@ -594,13 +613,12 @@ def test_cancellation_wins_if_requested_before_code_failure_commits(
     events = repository.events(job.job_id)
     assert events[-1].event == "code.cancelled"
     assert not any(event.event == "code.failed" for event in events)
-    coordinator.shutdown()
 
 
-def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    first = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
-    second = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+def test_live_supervisor_lease_is_renewed_until_shutdown(coordinator_factory, monkeypatch) -> None:
+    first = coordinator_factory(supervisor_lease_seconds=0.06)
+    second = coordinator_factory(supervisor_lease_seconds=0.06)
+    repository = first.repository
     original_claim = repository.claim_supervisor_lease
     renewal_seen = Event()
     claim_count = 0
@@ -622,21 +640,18 @@ def test_live_supervisor_lease_is_renewed_until_shutdown(tmp_path, monkeypatch) 
 
     monkeypatch.setattr(repository, "claim_supervisor_lease", observed_claim)
     first.startup_recover()
-    try:
-        assert renewal_seen.wait(timeout=3.0)
-        with pytest.raises(LeaseConflict, match="supervisor is already running"):
-            second.startup_recover()
-    finally:
-        first.shutdown()
+    assert renewal_seen.wait(timeout=3.0)
+    with pytest.raises(LeaseConflict, match="supervisor is already running"):
+        second.startup_recover()
+    first.shutdown()
     second.startup_recover()
-    second.shutdown()
 
 
 def test_supervisor_restart_waits_for_timed_out_heartbeat(
-    tmp_path, monkeypatch
+    coordinator_factory, monkeypatch
 ) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, supervisor_lease_seconds=0.06)
+    coordinator = coordinator_factory(supervisor_lease_seconds=0.06)
+    repository = coordinator.repository
     original_claim = repository.claim_supervisor_lease
     renewal_entered = Event()
     release_renewal = Event()
@@ -667,12 +682,10 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
 
     coordinator.startup_recover()
     assert coordinator._supervisor_thread is not old_thread
-    coordinator.shutdown()
 
 
-def test_foreign_live_job_lease_does_not_mark_code_as_failed(tmp_path) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+def test_foreign_live_job_lease_does_not_mark_code_as_failed(coordinator) -> None:
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
         CodeExecutionRequest(
@@ -692,12 +705,10 @@ def test_foreign_live_job_lease_does_not_mark_code_as_failed(tmp_path) -> None:
     sentinel = foreign_workspace / "foreign-owner.txt"
     sentinel.write_text("in use", encoding="utf-8")
     repository.decide_approval(job.job_id, owner=owner, decision="approved")
-    for _ in range(200):
-        with coordinator._code_lock:
-            active = job.job_id in coordinator._code_threads
-        if not active:
-            break
-        time.sleep(0.005)
+    wait_until(
+        lambda: job.job_id not in coordinator.active_code_job_ids(),
+        describe=f"the code thread for {job.job_id} to give up on the foreign lease",
+    )
 
     untouched = repository.get_job(job.job_id)
     assert untouched is not None
@@ -713,26 +724,19 @@ def test_foreign_live_job_lease_does_not_mark_code_as_failed(tmp_path) -> None:
     coordinator._launch_code(job.job_id)
     completed = coordinator.wait(job.job_id, timeout=5.0)
     assert completed.status == "succeeded"
-    coordinator.shutdown()
 
 
 def test_code_workspace_cleanup_happens_before_lease_release(
-    tmp_path, monkeypatch
+    coordinator, monkeypatch
 ) -> None:
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    repository = coordinator.repository
     owner = repository.installation_principal_id
     cleanup_observed = Event()
     cleanup_had_lease: list[bool] = []
     original_cleanup = coordinator._cleanup_code_workspace
 
     def tracked_cleanup(job_id: str) -> None:
-        with repository.connect() as connection:
-            lease = connection.execute(
-                "SELECT 1 FROM execution_leases WHERE job_id = ?",
-                (job_id,),
-            ).fetchone()
-        cleanup_had_lease.append(lease is not None)
+        cleanup_had_lease.append(repository.lease_holder(job_id) is not None)
         original_cleanup(job_id)
         cleanup_observed.set()
 
@@ -751,29 +755,20 @@ def test_code_workspace_cleanup_happens_before_lease_release(
     assert completed.status == "succeeded"
     assert cleanup_observed.wait(timeout=3.0)
     assert cleanup_had_lease == [True]
-    lease_released = False
-    for _ in range(300):
-        with repository.connect() as connection:
-            lease_released = connection.execute(
-                "SELECT 1 FROM execution_leases WHERE job_id = ?",
-                (job.job_id,),
-            ).fetchone() is None
-        if lease_released:
-            break
-        time.sleep(0.01)
-    assert lease_released
-    coordinator.shutdown()
+    wait_until(
+        lambda: repository.lease_holder(job.job_id) is None,
+        describe=lambda: f"the job lease to be released (still held by {repository.lease_holder(job.job_id)})",
+    )
 
 
 def test_code_workspace_clears_a_stale_directory_left_by_a_crashed_attempt(
-    tmp_path,
+    coordinator,
 ) -> None:
     """A hard crash mid-run skips _run_code's finally-block cleanup, so a
     crash-recovery relaunch of the same job_id must not silently reuse
     whatever files the crashed attempt left behind."""
 
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    repository = coordinator.repository
     job_id = "code-crash-recovery"
     stale_workspace = repository.artifact_root / ".code_workspaces" / job_id
     stale_workspace.mkdir(parents=True)
@@ -787,16 +782,14 @@ def test_code_workspace_clears_a_stale_directory_left_by_a_crashed_attempt(
     assert resolved == stale_workspace.resolve()
     assert resolved.is_dir()
     assert list(resolved.iterdir()) == []
-    coordinator.shutdown()
 
 
-def test_code_workspace_rejects_a_symlinked_workspace_directory(tmp_path) -> None:
+def test_code_workspace_rejects_a_symlinked_workspace_directory(coordinator, tmp_path) -> None:
     """The stale-directory clearing added above must not weaken the existing
     symlink/junction guard: a workspace path that is itself a symlink is
     still rejected outright rather than being rmtree'd."""
 
-    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
-    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    repository = coordinator.repository
     job_id = "code-symlink-guard"
     workspaces_root = repository.artifact_root / ".code_workspaces"
     workspaces_root.mkdir(parents=True)
@@ -814,7 +807,6 @@ def test_code_workspace_rejects_a_symlinked_workspace_directory(tmp_path) -> Non
     # The symlink itself must be left untouched, not rmtree'd.
     assert workspace_path.is_symlink()
     assert outside_target.exists()
-    coordinator.shutdown()
 
 
 def test_model_only_proposes_code_from_the_structured_envelope() -> None:
