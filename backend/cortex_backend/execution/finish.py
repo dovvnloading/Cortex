@@ -52,19 +52,20 @@ def finish_unsuccessful_job(
     against; if a concurrent actor moved the job first, the decision is made
     again from the new state. A job that is already terminal is left alone.
     Nothing here raises: this runs in a worker's error path, where the original
-    outcome is what matters.
+    outcome is what matters. That covers the read of the job and the
+    ``cancel_requested`` probe as well as the write.
     """
 
     for _ in range(_ATTEMPTS):
-        current = repository.get_job(job_id)
-        if current is None or current.status in TerminalExecutionStatus:
-            return
-        cancelled = (
-            failure_code == "cancelled"
-            or cancel_requested()
-            or current.status == "cancelling"
-        )
         try:
+            current = repository.get_job(job_id)
+            if current is None or current.status in TerminalExecutionStatus:
+                return
+            cancelled = (
+                failure_code == "cancelled"
+                or cancel_requested()
+                or current.status == "cancelling"
+            )
             repository.transition(
                 job_id,
                 status="cancelled" if cancelled else "failed",
