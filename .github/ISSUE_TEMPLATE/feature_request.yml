@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a change to what Cortex can do or how it feels to use.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cortex is local-first: conversations, memories and models stay on your machine. A feature that would give Cortex new authority (files, programs, network) is welcome as a proposal, but it would arrive as an explicit mode you turn on, with consent that names the operation, rather than as a side effect of ordinary chat.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it should work from where you sit, in the app.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other ways to solve it, including working around it today.
+    validations:
+      required: false
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Does it depend on a model runtime?
+      options:
+        - "No"
+        - "Ollama"
+        - "GGUF files (managed llama.cpp runtime)"
+        - "Both"
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Mockups and screenshots are welcome if they show no private conversation content.
+    validations:
+      required: false

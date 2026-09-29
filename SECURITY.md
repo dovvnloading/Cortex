@@ -7,13 +7,17 @@ diagnostic logging.
 
 ## Supported versions
 
-Security fixes are provided for the latest `main` release and the immediately
-preceding stable release. Upgrade before reporting an issue when possible.
+Cortex has a single maintainer. Security fixes land on `main` and ship in the
+next tagged release; only the latest release is supported, so upgrade before
+reporting an issue when possible. The rewritten application (declared version
+2.0.0) has no published release yet, so for now `main` is the supported code.
+The earlier Qt-era releases, v0.95.7 and v1.0.0, predate the rewrite and are
+not covered.
 
 ## Reporting a vulnerability
 
 Please do not disclose security issues in public GitHub issues. Use GitHub's
-[private vulnerability reporting](https://github.com/dovvnloading/Cortex/security)
+[private vulnerability reporting](https://github.com/dovvnloading/Cortex/security/advisories/new)
 or contact the repository maintainers privately.
 
 Include:
@@ -38,6 +42,12 @@ tokens, or local database files.
 - External links and rendered model content are validated by the frontend.
 - Model-produced memory actions are validated and destructive clears require
   explicit user confirmation.
+- Model-proposed code runs only after the user approves that one run, in a
+  short-lived worker process with source, time, memory, output and
+  child-process limits. That worker clears the environment variables it
+  inherited before it runs any source, but it is a bounded containment
+  layer, not operating-system isolation; see the README's "How local execution
+  is bounded" section before relying on it.
 
 Dependency or packaging concerns that could affect these boundaries should be
 reported privately as well.

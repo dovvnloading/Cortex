@@ -1,10 +1,11 @@
 # Cortex agent operating contract
 
 This file is the repository-level instruction for coding agents and
-contributors. Anything under `docs/` is background and design notes, not
-policy: this file is the only normative contract. Where a doc disagrees with
-this file, this file wins, and where a doc invents a prerequisite this file
-does not state, that prerequisite does not exist.
+contributors. Design notes may exist on the maintainer's machine in a
+`docs/` directory that is intentionally untracked and absent from a clone;
+they are background, never policy: this file is the only normative contract.
+Where a doc disagrees with this file, this file wins, and where a doc invents
+a prerequisite this file does not state, that prerequisite does not exist.
 
 ## Repository identity and boundaries
 
@@ -61,8 +62,9 @@ was changed and where.
    as an implicit way to make the tree convenient.
 3. Reproduce the issue or establish a baseline. Inspect the implementation and
    its tests before deciding that an “issue” is real.
-4. Use `apply_patch` for focused edits. Keep changes scoped, typed, readable,
-   and compatible with the Windows/local-data contract.
+4. Make focused edits with your environment's patch or edit tool. Keep changes
+   scoped, typed, readable, and compatible with the Windows/local-data
+   contract.
 5. Add or improve a focused test for every repaired behavior and important edge
    case. Keep security and failure-path tests explicit.
 6. Run the narrowest relevant checks first, then the appropriate full tier.
@@ -111,7 +113,9 @@ Useful focused commands include:
 ```powershell
 python -m pytest -q
 python -m ruff check backend tests tools main.py app_factory.py
-python tools/generate_contracts.py
+python -m mypy
+python tools/generate_contracts.py --check
+python tools/artifact_boundary_review.py --json --strict
 Push-Location frontend
 npm run typecheck
 npm run lint
