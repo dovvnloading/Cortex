@@ -281,6 +281,22 @@ def test_a_row_that_cannot_be_finished_yet_is_deferred_and_retried(tmp_path: Pat
     assert _tombstone_count(repository) == 0
 
 
+def test_skipped_rows_do_not_use_up_the_batch_for_fresh_expiries(tmp_path: Path) -> None:
+    """A batch of one, spent on a stuck tombstone, must still reach a new expiry."""
+    repository = _repository(tmp_path)
+    stuck = _expired_artifact(repository, "stuck-job", name="stuck.txt")
+    quarantine = repository.quarantine_root / "stuck.artifact"
+    quarantine.write_bytes(b"leftover")
+    _tombstone(repository, stuck, path=Path(stuck.path), quarantine=quarantine)
+    fresh = _expired_artifact(repository, "fresh-job", name="fresh.txt")
+
+    result = _cleanup(repository, limit=1)
+
+    assert (result.artifacts, result.skipped) == (1, 1)
+    assert repository.get_artifact(fresh.artifact_id) is None
+    assert repository.get_artifact(stuck.artifact_id) is not None
+
+
 def test_a_permanently_blocked_row_does_not_starve_the_rows_behind_it(tmp_path: Path) -> None:
     """With a batch of one, a stuck head row would be retried forever."""
     repository = _repository(tmp_path)

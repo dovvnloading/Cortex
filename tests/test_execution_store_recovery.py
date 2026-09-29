@@ -218,6 +218,34 @@ def test_error_messages_decide_when_the_driver_reports_no_code(
     assert len(_set_aside(tmp_path, "damaged")) == 1
 
 
+def test_an_integrity_check_that_reports_a_problem_is_damage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other way corruption shows up: no exception, a result that is not ok."""
+    db_path = _seed_store(tmp_path)
+    real_connect = sqlite3.connect
+    calls: list[int] = []
+
+    class _ReportsAProblem(sqlite3.Connection):
+        def execute(self, sql, *args):  # type: ignore[no-untyped-def]
+            if "integrity_check" in sql:
+                return super().execute("SELECT 'row 3 missing from index synthetic'")
+            return super().execute(sql, *args)
+
+    def connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        if len(calls) == 1:
+            kwargs["factory"] = _ReportsAProblem
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    rebuilt = ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    monkeypatch.undo()
+    assert rebuilt.get_job("job-1") is None
+    assert len(_set_aside(tmp_path, "damaged")) == 1
+
+
 def test_a_store_really_locked_by_another_connection_is_not_renamed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
