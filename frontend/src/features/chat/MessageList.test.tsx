@@ -1,6 +1,6 @@
 import { createRef, forwardRef, useEffect, useImperativeHandle } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { VirtuosoHandle, VirtuosoProps } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { MessageList, type MessageListHandle } from "./MessageList";
@@ -322,5 +322,176 @@ describe("MessageList", () => {
 
     ref.current?.scrollToBottom();
     expect(transcript.scrollTop).toBe(900);
+  });
+});
+
+describe("MessageList scrolling", () => {
+  type Captured = { props: VirtuosoProps<ChatMessage, unknown> | null; scrollTo: Mock<(location: ScrollToOptions) => void> };
+
+  /** The list with Virtuoso replaced by a stand-in that records the props it was given and the scrolls it was asked for. */
+  async function loadWithVirtuoso() {
+    vi.resetModules();
+    const captured: Captured = { props: null, scrollTo: vi.fn<(location: ScrollToOptions) => void>() };
+    vi.doMock("react-virtuoso", () => ({
+      Virtuoso: forwardRef<VirtuosoHandle, VirtuosoProps<ChatMessage, unknown>>(function MockVirtuoso(props, ref) {
+        captured.props = props;
+        useImperativeHandle(ref, () => ({
+          scrollTo: captured.scrollTo,
+          scrollToIndex: () => {},
+          scrollBy: () => {},
+          autoscrollToBottom: () => {},
+          scrollIntoView: () => {},
+          getState: () => { throw new Error("not implemented in this test double"); },
+        }));
+        return <div data-testid="virtuoso-scroller" />;
+      }),
+    }));
+    const { MessageList: MockedMessageList } = await import("./MessageList");
+    return { MockedMessageList, captured };
+  }
+
+  function listProps(messages: ChatMessage[], isStreaming = false) {
+    return {
+      messages,
+      isStreaming,
+      finalAssistantId: null,
+      busy: false,
+      forkingMessageId: null,
+      onRegenerate: vi.fn(),
+      onFork: vi.fn(),
+      onNearEndChange: vi.fn(),
+    };
+  }
+
+  function preferReducedMotion(reduce: boolean) {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: vi.fn((query: string) => ({
+        matches: reduce && query.includes("prefers-reduced-motion"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, "matchMedia");
+    vi.doUnmock("react-virtuoso");
+    vi.resetModules();
+  });
+
+  it("uses the same bottom band on the virtualized transcript as on the plain one", async () => {
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    render(<MockedMessageList {...listProps(makeMessages(45))} />);
+
+    // Virtuoso's own default is 4px; a reader 60px from the end was "at the
+    // bottom" on a short chat and "away" on a long one.
+    expect(captured.props?.atBottomThreshold).toBe(80);
+
+    const onNearEndChange = vi.fn();
+    vi.resetModules();
+    const { MessageList: PlainList } = await import("./MessageList");
+    // Below the threshold the plain path is used; find the same band there.
+    render(<PlainList {...listProps(makeMessages(3))} onNearEndChange={onNearEndChange} />);
+    const transcript = document.querySelector(".transcript") as HTMLDivElement;
+    Object.defineProperty(transcript, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(transcript, "clientHeight", { value: 400, configurable: true });
+
+    transcript.scrollTop = 521; // 79px from the end
+    fireEvent.scroll(transcript);
+    expect(onNearEndChange).toHaveBeenLastCalledWith(true);
+    transcript.scrollTop = 519; // 81px from the end
+    fireEvent.scroll(transcript);
+    expect(onNearEndChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("follows streamed output smoothly on the virtualized transcript, and not at all when idle", async () => {
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    const { rerender } = render(<MockedMessageList {...listProps(makeMessages(45), true)} />);
+    expect(captured.props?.followOutput).toBe("smooth");
+
+    rerender(<MockedMessageList {...listProps(makeMessages(45), false)} />);
+    expect(captured.props?.followOutput).toBe(false);
+  });
+
+  it("does not animate the follow when the person asked for reduced motion", async () => {
+    preferReducedMotion(true);
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    render(<MockedMessageList {...listProps(makeMessages(45), true)} />);
+
+    // Virtuoso animates in script, which the stylesheet's reduced-motion rule cannot reach.
+    expect(captured.props?.followOutput).toBe("auto");
+  });
+
+  it("scrolls the plain transcript instantly by default, so a streamed frame never restarts an animation", async () => {
+    const { MockedMessageList } = await loadWithVirtuoso();
+    const ref = createRef<MessageListHandle>();
+    render(<MockedMessageList ref={ref} {...listProps(makeMessages(3), true)} />);
+    const transcript = document.querySelector(".transcript") as HTMLDivElement;
+    Object.defineProperty(transcript, "scrollHeight", { value: 900, configurable: true });
+    const scrollTo = vi.fn();
+    transcript.scrollTo = scrollTo;
+
+    ref.current?.scrollToBottom();
+
+    // .transcript has `scroll-behavior: smooth`; only an explicit behavior overrides it.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: "instant" });
+  });
+
+  it("animates the explicit jump, unless reduced motion was asked for", async () => {
+    const { MockedMessageList } = await loadWithVirtuoso();
+    const ref = createRef<MessageListHandle>();
+    render(<MockedMessageList ref={ref} {...listProps(makeMessages(3))} />);
+    const transcript = document.querySelector(".transcript") as HTMLDivElement;
+    Object.defineProperty(transcript, "scrollHeight", { value: 900, configurable: true });
+    const scrollTo = vi.fn();
+    transcript.scrollTo = scrollTo;
+
+    ref.current?.scrollToBottom("smooth");
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 900, behavior: "smooth" });
+  });
+
+  it("makes the explicit jump instant when reduced motion was asked for", async () => {
+    preferReducedMotion(true);
+    const { MockedMessageList } = await loadWithVirtuoso();
+    const ref = createRef<MessageListHandle>();
+    render(<MockedMessageList ref={ref} {...listProps(makeMessages(3))} />);
+    const transcript = document.querySelector(".transcript") as HTMLDivElement;
+    Object.defineProperty(transcript, "scrollHeight", { value: 900, configurable: true });
+    const scrollTo = vi.fn();
+    transcript.scrollTo = scrollTo;
+
+    ref.current?.scrollToBottom("smooth");
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: "instant" });
+  });
+
+  it("gives the virtualized transcript the same instant, smooth, and reduced-motion rules", async () => {
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    const ref = createRef<MessageListHandle>();
+    render(<MockedMessageList ref={ref} {...listProps(makeMessages(45), true)} />);
+
+    ref.current?.scrollToBottom();
+    expect(captured.scrollTo).toHaveBeenLastCalledWith({ top: Number.MAX_SAFE_INTEGER, behavior: "instant" });
+    ref.current?.scrollToBottom("smooth");
+    expect(captured.scrollTo).toHaveBeenLastCalledWith({ top: Number.MAX_SAFE_INTEGER, behavior: "smooth" });
+  });
+
+  it("makes the virtualized jump instant under reduced motion", async () => {
+    preferReducedMotion(true);
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    const ref = createRef<MessageListHandle>();
+    render(<MockedMessageList ref={ref} {...listProps(makeMessages(45))} />);
+
+    ref.current?.scrollToBottom("smooth");
+
+    expect(captured.scrollTo).toHaveBeenCalledWith({ top: Number.MAX_SAFE_INTEGER, behavior: "instant" });
   });
 });

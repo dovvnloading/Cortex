@@ -23,7 +23,7 @@ import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft"
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
-import { applyStoredTheme, DEFAULT_THEME_PREFERENCE } from "../lib/theme";
+import { applyStoredTheme, DEFAULT_THEME_PREFERENCE, nextThemePreference } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
 import { useModelJobs } from "../hooks/useModelJobs";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
@@ -33,7 +33,7 @@ import { useSettingsStore } from "../stores/useSettingsStore";
 import { RouteBoundary } from "./ErrorBoundary";
 import { lazyRoute } from "./lazyRoute";
 import { useToast } from "./ToastProvider";
-import { resolveRuntimeAvailability } from "./runtimeAvailability";
+import { llamacppPollInterval, resolveRuntimeAvailability } from "./runtimeAvailability";
 
 type Props = { api?: CortexApi };
 
@@ -446,22 +446,21 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     if (route.kind === "not-found") navigate("/chat/new", { replace: true });
   }, [route.kind]);
 
-  const refreshExecutionTasks = useCallback((): Promise<void> => {
+  // Rejects when the request fails, so the poll can see the failure and back
+  // off. `refreshExecutionTasks` below is for the callers that refresh after an
+  // action of their own, which has already succeeded or failed on its own terms.
+  const fetchExecutionTasks = useCallback((): Promise<void> => {
     const inFlight = executionTaskRefreshRef.current;
     if (inFlight) return inFlight;
 
     // Defer the request one microtask so the in-flight marker is installed
     // before an unusually eager fetch implementation can resolve or throw.
     const refresh = Promise.resolve().then(async () => {
-      try {
-        const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
-        const signature = JSON.stringify(response.tasks);
-        if (signature === executionTasksSignatureRef.current) return;
-        executionTasksSignatureRef.current = signature;
-        setExecutionTasks(response.tasks);
-      } catch {
-        // A failed poll keeps the last list and the next tick retries.
-      }
+      const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+      const signature = JSON.stringify(response.tasks);
+      if (signature === executionTasksSignatureRef.current) return;
+      executionTasksSignatureRef.current = signature;
+      setExecutionTasks(response.tasks);
     });
     executionTaskRefreshRef.current = refresh;
     void refresh.then(
@@ -474,18 +473,25 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     );
     return refresh;
   }, [api]);
+  // A failed refresh keeps the last list; the caller's own outcome is what it reports.
+  const refreshExecutionTasks = useCallback(
+    (): Promise<void> => fetchExecutionTasks().catch(() => undefined),
+    [fetchExecutionTasks],
+  );
 
   // A second is the right cadence while something is actually running or
   // waiting on approval. With nothing in flight it was still a SQLite query
   // every second for the life of the app, so back off -- slowly enough that a
-  // task started elsewhere still appears promptly.
+  // task started elsewhere still appears promptly. A failing poll keeps the
+  // last list and slows down until the backend answers again.
   const hasActiveExecutionTask = executionTasks.some(
     (task) => !EXECUTION_TERMINAL_STATUSES.has(task.status),
   );
   useVisiblePolling(
-    refreshExecutionTasks,
+    fetchExecutionTasks,
     hasActiveExecutionTask ? 1000 : 5000,
     Boolean(system?.execution_preview_available),
+    { backoff: true },
   );
 
   // Only poll the local llama.cpp runtime state while a GGUF model is
@@ -494,21 +500,37 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // what lets the composer show live "loaded" / "starting" state instead
   // of only ever reflecting whatever was true at the last full page load.
   const selectedModelIsGGUF = isGGUFModel(settings?.models?.chat ?? null);
+  // Closely while the runtime is downloading, starting or stopping or a reply
+  // is being generated, and every fifteen seconds otherwise: a ready runtime
+  // was being asked every two seconds for as long as a GGUF model was selected.
+  const generationActive = useChatStore((state) => state.generation.jobId !== null);
   const refreshLlamacppStatus = useCallback(async () => {
-    try {
-      const response = await api.system();
-      const next = response.llamacpp ?? null;
-      // Every response parses to a new object, and the store notifies on any
-      // new reference, so an unchanged status would re-render the shell every
-      // two seconds for as long as a GGUF model is selected.
-      if (JSON.stringify(next) !== JSON.stringify(useModelStore.getState().llamacppStatus)) {
-        setLlamacppStatus(next);
-      }
-    } catch {
-      // Keep the last known status; the next tick retries.
+    // A failed request rejects, so the poll counts it and backs off; the last
+    // known status stays on screen meanwhile.
+    const response = await api.system();
+    const next = response.llamacpp ?? null;
+    // Every response parses to a new object, and the store notifies on any
+    // new reference, so an unchanged status would re-render the shell on every
+    // tick for as long as a GGUF model is selected.
+    if (JSON.stringify(next) !== JSON.stringify(useModelStore.getState().llamacppStatus)) {
+      setLlamacppStatus(next);
     }
   }, [api, setLlamacppStatus]);
-  useVisiblePolling(refreshLlamacppStatus, 2000, selectedModelIsGGUF);
+  useVisiblePolling(
+    refreshLlamacppStatus,
+    llamacppPollInterval(liveLlamacppStatus, generationActive),
+    selectedModelIsGGUF,
+    { backoff: true },
+  );
+  // A reply that finishes between two slow polls would leave the model picker
+  // saying "not loaded yet" for the model it just used, so one check follows
+  // every generation that ends.
+  const wasGenerationActiveRef = useRef(generationActive);
+  useEffect(() => {
+    const ended = wasGenerationActiveRef.current && !generationActive;
+    wasGenerationActiveRef.current = generationActive;
+    if (ended && selectedModelIsGGUF) refreshLlamacppStatus().catch(() => undefined);
+  }, [generationActive, selectedModelIsGGUF, refreshLlamacppStatus]);
 
   const visibleExecutionTasks = system?.execution_preview_available
     ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
@@ -870,7 +892,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     navigate("/settings");
   };
   const toggleTheme = () => {
-    const next = theme === "dark" ? "light" : "dark";
+    // System, light, dark, and round again: "system" is a choice of its own,
+    // and used to be turned into "dark" by the first press.
+    const next = nextThemePreference(theme);
     void saveSettings({ ...settings, appearance: { ...settings.appearance, theme: next } });
   };
 
@@ -889,6 +913,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         chats={visibleChats}
         localModels={localModels}
         selectedModel={selectedModel}
+        theme={theme}
         onNewChat={() => navigate("/chat/new")}
         onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}

@@ -1,32 +1,21 @@
 import type {
   AddMemoryRequest,
-  AttachmentStageAccepted,
-  AttachmentStageRequest,
   ChatAttachment,
   ChatAttachmentStageRequest,
   ChatGroup,
   ChatResponse,
   ChatSummary,
-  CodeExecutionAccepted,
-  CodeExecutionRequest,
   CodeExecutionSourceResponse,
   CreateChatGroupRequest,
   CreateChatRequest,
-  DiagnosticsResponse,
   MoveChatToGroupRequest,
   UpdateChatGroupRequest,
-  ExecutionSSEEvent,
   ExecutionApprovalDecisionRequest,
   ExecutionStatusResponse,
   ExecutionTaskListResponse,
-  RecipeImageTransformAccepted,
-  RecipeImageTransformRequest,
-  ScratchComputeAccepted,
-  ScratchComputeRequest,
   ForkRequest,
   GenerationEvent,
   GenerationRequest,
-  ShutdownResponse,
   HuggingFaceFileListResponse,
   JobAccepted,
   JobStatusResponse,
@@ -523,10 +512,6 @@ export class CortexApi {
     return this.request<JobStatusResponse>(`/jobs/${encodeURIComponent(jobId)}`);
   }
 
-  diagnostics(): Promise<DiagnosticsResponse> {
-    return this.request<DiagnosticsResponse>("/diagnostics");
-  }
-
   checkModels(): Promise<JobAccepted> {
     return this.request<JobAccepted>("/jobs/models", { method: "POST" });
   }
@@ -569,44 +554,10 @@ export class CortexApi {
     return this.request<ExecutionTaskListResponse>(`/execution/tasks${query ? `?${query}` : ""}`);
   }
 
-  executionStatus(jobId: string): Promise<ExecutionStatusResponse> {
-    return this.request<ExecutionStatusResponse>(`/execution/${encodeURIComponent(jobId)}`);
-  }
-
-  startCodeExecution(payload: CodeExecutionRequest): Promise<CodeExecutionAccepted> {
-    return this.request<CodeExecutionAccepted>("/execution/code", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  }
-
   executionSource(jobId: string): Promise<CodeExecutionSourceResponse> {
     return this.request<CodeExecutionSourceResponse>(
       `/execution/${encodeURIComponent(jobId)}/source`,
     );
-  }
-
-  startScratchCompute(payload: ScratchComputeRequest): Promise<ScratchComputeAccepted> {
-    return this.request<ScratchComputeAccepted>("/execution/scratch", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  }
-
-  startRecipeImageTransform(
-    payload: RecipeImageTransformRequest,
-  ): Promise<RecipeImageTransformAccepted> {
-    return this.request<RecipeImageTransformAccepted>("/execution/recipe/image", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  }
-
-  stageAttachment(payload: AttachmentStageRequest): Promise<AttachmentStageAccepted> {
-    return this.request<AttachmentStageAccepted>("/execution/attachments", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
   }
 
   stageChatAttachment(payload: ChatAttachmentStageRequest): Promise<ChatAttachment> {
@@ -645,19 +596,11 @@ export class CortexApi {
     );
   }
 
-  streamExecution(
-    jobId: string,
-    onEvent: (event: ExecutionSSEEvent) => void,
-    options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<void> {
-    return this.streamEvents(`/execution/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
-  }
-
   streamJob(
     jobId: string,
     onEvent: (event: SSEEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
-  ): Promise<SSEEvent | null | void> {
+  ): Promise<SSEEvent | null> {
     return this.streamEvents(`/jobs/${encodeURIComponent(jobId)}/events`, onEvent, options);
   }
 
@@ -685,10 +628,6 @@ export class CortexApi {
       method: "PUT",
       body: JSON.stringify({ memos }),
     });
-  }
-
-  shutdown(): Promise<ShutdownResponse> {
-    return this.request<ShutdownResponse>("/system/shutdown", { method: "POST" });
   }
 
   private async request<T>(
