@@ -423,6 +423,75 @@ def test_cleanup_supervisor_reports_rows_it_could_not_reclaim_and_still_succeeds
     assert str(tmp_path) not in caplog.text
 
 
+def test_a_failing_sweep_does_not_discard_the_retention_pass_that_already_finished(
+    tmp_path, monkeypatch, caplog
+):
+    """The sweep shared one ``try`` with the retention pass.
+
+    ``connect()`` failing inside the sweep, after the rows were already
+    reclaimed, recorded the whole pass as failed and dropped its counters, so
+    the work looked like it had not happened.
+    """
+
+    repository = _repository(tmp_path)
+    expired = _terminal_job(repository, "expired")
+    artifact = repository.publish_artifact(
+        expired.job_id, name="expired.txt", content=b"remove", mime_type="text/plain"
+    )
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_artifacts SET expires_at = ? WHERE artifact_id = ?",
+            ("2000-01-01T00:00:00+00:00", artifact.artifact_id),
+        )
+    _terminal_job(repository, "idle")
+
+    def sweep_cannot_open_the_store(**_kwargs):
+        raise ExecutionRepositoryError(f"SQLite execution operation failed at {tmp_path}")
+
+    monkeypatch.setattr(repository, "sweep_artifact_root", sweep_cannot_open_the_store)
+    supervisor = ExecutionCleanupSupervisor(repository, terminal_job_retention_seconds=0)
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.cleanup"):
+        assert supervisor.run_once() is True
+
+    metrics = supervisor.metrics
+    assert (metrics.successes, metrics.failures) == (1, 0)
+    assert (metrics.artifacts, metrics.jobs, metrics.events) == (1, 2, 4)
+    assert metrics.swept == 0
+    assert metrics.last_error == "ExecutionRepositoryError"
+    assert "sweep failed (ExecutionRepositoryError)" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    # The pass really did its work, and the lease is free for the next one.
+    assert repository.get_job("expired") is None
+    assert repository.get_artifact(artifact.artifact_id) is None
+    repository.claim_cleanup_lease(lease_owner="next", ttl_seconds=1)
+
+
+def test_a_sweep_that_fails_is_retried_by_the_next_pass(tmp_path, monkeypatch):
+    repository = _repository(tmp_path)
+    (repository.artifact_root / "job-empty").mkdir()
+    real_sweep = repository.sweep_artifact_root
+    outcomes: list[str] = []
+
+    def flaky_sweep(**kwargs):
+        if not outcomes:
+            outcomes.append("failed")
+            raise ExecutionRepositoryError("SQLite execution operation failed.")
+        outcomes.append("ran")
+        return real_sweep(**kwargs)
+
+    monkeypatch.setattr(repository, "sweep_artifact_root", flaky_sweep)
+    supervisor = ExecutionCleanupSupervisor(repository)
+
+    assert supervisor.run_once() is True
+    assert (repository.artifact_root / "job-empty").is_dir()
+    assert supervisor.run_once() is True
+
+    assert outcomes == ["failed", "ran"]
+    assert supervisor.metrics.swept == 1
+    assert not (repository.artifact_root / "job-empty").exists()
+
+
 def test_cleanup_supervisor_skips_live_peer_and_local_overlap(tmp_path):
     repository = _repository(tmp_path)
     first = ExecutionCleanupSupervisor(repository)
