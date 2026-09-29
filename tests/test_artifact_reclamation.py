@@ -425,14 +425,19 @@ def test_an_entry_cut_short_by_the_limit_is_resumed_not_skipped(tmp_path):
         directory.mkdir()
         _stale_temporary_files(directory, count)
 
-    per_pass = []
-    for _ in range(12):  # bounded: six things to remove
-        per_pass.append(repository.sweep_artifact_root(limit=2))
-        if not first.exists() and not second.exists():
-            break
+    # Six things to remove, two per pass. A pass that ran out of allowance inside
+    # job-a must come back to job-a, not move on and leave the rest of it behind.
+    assert repository.sweep_artifact_root(limit=2) == 2
+    assert len(list(first.iterdir())) == 1, "the first pass should have stopped inside job-a"
+    assert len(list(second.iterdir())) == 1
 
-    assert per_pass == [2, 2, 2]
-    assert not first.exists() and not second.exists()
+    assert repository.sweep_artifact_root(limit=2) == 2  # job-a's last file, then job-a itself
+    assert not first.exists(), "job-a was not finished before the sweep went on to job-b"
+    assert len(list(second.iterdir())) == 1, "job-b was touched before job-a was finished"
+
+    assert repository.sweep_artifact_root(limit=2) == 2  # job-b's file, then job-b itself
+    assert not second.exists()
+    assert repository.sweep_artifact_root(limit=2) == 0
 
 
 def test_the_limit_bounds_staging_and_legacy_directories_as_well_as_job_directories(tmp_path):
