@@ -110,13 +110,29 @@ class ArtifactLimitError(ExecutionRepositoryError):
     """An artifact exceeded the configured size limit."""
 
 
+class ArtifactCleanupRejected(ExecutionRepositoryError):
+    """A cleanup row can never be honoured safely: its paths are not ours to touch."""
+
+
+class ArtifactCleanupBlocked(ExecutionRepositoryError):
+    """A cleanup row could not be finished this time; a later pass may succeed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCleanupResult:
-    """Bounded cleanup work completed by one janitor pass."""
+    """Bounded cleanup work completed by one janitor pass.
+
+    ``skipped`` counts artifact rows whose files were deliberately left alone
+    because they could not be reclaimed safely -- a path outside the artifact
+    root, a link, an unexpected file type, a failed move. A skipped row never
+    stops the rest of the pass; the count exists so the supervisor can make
+    the condition visible instead of the store growing silently.
+    """
 
     artifacts: int = 0
     jobs: int = 0
     events: int = 0
+    skipped: int = 0
 
     @property
     def rows(self) -> int:
@@ -1460,7 +1476,9 @@ class ExecutionRepository:
         cutoff = cutoff_time.isoformat()
         job_cutoff = (cutoff_time - timedelta(seconds=terminal_job_retention_seconds)).isoformat()
 
-        removed_artifacts = self._resume_artifact_cleanup(limit=limit)
+        removed_artifacts, skipped = self._resume_artifact_cleanup(limit=limit)
+        # Skipped rows do not spend the budget: they are counted, re-queued or
+        # dropped, and must never crowd out the rows that can be reclaimed.
         remaining_artifacts = max(0, limit - removed_artifacts)
         if remaining_artifacts:
             with self.connect() as connection:
@@ -1477,19 +1495,30 @@ class ExecutionRepository:
                     """,
                     (cutoff, remaining_artifacts),
                 ).fetchall()
-            validated = [
-                (str(row["artifact_id"]), self._validated_cleanup_path(Path(row["path"])))
-                for row in artifact_rows
-            ]
-            for artifact_id, path in validated:
+            for artifact_row in artifact_rows:
+                artifact_id = str(artifact_row["artifact_id"])
                 quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
-                self._validated_quarantine_path(quarantine)
-                self._record_artifact_cleanup(artifact_id, path, quarantine)
-                removed_artifacts += self._resume_artifact_cleanup(limit=1)
+                try:
+                    path = self._validated_cleanup_path(Path(artifact_row["path"]))
+                    self._validated_quarantine_path(quarantine)
+                    self._record_artifact_cleanup(artifact_id, path, quarantine)
+                except ArtifactCleanupRejected as exc:
+                    self._discard_artifact_rows(artifact_id, exc)
+                    skipped += 1
+                    continue
+                except ArtifactCleanupBlocked as exc:
+                    _LOGGER.debug("Skipped an expired artifact (%s).", type(exc).__name__)
+                    skipped += 1
+                    continue
+                reclaimed, deferred = self._finish_artifact_cleanup(
+                    artifact_id, str(path), str(quarantine), "pending"
+                )
+                removed_artifacts += reclaimed
+                skipped += deferred
 
         remaining = max(0, limit - removed_artifacts)
         if remaining == 0:
-            return ExecutionCleanupResult(artifacts=removed_artifacts)
+            return ExecutionCleanupResult(artifacts=removed_artifacts, skipped=skipped)
         with self.connect() as connection:
             jobs = connection.execute(
                 """
@@ -1529,45 +1558,52 @@ class ExecutionRepository:
             artifacts=removed_artifacts,
             jobs=removed_jobs,
             events=removed_events,
+            skipped=skipped,
         )
 
     def _validated_cleanup_path(self, path: Path) -> Path:
-        """Validate a source path without following an untrusted reparse hop."""
+        """Validate a source path without following an untrusted reparse hop.
+
+        Raises :class:`ArtifactCleanupRejected` when the path is not one this
+        repository may ever touch (outside the artifact root, a link, not a
+        regular file), and :class:`ArtifactCleanupBlocked` when it merely could
+        not be examined this time.
+        """
 
         root = self.artifact_root.resolve()
         quarantine_root = self.quarantine_root.resolve()
         if _is_reparse_point(path):
-            raise ExecutionRepositoryError("Artifact path is unavailable.")
+            raise ArtifactCleanupRejected("Artifact path is unavailable.")
         try:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError):
-            raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+            raise ArtifactCleanupBlocked("Artifact path is unavailable.") from None
         if (
             not resolved.is_relative_to(root)
             or resolved == root
             or resolved.is_relative_to(quarantine_root)
             or _has_reparse_parent(path)
         ):
-            raise ExecutionRepositoryError("Artifact path is unavailable.")
+            raise ArtifactCleanupRejected("Artifact path is unavailable.")
         if path.exists():
             try:
                 info = path.lstat()
             except OSError:
-                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+                raise ArtifactCleanupBlocked("Artifact path is unavailable.") from None
             if not stat.S_ISREG(info.st_mode):
-                raise ExecutionRepositoryError("Artifact path is unavailable.")
+                raise ArtifactCleanupRejected("Artifact path is unavailable.")
         return path
 
     def _validated_quarantine_path(self, path: Path) -> Path:
         root = self.quarantine_root.resolve()
         if _is_reparse_point(path):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+            raise ArtifactCleanupRejected("Artifact quarantine is unavailable.")
         try:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.") from None
+            raise ArtifactCleanupBlocked("Artifact quarantine is unavailable.") from None
         if not resolved.is_relative_to(root) or resolved == root or _has_reparse_parent(path):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+            raise ArtifactCleanupRejected("Artifact quarantine is unavailable.")
         return path
 
     def _record_artifact_cleanup(
@@ -1584,7 +1620,9 @@ class ExecutionRepository:
                 (artifact_id, str(path), str(quarantine), self._now()),
             )
 
-    def _resume_artifact_cleanup(self, *, limit: int) -> int:
+    def _resume_artifact_cleanup(self, *, limit: int) -> tuple[int, int]:
+        """Finish up to ``limit`` recorded tombstones; return (reclaimed, skipped)."""
+
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -1596,66 +1634,141 @@ class ExecutionRepository:
                 (limit,),
             ).fetchall()
         removed = 0
+        skipped = 0
         for row in rows:
-            artifact_id = str(row["artifact_id"])
-            path = self._validated_cleanup_path(Path(row["path"]))
-            quarantine = self._validated_quarantine_path(Path(row["quarantine_path"]))
-            state = str(row["state"])
-            if state not in {"pending", "quarantined", "finalized"}:
-                raise ExecutionRepositoryError("Artifact cleanup state is invalid.")
-            if state == "pending":
-                source_exists = path.exists()
-                quarantine_exists = quarantine.exists()
-                if source_exists and quarantine_exists:
-                    raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
-                if source_exists:
-                    try:
-                        path.replace(quarantine)
-                    except OSError:
-                        raise ExecutionRepositoryError("Artifact cleanup failed.") from None
-                with self.connect() as connection:
-                    connection.execute(
-                        "UPDATE execution_artifact_cleanup SET state = 'quarantined' WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                state = "quarantined"
-            if state == "quarantined":
-                with self.connect() as connection:
-                    deleted = connection.execute(
-                        "DELETE FROM execution_artifacts WHERE artifact_id = ?",
-                        (artifact_id,),
-                    ).rowcount
-                    connection.execute(
-                        "UPDATE execution_artifact_cleanup SET state = 'finalized' WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                removed += int(deleted or 0)
-                state = "finalized"
-            if state == "finalized":
+            reclaimed, deferred = self._finish_artifact_cleanup(
+                str(row["artifact_id"]),
+                str(row["path"]),
+                str(row["quarantine_path"]),
+                str(row["state"]),
+            )
+            removed += reclaimed
+            skipped += deferred
+        return removed, skipped
+
+    def _finish_artifact_cleanup(
+        self, artifact_id: str, path_text: str, quarantine_text: str, state: str
+    ) -> tuple[int, int]:
+        """Finish one tombstone, containing anything wrong with that row.
+
+        A row that can never be honoured (its paths are outside the artifact
+        root, a link, or the wrong kind of file -- which a moved data directory
+        does to every pre-existing row) is discarded without touching any file.
+        A row that could not be finished this time is sent to the back of the
+        queue. Either way the rest of the pass goes on: one bad row used to
+        raise out of the whole pass before terminal-job retention ran, so the
+        store grew for good with nothing visible. Failures of the database
+        itself are not row problems and still propagate.
+        """
+
+        try:
+            return self._advance_artifact_cleanup(artifact_id, path_text, quarantine_text, state), 0
+        except ArtifactCleanupRejected as exc:
+            self._discard_artifact_rows(artifact_id, exc)
+            return 0, 1
+        except ArtifactCleanupBlocked as exc:
+            _LOGGER.debug("Deferred an artifact cleanup row (%s).", type(exc).__name__)
+            self._requeue_artifact_cleanup(artifact_id)
+            return 0, 1
+
+    def _discard_artifact_rows(self, artifact_id: str, reason: ExecutionRepositoryError) -> None:
+        """Drop an expired artifact's rows whose file this repository must not touch.
+
+        The file is left exactly where it is. The artifact was already expired
+        and unreadable -- ``read_artifact`` applies the same containment rule --
+        so the row protected nothing, and keeping it only blocked retention.
+        Logs the kind of failure, never a path.
+        """
+
+        _LOGGER.debug("Discarded an unusable artifact cleanup row (%s).", type(reason).__name__)
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+            connection.execute(
+                "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+
+    def _requeue_artifact_cleanup(self, artifact_id: str) -> None:
+        """Move a row that could not be finished behind everything else.
+
+        Ordering is the only thing ``created_at`` is used for here, so a row
+        that keeps failing rotates to the back instead of holding the head of
+        every batch.
+        """
+
+        try:
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET created_at = ? WHERE artifact_id = ?",
+                    (self._now(), artifact_id),
+                )
+        except ExecutionRepositoryError:
+            pass  # It stays where it is and is tried again next pass.
+
+    def _advance_artifact_cleanup(
+        self, artifact_id: str, path_text: str, quarantine_text: str, state: str
+    ) -> int:
+        path = self._validated_cleanup_path(Path(path_text))
+        quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        if state not in {"pending", "quarantined", "finalized"}:
+            raise ArtifactCleanupRejected("Artifact cleanup state is invalid.")
+        removed = 0
+        if state == "pending":
+            source_exists = path.exists()
+            quarantine_exists = quarantine.exists()
+            if source_exists and quarantine_exists:
+                raise ArtifactCleanupBlocked("Artifact quarantine is unavailable.")
+            if source_exists:
                 try:
-                    quarantine.unlink(missing_ok=True)
+                    path.replace(quarantine)
                 except OSError:
-                    raise ExecutionRepositoryError("Artifact cleanup failed.") from None
-                with self.connect() as connection:
-                    connection.execute(
-                        "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                # Artifacts live one directory per job, and removing the last
-                # file left the directory itself behind forever. Every
-                # attachment and every execution added one, so a long-lived
-                # workspace accumulates empty directories without bound.
-                # rmdir only succeeds when it is genuinely empty, so a job
-                # with artifacts still retained keeps its directory.
-                #
-                # The artifact's own directory, and never a root. Every
-                # tombstone is a file directly inside the single quarantine
-                # directory created when the repository was opened, so it is
-                # empty by design the moment the last one is unlinked --
-                # sweeping it here deleted it on the very first expiry and
-                # left every later quarantine hop with no parent to move
-                # into.
-                self._remove_empty_artifact_directory(path.parent)
+                    raise ArtifactCleanupBlocked("Artifact cleanup failed.") from None
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET state = 'quarantined' WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            state = "quarantined"
+        if state == "quarantined":
+            with self.connect() as connection:
+                deleted = connection.execute(
+                    "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                    (artifact_id,),
+                ).rowcount
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET state = 'finalized' WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            removed += int(deleted or 0)
+            state = "finalized"
+        if state == "finalized":
+            try:
+                quarantine.unlink(missing_ok=True)
+            except OSError:
+                raise ArtifactCleanupBlocked("Artifact cleanup failed.") from None
+            with self.connect() as connection:
+                connection.execute(
+                    "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            # Artifacts live one directory per job, and removing the last
+            # file left the directory itself behind forever. Every
+            # attachment and every execution added one, so a long-lived
+            # workspace accumulates empty directories without bound.
+            # rmdir only succeeds when it is genuinely empty, so a job
+            # with artifacts still retained keeps its directory.
+            #
+            # The artifact's own directory, and never a root. Every
+            # tombstone is a file directly inside the single quarantine
+            # directory created when the repository was opened, so it is
+            # empty by design the moment the last one is unlinked --
+            # sweeping it here deleted it on the very first expiry and
+            # left every later quarantine hop with no parent to move
+            # into.
+            self._remove_empty_artifact_directory(path.parent)
         return removed
 
     def _remove_empty_artifact_directory(self, directory: Path) -> None:

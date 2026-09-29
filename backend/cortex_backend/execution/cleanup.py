@@ -30,6 +30,10 @@ class CleanupMetrics:
     artifacts: int = 0
     jobs: int = 0
     events: int = 0
+    # Artifact rows a pass could not safely reclaim (a path outside the
+    # artifact root, a link, a failed move). Non-zero means files may be
+    # accumulating that retention will not remove on its own.
+    artifacts_skipped: int = 0
     last_error: str | None = None
 
 
@@ -158,7 +162,14 @@ class ExecutionCleanupSupervisor:
                     artifacts=result.artifacts,
                     jobs=result.jobs,
                     events=result.events,
+                    artifacts_skipped=result.skipped,
                 )
+                if result.skipped:
+                    _LOGGER.warning(
+                        "Cortex retention cleanup left %d artifact rows it could not "
+                        "safely reclaim.",
+                        result.skipped,
+                    )
                 return True
             except Exception as exc:
                 self._record_failure(exc)
