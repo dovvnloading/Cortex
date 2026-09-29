@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timedelta, timezone
+import threading
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -368,6 +369,80 @@ def test_cleanup_renews_lease_during_slow_pass(tmp_path, monkeypatch):
     assert not runner.is_alive()
     assert outcome == [True]
     assert renewals
+
+
+def _live_threads(name: str) -> list[Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == name and thread.is_alive()]
+
+
+def test_stop_that_times_out_says_so_and_still_releases_the_lease(tmp_path, monkeypatch, caplog):
+    """A worker still inside a pass when the timeout runs out must not vanish silently.
+
+    stop() used to do everything after the join -- stop the lease renewal, release
+    the lease, log -- only when the worker had already exited. With a worker still
+    running, nothing was logged and the renewal thread went on extending the
+    installation-wide cleanup lease for the life of the process, so the next
+    supervisor saw a conflict and retention stopped.
+    """
+    repository = _repository(tmp_path)
+    supervisor = ExecutionCleanupSupervisor(repository, interval_seconds=60, lease_seconds=30)
+    pass_started = Event()
+    finish_pass = Event()
+    original_cleanup = repository.cleanup_expired
+
+    def slow_cleanup(**kwargs):
+        pass_started.set()
+        assert finish_pass.wait(timeout=10)
+        return original_cleanup(**kwargs)
+
+    monkeypatch.setattr(repository, "cleanup_expired", slow_cleanup)
+    supervisor.start()
+    try:
+        assert pass_started.wait(timeout=5)
+        assert _live_threads("cortex-execution-cleanup-lease")
+
+        with caplog.at_level(logging.WARNING, logger="cortex.execution.cleanup"):
+            supervisor.stop(timeout=0.05)
+
+        # The worker is still alive, and the handle says so, so start() cannot build a second.
+        assert supervisor.running
+        assert any("still running" in record.message for record in caplog.records), caplog.text
+        assert str(tmp_path) not in caplog.text
+        # ...but nothing keeps extending the lease on its behalf.
+        assert not _live_threads("cortex-execution-cleanup-lease")
+        repository.claim_cleanup_lease(lease_owner="next-supervisor", ttl_seconds=5)
+        repository.release_cleanup_lease(lease_owner="next-supervisor")
+    finally:
+        finish_pass.set()
+        supervisor.stop(timeout=5)
+    wait_until(lambda: not supervisor.running, describe="the cleanup worker to exit")
+    assert not _live_threads("cortex-execution-cleanup")
+
+
+def test_stop_that_finds_the_worker_gone_is_quiet_and_releases_the_lease(tmp_path, caplog):
+    repository = _repository(tmp_path)
+    supervisor = ExecutionCleanupSupervisor(repository, interval_seconds=60)
+    supervisor.start()
+    wait_until(lambda: supervisor.metrics.runs >= 1, describe="the first cleanup pass")
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.cleanup"):
+        supervisor.stop(timeout=5)
+
+    assert not supervisor.running
+    assert caplog.records == []
+    repository.claim_cleanup_lease(lease_owner="next-supervisor", ttl_seconds=5)
+    repository.release_cleanup_lease(lease_owner="next-supervisor")
+
+
+def test_stop_reports_a_lease_renewal_that_will_not_stop(tmp_path, monkeypatch, caplog):
+    repository = _repository(tmp_path)
+    supervisor = ExecutionCleanupSupervisor(repository, interval_seconds=60)
+    monkeypatch.setattr(supervisor, "_stop_lease_renewal", lambda: False)
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.cleanup"):
+        supervisor.stop(timeout=0)
+
+    assert any("renewal did not stop" in record.message for record in caplog.records), caplog.text
 
 
 def test_a_worker_that_survives_the_kill_ladder_is_reported(caplog):

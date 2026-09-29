@@ -102,7 +102,17 @@ class ExecutionCleanupSupervisor:
         thread.start()
 
     def stop(self, *, timeout: float = 5.0) -> None:
-        """Stop the worker and release its lease without raising cleanup errors."""
+        """Stop the worker and release its lease without raising cleanup errors.
+
+        A worker still inside a pass when ``timeout`` runs out is left to finish
+        that pass and exit -- the stop signal is already set, and its handle is
+        kept while it lives so :meth:`start` cannot build a second one -- but
+        that is logged, and the lease is released and its renewal stopped
+        either way. Otherwise the renewal thread would go on extending the
+        installation-wide lease for as long as the process lives and every later
+        supervisor would see a conflict. Cleanup passes are restart-safe, so a
+        pass that outlives its lease cannot do harm by overlapping another.
+        """
 
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
@@ -110,20 +120,26 @@ class ExecutionCleanupSupervisor:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=timeout)
-        if thread is None or not thread.is_alive():
+        if thread is not None and thread.is_alive():
+            _LOGGER.warning(
+                "Cortex cleanup worker was still running %.1fs after it was asked to stop; "
+                "it will exit when its current pass ends.",
+                timeout,
+            )
+        else:
             self._thread = None
-            if self._stop_lease_renewal():
-                try:
-                    self.repository.release_cleanup_lease(lease_owner=self._owner)
-                except Exception as exc:
-                    _LOGGER.warning(
-                        "Cortex cleanup lease release failed (%s).", type(exc).__name__
-                    )
-            else:
+        if self._stop_lease_renewal():
+            try:
+                self.repository.release_cleanup_lease(lease_owner=self._owner)
+            except Exception as exc:
                 _LOGGER.warning(
-                    "Cortex cleanup lease renewal did not stop before shutdown; "
-                    "the lease will expire naturally."
+                    "Cortex cleanup lease release failed (%s).", type(exc).__name__
                 )
+        else:
+            _LOGGER.warning(
+                "Cortex cleanup lease renewal did not stop before shutdown; "
+                "the lease will expire naturally."
+            )
 
     def run_once(self) -> bool:
         """Attempt one pass, returning false when another supervisor owns it."""
