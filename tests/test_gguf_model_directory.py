@@ -293,6 +293,116 @@ def test_a_projector_is_dropped_even_when_its_name_does_not_say_so(tmp_path: Pat
     assert names == {"gguf:real.gguf"}
 
 
+def _write_projector(path: Path) -> None:
+    writer = gguf.GGUFWriter(str(path), "clip")
+    writer.add_name(path.stem)
+    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
+def test_a_complete_split_set_is_offered_once_under_its_first_part(tmp_path: Path) -> None:
+    folder = tmp_path / "Big-Repo-gguf"
+    folder.mkdir()
+    _write_gguf(folder / "big-00001-of-00002.gguf")
+    _write_gguf(folder / "big-00002-of-00002.gguf")
+
+    models = GGUFModelDirectory(lambda: tmp_path).list_installed_details()
+
+    assert [model.name for model in models] == ["gguf:Big-Repo-gguf/big-00001-of-00002.gguf"]
+    assert resolve_gguf_path(tmp_path, models[0].name) == Path(models[0].path).resolve()
+
+
+def test_a_split_set_missing_a_part_is_not_offered(tmp_path: Path) -> None:
+    """Three parts are named but only two are on disk: llama-server cannot open
+    the set, and it used to be offered anyway and blamed on memory."""
+    _write_gguf(tmp_path / "whole.gguf")
+    _write_gguf(tmp_path / "gap-00001-of-00003.gguf")
+    _write_gguf(tmp_path / "gap-00003-of-00003.gguf")
+    # A set whose first part is the one missing must not surface its later parts.
+    _write_gguf(tmp_path / "headless-00002-of-00002.gguf")
+
+    names = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert names == {"gguf:whole.gguf"}
+
+
+def test_a_set_is_judged_within_its_own_folder_and_ignoring_case(tmp_path: Path) -> None:
+    """Parts in another folder do not complete a set; a different capitalisation
+    of the same name does, because Windows treats them as one file name."""
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    _write_gguf(tmp_path / "one" / "split-00001-of-00002.gguf")
+    _write_gguf(tmp_path / "two" / "split-00002-of-00002.gguf")
+    _write_gguf(tmp_path / "Mixed-00001-of-00002.gguf")
+    _write_gguf(tmp_path / "mixed-00002-of-00002.gguf")
+
+    names = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+
+    assert names == {"gguf:Mixed-00001-of-00002.gguf"}
+
+
+def test_an_incomplete_set_is_reported_once_and_completing_it_lists_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_gguf(tmp_path / "gap-00001-of-00002.gguf")
+    directory = GGUFModelDirectory(lambda: tmp_path)
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.model_directory"):
+        for _ in range(3):
+            assert directory.list_installed_details() == ()
+    reports = [record for record in caplog.records if "split model" in record.getMessage()]
+    assert len(reports) == 1
+    # The name of the model is not repeated in the log, only that a set is short.
+    assert "gap" not in reports[0].getMessage()
+
+    # Completing the set makes it listable straight away, from the same instance.
+    _write_gguf(tmp_path / "gap-00002-of-00002.gguf")
+    assert [model.name for model in directory.list_installed_details()] == ["gguf:gap-00001-of-00002.gguf"]
+
+    # ...and breaking it again is a new event worth one more report.
+    (tmp_path / "gap-00002-of-00002.gguf").unlink()
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.model_directory"):
+        assert directory.list_installed_details() == ()
+        assert directory.list_installed_details() == ()
+    assert len([r for r in caplog.records if "split model" in r.getMessage()]) == 1
+
+
+def test_a_split_set_claiming_zero_parts_is_never_offered(tmp_path: Path) -> None:
+    _write_gguf(tmp_path / "odd-00001-of-00000.gguf")
+
+    assert GGUFModelDirectory(lambda: tmp_path).list_installed_details() == ()
+
+
+def test_ids_the_scan_hides_cannot_be_resolved(tmp_path: Path) -> None:
+    """A stale or hand-edited setting must not select what was never offered."""
+    _write_gguf(tmp_path / "model.gguf")
+    _write_gguf(tmp_path / "mmproj-model-f16.gguf")
+    _write_projector(tmp_path / "vision-tower.gguf")
+    _write_gguf(tmp_path / "big-00001-of-00002.gguf")
+    _write_gguf(tmp_path / "big-00002-of-00002.gguf")
+    _write_gguf(tmp_path / "gap-00001-of-00002.gguf")
+
+    assert resolve_gguf_path(tmp_path, "gguf:model.gguf") == (tmp_path / "model.gguf").resolve()
+    assert resolve_gguf_path(tmp_path, "gguf:big-00001-of-00002.gguf") == (
+        tmp_path / "big-00001-of-00002.gguf"
+    ).resolve()
+    for hidden in (
+        "gguf:mmproj-model-f16.gguf",  # a projector, by name
+        "gguf:vision-tower.gguf",  # a projector, by the architecture recorded in it
+        "gguf:big-00002-of-00002.gguf",  # a later part of a complete set
+        "gguf:gap-00001-of-00002.gguf",  # the first part of an incomplete set
+    ):
+        with pytest.raises(InvalidGGUFModelId, match="cannot be used as a model"):
+            resolve_gguf_path(tmp_path, hidden)
+    # The rejection is the scan's own decision, not a second opinion.
+    listed = {model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()}
+    assert listed == {"gguf:model.gguf", "gguf:big-00001-of-00002.gguf"}
+
+
 def test_an_unreadable_subfolder_costs_only_that_subfolder(tmp_path: Path) -> None:
     _write_gguf(tmp_path / "good.gguf")
     missing = tmp_path / "vanished"
