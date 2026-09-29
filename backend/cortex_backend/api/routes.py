@@ -584,6 +584,15 @@ async def _start_generation_job(
             if not sink.begin_commit("persisting", "Saving the response."):
                 return keep_stopped_answer(shown)
             stats_payload = asdict(result.stats) if result.stats else None
+            # With translation on, ``response`` is the translation the user
+            # reads. The answer as the model wrote it is kept beside it, for the
+            # next turn's history and for the title; it is passed only when
+            # there is one, so an untranslated turn calls the repository exactly
+            # as it always has.
+            original_answer = getattr(result, "original_response", None)
+            original_kwargs = (
+                {"original_content": original_answer} if original_answer else {}
+            )
             if target_message_id is None or target_is_dangling_user_turn:
                 assistant_message_id = deps.chats.add_message(
                     thread_id,
@@ -592,6 +601,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
             else:
                 deps.chats.replace_message(
@@ -601,6 +611,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
                 assistant_message_id = target_message_id
 
@@ -681,7 +692,7 @@ async def _start_generation_job(
                         raw_title = _call_with_timeout(
                             title_generator,
                             generation_snapshot,
-                            result.response,
+                            original_answer or result.response,
                             timeout=CHAT_TITLE_TIMEOUT_SECONDS,
                             cancel=title_cancel,
                             cancellation_event=title_cancel,

@@ -269,10 +269,30 @@ class GenerationServiceResult:
     # The answer in ``response`` is then the untranslated one: the turn still
     # succeeded, and the API reports the post-process failure beside it.
     translation_error: str | None = None
+    # The answer as the model wrote it, set only when ``response`` is a
+    # translation of it. It is what the model is shown as its own earlier turn
+    # and what a title is made from; ``response`` is what the user reads.
+    original_response: str | None = None
     # True when the engine published this answer token by token as it arrived.
     # The API replays the finished text as deltas only when it did not, so a
     # non-streaming engine still drives the same client-side rendering.
     streamed: bool = False
+
+
+def _history_turn(message: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored message as the model should see it in its own history.
+
+    With translation on, an answer is stored translated, for the user to read,
+    beside the answer as the model wrote it. The model is shown its own words:
+    fed its answers back in the target language, a small model starts answering
+    in it, and the translation model is then asked to translate a language into
+    itself.
+    """
+    turn = dict(message)
+    original = turn.get("original_content")
+    if isinstance(original, str) and original.strip():
+        turn["content"] = original
+    return turn
 
 
 class GenerationService:
@@ -409,7 +429,7 @@ class GenerationService:
                 if history_messages is not None
                 else self._history_loader(snapshot.thread_id)
             )
-            working_history = [dict(message) for message in loaded_history]
+            working_history = [_history_turn(message) for message in loaded_history]
             if working_history and working_history[-1].get("role") == "user":
                 working_history.pop()
 
@@ -580,6 +600,7 @@ class GenerationService:
                 rejection = None
 
             translation_error: str | None = None
+            original_response: str | None = None
             if snapshot.translation_enabled:
                 self._check_cancelled(cancellation_event)
                 self._publish(
@@ -617,6 +638,7 @@ class GenerationService:
                 elif not (translation_result.text or "").strip():
                     translation_error = "Translation returned an empty result."
                 else:
+                    original_response = response
                     response = translation_result.text or ""
                     if streamed:
                         # The untranslated answer is already on the user's
@@ -657,6 +679,7 @@ class GenerationService:
                 code_execution_rejection=rejection,
                 stats=stats,
                 translation_error=translation_error,
+                original_response=original_response,
                 streamed=streamed,
             )
         finally:

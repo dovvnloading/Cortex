@@ -667,6 +667,76 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(result.response, "response")
         self.assertIsNotNone(result.translation_error)
 
+    def test_history_uses_the_untranslated_answer_when_translation_is_on(self):
+        """The model is shown its own words, not the translation the user read.
+
+        Fed its answers back in the target language, a small model starts
+        answering in it, after which the translation model is asked to translate
+        a language into itself.
+        """
+        engine = _FakeEngine()
+        stored = [
+            {"role": "user", "content": "Bonjour"},
+            {
+                "role": "assistant",
+                "content": "Bonjour, comment allez-vous ?",
+                "original_content": "Hello, how are you?",
+            },
+            {"role": "user", "content": "hello"},
+        ]
+        service = GenerationService(
+            history_loader=lambda thread_id: stored,
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in engine.history_messages],
+            [("user", "Bonjour"), ("assistant", "Hello, how are you?")],
+        )
+        # What was stored -- what the user reads -- is not touched.
+        self.assertEqual(stored[1]["content"], "Bonjour, comment allez-vous ?")
+
+        # The API hands the service the history it read; the rule is the same.
+        engine.history_messages = None
+        service.generate(_snapshot(), progress_sink=_ProgressRecorder(), history_messages=stored)
+        self.assertEqual(engine.history_messages[1]["content"], "Hello, how are you?")
+
+    def test_a_blank_or_malformed_original_leaves_the_stored_answer_in_history(self):
+        engine = _FakeEngine()
+        for original in ("", "   ", None, 7, ["nested"]):
+            stored = [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "original_content": original},
+                {"role": "user", "content": "next"},
+            ]
+            GenerationService(
+                history_loader=lambda thread_id, stored=stored: stored,
+                memory_loader=lambda: [],
+                engine_factory=lambda snapshot: engine,
+            ).generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+            self.assertEqual(engine.history_messages[1]["content"], "a", original)
+
+    def test_the_untranslated_answer_is_reported_only_when_a_translation_replaced_it(self):
+        def run(engine, **snapshot_overrides):
+            return GenerationService(
+                history_loader=lambda thread_id: [],
+                memory_loader=lambda: [],
+                engine_factory=lambda snapshot: engine,
+            ).generate(_snapshot(**snapshot_overrides), progress_sink=_ProgressRecorder())
+
+        translated = run(_FakeEngine())
+        self.assertEqual((translated.response, translated.original_response), ("translated", "response"))
+
+        untranslated = run(_FakeEngine(), translation_enabled=False)
+        self.assertEqual((untranslated.response, untranslated.original_response), ("response", None))
+
+        failed = run(_FakeEngine(translation=TranslationResult.failed("no", error_details="x")))
+        self.assertEqual((failed.response, failed.original_response), ("response", None))
+
     def test_translation_type_error_from_inside_the_call_is_not_retried(self):
         """Regression guard: a TypeError raised by translate_text() itself,
         once it has already started real work, must propagate and not be
