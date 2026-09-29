@@ -7,22 +7,28 @@ which bound it crossed.
 
 The bounds are heuristics. They see only what literals decide, so a value that
 travels through a name is not tracked; the worker's line budget, wall clock and
-job object stay the limits that always hold.
+job object stay the limits that always hold. The programs in
+``_UNTRACKED_GROWTH`` are the ones the bounds deliberately do not see: the
+validator accepts them, and a test below runs each in a real worker to show
+that a limit stops it.
 """
 
 from __future__ import annotations
 
 import sys
+from threading import Event
 import time
 
 import pytest
 
 from cortex_backend.execution.code_execution import (
     MAX_CODE_SOURCE_BYTES,
+    CodeCapabilities,
     CodeExecutionError,
     CodeExecutionRequest,
     validate_code_source,
 )
+from cortex_backend.execution.local_code_attempt import LocalCodeAttempt
 from cortex_backend.services.code_feedback import (
     REJECTION_MESSAGES,
     REPAIR_HINTS,
@@ -250,6 +256,45 @@ def test_growth_carried_through_a_name_is_not_tracked() -> None:
     """
 
     validate_code_source('big = "a" * 1000\nfor i in range(3):\n    big = big * 1000')
+
+
+# Programs whose growth the bounds cannot see, and why. Each one is accepted by
+# the validator on purpose; none is a consent bypass, because an approved
+# program still runs under the worker's memory limit, wall clock and line
+# budget. The test below pins that both halves stay true.
+_UNTRACKED_GROWTH = {
+    # Only list(), tuple(), set(), sorted() and range() calls carry a size.
+    "a call's result repeated twice": "_result = len(str(1) * 100000 * 100000)",
+    # An f-string's length depends on what is formatted into it.
+    "an f-string repeated twice": '_result = len(f"a{1}" * 100000 * 100000)',
+    # A name is unknown, and a list display is not refused for a name count
+    # the way a string literal is (sequence_bound_required).
+    "a list repeated by a name": "n = 10 ** 9\nx = [0] * n\n_result = len(x)",
+    # Each augmented assignment is checked alone; their product is not.
+    "a string repeated by two augmented assignments": (
+        'x = "ab"\nx *= 100000\nx *= 100000\n_result = len(x)'
+    ),
+}
+# Whatever stops such a program, it is one of these and never a result. The
+# job object's memory limit makes the allocation fail (memory_limit); the
+# process dying, the wall clock and the line budget are the backstops.
+_STOPPED_BY_A_WORKER_LIMIT = {"memory_limit", "worker_failed", "worker_timeout", "runtime_limit"}
+
+
+@pytest.mark.parametrize("source", list(_UNTRACKED_GROWTH.values()), ids=list(_UNTRACKED_GROWTH))
+def test_growth_the_bounds_cannot_see_is_accepted_and_stopped_by_the_worker(
+    source: str, tmp_path
+) -> None:
+    validate_code_source(source)
+
+    attempt = LocalCodeAttempt(timeout_seconds=10.0, startup_timeout_seconds=60.0)
+    try:
+        with pytest.raises(CodeExecutionError) as stopped:
+            attempt.evaluate(source, CodeCapabilities(), str(tmp_path), Event())
+    finally:
+        attempt.close()
+
+    assert stopped.value.code in _STOPPED_BY_A_WORKER_LIMIT
 
 
 def test_every_new_refusal_can_be_explained_and_repaired() -> None:

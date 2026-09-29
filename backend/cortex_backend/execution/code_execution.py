@@ -58,6 +58,19 @@ MAX_CODE_TOTAL_ITERATIONS = 100_000
 # they keep obviously oversized programs from being offered for approval; the
 # worker's memory limit and wall clock remain the bounds that always hold.
 #
+# What is NOT tracked, and so is accepted here and left to those worker limits
+# (tests/test_code_static_bounds.py runs each in a real worker):
+#   * a value carried through a name, which includes ``n = 10 ** 9`` followed
+#     by ``[0] * n`` (only a string literal repeated by a non-constant count is
+#     refused, as sequence_bound_required) and ``x *= 100000`` written twice on
+#     one string (each augmented assignment is checked alone);
+#   * any operand that is not a literal, a list/tuple/set/dict display, a
+#     comprehension, or a list(), tuple(), set(), sorted() or range() call, so
+#     ``str(1) * 100000 * 100000`` and ``f"a{1}" * 100000 * 100000`` chain a
+#     repeat whose size the validator never learns. Bounding them would also
+#     refuse ordinary arithmetic such as ``seconds * 86400 * 1000000``, because
+#     the validator cannot tell a number from a string.
+#
 # Longest list, tuple or string a repeated or joined literal expression may
 # build (the same number as the largest multiplier).
 MAX_CODE_SEQUENCE_ITEMS = MAX_CODE_TOTAL_ITERATIONS
