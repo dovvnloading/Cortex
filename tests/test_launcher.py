@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
@@ -318,9 +319,11 @@ def test_native_window_uses_private_isolated_edge_webview(
     )
     dark_title_bar_calls: list[dict[str, object]] = []
     monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    # Pin this machine's own app mode: an unreadable registry means dark.
+    monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
     monkeypatch.setattr(
         desktop_module,
-        "_apply_windows_dark_title_bar",
+        "_apply_windows_title_bar_theme",
         lambda **kwargs: dark_title_bar_calls.append(kwargs) or True,
     )
     window_icon_calls: list[dict[str, object]] = []
@@ -350,7 +353,9 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert calls["start"]["storage_path"] == str(storage)
     assert calls["start"]["icon"] == str(icon)
     assert loaded_urls == ["http://127.0.0.1:8765"]
-    assert dark_title_bar_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex"}]
+    assert dark_title_bar_calls == [
+        {"pid": desktop_module.os.getpid(), "title": "Cortex", "dark": True}
+    ]
     assert window_icon_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex", "icon_path": icon}]
     assert webview_settings["ALLOW_DOWNLOADS"] is True
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
@@ -452,7 +457,8 @@ def test_native_window_legacy_start_without_icon_option_still_launches(
         "_apply_windows_window_icon",
         lambda **kwargs: applied.append(kwargs) or True,
     )
-    monkeypatch.setattr(desktop_module, "_apply_windows_dark_title_bar", lambda **_kwargs: True)
+    monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
+    monkeypatch.setattr(desktop_module, "_apply_windows_title_bar_theme", lambda **_kwargs: True)
 
     desktop_module.run_desktop_window(
         DesktopWindowConfig(
@@ -493,6 +499,311 @@ def test_native_window_rejects_legacy_windows_renderer(
         desktop_module.run_desktop_window(
             DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path)
         )
+
+
+class _KeyHandle:
+    def __enter__(self) -> _KeyHandle:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _FakeWinreg:
+    """Stands in for ``winreg`` so the Personalize key can be read on any host."""
+
+    HKEY_CURRENT_USER = object()
+    REG_DWORD = 4
+    REG_SZ = 1
+
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.opened: list[tuple[object, str]] = []
+        self.queried: list[str] = []
+
+    def OpenKey(self, hive: object, path: str) -> _KeyHandle:  # noqa: N802 - mirrors winreg
+        self.opened.append((hive, path))
+        return _KeyHandle()
+
+    def QueryValueEx(self, _key: object, name: str):  # noqa: N802 - mirrors winreg
+        self.queried.append(name)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _install_fake_winreg(monkeypatch: pytest.MonkeyPatch, result: object) -> _FakeWinreg:
+    fake = _FakeWinreg(result)
+    monkeypatch.setitem(desktop_module.sys.modules, "winreg", fake)
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("apps_use_light", "expect_dark", "expected_background"),
+    [
+        (0, True, desktop_module.WINDOW_BACKGROUND_DARK),
+        (1, False, desktop_module.WINDOW_BACKGROUND_LIGHT),
+        # Unreadable, or a value Windows never writes: the app's own default.
+        (None, True, desktop_module.WINDOW_BACKGROUND_DARK),
+        (2, True, desktop_module.WINDOW_BACKGROUND_DARK),
+    ],
+)
+def test_native_window_follows_system_app_theme(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    apps_use_light: int | None,
+    expect_dark: bool,
+    expected_background: str,
+):
+    exposed: list[object] = []
+    created: dict[str, object] = {}
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        load_url=lambda _url: None,
+        expose=exposed.append,
+    )
+
+    class FakeWebview:
+        renderer = "edgechromium"
+        settings: dict[str, object] = {}
+
+        @staticmethod
+        def create_window(*args, **kwargs):
+            created.update(kwargs)
+            return window
+
+        @staticmethod
+        def start(*, func, gui, debug, private_mode, storage_path):
+            func()
+
+    title_bar_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        desktop_module.importlib, "import_module", lambda _name: FakeWebview
+    )
+    monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: apps_use_light)
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_title_bar_theme",
+        lambda **kwargs: title_bar_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(desktop_module, "_apply_windows_window_icon", lambda **_kwargs: True)
+
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+    )
+
+    # The pre-paint ground and the title bar both come from the system's mode.
+    assert created["background_color"] == expected_background
+    assert title_bar_calls == [
+        {"pid": desktop_module.os.getpid(), "title": "Cortex", "dark": expect_dark}
+    ]
+
+    # The page can move the title bar when a pinned theme differs from Windows'.
+    assert [getattr(function, "__name__", None) for function in exposed] == [
+        "set_title_bar_dark"
+    ]
+    set_title_bar_dark = exposed[0]
+    title_bar_calls.clear()
+    assert set_title_bar_dark(False) is True
+    assert set_title_bar_dark(True) is True
+    assert [call["dark"] for call in title_bar_calls] == [False, True]
+    assert {call["title"] for call in title_bar_calls} == {"Cortex"}
+
+
+@pytest.mark.parametrize("argument", ["yes", 1, 0, None, {"dark": True}])
+def test_exposed_title_bar_switch_refuses_anything_but_a_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argument: object
+):
+    exposed: list[object] = []
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        load_url=lambda _url: None,
+        expose=exposed.append,
+    )
+
+    class FakeWebview:
+        renderer = "edgechromium"
+        settings: dict[str, object] = {}
+
+        @staticmethod
+        def create_window(*_args, **_kwargs):
+            return window
+
+        @staticmethod
+        def start(*, func, **_kwargs):
+            func()
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_module.importlib, "import_module", lambda _name: FakeWebview)
+    monkeypatch.setattr(desktop_module, "_read_apps_use_light_theme", lambda: None)
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_title_bar_theme",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+    )
+    calls.clear()
+
+    assert exposed[0](argument) is False
+    assert calls == []
+
+
+def test_exposed_title_bar_switch_does_nothing_off_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    exposed: list[object] = []
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        load_url=lambda _url: None,
+        expose=exposed.append,
+    )
+
+    class FakeWebview:
+        settings: dict[str, object] = {}
+
+        @staticmethod
+        def create_window(*_args, **_kwargs):
+            return window
+
+        @staticmethod
+        def start(*, func, **_kwargs):
+            # Off Windows there is no title-bar work at all, so leave the
+            # startup callback out and only inspect what was registered.
+            del func
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(desktop_module.sys, "platform", "linux")
+    monkeypatch.setattr(desktop_module.importlib, "import_module", lambda _name: FakeWebview)
+    monkeypatch.setattr(
+        desktop_module,
+        "_apply_windows_title_bar_theme",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "private")
+    )
+
+    assert exposed[0](True) is False
+    assert calls == []
+
+
+def test_system_app_theme_is_read_from_the_personalize_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake = _install_fake_winreg(monkeypatch, (1, _FakeWinreg.REG_DWORD))
+
+    assert desktop_module._read_apps_use_light_theme() == 1
+    assert desktop_module.system_prefers_dark_apps() is False
+    assert fake.opened == [
+        (
+            _FakeWinreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+    ] * 2
+    assert fake.queried == ["AppsUseLightTheme"] * 2
+
+    fake.result = (0, _FakeWinreg.REG_DWORD)
+    assert desktop_module.system_prefers_dark_apps() is True
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        FileNotFoundError("no Personalize key (older Windows)"),
+        PermissionError("registry access denied"),
+        ("light", _FakeWinreg.REG_SZ),  # not a DWORD
+        (True, _FakeWinreg.REG_SZ),
+        (b"\x01", _FakeWinreg.REG_DWORD),  # a DWORD that is not an int
+    ],
+)
+def test_unreadable_system_app_theme_falls_back_to_dark(
+    monkeypatch: pytest.MonkeyPatch, result: object
+):
+    _install_fake_winreg(monkeypatch, result)
+
+    assert desktop_module._read_apps_use_light_theme() is None
+    assert desktop_module.system_prefers_dark_apps() is True
+
+
+def test_system_app_theme_is_not_read_off_windows(monkeypatch: pytest.MonkeyPatch):
+    fake = _install_fake_winreg(monkeypatch, (1, _FakeWinreg.REG_DWORD))
+    monkeypatch.setattr(desktop_module.sys, "platform", "linux")
+
+    assert desktop_module._read_apps_use_light_theme() is None
+    assert desktop_module.system_prefers_dark_apps() is True
+    assert fake.opened == []
+
+
+@pytest.mark.parametrize("dark", [True, False])
+def test_title_bar_theme_sets_the_immersive_dark_mode_flag_to_match(
+    monkeypatch: pytest.MonkeyPatch, dark: bool
+):
+    attempts: list[tuple[int, int, int]] = []
+
+    def dwm_set_window_attribute(hwnd, attribute, value, _size):
+        attempts.append((hwnd, attribute, value._obj.value))
+        return 0
+
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_module, "_find_process_window", lambda *_a, **_k: 4242)
+    monkeypatch.setattr(
+        desktop_module.ctypes,
+        "WinDLL",
+        lambda *_a, **_k: SimpleNamespace(DwmSetWindowAttribute=dwm_set_window_attribute),
+        raising=False,
+    )
+
+    assert desktop_module._apply_windows_title_bar_theme(pid=1, title="Cortex", dark=dark)
+    # Attribute 20 (Win10 2004+) is accepted on the first try; the value is the
+    # requested darkness, so a light window really is switched back to light.
+    assert attempts == [(4242, 20, 1 if dark else 0)]
+
+
+def test_title_bar_theme_falls_back_to_the_older_attribute_and_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    results = {20: 1, 19: 0}
+    attempts: list[int] = []
+
+    def dwm_set_window_attribute(_hwnd, attribute, _value, _size):
+        attempts.append(attribute)
+        return results[attribute]
+
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_module, "_find_process_window", lambda *_a, **_k: 7)
+    monkeypatch.setattr(
+        desktop_module.ctypes,
+        "WinDLL",
+        lambda *_a, **_k: SimpleNamespace(DwmSetWindowAttribute=dwm_set_window_attribute),
+        raising=False,
+    )
+
+    assert desktop_module._apply_windows_title_bar_theme(pid=1, title="Cortex", dark=False)
+    assert attempts == [20, 19]
+
+    results.update({20: 1, 19: 1})
+    assert not desktop_module._apply_windows_title_bar_theme(pid=1, title="Cortex", dark=False)
+
+    # No window to change is a quiet False, never an exception.
+    monkeypatch.setattr(desktop_module, "_find_process_window", lambda *_a, **_k: None)
+    assert not desktop_module._apply_windows_title_bar_theme(pid=1, title="Cortex", dark=True)
+
+
+def test_native_window_backgrounds_match_the_pages_own_ground():
+    css = (Path(__file__).resolve().parents[1] / "frontend" / "src" / "styles" / "tokens.css").read_text(
+        encoding="utf-8"
+    )
+    light = re.search(r":root\s*\{[^}]*?--bg:\s*(#[0-9a-fA-F]{6})", css)
+    dark = re.search(r':root\[data-theme="dark"\]\s*\{[^}]*?--bg:\s*(#[0-9a-fA-F]{6})', css)
+
+    assert light is not None and dark is not None
+    assert light.group(1).lower() == desktop_module.WINDOW_BACKGROUND_LIGHT
+    assert dark.group(1).lower() == desktop_module.WINDOW_BACKGROUND_DARK
 
 
 def test_webview2_bootstrap_is_skipped_when_runtime_is_installed(

@@ -38,6 +38,47 @@ class DesktopWindowConfig:
 
 _WINDOW_ICON_HANDLES: list[int] = []
 
+# The native window's ground before the page has painted, and behind it if the
+# page is ever slow. These are the page's own `--bg` for each theme
+# (frontend/src/styles/tokens.css, also THEME_BACKGROUNDS in lib/theme.ts); a
+# test pins all three so the window and the page never disagree.
+WINDOW_BACKGROUND_DARK = "#101112"
+WINDOW_BACKGROUND_LIGHT = "#f3f1ec"
+
+_PERSONALIZE_KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+_APPS_USE_LIGHT_THEME = "AppsUseLightTheme"
+
+
+def _read_apps_use_light_theme() -> int | None:
+    """Read the per-user "app mode" flag from the Personalize registry key.
+
+    ``1`` is Windows' light app mode and ``0`` its dark one. Anything that
+    stops a clean read -- a non-Windows host, a missing key or value (older
+    Windows), a value that is not a DWORD -- is ``None``.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE_KEY) as key:
+            value, value_type = winreg.QueryValueEx(key, _APPS_USE_LIGHT_THEME)
+    except (ImportError, OSError):
+        return None
+    if value_type != winreg.REG_DWORD or not isinstance(value, int):
+        return None
+    return value
+
+
+def system_prefers_dark_apps() -> bool:
+    """Whether the native window should start dark.
+
+    Follows Windows' app mode. When that cannot be read cleanly the answer is
+    dark, which is Cortex's own default theme and what the native window
+    always used before it followed the system.
+    """
+    return _read_apps_use_light_theme() != 1
+
 
 def _start_accepts_icon(webview: Any) -> bool:
     """Return whether this pywebview build accepts ``start(icon=...)``."""
@@ -81,6 +122,10 @@ def run_desktop_window(
 
     icon_path = config.icon_path if config.icon_path and config.icon_path.is_file() else None
     start_accepts_icon = _start_accepts_icon(webview)
+    # The native chrome follows Windows' app mode until the page says otherwise
+    # (see ``set_title_bar_dark``), so a light-mode user is not shown a dark
+    # window and title bar on every launch.
+    start_dark = system_prefers_dark_apps()
 
     window = webview.create_window(
         config.title,
@@ -89,10 +134,27 @@ def run_desktop_window(
         height=config.height,
         min_size=(config.min_width, config.min_height),
         resizable=True,
-        background_color="#2d2d2d",
+        background_color=WINDOW_BACKGROUND_DARK if start_dark else WINDOW_BACKGROUND_LIGHT,
         text_select=True,
         zoomable=True,
     )
+
+    def set_title_bar_dark(dark: bool) -> bool:
+        """Switch this window's title bar between dark and light.
+
+        Exposed to the page as ``window.pywebview.api.set_title_bar_dark`` so it
+        can follow a theme the person pinned that differs from Windows' own.
+        Cosmetic, and the only thing the page can do to the native window
+        through it: anything but a real boolean is refused, and a window that
+        cannot be found reports ``False`` instead of raising.
+        """
+        if not isinstance(dark, bool) or sys.platform != "win32":
+            return False
+        return _apply_windows_title_bar_theme(pid=os.getpid(), title=config.title, dark=dark)
+
+    expose = getattr(window, "expose", None)
+    if callable(expose):
+        expose(set_title_bar_dark)
     startup_errors: list[Exception] = []
 
     def after_start() -> None:
@@ -114,7 +176,9 @@ def run_desktop_window(
                     "browser engine is intentionally disabled."
                 )
             if sys.platform == "win32":
-                _apply_windows_dark_title_bar(pid=os.getpid(), title=config.title)
+                _apply_windows_title_bar_theme(
+                    pid=os.getpid(), title=config.title, dark=start_dark
+                )
             # Keep the native window and taskbar identity aligned even when
             # pywebview accepts ``start(icon=...)``. Some WebView2 builds use
             # the Python host icon for the top-level window until WM_SETICON
@@ -259,8 +323,8 @@ def _apply_windows_window_icon(*, pid: int, title: str, icon_path: Path) -> bool
         return False
 
 
-def _apply_windows_dark_title_bar(*, pid: int, title: str) -> bool:
-    """Opt Cortex's native title bar into Windows immersive dark mode."""
+def _apply_windows_title_bar_theme(*, pid: int, title: str, dark: bool) -> bool:
+    """Set Cortex's native title bar to Windows immersive dark or light mode."""
     if sys.platform != "win32":
         return False
 
@@ -277,7 +341,7 @@ def _apply_windows_dark_title_bar(*, pid: int, title: str) -> bool:
             wintypes.DWORD,
         ]
         dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
-        enabled = ctypes.c_int(1)
+        enabled = ctypes.c_int(1 if dark else 0)
         for attribute in (20, 19):  # Win10 2004+ / older Win10 dark-mode IDs
             result = dwmapi.DwmSetWindowAttribute(
                 hwnd,
