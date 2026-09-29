@@ -386,6 +386,18 @@ What is kept, all beside the database files in that folder:
   `.corrupt-<id>` file and a valid backup looks like exactly that interrupted
   recovery and is restored, so to start over on purpose remove the backups and
   the `.corrupt-<id>` files along with it (they hold copies of your chats).
+- Deleting chats frees space inside `cortex_db.sqlite` but not on disk. At
+  launch, once that launch's backup has been written and verified, Cortex hands
+  the space back when more than a quarter of the file is free. A database
+  created by this release does it in small steps; an older one is rewritten
+  once (which needs roughly twice its size free on the data drive and the
+  temporary-files drive, and is skipped when there is not, when the database
+  holds over 1 GiB, or when it takes over 20 seconds). A skipped or interrupted
+  pass changes nothing and is tried again on the next launch.
+- Chats imported from the old JSON `chat_history` folder are moved to
+  `chat_history_migrated_<time>` and files that could not be read to
+  `chat_history/quarantine`. The `chat_history` folder itself is removed only
+  once it is completely empty; anything still in it is left alone.
 
 Cortex needs write-ahead logging, so the data directory has to be on a local
 drive SQLite can use it on; some network, cloud-synced and removable drives
