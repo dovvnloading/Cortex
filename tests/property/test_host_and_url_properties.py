@@ -48,7 +48,7 @@ _PUBLIC_ADDRESS = "93.184.216.34"
 _URL_PIECES = (
     "https", "http", "://", ":", "/", "//", "@", "?", "#", "\\", "[", "]", "::1", "127.0.0.1", "localhost",
     "0", "80", "99999", ".", "..", "-", "%2e", "%40", " ", "\t", "\n", "\x00", "model.gguf", ".gguf", "a", "b",
-    "huggingface.co", "blob", "resolve", "main", "evil.com", "LOCALHOST", "xn--", "K", "．",
+    "huggingface.co", "blob", "resolve", "main", "evil.com", "LOCALHOST", "xn--", "\u212a", "\uff0e",
 )
 _ANY_TEXT = st.text(alphabet=st.characters(exclude_categories=()), max_size=80)
 _URL_SOUP = st.builds(
@@ -84,7 +84,7 @@ _PORTS = st.one_of(st.none(), st.integers(0, 65_535))
 @example(raw="[::1")
 @example(raw="[::1]evil.com")
 @example(raw="::1")
-@example(raw="ｌocalhost")
+@example(raw="\uff4cocalhost")
 def test_a_host_header_never_raises_and_always_reduces_to_lowercase(raw: str) -> None:
     host = _parse_host_header(raw)
 
