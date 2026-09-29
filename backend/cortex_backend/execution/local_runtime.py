@@ -287,6 +287,23 @@ class LocalExecutionCoordinator:
         except (OSError, RuntimeError):
             raise CodeExecutionError("workspace_invalid") from None
 
+    def _discard_stale_code_workspace(self, job_id: str) -> None:
+        """Remove a workspace left by an earlier attempt for a job whose approval was refused.
+
+        A hard crash mid-run skips the run's own cleanup, and the relaunch after
+        restart is refused at the approval gate before any workspace is reset or
+        cleaned, so the directory would otherwise stay for good. This is only
+        for refusals where nothing can be running for the job: an approval that
+        lapsed, was denied, or was found spent. It is deliberately not reached
+        when another coordinator holds a live lease, since that run's workspace
+        is in use. A failure to remove it never changes the refusal.
+        """
+
+        try:
+            self._cleanup_code_workspace(job_id)
+        except CodeExecutionError:
+            pass
+
     def _cleanup_code_workspace(self, job_id: str) -> None:
         root = self.repository.artifact_root / ".code_workspaces"
         workspace = root / job_id
@@ -580,6 +597,7 @@ class LocalExecutionCoordinator:
                 return
             if current.approval_state == "expired":
                 self.repository.expire_approvals()
+                self._discard_stale_code_workspace(job_id)
                 return
             if current.approval_state == "pending":
                 current = self._await_approval(job_id, cancel_event)
@@ -587,7 +605,10 @@ class LocalExecutionCoordinator:
                     return
             if current.approval_state == "expired":
                 self.repository.expire_approvals()
+                self._discard_stale_code_workspace(job_id)
                 return
+            if current.approval_state == "denied":
+                self._discard_stale_code_workspace(job_id)
             if cancel_event.is_set() or current.status in {"cancelled", "cancelling"} or current.approval_state in {"denied", "expired"}:
                 # A denial/expiry already reaches a terminal status through
                 # decide_approval()/expire_approvals(); this call is then a
@@ -698,11 +719,15 @@ class LocalExecutionCoordinator:
         except ApprovalExpiredError:
             # The store has already cancelled the job as approval_expired in
             # the transaction that refused the approval. Nothing ran and there
-            # is nothing left to finish.
+            # is nothing left to finish -- except the directory an earlier,
+            # crashed attempt may have left, which the lease-fenced cleanup
+            # below never reaches for an attempt that took no lease.
+            self._discard_stale_code_workspace(job_id)
             return
         except ApprovalTransitionError:
             # The approval changed under this attempt (denied, expired) between
             # the check above and the claim. Fail closed.
+            self._discard_stale_code_workspace(job_id)
             self._finish_code_failure(job_id, cancel_event, "approval_required")
         except Exception:
             self._finish_code_failure(job_id, cancel_event, "coordinator_failed")

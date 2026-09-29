@@ -20,7 +20,11 @@ import time
 
 import pytest
 
-from cortex_backend.execution.code_execution import CODE_EXECUTION_PROFILE, CodeExecutionRequest
+from cortex_backend.execution.code_execution import (
+    CODE_EXECUTION_PROFILE,
+    CodeExecutionError,
+    CodeExecutionRequest,
+)
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.models import ExecutionJob
 from cortex_backend.execution.repository import (
@@ -32,6 +36,7 @@ from cortex_backend.execution.repository import (
     ExecutionTransitionConflict,
     LeaseConflict,
 )
+from support import wait_until
 
 
 def _repository(tmp_path: Path) -> ExecutionRepository:
@@ -458,3 +463,163 @@ def test_a_cancellation_landing_during_the_claim_wins_and_spends_nothing(
     assert final.error == "cancelled"
     assert _uses(repository, job.job_id) == 0
     assert "code.started" not in [event.event for event in repository.events(job.job_id)]
+
+
+# --- a crashed run's workspace ------------------------------------------------
+#
+# A hard crash mid-run skips the run's own cleanup. The relaunch after restart is
+# refused at the approval gate, which is before the workspace is reset or cleaned,
+# so the crashed run's directory used to stay under .code_workspaces for good.
+
+
+def _leave_a_crashed_workspace(repository: ExecutionRepository, job_id: str) -> Path:
+    workspace = repository.artifact_root / ".code_workspaces" / job_id
+    (workspace / "nested").mkdir(parents=True)
+    (workspace / "half-written.txt").write_text("left by the crashed run", encoding="utf-8")
+    (workspace / "nested" / "more.txt").write_text("also left", encoding="utf-8")
+    return workspace
+
+
+def _crash_mid_run(repository: ExecutionRepository, job_id: str) -> Path:
+    """Leave a job as a hard crash does: approval spent, lease dead, workspace on disk."""
+
+    job, _ = _approved_job(repository, job_id=job_id)
+    lease_until = datetime.fromisoformat(
+        repository.claim_approved_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
+    )
+    repository.transition(
+        job.job_id, status="running", event="code.started", phase="prepare", data={}
+    )
+    workspace = _leave_a_crashed_workspace(repository, job.job_id)
+    wait_until(
+        lambda: datetime.now(timezone.utc) > lease_until,
+        timeout=5.0,
+        describe="the crashed run's lease to lapse",
+    )
+    return workspace
+
+
+def test_a_refused_relaunch_removes_the_workspace_a_crashed_run_left(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    workspace = _crash_mid_run(repository, "crashed-workspace")
+
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    try:
+        assert coordinator.startup_recover() == ["crashed-workspace"]
+        final = coordinator.wait("crashed-workspace", timeout=10.0)
+        wait_until(
+            lambda: not workspace.exists(),
+            timeout=5.0,
+            describe="the crashed run's workspace to be removed",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert (final.status, final.error) == ("cancelled", "approval_expired")
+    assert not workspace.exists()
+    # Only that job's directory goes; the shared root stays for the next run.
+    assert workspace.parent.is_dir()
+
+
+def test_an_expired_approval_removes_a_stale_workspace(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    job, _ = _pending_job(repository, job_id="expired-workspace")
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_approvals SET expires_at = ? WHERE job_id = ?",
+            ("2000-01-01T00:00:00+00:00", job.job_id),
+        )
+    workspace = _leave_a_crashed_workspace(repository, job.job_id)
+
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    try:
+        coordinator._launch_code(job.job_id)
+        final = coordinator.wait(job.job_id, timeout=10.0)
+        wait_until(
+            lambda: not workspace.exists(),
+            timeout=5.0,
+            describe="the stale workspace to be removed",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert (final.status, final.approval_state) == ("cancelled", "expired")
+
+
+def test_a_denied_approval_removes_a_stale_workspace(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    job, owner = _pending_job(repository, job_id="denied-workspace")
+    workspace = _leave_a_crashed_workspace(repository, job.job_id)
+    repository.decide_approval(job.job_id, owner=owner, decision="denied")
+
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    try:
+        coordinator._launch_code(job.job_id)
+        wait_until(
+            lambda: not workspace.exists(),
+            timeout=5.0,
+            describe="the stale workspace to be removed",
+        )
+    finally:
+        coordinator.shutdown()
+
+
+def test_a_workspace_that_cannot_be_removed_does_not_change_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    workspace = _crash_mid_run(repository, "stubborn-workspace")
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    attempts: list[str] = []
+
+    def refuse(job_id: str) -> None:
+        attempts.append(job_id)
+        raise CodeExecutionError("workspace_cleanup_failed")
+
+    monkeypatch.setattr(coordinator, "_cleanup_code_workspace", refuse)
+    try:
+        coordinator.startup_recover()
+        final = coordinator.wait("stubborn-workspace", timeout=10.0)
+        wait_until(
+            lambda: "stubborn-workspace" not in coordinator.active_code_job_ids(),
+            timeout=5.0,
+            describe="the refused job's thread to exit",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert attempts == ["stubborn-workspace"]
+    assert (final.status, final.error) == ("cancelled", "approval_expired")
+    assert workspace.exists()  # left for a later pass, never a reason to reopen the job
+
+
+def test_a_refusal_never_follows_a_link_out_of_the_workspace_root(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    job, _ = _approved_job(repository, job_id="linked-workspace")
+    repository.claim_approved_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not the run's to delete", encoding="utf-8")
+    root = repository.artifact_root / ".code_workspaces"
+    root.mkdir(parents=True)
+    try:
+        (root / job.job_id).symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this platform")
+    repository.release_lease(job.job_id, lease_owner="dead-worker")
+
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    try:
+        coordinator._launch_code(job.job_id)
+        final = coordinator.wait(job.job_id, timeout=10.0)
+        wait_until(
+            lambda: job.job_id not in coordinator.active_code_job_ids(),
+            timeout=5.0,
+            describe="the refused job's thread to exit",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert final.status == "cancelled"
+    assert (root / job.job_id).is_symlink()
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "not the run's to delete"
