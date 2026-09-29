@@ -330,25 +330,47 @@ What is kept, all beside the database files in that folder:
   `cortex_settings.sqlite`) are the two newest verified backups. They are
   refreshed each launch, after any schema upgrade, so they hold the new schema.
   If a backup cannot be written (a full disk, a file held by another program)
-  Cortex still starts, logs the failure, and says so in the diagnostics.
+  Cortex still starts and logs the failure. The failure is also reported by the
+  diagnostics API (`GET /api/v1/diagnostics`); the app does not show it yet.
 - `cortex_db.sqlite.pre-v<N>.bak` is a snapshot of the chat database taken
-  just before a release upgraded it from schema version `N`. It is written
-  once per version and never replaced, and it is the file an older release can
-  open.
+  just before a release upgraded it from schema version `N`, and it is the file
+  an older release can open. The upgrade does not run without it: if Cortex
+  cannot write the snapshot (a full disk, a file held by another program) it
+  refuses to upgrade, changes nothing, and tries again on the next launch. The
+  name always holds the newest snapshot for that version. One that already
+  exists and no longer matches the database (a rollback followed by more chats
+  on the older release, then a second upgrade) is kept as
+  `pre-v<N>.bak.superseded-<n>`. Cortex never deletes any of these.
 - If the chat or settings database is found corrupt at launch, Cortex restores
   the newest verified backup and keeps what it replaced as
   `<database>.corrupt-<id>`, with its write-ahead log beside it as
   `<database>.corrupt-<id>-wal`. The restored data is the backup's, which is
-  the state at the previous launch; the diagnostics
-  (`/api/v1/diagnostics`, `chat_backup` and `settings_backup`) name the
-  quarantined file. Cortex never deletes it.
+  the state at the previous launch; the diagnostics API
+  (`GET /api/v1/diagnostics`, `chat_backup` and `settings_backup`) names the
+  quarantined file. Cortex never deletes it. If Cortex is stopped part-way
+  through a recovery, the next launch finishes it from the newest verified
+  backup, and any write-ahead log the earlier attempt had set aside under a
+  different name is moved beside the quarantined file (the diagnostics list it
+  as `adopted_sidecars`). The diagnostics are API-only for now: nothing in the
+  app reads them yet. A database that is simply missing beside a
+  `.corrupt-<id>` file and a valid backup looks like exactly that interrupted
+  recovery and is restored, so to start over on purpose remove the backups and
+  the `.corrupt-<id>` files along with it (they hold copies of your chats).
+
+Cortex needs write-ahead logging, so the data directory has to be on a local
+drive SQLite can use it on; some network, cloud-synced and removable drives
+cannot. If SQLite reports that it could not enable it, Cortex stops at startup
+with a message saying so rather than running with weaker durability. Point
+`--data-dir` at a folder on a local drive.
 
 To go back to an older release after a newer one upgraded the chat database:
 close Cortex, move `cortex_db.sqlite` and any `-wal` and `-shm` files beside it
 into a folder of your own, copy `cortex_db.sqlite.pre-v<N>.bak` to
 `cortex_db.sqlite`, and start the older release. Anything written after the
-upgrade is only in the files you moved aside. An older release that meets a
-newer database refuses it without changing it and names the snapshot to
+upgrade is only in the files you moved aside. If you upgrade again later, that
+upgrade takes a fresh snapshot, so the next rollback goes back to that one and
+the earlier snapshot stays beside it as `.superseded-<n>`. An older release that
+meets a newer database refuses it without changing it and names the snapshot to
 restore.
 
 ## Troubleshooting
