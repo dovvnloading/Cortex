@@ -1,5 +1,5 @@
 import { Paperclip } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
@@ -7,7 +7,7 @@ import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachm
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
 import { useShallow } from "zustand/react/shallow";
 import { useFileDropZone } from "../../hooks/useFileDropZone";
-import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
+import { trackGeneration } from "../../hooks/useGenerationStream";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { useUiStore } from "../../stores/useUiStore";
@@ -38,10 +38,8 @@ type Props = {
   onSelectModel: (model: string) => Promise<boolean>;
   onRescanModels: () => Promise<void>;
   onThreadCreated: (threadId: string) => void;
-  onChatChanged: (chat: ChatResponse) => void;
   onForked: (chat: ChatResponse) => void;
   onClearMemory?: () => Promise<void>;
-  onSessionExpired: () => void;
 };
 
 type ScopedError = {
@@ -95,10 +93,8 @@ export function ChatPage({
   onSelectModel,
   onRescanModels,
   onThreadCreated,
-  onChatChanged,
   onForked,
   onClearMemory,
-  onSessionExpired,
 }: Props) {
   // Only the fields this page acts on. The streamed text is deliberately not
   // among them: the store rebuilds `generation` on every flushed frame, and
@@ -115,7 +111,14 @@ export function ChatPage({
   const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
   const setThreadOptions = useChatStore((state) => state.setThreadOptions);
   const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
-  const { start, consume, stop } = useGenerationStream(api, onSessionExpired);
+  // How the last generation ended, published by GenerationStreamHost -- which
+  // keeps consuming the stream while this page is not mounted. Handled by the
+  // two effects further down.
+  const lastCompletion = useChatStore((state) => state.lastCompletion);
+  const lastFailure = useChatStore((state) => state.lastFailure);
+  // Outcomes already on the store when this page mounted happened while it was
+  // away. Their chat is not applied (the load below fetches the current one).
+  const [mountCompletionId] = useState(() => useChatStore.getState().lastCompletion?.id ?? 0);
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
   const [drafts, setDrafts] = useState<Record<string, string>>(() => ({
@@ -151,7 +154,6 @@ export function ChatPage({
   // `chat` from the render that created them.
   const chatRef = useRef<ChatResponse | null>(null);
   const chatRequestVersionsRef = useRef(new Map<string | null, number>());
-  const initialMountRef = useRef(true);
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
@@ -167,10 +169,7 @@ export function ChatPage({
   // user turn with a fresh request id.
   const pendingAdmissionRef = useRef<PendingAdmission | null>(null);
   const handledClearRequestsRef = useRef(new Set<string>());
-
-  const reportGenerationFailure = useCallback((failedThreadId: string, message: string) => {
-    setGenerationError({ threadId: failedThreadId, message, retryable: true });
-  }, []);
+  const handledCompletionsRef = useRef(new Set<number>());
 
   const loadChat = useCallback(async ({ preserveCurrent = false }: { preserveCurrent?: boolean } = {}) => {
     const requestedThreadId = threadId;
@@ -203,8 +202,6 @@ export function ChatPage({
       });
     }
   }, [api, threadId]);
-
-  useEffect(() => stop, [stop]);
 
   useEffect(() => {
     chatRef.current = chat;
@@ -261,54 +258,73 @@ export function ChatPage({
           ? "starting"
           : "ready";
 
-  const reconcileChat = useCallback(async (id: string): Promise<void> => {
-    const requestVersion = (chatRequestVersionsRef.current.get(id) ?? 0) + 1;
-    chatRequestVersionsRef.current.set(id, requestVersion);
-    const isLatestRequest = () => chatRequestVersionsRef.current.get(id) === requestVersion;
-    try {
-      const next = await api.chat(id);
-      if (!isLatestRequest()) return;
-      onChatChanged(next);
-      if (viewThreadIdRef.current === id) {
-        setChat(next);
-        setChatLoad({
-          threadId: id,
-          loading: false,
-          error: null,
-        });
-      }
-    } catch {
-      if (!isLatestRequest()) return;
-      // The generation succeeded; only the reload failed. Resending would
-      // ask for a second answer to a question already answered.
-      setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded.", retryable: false });
-      if (viewThreadIdRef.current !== id) return;
-      // This call bumped the shared request version, so any route load still
-      // in flight for this thread has already returned early as stale. If we
-      // do not settle the load state here too, nothing ever will: the page
-      // stays on "Loading conversation..." forever, and that branch renders
-      // before the error branch, so there is not even a Retry button.
-      setChatLoad((current) => {
-        if (current.threadId !== id) return current;
-        // The transcript we already have is stale but readable, so keep
-        // showing it with the banner. With nothing to show, surface the
-        // failure so Retry is reachable.
-        if (!current.loading && !current.error) return current;
-        return chatRef.current
-          ? { threadId: id, loading: false, error: null }
-          : {
-              threadId: id,
-              loading: false,
-              error: "Could not reload this chat after the generation finished.",
-            };
-      });
-    }
-  }, [api, onChatChanged]);
+  // A generation failed: show it for the thread it belongs to. A failure that
+  // came in while this page was away is waiting on the store and shows here on
+  // return. Resending the prompt is the remedy, so it is retryable.
+  useEffect(() => {
+    if (!lastFailure) return;
+    useChatStore.getState().acknowledgeFailure(lastFailure.id);
+    // The store is the external system here: an outcome published there is
+    // taken into local state exactly once, and acknowledged so it is not taken
+    // again by the next mount. It happens once per generation, not per render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setGenerationError({ threadId: lastFailure.threadId, message: lastFailure.message, retryable: true });
+  }, [lastFailure]);
 
-  const completeGeneration = useCallback(async (id: string, clearRequested = false, jobId?: string): Promise<void> => {
-    await reconcileChat(id);
-    if (!clearRequested) return;
-    const requestKey = jobId ?? id;
+  // A generation ended and the stream host has already reloaded its chat.
+  //
+  // A layout effect on purpose: the host drops the pending bubble as soon as
+  // this outcome is published, so the saved message has to be in `chat` before
+  // then -- from a passive effect it would land a frame later and the answer
+  // would blink out in between.
+  useLayoutEffect(() => {
+    if (!lastCompletion || handledCompletionsRef.current.has(lastCompletion.id)) return;
+    const completion = lastCompletion;
+    handledCompletionsRef.current.add(completion.id);
+    useChatStore.getState().acknowledgeCompletion(completion.id);
+    const id = completion.threadId;
+    // One that predates this mount ended while the page was away: the load
+    // this mount runs already fetches the current chat, so only its side
+    // effects (the memory prompt below) still apply.
+    if (completion.id > mountCompletionId) {
+      // A load still in flight for this thread began before the answer was
+      // saved; it must not replace the chat that includes it.
+      chatRequestVersionsRef.current.set(id, (chatRequestVersionsRef.current.get(id) ?? 0) + 1);
+      if (completion.chat) {
+        if (viewThreadIdRef.current === id) {
+          setChat(completion.chat);
+          setChatLoad({ threadId: id, loading: false, error: null });
+        }
+      } else {
+        // The generation succeeded; only the reload failed. Resending would
+        // ask for a second answer to a question already answered.
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- same as the failure effect above: an outcome from the store, handled once
+        setGenerationError({ threadId: id, message: "Generation finished, but the saved chat could not be reloaded.", retryable: false });
+        if (viewThreadIdRef.current === id) {
+          // Invalidating the version above already made any route load for
+          // this thread return early as stale. If we do not settle the load
+          // state here too, nothing ever will: the page stays on "Loading
+          // conversation..." forever, and that branch renders before the
+          // error branch, so there is not even a Retry button.
+          setChatLoad((current) => {
+            if (current.threadId !== id) return current;
+            // The transcript we already have is stale but readable, so keep
+            // showing it with the banner. With nothing to show, surface the
+            // failure so Retry is reachable.
+            if (!current.loading && !current.error) return current;
+            return chatRef.current
+              ? { threadId: id, loading: false, error: null }
+              : {
+                  threadId: id,
+                  loading: false,
+                  error: "Could not reload this chat after the generation finished.",
+                };
+          });
+        }
+      }
+    }
+    if (!completion.clearRequested) return;
+    const requestKey = completion.jobId ?? id;
     if (handledClearRequestsRef.current.has(requestKey)) return;
     handledClearRequestsRef.current.add(requestKey);
     if (!onClearMemory) {
@@ -319,7 +335,7 @@ export function ChatPage({
     // call is synchronous and blocks the whole JS thread -- including the
     // pending message bubble's teardown -- until the OS dialog is dismissed.
     setMemoryClearPromptOpen(true);
-  }, [onClearMemory, reconcileChat]);
+  }, [lastCompletion, mountCompletionId, onClearMemory]);
 
   // A memory the model suggested is stored only here, when the user presses
   // Save. It goes through the same memories API as the Settings panel, so the
@@ -364,44 +380,12 @@ export function ChatPage({
       setShowJumpToLatest(false);
       setResolvedThreadId(threadId);
       void loadChat({ preserveCurrent });
-      const stored = readActiveJob();
-      // The global store is authoritative while the app is alive. Storage is
-      // only a best-effort cold-start side channel, so a denied/quota-full
-      // sessionStorage must not make a live job look finished on re-entry.
-      const { generation: currentGeneration, generationCursor } = useChatStore.getState();
-      const activeJob = (
-        currentGeneration.jobId && currentGeneration.threadId
-          ? {
-              jobId: currentGeneration.jobId,
-              threadId: currentGeneration.threadId,
-              lastEventId: generationCursor,
-            }
-          : null
-      ) ?? stored;
-      if (activeJob) {
-        // Only rewind the event cursor when the store is actually cold for
-        // this job. initialMountRef is per-instance, so it is true on EVERY
-        // mount -- including a return from /settings, which unmounts this
-        // page but leaves the module-level generation store populated.
-        // Replaying from 0 onto already-accumulated text printed the answer
-        // twice; keeping the stored cursor resumes where the buffer left off.
-        const warmForThisJob = currentGeneration.jobId === activeJob.jobId;
-        const replayFromStart = initialMountRef.current && !warmForThisJob;
-        const job: PersistedJob = replayFromStart ? { ...activeJob, lastEventId: 0 } : activeJob;
-        initialMountRef.current = false;
-        if (replayFromStart || !warmForThisJob) {
-          useChatStore.getState().beginGeneration(job.jobId, job.threadId);
-        }
-        void consume(job, completeGeneration, reportGenerationFailure);
-      } else {
-        initialMountRef.current = false;
-        const current = useChatStore.getState().generation;
-        if (current.jobId !== null) useChatStore.getState().endGeneration(current.jobId);
-      }
     }, 0);
     return () => window.clearTimeout(timer);
-    // The event consumer intentionally survives route changes. A generation
-    // is global to the local backend, while a route is merely a view of it.
+    // Re-run for a different thread (or a new loadChat, which follows the
+    // thread), not for every change of the chat and load state read above. The
+    // running generation is not touched here: GenerationStreamHost owns its
+    // stream, and this page only reads the text from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, loadChat]);
 
@@ -464,7 +448,7 @@ export function ChatPage({
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
       setResolvedThreadId(jobThreadId);
-      start(accepted.job_id, jobThreadId, completeGeneration, reportGenerationFailure);
+      trackGeneration(accepted.job_id, jobThreadId);
       if (pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
       }

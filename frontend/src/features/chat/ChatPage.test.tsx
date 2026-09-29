@@ -1,13 +1,31 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
+import { GenerationStreamHost } from "./GenerationStreamHost";
+
+const ignoreSessionExpiry = () => undefined;
+
+/**
+ * The page with the host that consumes its stream, as AuthenticatedWorkspace
+ * renders them. ChatPage no longer follows a generation itself, so every test
+ * that sends a message needs the host beside it. Both sit in one fragment so a
+ * rerender keeps the same instances.
+ */
+function ChatWithHost(props: ComponentProps<typeof ChatPage>) {
+  return (
+    <>
+      <GenerationStreamHost api={props.api} onSessionExpired={ignoreSessionExpiry} />
+      <ChatPage {...props} />
+    </>
+  );
+}
 
 describe("humanizeGenerationStatus", () => {
   it("never exposes an internal all-caps control marker", () => {
@@ -45,7 +63,7 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
 
 function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
   return render(
-    <ChatPage
+    <ChatWithHost
       api={api}
       threadId={threadId}
       runtimeReady
@@ -57,10 +75,8 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onSelectModel={async () => true}
       onRescanModels={async () => undefined}
       onThreadCreated={vi.fn()}
-      onChatChanged={vi.fn()}
       onForked={vi.fn()}
       onClearMemory={onClearMemory}
-      onSessionExpired={vi.fn()}
     />,
   );
 }
@@ -367,7 +383,7 @@ describe("ChatPage composer integration", () => {
     expect(await screen.findByText("Alpha answer")).toBeInTheDocument();
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -378,9 +394,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
 
@@ -403,7 +417,7 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-a"));
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -414,14 +428,12 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -432,9 +444,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledTimes(3));
@@ -457,7 +467,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -468,9 +478,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -504,7 +512,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -515,9 +523,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -565,7 +571,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -576,9 +582,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -620,7 +624,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -631,9 +635,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -666,14 +668,14 @@ describe("ChatPage composer integration", () => {
     expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-inverse") ?? "[]")).toEqual([stagedAttachment]);
   });
 
-  it("replays from the beginning on a cold start, then resumes without duplicating after a route remount", async () => {
-    // Two different situations that both reach this mount effect:
+  it("replays from the beginning on a cold start, then resumes without duplicating after a remount", async () => {
+    // Two different situations that both reach the stream host's resume:
     //
     //   Cold start (page reload): sessionStorage remembers the job but the
     //   module-level store was wiped, so the transcript must be rebuilt by
     //   replaying every event from 0.
     //
-    //   Route remount (Settings and back): the page unmounts but the store
+    //   Remount (the workspace is rebuilt): the host unmounts but the store
     //   survives with its accumulated text intact. Replaying from 0 here
     //   appends the whole answer onto itself -- the regression this pins.
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-replay", threadId: "thread-a", lastEventId: 7 }));
@@ -681,7 +683,7 @@ describe("ChatPage composer integration", () => {
     const api = chatApi({
       streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
         streamCalls.push({ afterEventId: options.afterEventId });
-        onEvent({ event_id: 8, event: "generation.content_delta", job_id: "job-replay", thread_id: "thread-a", data: { delta: "replayed" } });
+        onEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-replay", thread_id: "thread-a", data: { delta: "replayed" } });
         return new Promise<void>((_resolve, reject) => options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
       }),
     });
@@ -696,7 +698,7 @@ describe("ChatPage composer integration", () => {
     // Cold start replayed from 0; the remount resumed from the persisted
     // cursor instead of rewinding.
     expect(streamCalls[0].afterEventId).toBe(0);
-    expect(streamCalls[1].afterEventId).toBe(8);
+    expect(streamCalls[1].afterEventId).toBe(1);
 
     // And the answer is not printed twice.
     await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
@@ -896,7 +898,7 @@ describe("ChatPage composer integration", () => {
     revision = 9;
     useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.8 });
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -907,14 +909,12 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -925,9 +925,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await screen.findByRole("button", { name: "Retry last message" });
@@ -988,7 +986,7 @@ describe("ChatPage composer integration", () => {
     await user.type(composer, "Draft for A");
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -999,9 +997,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     const composerB = await screen.findByLabelText("Message Cortex");
@@ -1009,7 +1005,7 @@ describe("ChatPage composer integration", () => {
     await user.type(composerB, "Draft for B");
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -1020,9 +1016,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => {
@@ -1044,7 +1038,7 @@ describe("ChatPage composer integration", () => {
     await screen.findByRole("button", { name: "Stop generating" });
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -1055,9 +1049,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
 
@@ -1162,7 +1154,7 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull());
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -1173,9 +1165,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     expect(await screen.findByText("Answer from B")).toBeInTheDocument();

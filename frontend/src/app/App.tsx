@@ -13,6 +13,7 @@ import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../features/command-palette/ShortcutsHelpDialog";
 const loadChatPage = () => import("../features/chat/ChatPage").then(({ ChatPage: component }) => ({ default: component }));
 const ChatPage = lazy(loadChatPage);
+import { GenerationStreamHost } from "../features/chat/GenerationStreamHost";
 import { Onboarding } from "../features/shell/Onboarding";
 const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
@@ -861,11 +862,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   return (
     <>
+      {/* Above the route switch, so a generation keeps streaming into the store while Settings is open. */}
+      <GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
             ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
-            : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
+            : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} />}
         </Suspense>
       </AppShell>
       <CommandPalette
@@ -892,9 +895,9 @@ function updateModelProgress(event: SSEEvent, setProgress: (progress: ModelProgr
   setProgress({ model, status, percent });
 }
 
-function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onChatChanged, onForked, onClearMemory, onSessionExpired }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onChatChanged: (chat: ChatResponse) => void; onForked: (chat: ChatResponse) => void; onClearMemory: () => Promise<void>; onSessionExpired: () => void }) {
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: () => Promise<void> }) {
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} onSessionExpired={onSessionExpired} />;
+  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
 }
 
 function SettingsRoute({ activeChatId, onLoadMemories, ...props }: Omit<SettingsPanelProps, "onClose" | "onRetryMemory"> & { activeChatId: string | null; onLoadMemories: () => Promise<void> }) {

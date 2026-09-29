@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ChatGroup, ChatResponse, ChatSummary, GenerationOptionsOverride } from "../../../contracts/cortex-api";
+import { GENERATION_GAP_NOTICE } from "../lib/generationStatus";
 
 /** A brand-new, not-yet-created chat has no thread id yet; scope its draft options under this key. */
 export const NEW_THREAD_OPTIONS_KEY = "new";
@@ -24,6 +25,35 @@ export interface GenerationState {
    * unrelated backend bookkeeping the user can't see the effect of yet.
    */
   contentReady: boolean;
+  /**
+   * True once events of this job were skipped: the stream came back after the
+   * backend had already dropped the older ones, so the text held here has a
+   * hole in it. Nothing more is appended after that; the saved answer replaces
+   * the bubble when the job ends.
+   */
+  gap: boolean;
+}
+
+/**
+ * How a generation ended, published by the stream consumer for whichever view
+ * is showing the chat. `id` only ever grows, so a reader can tell a new outcome
+ * from one it already handled, and acknowledges an outcome to take it off the
+ * store -- which is what lets one that arrived while no chat was on screen (for
+ * example Settings was open) wait for the next chat view instead of being lost.
+ */
+export interface GenerationCompletion {
+  id: number;
+  jobId: string | null;
+  threadId: string;
+  /** The saved chat after the job, or null when reloading it failed. */
+  chat: ChatResponse | null;
+  clearRequested: boolean;
+}
+
+export interface GenerationFailure {
+  id: number;
+  threadId: string;
+  message: string;
 }
 
 interface ChatStoreState {
@@ -35,7 +65,7 @@ interface ChatStoreState {
    * Sequence number of the last SSE event applied to the tracked generation.
    *
    * Deliberately a sibling of `generation` rather than a field inside it.
-   * Nothing renders this -- only ChatPage's resume effect reads it, and it
+   * Nothing renders this -- only GenerationStreamHost's resume reads it, and it
    * does so imperatively via getState(). It does advance on every single SSE
    * frame, so while it lived inside `generation` it rebuilt that object per
    * frame, and ChatPage subscribes to the object by reference: the transcript
@@ -43,6 +73,9 @@ interface ChatStoreState {
    * requestAnimationFrame batching in useGenerationStream.
    */
   generationCursor: number;
+  /** The newest outcome nobody has acknowledged yet; see {@link GenerationCompletion}. */
+  lastCompletion: GenerationCompletion | null;
+  lastFailure: GenerationFailure | null;
   generationOptionsByThread: Record<string, GenerationOptionsOverride>;
   /**
    * Assistant messages whose requested translation failed, so the original
@@ -76,7 +109,13 @@ interface ChatStoreState {
   markContentReady: (jobId: string) => void;
   markStopping: (jobId: string) => void;
   revertStopping: (jobId: string) => void;
+  /** Record that events were skipped, and say so in the status line. */
+  markGenerationGap: (jobId: string) => void;
   endGeneration: (jobId: string) => void;
+  recordCompletion: (completion: Omit<GenerationCompletion, "id">) => void;
+  acknowledgeCompletion: (id: number) => void;
+  recordFailure: (failure: Omit<GenerationFailure, "id">) => void;
+  acknowledgeFailure: (id: number) => void;
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
   markUntranslated: (messageId: string) => void;
@@ -94,21 +133,27 @@ const idleGeneration: GenerationState = {
   partialThoughts: "",
   statusText: "",
   contentReady: false,
+  gap: false,
 };
+
+let nextOutcomeId = 0;
 
 /**
  * Chat-list summaries and the active generation stream. Generation is
  * intentionally global (not scoped to one ChatPage instance) so it survives
  * a route change to Settings and back, and so "generating in another
  * thread" reads correctly regardless of which ChatPage props are current.
- * Error handling for a generation stays page-local (see useGenerationStream
- * / ChatPage) since it's tightly coupled to which thread is being viewed.
+ * The stream itself is consumed above the routes (GenerationStreamHost); how a
+ * job ended is published here as lastCompletion / lastFailure, and the chat
+ * view reacts to it, since what to show is tied to which thread is on screen.
  */
 export const useChatStore = create<ChatStoreState>((set) => ({
   chats: [],
   groups: [],
   generation: idleGeneration,
   generationCursor: 0,
+  lastCompletion: null,
+  lastFailure: null,
   generationOptionsByThread: {},
   untranslatedMessageIds: {},
   proposedMemoriesByMessage: {},
@@ -200,10 +245,24 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? { generation: { ...state.generation, phase: "streaming" } }
         : state,
     ),
+  markGenerationGap: (jobId) =>
+    set((state) => (
+      state.generation.jobId === jobId && !state.generation.gap
+        ? { generation: { ...state.generation, gap: true, statusText: GENERATION_GAP_NOTICE } }
+        : state
+    )),
   endGeneration: (jobId) =>
     set((state) => (
       state.generation.jobId === jobId ? { generation: idleGeneration, generationCursor: 0 } : state
     )),
+  recordCompletion: (completion) =>
+    set({ lastCompletion: { ...completion, id: ++nextOutcomeId } }),
+  acknowledgeCompletion: (id) =>
+    set((state) => (state.lastCompletion?.id === id ? { lastCompletion: null } : state)),
+  recordFailure: (failure) =>
+    set({ lastFailure: { ...failure, id: ++nextOutcomeId } }),
+  acknowledgeFailure: (id) =>
+    set((state) => (state.lastFailure?.id === id ? { lastFailure: null } : state)),
 
   setThreadOptions: (threadKey, options) =>
     set((state) => {
