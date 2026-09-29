@@ -7,6 +7,9 @@ backups. The parts of that which are easy to get subtly wrong live here once:
 * ``snapshot_database`` copies a live database through SQLite's online backup
   API, so the copy includes commits that are still only in the ``-wal``
   sidecar.
+* ``open_at_rest`` / ``quick_check_at_rest`` read a backup that nothing is
+  writing without leaving ``-wal`` and ``-shm`` files beside it, and bound the
+  time a check may take.
 * ``move_sidecars`` / ``put_sidecars_back`` set a crashed database's write-ahead
   log aside instead of deleting it, and undo that when recovery is abandoned.
 * ``find_interrupted_recovery`` / ``adopt_orphaned_sidecars`` finish what a
@@ -137,6 +140,44 @@ def snapshot_database(
             target_connection.close()
     finally:
         source_connection.close()
+
+
+def open_at_rest(path: str | os.PathLike[str]) -> sqlite3.Connection:
+    """Open a backup or snapshot nobody is writing, touching nothing but its bytes.
+
+    A plain read-only open of a file whose header says write-ahead logging still
+    makes SQLite create ``<file>-wal`` and ``<file>-shm`` beside it, and a file
+    that is later renamed or superseded leaves them behind next to whatever
+    takes its name. ``immutable=1`` tells SQLite the file cannot change, so it
+    creates and locks nothing. It also means the write-ahead log is ignored, so
+    this is only for files that have none: never for a live database.
+    """
+    uri = f"{Path(path).resolve().as_uri()}?mode=ro&immutable=1"
+    return sqlite3.connect(uri, timeout=SNAPSHOT_WAIT_SECONDS, uri=True)
+
+
+def quick_check_at_rest(path: str | os.PathLike[str], *, time_limit: float) -> bool:
+    """Whether a backup passes ``PRAGMA quick_check``, giving up after ``time_limit`` seconds.
+
+    A check that cannot finish in time, or a file that cannot be opened at all,
+    is not a pass: the callers use this to decide whether a backup may push an
+    older, verified generation out of its slot, and not knowing is a reason to
+    keep the older one. The file is opened with :func:`open_at_rest`.
+    """
+    deadline = time.monotonic() + time_limit
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = open_at_rest(path)
+        # SQLite calls this every few dozen internal steps, including from
+        # inside the integrity check, and a non-zero return interrupts it.
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+        result = connection.execute("PRAGMA quick_check").fetchone()
+        return result is not None and str(result[0]).lower() == "ok"
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def move_sidecars(

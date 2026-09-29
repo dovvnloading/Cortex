@@ -616,8 +616,10 @@ def test_startup_backup_rotation_reads_the_primary_once_and_renames_the_old_gene
     old_backup = Path(manager.backup_path).read_bytes()
     checks: list[tuple[str, bool]] = []
     snapshots: list[str] = []
+    outgoing_checks: list[str] = []
     real_is_valid = DatabaseManager._database_is_valid
     real_snapshot = storage.snapshot_database
+    real_outgoing_check = storage.quick_check_at_rest
 
     def spy_is_valid(path: str, *, quick: bool = False) -> bool:
         checks.append((os.path.basename(path), quick))
@@ -627,11 +629,16 @@ def test_startup_backup_rotation_reads_the_primary_once_and_renames_the_old_gene
         snapshots.append(os.path.basename(str(source)))
         return real_snapshot(source, destination, **kwargs)
 
+    def spy_outgoing_check(path, **kwargs):
+        outgoing_checks.append(os.path.basename(str(path)))
+        return real_outgoing_check(path, **kwargs)
+
     def no_byte_copies(*_args, **_kwargs):
         raise AssertionError("rotation must rename the old generation, not copy it")
 
     monkeypatch.setattr(DatabaseManager, "_database_is_valid", staticmethod(spy_is_valid))
     monkeypatch.setattr(storage, "snapshot_database", spy_snapshot)
+    monkeypatch.setattr(storage, "quick_check_at_rest", spy_outgoing_check)
     monkeypatch.setattr(storage.shutil, "copy2", no_byte_copies)
 
     reopened = _reopen(manager)
@@ -641,6 +648,7 @@ def test_startup_backup_rotation_reads_the_primary_once_and_renames_the_old_gene
     quick_checks = [name for name, quick in checks if quick]
     assert full == ["chat.sqlite"], "the primary gets exactly one full integrity check"
     assert len(quick_checks) == 1 and quick_checks[0].endswith(".tmp"), "only the new snapshot is re-checked"
+    assert outgoing_checks == ["chat.sqlite.bak"], "the backup being rotated is checked once, bounded"
     assert snapshots == ["chat.sqlite"], "one snapshot of the primary"
     assert reopened.backup_status == ("ok", None)
     # The old backup was renamed into the older slot, byte for byte.
@@ -700,6 +708,72 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
     assert DatabaseManager._database_is_valid(manager.backup_path)
     assert _leftover_temporaries(tmp_path) == []
     assert _reopen(manager).backup_status == ("ok", None)
+
+
+def _stray_files(directory: Path) -> list[str]:
+    """Anything a rotation may set aside while it works and must not leave behind."""
+    return sorted(entry.name for entry in directory.iterdir() if entry.name.endswith((".old", ".tmp")))
+
+
+def test_a_rotted_newest_backup_does_not_displace_the_older_verified_generation(
+    tmp_path: Path,
+) -> None:
+    """The outgoing .bak used to be renamed over .bak.1 without being looked at,
+    so a backup that had rotted between two launches pushed the last good copy out
+    and left one good backup and one rotten one."""
+    manager, _ = _manager_with_data(tmp_path)
+    older_generation = Path(manager.previous_backup_path).read_bytes()
+    Path(manager.backup_path).write_bytes(b"rotted since the last launch")
+
+    reopened = _reopen(manager)
+
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == older_generation
+    assert DatabaseManager._database_is_valid(manager.previous_backup_path)
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _chat_ids(manager.backup_path) == {"thread-1"}
+    assert _stray_files(tmp_path) == []
+
+    # Once .bak is healthy again the rotation carries on as before.
+    healthy_backup = Path(manager.backup_path).read_bytes()
+    assert _reopen(manager).backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == healthy_backup
+
+
+def test_a_backup_with_a_damaged_page_does_not_displace_the_older_generation(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    older_generation = Path(manager.previous_backup_path).read_bytes()
+    damaged = bytearray(Path(manager.backup_path).read_bytes())
+    page_size = 4096
+    damaged[page_size : 2 * page_size] = bytes(page_size)
+    Path(manager.backup_path).write_bytes(bytes(damaged))
+    assert not storage.quick_check_at_rest(manager.backup_path, time_limit=30.0)
+
+    _reopen(manager)
+
+    assert Path(manager.previous_backup_path).read_bytes() == older_generation
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+
+
+def test_checking_the_outgoing_backup_leaves_nothing_beside_it_and_gives_up_on_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "big.sqlite"
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("CREATE TABLE filler (body TEXT)")
+        writer.executemany("INSERT INTO filler VALUES (?)", [("x" * 500,)] * 2000)
+        writer.commit()
+    finally:
+        writer.close()
+
+    assert storage.quick_check_at_rest(str(path), time_limit=30.0)
+    assert not storage.quick_check_at_rest(str(path), time_limit=0.0), "a check that overruns is not a pass"
+    assert not storage.quick_check_at_rest(str(tmp_path / "missing.sqlite"), time_limit=30.0)
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["big.sqlite"]
 
 
 # -- Recovery that was interrupted ------------------------------------------

@@ -329,9 +329,12 @@ What is kept, all beside the database files in that folder:
 - `cortex_db.sqlite.bak` and `.bak.1` (and the same for
   `cortex_settings.sqlite`) are the two newest verified backups. They are
   refreshed each launch, after any schema upgrade, so they hold the new schema.
-  If a backup cannot be written (a full disk, a file held by another program)
-  Cortex still starts and logs the failure. The failure is also reported by the
-  diagnostics API (`GET /api/v1/diagnostics`); the app does not show it yet.
+  The chat database's `.bak` is checked before it takes the `.bak.1` slot, and
+  one that fails the check is replaced instead, so a backup that has rotted
+  never pushes the older good copy out. If a backup cannot be written (a full
+  disk, a file held by another program) Cortex still starts and logs the
+  failure. The failure is also reported by the diagnostics API
+  (`GET /api/v1/diagnostics`); the app does not show it yet.
 - `cortex_db.sqlite.pre-v<N>.bak` is a snapshot of the chat database taken
   just before a release upgraded it from schema version `N`, and it is the file
   an older release can open. The upgrade does not run without it: if Cortex

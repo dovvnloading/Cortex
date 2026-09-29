@@ -36,6 +36,7 @@ from cortex_backend.repositories.sqlite_backup import (
     find_interrupted_recovery,
     move_sidecars,
     put_sidecars_back,
+    quick_check_at_rest,
     snapshot_database,
     utc_now_iso,
 )
@@ -123,6 +124,12 @@ MAX_LEGACY_CHAT_ATTACHMENTS = 8
 MAX_LEGACY_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _LEGACY_ATTACHMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _LEGACY_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+# How long the backup about to be rotated into the older slot may take to prove
+# it is still whole. A check that overruns counts as a failure, which keeps the
+# older generation, so this only bounds startup; it does not decide anything a
+# healthy backup would not pass in a few seconds.
+_OUTGOING_BACKUP_CHECK_SECONDS = 30.0
 
 def _discard_sidecars_for(database_path: str | Path) -> None:
     """Remove the -wal/-shm SQLite leaves beside a database file.
@@ -653,17 +660,20 @@ class DatabaseManager:
         when a reader keeps it from finishing.
 
         Startup does one full read of the primary to validate it
-        (_prepare_primary), one snapshot of it, and a quick_check of that
-        snapshot. ``primary_verified`` says the first has already happened
-        this launch. The old backup becomes the older generation by rename,
-        after the new snapshot has been written and verified, not by a second
-        byte copy: a snapshot that fails leaves both generations untouched.
-        The outgoing backup is not read again on the way. If it had quietly
-        rotted it still takes the older slot and the generation it replaces is
-        gone, but the new backup was just verified and the next launch rotates
-        again, so that exposure lasts one launch. A backup that recovery has
-        already found bad is the exception: it is overwritten, not rotated over
-        the good generation recovery restored from.
+        (_prepare_primary), one snapshot of it, a quick_check of that
+        snapshot, and a bounded quick_check of the backup it replaces.
+        ``primary_verified`` says the first has already happened this launch.
+        The old backup becomes the older generation by rename, after the new
+        snapshot has been written and verified, not by a second byte copy: a
+        snapshot that fails leaves both generations where they were.
+
+        A backup that has failed its check is overwritten, not rotated over
+        the good generation behind it. Recovery finding one bad is one way to
+        know (``_newest_backup_unusable``); the other is the check just
+        described, which catches a backup that quietly rotted between two
+        launches. A check that cannot finish in time is treated the same way,
+        so the older generation is kept whenever the newer one is not known
+        to be good.
         """
         with self._write_lock:
             if not os.path.exists(self.db_path):
@@ -673,13 +683,24 @@ class DatabaseManager:
                     "Could not back up a chat database that failed validation.",
                     operation="backup",
                 )
+            older_generation_slot = None if self._newest_backup_unusable else self.previous_backup_path
+            if (
+                older_generation_slot is not None
+                and os.path.exists(self.backup_path)
+                and not quick_check_at_rest(
+                    self.backup_path, time_limit=_OUTGOING_BACKUP_CHECK_SECONDS
+                )
+            ):
+                logging.warning(
+                    "The newest chat database backup did not pass its check; keeping the older "
+                    "generation and replacing the newest one."
+                )
+                older_generation_slot = None
             try:
                 self._atomic_snapshot_database(
                     self.db_path,
                     self.backup_path,
-                    displace_existing_to=(
-                        None if self._newest_backup_unusable else self.previous_backup_path
-                    ),
+                    displace_existing_to=older_generation_slot,
                 )
             except PersistenceError:
                 raise
