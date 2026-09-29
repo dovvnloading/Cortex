@@ -1345,6 +1345,21 @@ def _validate_download_url(url: str) -> str:
     without giving this module a chance to enforce its HTTPS-only and
     public-host policy.  Resolve hostnames before each request so a redirect
     cannot point the downloader at Cortex or another private service.
+
+    Known limit (DNS rebinding, stated in the README's download notes and pinned
+    by ``test_the_request_is_addressed_by_name_not_to_the_address_that_was_checked``):
+    this resolves the name to *check* it, and the request is still addressed by
+    name, so the HTTP stack resolves it again when it connects. A DNS server that
+    answers a public address here and a private one there is not stopped by this
+    check. What still holds is TLS: the connection is verified against the
+    requested host name (``httpx``'s default), and no HTTP request, so no Hugging
+    Face token, is sent before that succeeds, so the swapped-in address can only
+    be answered by a server with a valid certificate for that name. Connecting to
+    the address checked here (pinning it, with the original name kept for the
+    ``Host`` header and TLS) is not done: it would have to reimplement the
+    fallback across a host's several addresses that ``httpx`` provides, would not
+    apply behind a system proxy (which resolves the name itself), and touches
+    every real connection in a path whose TLS behaviour a unit test cannot exercise.
     """
     if not isinstance(url, str) or _contains_control_character(url):
         raise GGUFDownloadError("The download URL contains invalid control characters.")

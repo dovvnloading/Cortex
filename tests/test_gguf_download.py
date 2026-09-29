@@ -288,6 +288,42 @@ def test_download_gguf_rejects_private_dns_on_initial_url(tmp_path: Path, monkey
         )
 
 
+def test_the_request_is_addressed_by_name_not_to_the_address_that_was_checked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Documents a known limit (README, "Bring your own GGUF"; the note in
+    ``_validate_download_url``): the host is resolved here to be *checked*, but
+    the request itself goes to the name, so the HTTP stack resolves it again when
+    it connects and an answer that changed in between (DNS rebinding) is not seen
+    by the check. TLS verification against the name is what still applies.
+
+    If the connection is ever pinned to the checked address this test fails on
+    purpose: update it, the README and that note together."""
+    content = _valid_gguf_content(tmp_path)
+    resolved: list[tuple[str, int]] = []
+
+    def getaddrinfo(host, port, **kwargs):
+        resolved.append((host, port))
+        return [(0, 0, 0, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(download_module.socket, "getaddrinfo", getaddrinfo)
+    seen: list[tuple[str, str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers["host"], request.extensions.get("sni_hostname")))
+        return httpx.Response(200, content=content)
+
+    download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert resolved and {host for host, _port in resolved} == {"example.com"}  # looked up here, to be checked
+    assert seen == [("example.com", "example.com", None)]  # and the request still names the host, not 93.184.216.34
+
+
 def test_download_gguf_rejects_redirect_loop(tmp_path: Path) -> None:
     calls = 0
 
