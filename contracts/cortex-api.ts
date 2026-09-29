@@ -388,6 +388,7 @@ export interface LlamaCppRuntimeStatus {
   active_backend?: "vulkan" | "cpu" | null;
   last_restart_reason?: string | null;
   loaded_context?: number | null;
+  last_failure_code?: "unsupported_architecture" | "model_unreadable" | "memory" | "missing_shards" | "projector_not_a_model" | "no_gpu" | "port_unavailable" | "runtime_unusable" | "startup_timeout" | "health_check_failed" | "runtime_exited" | null;
 }
 
 export interface LlamaCppSettings {

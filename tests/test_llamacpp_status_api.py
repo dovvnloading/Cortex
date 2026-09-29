@@ -44,3 +44,32 @@ def test_status_route_reports_an_unknown_context_as_null() -> None:
 
     assert with_manager.loaded_context is None
     assert without_manager.loaded_context is None
+
+
+def test_status_route_reports_the_launch_failure_cause() -> None:
+    live = LlamaCppRuntimeStatus(
+        state="failed",
+        binary_present=True,
+        loaded_model=None,
+        last_error="The model does not fit in available memory.",
+        models_directory="C:/synthetic/models",
+        last_failure_code="memory",
+    )
+
+    status = _llamacpp_status(_request_with_manager(SimpleNamespace(status=live)))
+
+    assert status.last_failure_code == "memory"
+    assert status.model_dump()["last_failure_code"] == "memory"
+
+
+def test_status_route_reports_no_failure_cause_by_default() -> None:
+    live = LlamaCppRuntimeStatus(
+        state="idle",
+        binary_present=False,
+        loaded_model=None,
+        last_error=None,
+        models_directory="C:/synthetic/models",
+    )
+
+    assert _llamacpp_status(_request_with_manager(SimpleNamespace(status=live))).last_failure_code is None
+    assert _llamacpp_status(_request_with_manager(None)).last_failure_code is None

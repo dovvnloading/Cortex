@@ -10,6 +10,8 @@ existing Ollama error copy is unaffected.
 
 from __future__ import annotations
 
+from .launch_failure import LaunchFailureCode, launch_failure_message
+
 
 class LlamaCppError(RuntimeError):
     """Raised for any llama.cpp runtime failure (binary fetch, process, HTTP)."""
@@ -37,7 +39,38 @@ class BinaryVerificationError(LlamaCppError):
     """Raised when a downloaded/cached llama-server binary fails verification."""
 
 
-class ServerLaunchError(LlamaCppError):
+class _ClassifiedLaunchError(LlamaCppError):
+    """A launch failure that can carry the cause the manager identified.
+
+    With a ``failure_code`` the message is the fixed, user-facing text for that
+    cause (see ``launch_failure``), never anything the child said, and the
+    error is marked as guidance Cortex wrote so that
+    ``services/llm.py``'s ``_generation_failure_message`` passes it through
+    instead of matching keywords in it. Without one it is the plain error it
+    always was and is classified the way any other runtime text is.
+    """
+
+    failure_code: LaunchFailureCode | None
+
+    def __init__(
+        self,
+        error: str | None = None,
+        *,
+        status_code: int | None = None,
+        failure_code: LaunchFailureCode | None = None,
+    ) -> None:
+        if error is None:
+            if failure_code is None:
+                raise TypeError("A launch error needs a message or a failure code.")
+            error = launch_failure_message(failure_code)
+        super().__init__(error, status_code=status_code)
+        self.failure_code = failure_code
+        if failure_code is not None:
+            self.is_user_guidance = True
+            self.guidance_code = f"llamacpp_{failure_code}"
+
+
+class ServerLaunchError(_ClassifiedLaunchError):
     """Raised when the llama-server process exits before becoming healthy.
 
     This is the specific signature :class:`~cortex_backend.llamacpp.server_manager.LlamaServerManager`
@@ -45,7 +78,7 @@ class ServerLaunchError(LlamaCppError):
     """
 
 
-class ServerStartTimeoutError(LlamaCppError):
+class ServerStartTimeoutError(_ClassifiedLaunchError):
     """Raised when the llama-server process never becomes healthy in time.
 
     Deliberately distinct from :class:`ServerLaunchError`: a process that is

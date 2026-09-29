@@ -19,6 +19,7 @@ from cortex_backend.execution.attachment_staging import (
     DEFAULT_ATTACHMENT_RETENTION_SECONDS,
     MAX_ATTACHMENT_RETENTION_SECONDS,
 )
+from cortex_backend.llamacpp.launch_failure import LaunchFailureCode
 from cortex_backend.services.attachments import (
     MAX_CHAT_ATTACHMENT_BYTES,
     MAX_CHAT_ATTACHMENTS,
@@ -106,6 +107,11 @@ class LlamaCppRuntimeStatus(APIModel):
     # which can differ from the size that was requested. Null while nothing is
     # ready or when the server did not report one.
     loaded_context: int | None = None
+    # The identified cause of the most recent failed launch or crash, from a
+    # closed set the client can rely on. Never carries text the runtime
+    # produced. Null when nothing failed, when the cause was not identified,
+    # and once a server is ready.
+    last_failure_code: LaunchFailureCode | None = None
 
 
 class SystemResponse(APIModel):

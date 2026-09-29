@@ -971,6 +971,7 @@ def _llamacpp_status(request: Request) -> LlamaCppRuntimeStatus:
         active_backend=live.active_backend,
         last_restart_reason=live.last_restart_reason,
         loaded_context=live.loaded_context,
+        last_failure_code=live.last_failure_code,
     )
 
 

@@ -51,6 +51,12 @@ from .errors import (
     ServerLaunchError,
     ServerStartTimeoutError,
 )
+from .launch_failure import (
+    LaunchFailureCode,
+    classify_child_exit,
+    crash_loop_message,
+    launch_failure_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,10 @@ _LOCK_POLL_SECONDS = 0.05
 _STOP_LOCK_TIMEOUT_SECONDS = 0.5
 _STATUS_REPEAT_SECONDS = 5.0
 _STDERR_TAIL_LINES = 200
+# After the child exits, how long to let the output reader consume what is
+# still in the pipe before the tail is read to work out why it exited. Normally
+# instant; the bound is for a pipe some other process still holds open.
+_OUTPUT_DRAIN_SECONDS = 2.0
 # Crash-loop guard: if the same (model, num_ctx) keeps dying, stop paying a
 # full model reload per message and surface an honest error instead. The
 # guard clears when the user changes model or context size (either may fix
@@ -189,6 +199,11 @@ class LlamaCppRuntimeStatus:
     # ``/props`` at readiness), as opposed to the size that was requested.
     # None while nothing is ready, or when the server did not report one.
     loaded_context: int | None = None
+    # The identified cause of the most recent failed launch or crash, from a
+    # closed set (see launch_failure) so it never carries anything the child
+    # said. None when nothing failed, when the cause was not identified, and
+    # again once a server reaches ready.
+    last_failure_code: LaunchFailureCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +215,8 @@ class _ReuseVerdict:
     # True when the running server was lost rather than deliberately
     # replaced (process died, stopped responding). Feeds the crash-loop guard.
     failure: bool = False
+    # The exit code of a process that died; None when it did not (or has not).
+    exit_code: int | None = None
 
 
 class ProcessLauncher(Protocol):
@@ -574,6 +591,12 @@ class LlamaServerManager:
         self._stderr_tail: list[str] = []
         self._failure_times: list[float] = []
         self._failure_key: tuple[Path, int] | None = None
+        # The cause of the most recent failure counted against _failure_key.
+        # Only meaningful while that key is set; it is replaced whenever the
+        # key changes or another failure is counted.
+        self._failure_code: LaunchFailureCode | None = None
+        # What status reports; see LlamaCppRuntimeStatus.last_failure_code.
+        self._last_failure_code: LaunchFailureCode | None = None
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
         self._api_key: str | None = None
         self._scrubbed_env_noted = False
@@ -689,7 +712,12 @@ class LlamaServerManager:
                         if isinstance(exc, ServerLaunchError)
                         else "the runtime did not become ready in time"
                     )
-                    self._record_launch_failure(reason, model_path, effective_num_ctx)
+                    self._record_launch_failure(
+                        reason,
+                        model_path,
+                        effective_num_ctx,
+                        getattr(exc, "failure_code", None),
+                    )
                 # A caller cancellation can arrive after startup has begun.
                 # The startup finally block reaps an unpublished child, but
                 # also clear the manager's state so a cancelled request does
@@ -715,6 +743,7 @@ class LlamaServerManager:
                 else None
             )
             last_error = self._last_error
+            last_failure_code = self._last_failure_code
             last_restart_reason = self._last_restart_reason
             active_backend = self._active_backend
             loaded_context = self._loaded_context if state == "ready" else None
@@ -732,6 +761,7 @@ class LlamaServerManager:
             active_backend=active_backend,
             last_restart_reason=last_restart_reason,
             loaded_context=loaded_context,
+            last_failure_code=last_failure_code,
         )
 
     def stop(self) -> None:
@@ -863,6 +893,7 @@ class LlamaServerManager:
                     reusable=False,
                     reason=f"the runtime process exited unexpectedly (exit code {exit_code})",
                     failure=True,
+                    exit_code=exit_code,
                 )
             if time.monotonic() - self._last_health_check < _HEALTH_STATUS_CACHE_SECONDS:
                 return _ReuseVerdict(reusable=True)
@@ -885,6 +916,7 @@ class LlamaServerManager:
                     reusable=False,
                     reason=f"the runtime process exited unexpectedly (exit code {exit_code})",
                     failure=True,
+                    exit_code=exit_code,
                 )
             return _ReuseVerdict(
                 reusable=False,
@@ -954,6 +986,16 @@ class LlamaServerManager:
                     self._failure_key = crashed_key
                     self._failure_times.clear()
                 self._failure_times.append(time.monotonic())
+                # A server that died after being ready left its output in
+                # the retained tail; one that merely stopped answering left
+                # nothing to read and is named for what was observed.
+                code: LaunchFailureCode = (
+                    classify_child_exit(list(self._stderr_tail), verdict.exit_code)
+                    if verdict.exit_code is not None
+                    else "health_check_failed"
+                )
+                self._failure_code = code
+                self._last_failure_code = code
             else:
                 # A deliberate configuration change (model or context size)
                 # is exactly what fixes an out-of-memory crash loop -- give
@@ -967,7 +1009,11 @@ class LlamaServerManager:
         # tail in memory for lifecycle bookkeeping, but never emit it.
 
     def _record_launch_failure(
-        self, reason: str, model_path: Path, effective_num_ctx: int
+        self,
+        reason: str,
+        model_path: Path,
+        effective_num_ctx: int,
+        failure_code: LaunchFailureCode | None,
     ) -> None:
         """Feed a launch that never reached ``ready`` into the same
         crash-loop bookkeeping ``_record_restart`` uses for a post-health
@@ -991,7 +1037,13 @@ class LlamaServerManager:
                 self._failure_key = crashed_key
                 self._failure_times.clear()
             self._failure_times.append(time.monotonic())
-        logger.warning("The local model runtime failed to launch (%s).", safe_reason)
+            self._failure_code = failure_code
+            self._last_failure_code = failure_code
+        logger.warning(
+            "The local model runtime failed to launch (%s; cause: %s).",
+            safe_reason,
+            failure_code or "not identified",
+        )
 
     def _guard_against_crash_loop(self, model_path: Path, effective_num_ctx: int) -> None:
         with self._state_lock:
@@ -1008,13 +1060,8 @@ class LlamaServerManager:
             reason = _safe_restart_reason(
                 self._last_restart_reason or "the runtime kept failing"
             )
-            message = (
-                f"The local model runtime failed {len(self._failure_times)} times "
-                f"in the last few minutes "
-                f"(most recently: {reason}). It likely does not fit in available "
-                "memory. Choose a smaller model or quantization, or lower the "
-                "context window in Settings, and Cortex will try again."
-            )
+            failure_code = self._failure_code
+            message = crash_loop_message(len(self._failure_times), reason, failure_code)
             process = self._process
             self._state = "stopping"
         # Terminate outside the state lock, same as _terminate_and_reset: the
@@ -1125,8 +1172,10 @@ class LlamaServerManager:
         last_exc: Exception | None = None
         vulkan_launch_failed = False
         # ServerLaunchError may originate from the child process and include
-        # arbitrary stderr.  Keep status/API diagnostics stable and classify
-        # the failure by exception type instead of relaying that text.
+        # arbitrary stderr.  Keep status/API diagnostics stable and never relay
+        # that text: a failure the manager could identify is reported through
+        # its code's fixed message (see launch_failure), anything else through
+        # this generic one.
         message = (
             "The local model runtime could not start. "
             "Check System settings and try again."
@@ -1148,9 +1197,10 @@ class LlamaServerManager:
                     if backend == "vulkan":
                         vulkan_launch_failed = True
                     logger.warning(
-                        "llama-server backend '%s' is unusable (%s); trying the next option.",
+                        "llama-server backend '%s' is unusable (%s, cause: %s); trying the next option.",
                         backend,
                         type(exc).__name__,
+                        getattr(exc, "failure_code", None) or "not identified",
                     )
                     continue
                 if vulkan_launch_failed and backend != "vulkan":
@@ -1164,7 +1214,7 @@ class LlamaServerManager:
                     # the GPU backend.
                     self._mark_backend_bad("vulkan", model_path, num_ctx)
                 return handle
-        except BaseException:
+        except BaseException as exc:
             # Only the exceptions handled above are retried on another
             # backend; everything else leaves the loop straight away. The
             # states _start_with_backend publishes as it works
@@ -1179,25 +1229,33 @@ class LlamaServerManager:
             # returns the manager to idle for that case, and it can only do
             # so while the state still says a start is in progress.
             if not cancellation_event.is_set():
-                self._publish_start_failure(message)
+                self._publish_start_failure(message, getattr(exc, "failure_code", None))
             raise
+        # The last backend's failure is the one reported: the earlier ones
+        # only got the chance to be replaced by a better one.
+        failure_code: LaunchFailureCode | None = getattr(last_exc, "failure_code", None)
         with self._state_lock:
             self._state = "failed"
-            self._last_error = message
+            self._last_error = launch_failure_message(failure_code) if failure_code else message
+            self._last_failure_code = failure_code
         raise last_exc or LlamaCppError(message)
 
-    def _publish_start_failure(self, message: str) -> None:
+    def _publish_start_failure(
+        self, message: str, failure_code: LaunchFailureCode | None = None
+    ) -> None:
         """Replace an in-progress start state with a terminal, reported one.
 
         Deliberately narrow. ``_start_with_backend``'s ``finally`` clause can
         leave ``stopping`` behind with a more specific message when a child
         will not exit, and a concurrent caller may already have reached
-        ``ready``; neither should be overwritten by this generic text.
+        ``ready``; neither should be overwritten by this text. A ``failure_code``
+        replaces the generic message with the fixed one for that cause.
         """
         with self._state_lock:
             if self._state in {"downloading_binary", "starting"}:
                 self._state = "failed"
-                self._last_error = message
+                self._last_error = launch_failure_message(failure_code) if failure_code else message
+                self._last_failure_code = failure_code
 
     def _backend_order(
         self, requested: GpuBackendSetting, model_path: Path, num_ctx: int
@@ -1341,10 +1399,24 @@ class LlamaServerManager:
         try:
             process = self._launcher(argv, cwd=executable.parent, env=env)
         except Exception as exc:
+            # A program that cannot be spawned at all -- missing, unreadable,
+            # or blocked or quarantined by security software -- is an OSError
+            # from the operating system. Anything else (a containment failure)
+            # is not evidence of that, so it keeps the generic message.
+            launch_error = (
+                ServerLaunchError(failure_code="runtime_unusable")
+                if isinstance(exc, OSError)
+                else ServerLaunchError("The local model runtime could not start.")
+            )
             with self._state_lock:
                 self._state = "failed"
-                self._last_error = "The local model runtime could not start. Check System settings and try again."
-            raise ServerLaunchError("The local model runtime could not start.") from exc
+                self._last_error = (
+                    launch_error.error
+                    if launch_error.failure_code is not None
+                    else "The local model runtime could not start. Check System settings and try again."
+                )
+                self._last_failure_code = launch_error.failure_code
+            raise launch_error from exc
         with self._state_lock:
             self._starting_process = process
         stderr_tail: list[str] = []
@@ -1358,13 +1430,15 @@ class LlamaServerManager:
                 listening_port.append(int(match.group(1)))
                 listening_event.set()
 
+        reader: threading.Thread | None = None
         try:
             if process.stdout is not None:
-                threading.Thread(
+                reader = threading.Thread(
                     target=_drain_output,
                     args=(process.stdout, stderr_tail, on_output),
                     daemon=True,
-                ).start()
+                )
+                reader.start()
             deadline = time.monotonic() + self._health_timeout_seconds
             last_status_at = time.monotonic()
             while time.monotonic() < deadline:
@@ -1376,8 +1450,14 @@ class LlamaServerManager:
                     # corrupt model file -- is decided by the caller, which
                     # can see whether a subsequent backend attempt with the
                     # same model/args goes on to succeed.
+                    #
+                    # The child's last lines are what say why. Its pipe can
+                    # still hold output the reader has not consumed, so let
+                    # the reader finish (bounded) before reading the tail.
+                    if reader is not None and reader.is_alive():
+                        reader.join(_OUTPUT_DRAIN_SECONDS)
                     raise ServerLaunchError(
-                        "The local model runtime exited before it became ready."
+                        failure_code=classify_child_exit(list(stderr_tail), exit_code)
                     )
                 if not listening_port:
                     if cancellation_event.wait(
@@ -1414,6 +1494,7 @@ class LlamaServerManager:
                         self._api_key = api_key
                         self._state = "ready"
                         self._last_error = None
+                        self._last_failure_code = None
                         self._active_backend = backend
                         self._last_health_check = time.monotonic()
                         self._stderr_tail = stderr_tail
@@ -1438,7 +1519,12 @@ class LlamaServerManager:
                 if cancellation_event.wait(_HEALTH_POLL_INTERVAL_SECONDS):
                     raise LlamaCppError("The local model runtime startup was cancelled.")
 
-            raise ServerStartTimeoutError("The local model runtime did not become ready in time.")
+            # No "listening" line means the model never finished loading; a
+            # listening server that never passed its authenticated readiness
+            # probe is a different problem with a different fix.
+            raise ServerStartTimeoutError(
+                failure_code="health_check_failed" if listening_port else "startup_timeout"
+            )
         except (LlamaCppError, ServerStartTimeoutError):
             raise
         except Exception as exc:

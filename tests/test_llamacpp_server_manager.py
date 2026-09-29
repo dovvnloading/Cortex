@@ -20,11 +20,17 @@ import pytest
 
 from cortex_backend.llamacpp.errors import (
     BinaryVerificationError,
+    CrashLoopError,
     LlamaCppError,
     ServerLaunchError,
     ServerStartTimeoutError,
 )
-from cortex_backend.llamacpp.server_manager import _LISTENING_PORT_RE, LlamaServerManager
+from cortex_backend.llamacpp.launch_failure import launch_failure_message
+from cortex_backend.llamacpp.server_manager import (
+    _LISTENING_PORT_RE,
+    LlamaServerManager,
+    _ReuseVerdict,
+)
 
 
 class _FakePopen:
@@ -1439,6 +1445,341 @@ def test_launch_failure_status_omits_raw_child_output(tmp_path: Path) -> None:
     )
 
 
+class _ExitedPopen(_FakePopen):
+    """A child that has already exited with ``exit_code``, leaving ``output`` behind."""
+
+    def __init__(self, output: str = "", *, exit_code: int = 1) -> None:
+        super().__init__()
+        self.exit_code = exit_code
+        self.stdout = io.BytesIO(output.encode())
+
+
+class _LateOutput:
+    """Output that reaches the reader only after the child is already seen to have exited."""
+
+    def __init__(self, data: bytes, *, delay_seconds: float) -> None:
+        self._data = data
+        self._gate = threading.Event()
+        threading.Timer(delay_seconds, self._gate.set).start()
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        if not self._gate.wait(5.0):
+            return b""
+        data, self._data = self._data, b""
+        return data
+
+    def readline(self) -> bytes:
+        return self.read1()
+
+
+_LISTENING_LINE = "0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
+
+
+def _launch_failure(
+    tmp_path: Path, process: _FakePopen, *, gpu_backend: str = "cpu"
+) -> tuple[LlamaServerManager, ServerLaunchError]:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+    )
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager, raised.value
+
+
+def test_launch_failure_is_classified_without_relaying_child_text(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Six different causes used to read as one sentence blaming memory. The
+    child's output only decides *which* fixed message is shown; nothing it said
+    reaches status, the error, or the log."""
+    architecture = "zzz-private-arch-name"
+    output = (
+        f"llama_model_load: error loading model architecture: unknown model architecture: '{architecture}'\n"
+        "llama_model_load_from_file_impl: failed to load model\n"
+    )
+
+    with caplog.at_level("DEBUG"):
+        manager, error = _launch_failure(tmp_path, _ExitedPopen(output))
+
+    status = manager.status
+    assert status.state == "failed"
+    assert status.last_failure_code == "unsupported_architecture"
+    assert status.last_error == launch_failure_message("unsupported_architecture")
+    assert error.failure_code == "unsupported_architecture"
+    assert error.error == status.last_error
+    for text in (status.last_error, str(error), status.last_restart_reason or "", caplog.text):
+        assert architecture not in text
+        assert "llama_model_load" not in text
+    # Naming the cause in the log is fine; it is one of a closed set.
+    assert "unsupported_architecture" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("llama_model_load: error loading model: tensor 'blk.3.ffn_up.weight' data is not within the file bounds\n", "model_unreadable"),
+        ("ggml_backend_alloc_ctx_tensors: failed to allocate buffer\nfailed to load model\n", "memory"),
+        ("llama_model_load: error loading model: illegal split file idx: 1\n", "missing_shards"),
+        ("llama_model_load: error loading model architecture: unknown model architecture: 'clip'\n", "projector_not_a_model"),
+        ("ggml_vulkan: No devices found.\n", "no_gpu"),
+        ("srv  operator(): couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 0\n", "port_unavailable"),
+    ],
+)
+def test_each_recognised_launch_failure_gets_its_own_cause_and_message(
+    tmp_path: Path, output: str, code: str
+) -> None:
+    manager, error = _launch_failure(tmp_path, _ExitedPopen(output))
+
+    assert error.failure_code == code
+    assert manager.status.last_failure_code == code
+    assert manager.status.last_error == launch_failure_message(code)  # type: ignore[arg-type]
+    assert manager.status.last_error != launch_failure_message("runtime_exited")
+
+
+@pytest.mark.parametrize("exit_code", [0xC0000135, -1073741515])
+def test_a_child_that_cannot_load_its_libraries_is_reported_as_a_blocked_or_missing_runtime(
+    tmp_path: Path, exit_code: int
+) -> None:
+    """Such a process prints nothing; the Windows exit code is the only evidence,
+    and Popen may hand it back signed or unsigned."""
+    manager, error = _launch_failure(tmp_path, _ExitedPopen("", exit_code=exit_code))
+
+    assert error.failure_code == "runtime_unusable"
+    assert manager.status.last_failure_code == "runtime_unusable"
+
+
+def test_an_exit_that_says_nothing_is_reported_as_unexplained_rather_than_guessed(tmp_path: Path) -> None:
+    manager, error = _launch_failure(tmp_path, _ExitedPopen(_LISTENING_LINE, exit_code=1))
+
+    assert error.failure_code == "runtime_exited"
+    assert manager.status.last_error == launch_failure_message("runtime_exited")
+    assert "could not tell why" in (manager.status.last_error or "")
+
+
+def test_the_output_that_explains_an_exit_is_read_even_when_it_arrives_after_the_exit_is_seen(
+    tmp_path: Path,
+) -> None:
+    process = _ExitedPopen()
+    process.stdout = _LateOutput(b"ggml: out of memory\n", delay_seconds=0.05)  # type: ignore[assignment]
+
+    manager, error = _launch_failure(tmp_path, process)
+
+    assert error.failure_code == "memory"
+    assert manager.status.last_failure_code == "memory"
+
+
+def test_a_program_that_cannot_be_spawned_is_reported_as_a_blocked_or_missing_runtime(tmp_path: Path) -> None:
+    def blocked(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
+        del argv, cwd, env
+        raise PermissionError("synthetic: blocked by security software")
+
+    manager = _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=blocked, http_client=_AlwaysHealthyClient()
+    )
+
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert raised.value.failure_code == "runtime_unusable"
+    assert manager.status.last_failure_code == "runtime_unusable"
+    assert manager.status.last_error == launch_failure_message("runtime_unusable")
+    assert "blocked by security software" not in str(raised.value)
+
+
+def test_a_containment_failure_is_not_blamed_on_security_software(tmp_path: Path) -> None:
+    def cannot_contain(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
+        del argv, cwd, env
+        raise RuntimeError("could not assign the model process to containment")
+
+    manager = _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=cannot_contain, http_client=_AlwaysHealthyClient()
+    )
+
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert raised.value.failure_code is None
+    assert manager.status.last_failure_code is None
+    assert manager.status.last_error == (
+        "The local model runtime could not start. Check System settings and try again."
+    )
+
+
+def test_a_load_that_never_finishes_is_told_apart_from_a_server_that_never_answers(tmp_path: Path) -> None:
+    silent = _FakePopen()
+    silent.stdout = io.BytesIO(b"")
+    never_listening = _manager(
+        tmp_path / "a",
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([silent]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    with pytest.raises(ServerStartTimeoutError) as raised:
+        never_listening.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert raised.value.failure_code == "startup_timeout"
+    assert never_listening.status.last_failure_code == "startup_timeout"
+    assert never_listening.status.last_error == launch_failure_message("startup_timeout")
+
+    # The default fake child announces its port, then the health probe fails.
+    never_answering = _manager(
+        tmp_path / "b",
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    with pytest.raises(ServerStartTimeoutError) as raised:
+        never_answering.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert raised.value.failure_code == "health_check_failed"
+    assert never_answering.status.last_failure_code == "health_check_failed"
+
+
+def test_the_failure_code_clears_once_a_server_is_ready(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_ExitedPopen("ggml: out of memory\n"), _FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert manager.status.last_failure_code == "memory"
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=2048)
+
+    assert manager.status.state == "ready"
+    assert manager.status.last_failure_code is None
+    assert manager.status.last_error is None
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("ggml: out of memory\n", "memory"),
+        ("llama_model_load: error loading model: illegal split file idx: 1\n", "missing_shards"),
+        ("ggml_vulkan: No devices found.\n", "no_gpu"),
+        (_LISTENING_LINE, "runtime_exited"),
+    ],
+)
+def test_the_crash_loop_refusal_names_the_cause_instead_of_blaming_memory(
+    tmp_path: Path, output: str, code: str
+) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_ExitedPopen(output) for _ in range(3)]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    message = str(raised.value)
+    assert launch_failure_message(code) in message  # type: ignore[arg-type]
+    assert "3 times" in message
+    assert manager.status.last_error == message
+    assert manager.status.last_failure_code == code
+    if code != "memory":
+        assert "does not fit in available memory" not in message
+
+
+def test_a_slow_load_that_keeps_timing_out_is_not_blamed_on_memory(tmp_path: Path) -> None:
+    def silent() -> _FakePopen:
+        process = _FakePopen()
+        process.stdout = io.BytesIO(b"")
+        return process
+
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([silent() for _ in range(3)]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    for _ in range(3):
+        with pytest.raises(ServerStartTimeoutError):
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    message = str(raised.value)
+    assert "took too long to load" in message
+    assert "slow or busy disk" in message
+    assert "memory" not in message
+
+
+def test_a_crash_after_ready_is_classified_from_the_retained_output(tmp_path: Path) -> None:
+    def child() -> _FakePopen:
+        process = _FakePopen()
+        process.stdout = io.BytesIO(("ggml: out of memory\n" + _LISTENING_LINE).encode())
+        return process
+
+    processes = [child() for _ in range(3)]
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher(list(processes)),
+        http_client=_AlwaysHealthyClient(),
+    )
+    model_path = tmp_path / "model.gguf"
+
+    for process in processes:
+        manager.ensure_ready(model_path, num_ctx=4096)
+        assert manager.status.last_failure_code is None
+        process.exit_code = 1  # dies after having been ready
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert launch_failure_message("memory") in str(raised.value)
+    assert manager.status.last_failure_code == "memory"
+
+
+def test_a_server_that_stops_answering_is_recorded_as_a_failed_health_check(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    verdict = _ReuseVerdict(
+        reusable=False,
+        reason="the runtime stopped responding to health checks (3 attempts)",
+        failure=True,
+    )
+
+    manager._record_restart(verdict, tmp_path / "model.gguf", 4096)
+
+    assert manager.status.last_failure_code == "health_check_failed"
+
+
+def test_a_classified_launch_error_reaches_the_user_unchanged_and_an_unclassified_one_does_not(
+    tmp_path: Path,
+) -> None:
+    from cortex_backend.services.llm import _generation_failure_message
+
+    _manager_unused, error = _launch_failure(
+        tmp_path, _ExitedPopen("llama_model_load: error loading model: illegal split file idx: 1\n")
+    )
+
+    message, details = _generation_failure_message(error)
+
+    assert message == launch_failure_message("missing_shards")
+    assert details == "llamacpp_missing_shards"
+    # Without a code the error is ordinary runtime text again, not guidance.
+    assert not getattr(ServerLaunchError("The local model runtime could not start."), "is_user_guidance", False)
+
+
 def test_a_dead_process_is_restarted_with_the_exit_code_recorded(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     first = _FakePopen()
@@ -1516,7 +1857,10 @@ def test_a_crash_loop_stops_with_an_honest_error_instead_of_thrashing(tmp_path: 
         manager.ensure_ready(model_path, num_ctx=6144)
 
     assert len(launcher.launch_args) == 3  # the guard fired BEFORE a fourth reload
-    assert "does not fit in available memory" in str(raised.value)
+    # Nothing in the child's output said why, so the refusal says so instead of
+    # guessing at memory.
+    assert "could not tell why" in str(raised.value)
+    assert "3 times" in str(raised.value)
     assert manager.status.state == "failed"
 
     # And it keeps refusing fast -- no half-thrash of reload-every-other-message.
@@ -1557,7 +1901,10 @@ def test_repeated_launch_failures_are_tracked_and_trip_the_crash_loop_guard(tmp_
         manager.ensure_ready(model_path, num_ctx=4096)
 
     assert len(launcher.launch_args) == 3  # the guard fired before a fourth doomed attempt
-    assert "does not fit in available memory" in str(raised.value)
+    # Nothing in the child's output said why, so the refusal says so instead of
+    # guessing at memory.
+    assert "could not tell why" in str(raised.value)
+    assert "3 times" in str(raised.value)
     assert manager.status.state == "failed"
 
 
