@@ -91,13 +91,17 @@ class GenerationSettings(_SettingsModel):
     # (code execution contract, memory instructions) are unaffected: they
     # stay conditional on their own settings, not on this one.
     bypass_system_prompt: bool = False
-    # How long Ollama keeps a model in memory after it answers, in minutes. 5 is
-    # Ollama's own default, sent explicitly so every call refreshes the timer;
-    # 0 sends nothing and leaves Ollama's own setting (OLLAMA_KEEP_ALIVE) alone;
-    # -1 keeps the model loaded until Ollama is stopped. (Ollama's API reads 0
-    # as "unload now", which is not something this setting offers.) It does not
-    # apply to GGUF models, whose server Cortex starts and stops itself.
-    keep_alive_minutes: int = Field(default=5, ge=-1, le=1440)
+    # How long Ollama keeps a model in memory after it answers, in minutes. 0, the
+    # default, sends nothing and leaves Ollama's own setting (OLLAMA_KEEP_ALIVE,
+    # or its five-minute default) in charge, so a build that adds this setting
+    # changes nothing for anyone who has not chosen a value: a value sent on a
+    # request overrides that variable, so a non-zero default would have shortened
+    # a longer one. 1 to 1440 sends that many minutes on every call, so each one
+    # refreshes the timer; -1 keeps the model loaded until Ollama is stopped.
+    # (Ollama's API reads 0 as "unload now", which is not something this setting
+    # offers.) It does not apply to GGUF models, whose server Cortex starts and
+    # stops itself.
+    keep_alive_minutes: int = Field(default=0, ge=-1, le=1440)
 
 
 # The subset of GenerationSettings that a single request may override for

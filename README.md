@@ -116,10 +116,14 @@ transcript.](.github/images/workspace-light.png)
   system prompt** leaves the built-in identity and safety instructions out of
   the request entirely. It is off by default and takes a deliberate opt-in.
 - **Model loading.** When Ollama has to load a model into memory, the turn says
-  so instead of looking hung. Cortex asks Ollama to keep the model loaded for
-  five minutes after each turn; the `generation.keep_alive_minutes` setting
-  changes that (`0` leaves Ollama's own default alone, `-1` keeps the model
-  loaded until Ollama stops). It has no control in the Settings panel yet.
+  so instead of looking hung. By default Cortex leaves how long Ollama keeps a
+  model loaded to Ollama itself (its `OLLAMA_KEEP_ALIVE` variable, or its
+  five-minute default), exactly as before. To choose for Cortex's own requests
+  instead, set `generation.keep_alive_minutes` to 1-1440 minutes, or `-1` to
+  keep the model loaded until Ollama stops; the value is sent on every request,
+  so it takes priority over `OLLAMA_KEEP_ALIVE`, and `0` (the default) sends
+  none. It applies to Ollama models only and has no control in the Settings
+  panel yet, so it is set through the settings API.
 - **Model details.** The Models panel shows each installed model's parameter
   size, quantization, and context length alongside its name, read from Ollama's
   existing model-detail response.

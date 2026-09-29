@@ -1803,7 +1803,7 @@
             "type": "boolean"
           },
           "keep_alive_minutes": {
-            "default": 5,
+            "default": 0,
             "maximum": 1440.0,
             "minimum": -1.0,
             "title": "Keep Alive Minutes",

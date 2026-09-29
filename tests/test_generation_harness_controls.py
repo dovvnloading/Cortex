@@ -142,12 +142,14 @@ class KeepAliveOptionTests(unittest.TestCase):
             "job-1", GenerationRequest(user_input="hello"), settings, ("local-chat:9b",)
         )
 
-    def test_the_default_asks_ollama_to_keep_the_model_five_minutes(self):
+    def test_the_default_sends_no_keep_alive_so_ollamas_own_setting_stands(self):
+        # A keep_alive sent on a request overrides OLLAMA_KEEP_ALIVE, so sending
+        # one by default would shorten a longer value a user had configured.
         snapshot = _generation_snapshot(
             "job-1", GenerationRequest(user_input="hello"), CortexSettings(), ("local-chat:9b",)
         )
 
-        assert snapshot.model_options["keep_alive"] == "5m"
+        assert "keep_alive" not in snapshot.model_options
 
     def test_a_longer_setting_is_sent_in_minutes(self):
         assert self._snapshot(90).model_options["keep_alive"] == "90m"

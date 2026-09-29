@@ -22,8 +22,8 @@ def _write_ini(path: Path, values: dict[str, object]) -> None:
 
 
 class TypedSettingsTests(unittest.TestCase):
-    def test_keep_alive_defaults_to_five_minutes_and_is_bounded(self):
-        self.assertEqual(GenerationSettings().keep_alive_minutes, 5)
+    def test_keep_alive_defaults_to_leaving_ollama_alone_and_is_bounded(self):
+        self.assertEqual(GenerationSettings().keep_alive_minutes, 0)
         for accepted in (-1, 0, 1, 1440):
             self.assertEqual(GenerationSettings(keep_alive_minutes=accepted).keep_alive_minutes, accepted)
         for refused in (-2, 1441, 2.5, "soon"):
@@ -34,7 +34,7 @@ class TypedSettingsTests(unittest.TestCase):
         stored = CortexSettings().model_dump(mode="json")
         del stored["generation"]["keep_alive_minutes"]
 
-        self.assertEqual(CortexSettings.model_validate(stored).generation.keep_alive_minutes, 5)
+        self.assertEqual(CortexSettings.model_validate(stored).generation.keep_alive_minutes, 0)
 
     def test_defaults_match_the_web_runtime_contract(self):
         settings = CortexSettings()
