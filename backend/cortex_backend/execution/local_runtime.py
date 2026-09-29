@@ -431,6 +431,13 @@ class LocalExecutionCoordinator:
                     self._recover_scratch(job)
                 elif job.profile == ATTACHMENT_STAGE_PROFILE:
                     self._fail_interrupted_attachment(job)
+                elif job.profile == CODE_EXECUTION_PROFILE and job.status in TerminalExecutionStatus:
+                    # A code job that crashed while cancelling was finished by
+                    # recovery itself (its lease had expired, so it went
+                    # straight to cancelled) and is never relaunched, so the
+                    # run's own cleanup never happens. Its workspace is ours to
+                    # remove: the process that used it is gone.
+                    self._discard_stale_code_workspace(job.job_id)
             try:
                 owner = self.repository.installation_principal_id
                 for job in self.repository.list_jobs(
@@ -675,6 +682,13 @@ class LocalExecutionCoordinator:
                 # approved-but-unleased is not yet terminal anywhere else --
                 # without finishing it here, the job is left in "cancelling"
                 # forever, since nothing else will ever revisit it.
+                #
+                # No lease is held on this path, so the run's own cleanup in the
+                # finally block below never reaches a workspace an earlier
+                # attempt left (a crash while the job was cancelling). Nothing
+                # can be running for the job: one thread per job, and the
+                # launcher's instance lock keeps every other process out.
+                self._discard_stale_code_workspace(job_id)
                 self._finish_code_failure(job_id, cancel_event, "cancelled")
                 return
             if current.approval_state != "approved":

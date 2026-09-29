@@ -1067,3 +1067,86 @@ def test_the_capability_scan_finds_the_same_namespaces_from_a_tree_as_from_sourc
 
     assert from_source == from_tree == CodeCapabilities(filesystem=True, network=True)
     assert code_execution.capabilities_required_by_tree(ast.parse("x = 1")) == CodeCapabilities()
+
+
+def _stale_workspace(repository, job_id: str) -> Path:
+    workspace = repository.artifact_root / ".code_workspaces" / job_id
+    workspace.mkdir(parents=True)
+    (workspace / "leftover.txt").write_text("left by the crashed run", encoding="utf-8")
+    return workspace
+
+
+def test_a_job_that_crashed_while_cancelling_does_not_leak_its_workspace(
+    coordinator, frozen_clock
+) -> None:
+    """Recovery moves such a job straight to cancelled, and nothing relaunches it.
+
+    The run's own cleanup therefore never happens, and its workspace stayed
+    under the artifact root for good.
+    """
+
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    job, _ = repository.create_job(
+        job_id="job-crashed-cancelling",
+        owner=owner,
+        request_id="request-crashed-cancelling",
+        profile="code.exec.v1",
+        payload={},
+    )
+    repository.claim_lease(job.job_id, lease_owner="dead-coordinator", ttl_seconds=30)
+    workspace = _stale_workspace(repository, job.job_id)
+    repository.request_cancel(job.job_id)
+    frozen_clock.advance(31)
+
+    recovered = coordinator.startup_recover()
+
+    assert job.job_id in recovered
+    assert repository.get_job(job.job_id).status == "cancelled"
+    assert not workspace.exists()
+
+
+def test_a_cancelling_job_relaunched_after_a_crash_does_not_leak_its_workspace(coordinator) -> None:
+    """The same leak on the path where the crashed run's lease has not expired yet.
+
+    The job is not recovered, it is relaunched into ``_run_code``, which sees it
+    cancelling and finishes it without ever taking a lease -- so the cleanup
+    that runs for a leased attempt never happened.
+    """
+
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    request = CodeExecutionRequest(
+        owner=owner,
+        request_id="code-cancelling-relaunch",
+        source="_result = 1",
+        intent_summary="Exercise a relaunch of a cancelling job.",
+    )
+    job, _ = repository.create_job(
+        job_id="job-cancelling-relaunch",
+        owner=owner,
+        request_id=request.request_id,
+        profile="code.exec.v1",
+        payload=request.payload(),
+    )
+    repository.request_approval(
+        job.job_id,
+        owner=owner,
+        scope_digest=request.approval_scope_digest,
+        reason=request.intent_summary,
+    )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    repository.claim_lease(job.job_id, lease_owner="dead-coordinator", ttl_seconds=60)
+    workspace = _stale_workspace(repository, job.job_id)
+    repository.request_cancel(job.job_id)
+
+    assert coordinator.startup_recover() == []  # the lease is still live: nothing is recovered
+
+    wait_until(
+        lambda: repository.get_job(job.job_id).status == "cancelled" and not workspace.exists(),
+        timeout=5.0,
+        describe=lambda: (
+            f"the job to be cancelled with its workspace removed "
+            f"(status={repository.get_job(job.job_id).status}, workspace exists={workspace.exists()})"
+        ),
+    )
