@@ -2,10 +2,11 @@
 
 ggml-org's GitHub releases do not publish official per-asset checksums, so
 Cortex pins its own: this tool downloads the Windows CPU and Vulkan release
-assets for one build tag, hashes the archive and the extracted
-``llama-server.exe`` separately, and prints a ``PinnedRelease`` literal ready
-to paste into ``backend/cortex_backend/llamacpp/binary_release.py`` as the
-new ``CURRENT_RELEASE`` value.
+assets for one build tag, hashes each archive and also the whole extracted
+directory (the executable plus the DLLs it loads), and prints a
+``PinnedRelease`` literal ready to paste into
+``backend/cortex_backend/llamacpp/binary_release.py`` as the new
+``CURRENT_RELEASE`` value. It does not edit that file.
 
 This performs real network downloads (two zip archives, each roughly
 50-150MB) -- run it deliberately when bumping the pinned llama.cpp version,
