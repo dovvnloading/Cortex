@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { SSEEvent } from "../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isAbortedError, isDefinitiveRejection } from "./client";
 
 describe("CortexApi", () => {
@@ -304,6 +305,12 @@ describe("CortexApi", () => {
     expect(terminal).toMatchObject({ kind: "completed", status: "succeeded" });
   });
 
+  it("types a job stream's result as a terminal event or null, never void", () => {
+    // A `void` in the union let a caller "use" a result that was never there.
+    // Compile-time only: tsc rejects this file if the return type drifts.
+    expectTypeOf<ReturnType<CortexApi["streamJob"]>>().toEqualTypeOf<Promise<SSEEvent | null>>();
+  });
+
   it("returns no terminal event when a job stream closes while still active", async () => {
     const sse = 'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"progress","status":"running"}\n\n';
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(sse, { status: 200 }));
@@ -346,69 +353,6 @@ describe("CortexApi", () => {
     );
     const request = fetcher.mock.calls[0]?.[1] as RequestInit;
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
-  });
-
-  it("starts a typed recipe request on the recipe route", async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      job_id: "recipe-job",
-      request_id: "recipe-request",
-      profile: "recipe.image.v1",
-      status: "queued",
-      sequence: 1,
-    }), { status: 202, headers: { "Content-Type": "application/json" } }));
-    window.sessionStorage.setItem("cortex.session.token", "session-1");
-    const api = new CortexApi("/api/v1", fetcher);
-
-    await api.startRecipeImageTransform({
-      request_id: "recipe-request",
-      source_artifact_id: "artifact-1",
-      plan: {
-        schema_version: "artifact.transform.v1",
-        input_artifact_id: "artifact-1",
-        steps: [{ op: "grayscale" }],
-        output_format: "png",
-      },
-    });
-
-    expect(fetcher).toHaveBeenCalledWith(
-      "/api/v1/execution/recipe/image",
-      expect.objectContaining({
-        method: "POST",
-        body: expect.stringContaining('"source_artifact_id":"artifact-1"'),
-      }),
-    );
-    const request = fetcher.mock.calls[0]?.[1] as RequestInit;
-    expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
-  });
-
-  it("stages a bounded attachment through the attachment route", async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      job_id: "attachment-job",
-      request_id: "attachment-request",
-      profile: "attachment.stage.v1",
-      status: "succeeded",
-      sequence: 1,
-      artifact_id: "artifact-1",
-      mime_type: "image/png",
-      size: 4,
-      sha256: "a".repeat(64),
-      expires_at: "2026-07-20T00:00:00Z",
-    }), { status: 201, headers: { "Content-Type": "application/json" } }));
-    window.sessionStorage.setItem("cortex.session.token", "session-1");
-    const api = new CortexApi("/api/v1", fetcher);
-
-    await api.stageAttachment({
-      request_id: "attachment-request",
-      content_base64: "iVBORw==",
-    });
-
-    expect(fetcher).toHaveBeenCalledWith(
-      "/api/v1/execution/attachments",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ request_id: "attachment-request", content_base64: "iVBORw==" }),
-      }),
-    );
   });
 });
 

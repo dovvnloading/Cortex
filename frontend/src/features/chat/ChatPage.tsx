@@ -18,16 +18,6 @@ import { MessageList, type MessageListHandle } from "./MessageList";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
 import { ResponseAnnouncer } from "./ResponseAnnouncer";
 
-const DEFAULT_GENERATION_SETTINGS = {
-  temperature: 0.7,
-  top_p: 0.9,
-  top_k: 40,
-  repeat_penalty: 1.1,
-  num_ctx: 8192,
-  seed: -1,
-  system_instructions: "",
-};
-
 type Props = {
   api: CortexApi;
   threadId: string | null;
@@ -112,7 +102,10 @@ export function ChatPage({
   })));
   const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
   const setThreadOptions = useChatStore((state) => state.setThreadOptions);
-  const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
+  // Until the settings load there are none; the composer then falls back to the
+  // one set of built-in defaults (lib/generationParams), instead of this page
+  // keeping a second copy of them.
+  const generationDefaults = useSettingsStore((state) => state.settings?.generation);
   // How the last generation ended, published by GenerationStreamHost -- which
   // keeps consuming the stream while this page is not mounted. Handled by the
   // two effects further down.
