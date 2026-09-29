@@ -739,6 +739,38 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
     assert _reopen(manager).backup_status == ("ok", None)
 
 
+def _files_beside(directory: Path) -> dict[str, bytes]:
+    """Every file in the data directory but SQLite's transient -wal and -shm, with its bytes."""
+    return {
+        entry.name: entry.read_bytes()
+        for entry in directory.iterdir()
+        if entry.is_file() and not entry.name.endswith(("-wal", "-shm"))
+    }
+
+
+def test_a_database_from_a_newer_build_is_refused_without_being_modified(tmp_path: Path) -> None:
+    """Downgrading must not half-modify the file it cannot read: no index, no
+    journal-mode switch, no backup rotated over the older generations, no
+    snapshot -- nothing but the refusal."""
+    manager, _ = _manager_with_data(tmp_path)
+    stamp = sqlite3.connect(manager.db_path)
+    stamp.execute("PRAGMA user_version = 99")
+    stamp.commit()
+    stamp.close()
+    before = _files_beside(tmp_path)
+    assert Path(manager.backup_path).name in before
+
+    with pytest.raises(PersistenceError, match=r"schema version 99; this release reads up to"):
+        DatabaseManager(db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir)
+
+    assert _files_beside(tmp_path) == before
+    probe = sqlite3.connect(manager.db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 99
+    finally:
+        probe.close()
+
+
 def test_a_backup_held_briefly_by_another_program_is_still_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

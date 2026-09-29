@@ -363,6 +363,73 @@ def test_a_backup_held_briefly_by_another_program_is_still_published(
     assert SQLiteSettingsRepository._database_is_valid(repository.backup_path)
 
 
+def _files_beside(directory: Path) -> dict[str, bytes]:
+    return {
+        entry.name: entry.read_bytes()
+        for entry in directory.iterdir()
+        if entry.is_file() and not entry.name.endswith(("-wal", "-shm"))
+    }
+
+
+def _run(path: Path, statement: str) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_a_settings_database_from_a_newer_build_is_refused_without_being_modified(tmp_path: Path):
+    """The file gate: refused on its stored version before any backup is
+    rotated, so the older-schema generations survive the downgrade."""
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    _run(repository.db_path, "PRAGMA user_version = 99")
+    before = _files_beside(tmp_path)
+    assert repository.backup_path.name in before
+
+    with pytest.raises(SettingsRepositoryError, match="newer Cortex release"):
+        SQLiteSettingsRepository(repository.db_path)
+
+    assert _files_beside(tmp_path) == before
+
+
+def test_a_newer_settings_schema_is_reported_not_crashed(tmp_path: Path):
+    """The row gate: settings a newer build stored in a shape this one does not
+    know are reported as an error, never parsed as if they were current."""
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    _run(repository.db_path, "UPDATE cortex_settings SET schema_version = 99 WHERE id = 1")
+    reopened = SQLiteSettingsRepository(repository.db_path)  # the file itself is this build's shape
+
+    with pytest.raises(SettingsRepositoryError, match="newer than this release"):
+        reopened.load()
+
+    probe = sqlite3.connect(repository.db_path)
+    try:
+        assert probe.execute("SELECT schema_version FROM cortex_settings WHERE id = 1").fetchone()[0] == 99
+    finally:
+        probe.close()
+
+
+def test_a_newer_settings_schema_is_a_reported_error_at_the_api_not_a_crash(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from cortex_backend.api import create_app
+    from cortex_backend.testing import build_demo_dependencies
+    from support import session_headers
+
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    _run(repository.db_path, "UPDATE cortex_settings SET schema_version = 99 WHERE id = 1")
+    dependencies = build_demo_dependencies()
+    dependencies.settings = SQLiteSettingsRepository(repository.db_path)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/settings", headers=session_headers(client, app))
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Could not load settings."
+
+
 def _snapshot_that_fails_verification(monkeypatch: pytest.MonkeyPatch, repository) -> None:
     def torn(_source, destination, **_kwargs):
         Path(destination).write_bytes(b"torn snapshot")
