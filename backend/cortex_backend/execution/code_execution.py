@@ -930,12 +930,22 @@ class _CapabilityRuntime:
         self.net = _NetworkCapability(capabilities.network, budget)
         self.network = self.net
 
+    # The broker objects are values the program can print or leave in
+    # ``result``, which reaches stdout, the durable result and the tray. The
+    # default repr names the module path and a heap address, so each class says
+    # only what it is. None of them shows the workspace path or the grants.
+    def __repr__(self) -> str:
+        return "<cortex>"
+
 
 class _FilesystemCapability:
     def __init__(self, enabled: bool, workspace: Path, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self.workspace = workspace
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.fs>"
 
     def _check(self) -> None:
         if not self.enabled:
@@ -1050,6 +1060,9 @@ class _ProcessCapability:
         self.enabled = enabled
         self.workspace = workspace
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.process>"
 
     def run(self, args: list[str] | tuple[str, ...], timeout: float = 5.0) -> dict[str, Any]:
         if not self.enabled:
@@ -1472,6 +1485,9 @@ class _NetworkCapability:
     def __init__(self, enabled: bool, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.net>"
 
     def get(self, url: str, timeout: float = 5.0) -> str:
         if not self.enabled:

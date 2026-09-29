@@ -981,3 +981,42 @@ def test_a_complete_result_is_not_reported_as_truncated(value: object) -> None:
 
     assert truncated is False
     assert safe == value
+
+
+def _reveals_process_internals(text: str) -> bool:
+    return any(marker in text for marker in ("0x", "cortex_backend", "object at", str(Path.cwd())))
+
+
+def test_every_broker_object_has_a_fixed_repr(tmp_path: Path) -> None:
+    """The broker objects are values a program can print or leave in ``result``.
+
+    Their default repr named the module path and a heap address, and it reached
+    the program's stdout, the persisted result and the task tray.
+    """
+
+    runtime = code_execution._CapabilityRuntime(CodeCapabilities(), str(tmp_path))
+    rendered = {
+        repr(runtime): "<cortex>",
+        repr(runtime.fs): "<cortex.fs>",
+        repr(runtime.process): "<cortex.process>",
+        repr(runtime.net): "<cortex.net>",
+        repr(runtime.network): "<cortex.net>",
+    }
+    assert set(rendered) == set(rendered.values())
+    for value in (runtime, runtime.fs, runtime.process, runtime.net):
+        assert str(value) == repr(value)
+        assert not _reveals_process_internals(repr(value))
+        assert str(tmp_path) not in repr(value)
+
+
+@pytest.mark.parametrize("expression", ["cortex", "cortex.fs", "cortex.net", "cortex.network"])
+def test_a_broker_object_left_in_the_result_or_printed_reaches_no_output_with_an_address(
+    expression: str, tmp_path: Path
+) -> None:
+    source = f"print({expression})\n_result = {expression}"
+    result = run_code_in_worker(source, {}, str(tmp_path))
+    payload = result.as_payload()
+
+    assert result.stdout.strip() == result.value
+    for text in (result.stdout, str(result.value), str(payload)):
+        assert not _reveals_process_internals(text)
