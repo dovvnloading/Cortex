@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
 import type { ChatResponse } from "../../../../contracts/cortex-api";
 import { CortexApi } from "../../api/client";
 import { useChatStore } from "../../stores/useChatStore";
+import { ToastProvider } from "../../app/ToastProvider";
 import { useUiStore } from "../../stores/useUiStore";
 import { CommandPalette } from "../command-palette/CommandPalette";
 import { ShortcutsHelpDialog } from "../command-palette/ShortcutsHelpDialog";
@@ -263,6 +264,9 @@ describe("ChatPage Escape", () => {
     const { api, cancelGeneration } = harness();
     renderChat(api);
     await sendPrompt(user);
+    // Sending hands focus back to the composer on the next frame; focusing the
+    // field before that would just be undone (see focusThePage).
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Message Cortex")));
     const field = document.createElement("input");
     field.setAttribute("data-test-overlay", "");
     document.body.appendChild(field);
@@ -431,5 +435,100 @@ describe("ChatPage response announcements", () => {
     act(() => useChatStore.getState().recordFailure({ threadId: "thread-b", message: "Elsewhere." }));
 
     expect(announcer()).toBeEmptyDOMElement();
+  });
+});
+
+describe("ChatPage beside the app's toasts", () => {
+  afterEach(() => {
+    act(() => {
+      for (const toast of useUiStore.getState().toasts) useUiStore.getState().dismissToast(toast.id);
+    });
+  });
+
+  function renderChatWithToasts(api: CortexApi) {
+    return render(
+      <ToastProvider>
+        <ChatWithHost
+          api={api}
+          threadId="thread-a"
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={vi.fn()}
+          onForked={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+  }
+
+  it("leaves Escape to the Undo button of a toast that has focus, and stops the response from anywhere else", async () => {
+    const user = userEvent.setup();
+    const { api, cancelGeneration } = harness();
+    renderChatWithToasts(api);
+    await sendPrompt(user);
+    await focusThePage();
+    const undo = vi.fn();
+    act(() => { useUiStore.getState().notify("Chat deleted.", "success", { action: { label: "Undo", onAction: undo }, durationMs: 60_000 }); });
+    const undoButton = await screen.findByRole("button", { name: "Undo" });
+    undoButton.focus();
+    expect(document.activeElement).toBe(undoButton);
+
+    await user.keyboard("{Escape}");
+
+    // The response keeps running, and the toast (and its way back) is untouched.
+    expect(cancelGeneration).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+    expect(undo).not.toHaveBeenCalled();
+
+    undoButton.blur();
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  });
+
+  it("keeps the response announcer and an error toast to one reading each", async () => {
+    const user = userEvent.setup();
+    const { api, finishWith } = harness();
+    renderChatWithToasts(api);
+    await sendPrompt(user);
+    await waitFor(() => expect(announcer()).toHaveTextContent(/^Response started$/));
+
+    act(() => { useUiStore.getState().notify("Could not save memory.", "error"); });
+
+    // The toast is its own alert; the announcer neither repeats it nor changes.
+    const toastAlert = await screen.findByRole("alert");
+    expect(toastAlert).toHaveTextContent("Could not save memory.");
+    expect(announcer()).toHaveTextContent(/^Response started$/);
+
+    await finishWith("generation.failed", { message: "The model failed." });
+
+    // The failure is said briefly by the announcer and in full by the composer's alert;
+    // the toast is not read again, and the announcer is a polite status, never an alert.
+    await waitFor(() => expect(announcer()).toHaveTextContent(/^Response failed$/));
+    const alerts = await screen.findAllByRole("alert");
+    expect(alerts).toHaveLength(2);
+    expect(alerts.filter((alert) => alert.textContent?.includes("Could not save memory."))).toHaveLength(1);
+    expect(alerts.filter((alert) => alert.textContent?.includes("The model failed."))).toHaveLength(1);
+    expect(alerts).not.toContain(announcer());
+    expect(screen.getAllByText("Could not save memory.")).toHaveLength(1);
+    expect(screen.getAllByText(/Response failed/)).toHaveLength(1);
+  });
+
+  it("does not read a status toast into the announcer either", async () => {
+    const user = userEvent.setup();
+    const { api, finishWith } = harness();
+    renderChatWithToasts(api);
+    await sendPrompt(user);
+
+    await finishWith("generation.completed", { assistant_message_id: "assistant-1" }, savedAnswer({ eval_count: 5 }));
+    act(() => { useUiStore.getState().notify("Memory saved.", "success"); });
+
+    await waitFor(() => expect(announcer()).toHaveTextContent(/^Response complete, 5 tokens$/));
+    expect(screen.getAllByText("Memory saved.")).toHaveLength(1);
   });
 });

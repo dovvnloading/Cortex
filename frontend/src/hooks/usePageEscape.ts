@@ -10,6 +10,15 @@ import { isEditableTarget } from "./useHotkey";
 const OVERLAY_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
 
 /**
+ * A notification (a toast) whose own buttons -- Undo on a deleted chat,
+ * Dismiss on an error -- have focus. Escape there is not a request to stop the
+ * response behind it, and a toast has no cancel of its own to give the key to:
+ * closing one would run whatever it was holding back, such as the delete that
+ * Undo is still able to reverse. So the key is left alone.
+ */
+const NOTIFICATION_SELECTOR = "[data-keeps-escape]";
+
+/**
  * Runs `onEscape` when Escape is pressed on the page itself while `enabled`.
  *
  * It is for an action that is otherwise reachable only from one focused
@@ -19,6 +28,7 @@ const OVERLAY_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="menu"], 
  *    composer's own Escape handling keeps this from running twice;
  *  - an overlay is open, whose Escape closes it;
  *  - focus is in some other text field, where Escape cancels the edit;
+ *  - focus is inside a notification (`data-keeps-escape`), see above;
  *  - it is an auto-repeat, an IME composition, or carries a modifier.
  *
  * The handler is held in a ref, so a new function each render does not remove
@@ -38,6 +48,7 @@ export function usePageEscape(onEscape: () => void, enabled: boolean): void {
       if (event.repeat || event.isComposing) return;
       if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
       if (isEditableTarget(event.target)) return;
+      if (event.target instanceof Element && event.target.closest(NOTIFICATION_SELECTOR)) return;
       if (document.querySelector(OVERLAY_SELECTOR)) return;
       event.preventDefault();
       handlerRef.current();

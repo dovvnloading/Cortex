@@ -98,6 +98,22 @@ describe("usePageEscape", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("leaves Escape to a notification whose button has focus, and takes it again elsewhere", () => {
+    const handler = vi.fn();
+    renderHook(() => usePageEscape(handler, true));
+    const notification = attach(document.createElement("div"));
+    notification.setAttribute("data-keeps-escape", "");
+    const undo = notification.appendChild(document.createElement("button"));
+
+    const inside = press({}, undo);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(inside.defaultPrevented).toBe(false);
+
+    press({}, attach(document.createElement("button")));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores auto-repeat, composition, and modifiers", () => {
     const handler = vi.fn();
     renderHook(() => usePageEscape(handler, true));

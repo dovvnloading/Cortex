@@ -16,7 +16,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         the rest), so the region itself announces nothing and a toast is never
         read twice.
       */}
-      <div className="toast-region">
+      <div className="toast-region" data-keeps-escape="">
         {toasts.map((toast) => <ToastItem key={toast.id} toast={toast} />)}
       </div>
     </>
