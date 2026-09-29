@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide-react";
 import type { ChatAttachment, ChatMessage, GenerationStats } from "../../../../contracts/cortex-api";
-import { formatMessageTime } from "../../lib/messageTime";
+import { formatMessageTime, formatMessageTimeTitle } from "../../lib/messageTime";
 import { useChatStore } from "../../stores/useChatStore";
 import { MemoryProposals } from "./MemoryProposals";
 import { MessageStats } from "./MessageStats";
@@ -102,5 +102,5 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
 function MessageMeta({ timestamp, stats }: { timestamp?: string | null; stats?: GenerationStats | null }) {
   const displayTime = formatMessageTime(timestamp);
   if (!displayTime && !stats?.tokens_per_second && !stats?.stopped) return null;
-  return <div className="message-meta">{displayTime && <time dateTime={timestamp ?? undefined}>{displayTime}</time>}<MessageStats stats={stats} /></div>;
+  return <div className="message-meta">{displayTime && <time dateTime={timestamp ?? undefined} title={formatMessageTimeTitle(timestamp) ?? undefined}>{displayTime}</time>}<MessageStats stats={stats} /></div>;
 }

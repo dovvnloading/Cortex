@@ -63,6 +63,26 @@ describe("MessageCard", () => {
     expect(screen.queryByRole("region", { name: "Cortex suggests remembering" })).toBeNull();
   });
 
+  it("shows the date on an older message and always carries the full time in a title", () => {
+    renderCard({ id: "assistant-1", role: "assistant", content: "Old answer.", timestamp: "2020-01-05T10:00:00Z" });
+
+    const time = document.querySelector("time");
+    expect(time).not.toBeNull();
+    expect(time).toHaveAttribute("datetime", "2020-01-05T10:00:00Z");
+    // Long ago: the year is part of the visible text, not only the tooltip.
+    expect(time?.textContent).toContain("2020");
+    expect(time?.getAttribute("title")).toContain("2020");
+  });
+
+  it("shows only the clock time for a message from today", () => {
+    const now = new Date();
+    renderCard({ id: "assistant-1", role: "assistant", content: "New answer.", timestamp: now.toISOString() });
+
+    const time = document.querySelector("time");
+    expect(time?.textContent).not.toContain(String(now.getFullYear()));
+    expect(time?.getAttribute("title")).toContain(String(now.getFullYear()));
+  });
+
   it("drops the suggestions from the card once they have all been decided", () => {
     useChatStore.getState().setProposedMemories("assistant-1", ["User likes tea."]);
     renderCard({ id: "assistant-1", role: "assistant", content: "Noted." }, vi.fn());
