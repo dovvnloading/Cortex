@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -49,7 +50,17 @@ DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
 STARTUP_LOG_NAME = "startup.log"
 MAX_STARTUP_LOG_BYTES = 64 * 1024
+# How long uvicorn waits for open connections and background tasks once a
+# shutdown starts. It sits inside the launcher's 15 second wait for the server
+# thread, together with the job registry's own cancellation grace and the
+# runtime teardown that follows.
+GRACEFUL_SHUTDOWN_SECONDS = 5.0
 _last_startup_log_path: Path | None = None
+# _launch records that stopping the backend failed; _run_web turns that into a
+# failing exit only when nothing else failed, and main() reads the result to
+# skip the startup dialog for it.
+_backend_stop_failed = False
+_backend_abandoned_at_exit = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,6 +244,33 @@ def _startup_dialog_message(log_path: Path | None) -> str:
     )
 
 
+class _CortexServer(uvicorn.Server):
+    """A uvicorn server whose forced exit really exits and still tears down.
+
+    ``force_exit`` (a second Ctrl+C, or the launcher's own escalation) was
+    meant to be the way out of a stuck graceful shutdown, but in uvicorn it
+    does two things wrong. It skips ``lifespan.shutdown()`` -- the teardown
+    that cancels running jobs, stops the execution workers and terminates
+    llama-server -- and it cannot end the wait itself: the final
+    ``wait_closed()`` blocks while any response is still being written, so an
+    open event stream outlives it. Here a forced exit cancels the running
+    request tasks, the same thing the graceful timeout does, and then runs the
+    teardown. Running that teardown again after a normal one is harmless: the
+    lifespan has already completed.
+    """
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        graceful = asyncio.ensure_future(super().shutdown(sockets=sockets))
+        while not graceful.done():
+            if self.force_exit:
+                for task in list(self.server_state.tasks):
+                    task.cancel(msg="Task cancelled, forced exit requested")
+            await asyncio.wait({graceful}, timeout=0.1)
+        await graceful
+        if self.force_exit:
+            await self.lifespan.shutdown()
+
+
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
     # A PyInstaller windowed executable intentionally has no console streams.
     # Uvicorn's stock formatter probes ``sys.stderr.isatty()`` while it builds
@@ -248,8 +286,13 @@ def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
         log_level=log_level,
         access_log=False,
         log_config=log_config,
+        # The default is to wait for every open connection forever, so one
+        # attached event stream held the process open after the window closed.
+        # After this long uvicorn cancels what is still running and carries on
+        # to the lifespan teardown.
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
-    server = uvicorn.Server(config)
+    server = _CortexServer(config)
     app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)
     return server
 
@@ -263,13 +306,11 @@ def _install_shutdown_signals(server: uvicorn.Server) -> None:
     -- so uvicorn's escalation never exists here and has to be carried by this
     handler instead.
 
-    Escalation is not a nicety. Graceful shutdown waits on
-    ``while self.server_state.connections and not self.force_exit``, with
-    ``timeout_graceful_shutdown`` left at its default of ``None``, so one
-    still-open SSE stream holds the process open indefinitely. Uvicorn logs
-    "Waiting for connections to close. (CTRL+C to force quit)" while it waits;
-    without this, that instruction is untrue and the only way out is killing
-    the process.
+    Escalation is still needed even though graceful shutdown is now bounded
+    (``timeout_graceful_shutdown``): uvicorn logs "Waiting for connections to
+    close. (CTRL+C to force quit)" while it waits, and without this handler
+    that instruction is untrue. A forced exit skips uvicorn's own lifespan
+    teardown, which is why the server is a ``_CortexServer``.
     """
     def request_shutdown(_signum: int, _frame: object) -> None:
         # Matches uvicorn's own handle_exit: the first interrupt asks, a
@@ -297,6 +338,15 @@ def _monitor_native_window(
     """Close the shell only after sustained backend-liveness failure."""
     failed_probes = 0
     while not window.events.closed.is_set():
+        if server.should_exit:
+            # Shutdown was requested here or by the backend itself (the
+            # in-app quit, Ctrl+C). There is nothing left for the window to
+            # show, so close it now rather than after eight failed probes.
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            return
         ready = wait_for_http(
             readiness_url,
             timeout=0.25,
@@ -347,6 +397,19 @@ def _run_headless(*, backend, frontend, server) -> int:
 
 
 def _run_web(args: argparse.Namespace) -> int:
+    """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
+    global _backend_abandoned_at_exit, _backend_stop_failed
+    _backend_abandoned_at_exit = False
+    _backend_stop_failed = False
+    result = _launch(args)
+    if result == 0 and _backend_stop_failed:
+        _backend_abandoned_at_exit = True
+        return 1
+    return result
+
+
+def _launch(args: argparse.Namespace) -> int:
+    global _backend_stop_failed
     packaged = _is_packaged()
     frontend_root = _frontend_root()
 
@@ -543,6 +606,12 @@ def _run_web(args: argparse.Namespace) -> int:
                     try:
                         backend.stop()
                     except (RuntimeError, TimeoutError) as exc:
+                        _backend_stop_failed = True
+                        _write_startup_diagnostic(
+                            stage="backend shutdown",
+                            error=exc,
+                            data_dir=args.data_dir,
+                        )
                         print(str(exc), file=sys.stderr)
     finally:
         if backend_listener is not None:
@@ -571,7 +640,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Cortex startup error: {exc}", file=sys.stderr)
         result = 1
-    if result and _is_packaged() and os.name == "nt":
+    # A backend abandoned at exit is not a startup failure, and a modal box
+    # would keep the process alive after the user has already quit.
+    if result and not _backend_abandoned_at_exit and _is_packaged() and os.name == "nt":
         try:
             import ctypes
 

@@ -100,10 +100,20 @@ class ServerSupervisor:
         """Remain probeable until the server exits or is asked to stop."""
         return not self.exited_unexpectedly.is_set() and not self.server.should_exit
 
-    def stop(self, *, timeout: float = 15.0) -> None:
+    def stop(self, *, timeout: float = 15.0, force_timeout: float = 5.0) -> None:
+        """Ask the server to stop, escalate once, and raise if it still runs.
+
+        The first wait covers an orderly shutdown. When it is not enough the
+        server is told to stop waiting on anything (``force_exit``) and given
+        ``force_timeout`` more to finish; a server that is still alive after
+        that is abandoned, and the caller is told.
+        """
         self.server.should_exit = True
         if self.thread is not None:
             self.thread.join(timeout=timeout)
+            if self.thread.is_alive():
+                self.server.force_exit = True
+                self.thread.join(timeout=force_timeout)
         if self.thread is not None and self.thread.is_alive():
             raise TimeoutError("Cortex backend did not stop within the shutdown grace period.")
         if self.error is not None:

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+import ctypes
+import http.client
 import json
 from pathlib import Path
 import signal
 import socket
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -639,6 +644,10 @@ def test_default_runtime_starts_backend_then_native_window(
         destroy=lambda: None,
     )
     monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
+    # The window closing set should_exit above; a monitor that starts under an
+    # owned shutdown closes at once (covered separately), so make the backend
+    # look live again to exercise the probing path.
+    server.should_exit = False
     monitor(fake_window)
     assert probed_urls[-1] == (
         f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
@@ -1312,3 +1321,324 @@ def test_build_app_creates_one_ssl_context(tmp_path: Path, monkeypatch: pytest.M
     build_app(data_dir=tmp_path / "app-data", serve_frontend=False)
 
     assert fresh_builds == 1
+
+
+class _LaunchFakes:
+    """What ``_run_web`` needs to run a whole launch without a window or a port.
+
+    Everything that would touch the machine -- the instance lock, the frontend
+    build, the server thread, WebView2 and the native window -- is replaced.
+    ``calls`` records the order of the interesting steps, and ``on_window`` is
+    what runs in place of the GUI loop.
+    """
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        session_manager: object | None = None,
+        backend_stop_error: BaseException | None = None,
+        instance_class: type | None = None,
+    ) -> None:
+        self.calls: list[str] = []
+        self.window_configs: list[DesktopWindowConfig] = []
+        self.server = SimpleNamespace(should_exit=False, force_exit=False)
+        self.record = SimpleNamespace(pid=1234, port=0)
+        self.on_window: Callable[[DesktopWindowConfig, object], None] = lambda config, monitor: None
+        fakes = self
+        manager = session_manager or SimpleNamespace(
+            bootstrap_token="bootstrap-token",
+            issue_bootstrap_token=lambda: ("bootstrap-token", None),
+        )
+        app = SimpleNamespace(state=SimpleNamespace(session_manager=manager))
+
+        class FakeInstance:
+            def __init__(self, _profile_dir):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                pass
+
+            def acquire(self, *, port):
+                fakes.record.port = port
+                return fakes.record
+
+            def read_secret(self, _record):
+                return "handoff-secret"
+
+        class FakeBackend:
+            def __init__(self, _server, *, sockets):
+                self.sockets = sockets
+                self.running = False
+                self.accepting_startup = True
+                self.error = None
+
+            def start(self):
+                self.running = True
+
+            def stop(self):
+                self.running = False
+                for listener in self.sockets:
+                    listener.close()
+                if backend_stop_error is not None:
+                    raise backend_stop_error
+
+        def window(config, monitor):
+            fakes.window_configs.append(config)
+            fakes.calls.append("window")
+            fakes.on_window(config, monitor)
+
+        monkeypatch.setattr(launcher_main, "InstanceLock", instance_class or FakeInstance)
+        monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_a, **_k: tmp_path)
+        monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
+        monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_a, **_k: self.server)
+        monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
+        monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+        monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            launcher_main, "ensure_webview2_runtime", lambda _root: self.calls.append("runtime")
+        )
+        monkeypatch.setattr(launcher_main, "run_desktop_window", window)
+
+
+def _launch_args(tmp_path: Path, *extra: str):
+    return launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path), *extra])
+
+
+def test_server_for_app_bounds_graceful_shutdown():
+    """uvicorn's default is to wait for every open connection forever."""
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    server = launcher_main._server_for_app(app, port=43125, log_level="info")
+
+    assert isinstance(server, launcher_main._CortexServer)
+    assert server.config.timeout_graceful_shutdown == launcher_main.GRACEFUL_SHUTDOWN_SECONDS
+    assert 0 < launcher_main.GRACEFUL_SHUTDOWN_SECONDS <= 10
+
+
+class _HoldOpenApp:
+    """An ASGI app with one response that never ends and an observable teardown."""
+
+    def __init__(self) -> None:
+        self.state = SimpleNamespace()
+        self.torn_down = threading.Event()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            await receive()
+            await send({"type": "lifespan.startup.complete"})
+            await receive()
+            self.torn_down.set()
+            await send({"type": "lifespan.shutdown.complete"})
+            return
+        headers = [(b"content-type", b"text/event-stream")]
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        if scope["path"] == "/hold":
+            while True:
+                await send({"type": "http.response.body", "body": b": hold\n\n", "more_body": True})
+                await asyncio.sleep(0.05)
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+def _serve_with_an_open_stream(monkeypatch: pytest.MonkeyPatch, *, graceful: float):
+    """Start the real server with one client attached to an endless response."""
+    monkeypatch.setattr(launcher_main, "GRACEFUL_SHUTDOWN_SECONDS", graceful)
+    app = _HoldOpenApp()
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+    server = launcher_main._server_for_app(app, port=port, log_level="error")
+    supervisor = supervisor_module.ServerSupervisor(server, sockets=[listener])
+    supervisor.start()
+    assert supervisor_module.wait_for_http(
+        f"http://127.0.0.1:{port}/ready", timeout=10, is_alive=lambda: supervisor.accepting_startup
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("GET", "/hold")
+    assert connection.getresponse().read(3) == b": h"
+    return app, server, supervisor, connection
+
+
+def test_graceful_shutdown_gives_up_on_an_open_stream_and_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app, server, supervisor, connection = _serve_with_an_open_stream(monkeypatch, graceful=0.3)
+    try:
+        server.should_exit = True
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=10)
+        assert not supervisor.thread.is_alive(), "shutdown waited on the open stream"
+        assert app.torn_down.is_set()
+        assert server.force_exit is False
+    finally:
+        connection.close()
+        if supervisor.running and supervisor.thread is not None:
+            server.force_exit = True
+            supervisor.thread.join(timeout=10)
+
+
+def test_forced_exit_still_runs_the_lifespan_teardown(monkeypatch: pytest.MonkeyPatch):
+    """Ctrl+C twice, or the launcher's escalation, must not skip teardown.
+
+    uvicorn skips ``lifespan.shutdown()`` once ``force_exit`` is set, and that
+    teardown is what cancels jobs and terminates llama-server.
+    """
+    app, server, supervisor, connection = _serve_with_an_open_stream(monkeypatch, graceful=600.0)
+    try:
+        server.should_exit = True
+        server.force_exit = True
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=10)
+        assert not supervisor.thread.is_alive()
+        assert app.torn_down.is_set(), "a forced exit skipped the lifespan teardown"
+    finally:
+        connection.close()
+        if supervisor.running and supervisor.thread is not None:
+            server.force_exit = True
+            supervisor.thread.join(timeout=10)
+
+
+def test_supervisor_stop_escalates_to_force_exit():
+    release = threading.Event()
+
+    class StubbornServer:
+        should_exit = False
+        force_exit = False
+
+        def run(self):
+            # The orderly path never finishes on its own; only force_exit does.
+            deadline = time.monotonic() + 10
+            while not self.force_exit and time.monotonic() < deadline:
+                release.wait(timeout=0.005)
+
+    server = StubbornServer()
+    supervisor = supervisor_module.ServerSupervisor(server)
+    supervisor.start()
+
+    supervisor.stop(timeout=0.05, force_timeout=5.0)
+
+    assert server.should_exit is True
+    assert server.force_exit is True
+    assert not supervisor.running
+
+
+def test_supervisor_stop_raises_when_even_a_forced_exit_does_not_finish():
+    release = threading.Event()
+
+    class WedgedServer:
+        should_exit = False
+        force_exit = False
+
+        def run(self):
+            release.wait(timeout=10)
+
+    server = WedgedServer()
+    supervisor = supervisor_module.ServerSupervisor(server)
+    supervisor.start()
+    try:
+        with pytest.raises(TimeoutError, match="did not stop"):
+            supervisor.stop(timeout=0.05, force_timeout=0.05)
+        assert server.force_exit is True
+    finally:
+        release.set()
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=5)
+
+
+def test_monitor_closes_window_immediately_after_owned_shutdown(monkeypatch: pytest.MonkeyPatch):
+    """Once the backend is stopping there is nothing to show, so no probe grace."""
+    probes: list[str] = []
+    monkeypatch.setattr(
+        launcher_main, "wait_for_http", lambda url, **_kwargs: probes.append(url) or False
+    )
+    destroyed: list[bool] = []
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        destroy=lambda: destroyed.append(True),
+    )
+
+    launcher_main._monitor_native_window(
+        window,
+        backend=SimpleNamespace(error=None),
+        frontend=None,
+        server=SimpleNamespace(should_exit=True),
+        readiness_url="http://127.0.0.1:43125/api/v1/health/live",
+    )
+
+    assert destroyed == [True]
+    assert probes == []
+
+
+def test_run_web_does_not_exit_zero_when_the_backend_will_not_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(
+        monkeypatch,
+        tmp_path,
+        backend_stop_error=TimeoutError("Cortex backend did not stop within the shutdown grace period."),
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    assert launcher_main._backend_abandoned_at_exit is True
+    recorded = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=backend shutdown" in recorded
+    assert fakes.calls == ["runtime", "window"]
+
+
+def test_run_web_exits_zero_when_the_backend_stops_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert launcher_main._backend_abandoned_at_exit is False
+
+
+def _record_startup_dialogs(monkeypatch: pytest.MonkeyPatch, resources: Path) -> list[str]:
+    """Act as the packaged app and collect the text of every message box."""
+    shown: list[str] = []
+    user32 = SimpleNamespace(MessageBoxW=lambda _hwnd, text, *_rest: shown.append(text))
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(launcher_main, "_is_packaged", lambda: True)
+    monkeypatch.setattr(launcher_main, "_frontend_root", lambda: resources)
+    monkeypatch.setattr(launcher_main, "_resource_root", lambda: resources)
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: resources)
+    monkeypatch.setattr(launcher_main.os, "name", "nt")
+    return shown
+
+
+def test_an_abandoned_backend_at_exit_does_not_show_the_could_not_start_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(
+        monkeypatch,
+        tmp_path,
+        backend_stop_error=TimeoutError("Cortex backend did not stop within the shutdown grace period."),
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert shown == []
+
+
+def test_a_startup_failure_still_shows_the_could_not_start_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_window(_config, _monitor):
+        raise DesktopWindowError("synthetic window failure")
+
+    fakes.on_window = failing_window
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert len(shown) == 1
+    assert "Cortex could not start" in shown[0]
