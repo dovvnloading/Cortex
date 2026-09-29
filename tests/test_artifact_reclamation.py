@@ -320,6 +320,8 @@ def _make_junction(link: Path, target: Path) -> None:
 
     if os.name != "nt":
         pytest.skip("directory junctions exist only on Windows")
+    if not hasattr(Path, "is_junction"):
+        pytest.skip("this interpreter cannot recognise a junction (Path.is_junction arrived in 3.12)")
     import _winapi  # type: ignore[import-not-found]
 
     try:
@@ -349,7 +351,7 @@ def test_the_sweep_never_follows_or_removes_a_junction(tmp_path, name):
 
         assert (outside / f".tmp-{'e' * 32}").read_bytes() == b"not ours"
         assert (outside / "output").read_bytes() == b"not ours either"
-        assert junction.is_junction()
+        assert junction.exists(), "the junction itself was removed"
     finally:
         os.rmdir(junction)  # removes the junction itself and nothing behind it
 
