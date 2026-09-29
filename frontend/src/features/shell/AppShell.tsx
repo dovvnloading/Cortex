@@ -119,7 +119,7 @@ export function AppShell({
             onClick={onOpenSettings}
           >
             <Settings aria-hidden="true" size={17} />
-            <span className={`connection-indicator ${modelConnection?.success ? "connection-connected" : "connection-error"}`} aria-hidden="true" />
+            <span className={`connection-indicator ${connectionIndicatorClass(modelConnection)}`} aria-hidden="true" />
           </NavigationLink>
         </div>
       </header>
@@ -191,6 +191,12 @@ export function AppShell({
       </InlineBoundary>
     </div>
   );
+}
+
+/** No verdict yet (the inventory is still loading) is neither connected nor an error. */
+function connectionIndicatorClass(connection: ModelResponse["connection"]): string {
+  if (!connection) return "connection-pending";
+  return connection.success ? "connection-connected" : "connection-error";
 }
 
 function isCompactWindow(): boolean {

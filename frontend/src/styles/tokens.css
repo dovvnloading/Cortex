@@ -330,6 +330,7 @@ a { color: inherit; text-decoration: none; }
 .connection-indicator { position: absolute; right: 7px; bottom: 7px; width: 7px; height: 7px; border: 2px solid var(--bg); border-radius: 50%; }
 .connection-connected { background: var(--success); }
 .connection-error { background: var(--danger); }
+.connection-pending { background: var(--text-faint); }
 
 .workspace-body { position: relative; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 /* Chat library
@@ -532,6 +533,12 @@ a { color: inherit; text-decoration: none; }
 .chat-empty-state { display: grid; justify-items: center; align-content: center; min-height: 100%; padding: 30px; color: var(--text-muted); text-align: center; }
 .chat-empty-state h2, .chat-empty-state h3 { margin: 0; color: var(--text); font-size: var(--text-xl); font-weight: var(--weight-semi); letter-spacing: -0.022em; }
 .chat-empty-state p { max-width: 420px; margin: 8px 0 0; font-size: var(--text-md); line-height: var(--leading-ui); }
+.new-chat-guide { display: grid; justify-items: center; gap: 14px; max-width: 440px; margin: auto; padding: 24px 0; color: var(--text-muted); font-size: var(--text-sm); text-align: center; }
+.new-chat-guide p { margin: 0; line-height: 1.5; }
+.new-chat-guide strong { color: var(--text); font-weight: var(--weight-semi); }
+.new-chat-guide-hints { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.new-chat-guide-hints li { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px; }
+.new-chat-guide-note { color: var(--text-faint); font-size: var(--text-xs); }
 
 /* Focused composer */
 /* Same --gutter as .transcript, so the composer shares the message column's
