@@ -320,6 +320,26 @@ registry settings, and both the chat and settings databases carry verified
 backups. Those backups and the untouched legacy settings source are the
 rollback path; an untested in-place downgrade is not.
 
+What is kept, all beside the database files in that folder:
+
+- `cortex_db.sqlite.bak` and `.bak.1` (and the same for
+  `cortex_settings.sqlite`) are the two newest verified backups. They are
+  refreshed each launch, after any schema upgrade, so they hold the new schema.
+  If a backup cannot be written (a full disk, a file held by another program)
+  Cortex still starts, logs the failure, and says so in the diagnostics.
+- `cortex_db.sqlite.pre-v<N>.bak` is a snapshot of the chat database taken
+  just before a release upgraded it from schema version `N`. It is written
+  once per version and never replaced, and it is the file an older release can
+  open.
+
+To go back to an older release after a newer one upgraded the chat database:
+close Cortex, move `cortex_db.sqlite` and any `-wal` and `-shm` files beside it
+into a folder of your own, copy `cortex_db.sqlite.pre-v<N>.bak` to
+`cortex_db.sqlite`, and start the older release. Anything written after the
+upgrade is only in the files you moved aside. An older release that meets a
+newer database refuses it without changing it and names the snapshot to
+restore.
+
 ## Troubleshooting
 
 - If Cortex reports Ollama unavailable, verify the Ollama service and endpoint.

@@ -152,6 +152,7 @@ class DatabaseManager:
         # written is reported here; it does not stop Cortex from starting on
         # a healthy primary.
         self.backup_status = BackupStatus("ok")
+        self.pre_upgrade_snapshot_path: str | None = None
         self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
         # diagnostics useful without copying them into process logs.
@@ -159,6 +160,7 @@ class DatabaseManager:
         self._ensure_parent_directory()
         with self._write_lock:
             self._prepare_primary()
+            self._snapshot_before_upgrade()
             self._create_tables()
             self._refresh_startup_backup()
 
@@ -412,6 +414,85 @@ class DatabaseManager:
         if self.backup_status.state != "failed":
             self.backup_status = BackupStatus("failed", failure_detail(message, cause))
 
+    def _stored_schema_state(self) -> tuple[int, bool]:
+        """Return ``(user_version, has_tables)`` for the existing primary."""
+        with self.connect() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            has_tables = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+        return version, has_tables
+
+    def _pre_upgrade_snapshot_path(self, version: int) -> str:
+        return f"{self.db_path}.pre-v{version}.bak"
+
+    def _unsupported_schema_error(self, version: int) -> PersistenceError:
+        """Refuse a database a newer release has upgraded, and say how to go back."""
+        # Any snapshot at or below this release's version is readable by it;
+        # the highest such version is the newest data that can go back.
+        pattern = re.compile(rf"{re.escape(os.path.basename(self.db_path))}\.pre-v(\d+)\.bak")
+        try:
+            names = os.listdir(os.path.dirname(os.path.abspath(self.db_path)))
+        except OSError:
+            names = []
+        readable = {
+            int(match.group(1)): match.group(0)
+            for match in map(pattern.fullmatch, names)
+            if match is not None and int(match.group(1)) <= self.SCHEMA_VERSION
+        }
+        if readable:
+            advice = (
+                f"To go back to this release, close Cortex and restore {readable[max(readable)]}, "
+                "which the newer release kept before it upgraded the database."
+            )
+        else:
+            advice = "Install the release that wrote it, or restore a backup taken before it was upgraded."
+        return PersistenceError(
+            f"Unsupported database schema version {version}; this release reads up to "
+            f"{self.SCHEMA_VERSION}. {advice}",
+            operation="schema_check",
+        )
+
+    def _snapshot_before_upgrade(self) -> None:
+        """Keep the pre-upgrade state of a database this release is about to change.
+
+        The ordinary backup is refreshed after the schema upgrade, so it and
+        the generation behind it both hold the new schema, and an older
+        release refuses all of them. A database on an older schema version is
+        therefore snapshotted first, to ``<db>.pre-v<version>.bak``: a fixed
+        name per version, written once and never rotated or overwritten.
+
+        A database from a newer release is refused here, before anything
+        touches it, with the name of the snapshot to restore.
+
+        A failed snapshot is reported through ``backup_status`` but does not
+        block the upgrade: the schema steps are additive, and the alternative
+        is a Cortex that cannot start until the disk has room.
+        """
+        if not os.path.exists(self.db_path):
+            return
+        version, has_tables = self._stored_schema_state()
+        if version > self.SCHEMA_VERSION:
+            raise self._unsupported_schema_error(version)
+        # A pre-versioning file (user_version 0) that already has tables is
+        # real history about to be altered; an empty or brand-new one is not.
+        if version == self.SCHEMA_VERSION or not has_tables:
+            return
+        snapshot_path = self._pre_upgrade_snapshot_path(version)
+        if os.path.exists(snapshot_path):
+            return
+        try:
+            self._atomic_snapshot_database(self.db_path, snapshot_path)
+        except PersistenceError as exc:
+            self._note_backup_failure(
+                f"Could not keep a pre-upgrade snapshot. {exc}", exc.cause
+            )
+            return
+        self.pre_upgrade_snapshot_path = snapshot_path
+
     def _create_tables(self):
         """Creates the necessary tables in the database if they don't exist."""
         with self.connect() as conn:
@@ -466,10 +547,7 @@ class DatabaseManager:
             )
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > self.SCHEMA_VERSION:
-                raise PersistenceError(
-                    f"Unsupported database schema version {version}.",
-                    operation="schema_check",
-                )
+                raise self._unsupported_schema_error(version)
             columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(messages)").fetchall()
