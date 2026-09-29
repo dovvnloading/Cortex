@@ -82,6 +82,11 @@ from .scratch_compute import (
 
 _LOGGER = logging.getLogger("cortex.execution.local_runtime")
 
+# How long a code job waiting for approval sleeps before it looks again on its
+# own. Decisions, expiries, cancellation and shutdown all wake it sooner; this
+# only bounds how long a change nobody announced can go unnoticed.
+_APPROVAL_RECHECK_SECONDS = 2.0
+
 
 class LocalExecutionCoordinator:
     """One lifecycle owner for the normal local image and compute profiles."""
@@ -282,6 +287,23 @@ class LocalExecutionCoordinator:
         except (OSError, RuntimeError):
             raise CodeExecutionError("workspace_invalid") from None
 
+    def _discard_stale_code_workspace(self, job_id: str) -> None:
+        """Remove a workspace left by an earlier attempt for a job whose approval was refused.
+
+        A hard crash mid-run skips the run's own cleanup, and the relaunch after
+        restart is refused at the approval gate before any workspace is reset or
+        cleaned, so the directory would otherwise stay for good. This is only
+        for refusals where nothing can be running for the job: an approval that
+        lapsed, was denied, or was found spent. It is deliberately not reached
+        when another coordinator holds a live lease, since that run's workspace
+        is in use. A failure to remove it never changes the refusal.
+        """
+
+        try:
+            self._cleanup_code_workspace(job_id)
+        except CodeExecutionError:
+            pass
+
     def _cleanup_code_workspace(self, job_id: str) -> None:
         root = self.repository.artifact_root / ".code_workspaces"
         workspace = root / job_id
@@ -440,6 +462,9 @@ class LocalExecutionCoordinator:
             code_threads = list(self._code_threads.values())
         for event in code_events:
             event.set()
+        # A job still waiting for approval is asleep on this signal, not on its
+        # cancel event; without a nudge it would sit out its recheck.
+        self.repository.approval_changes.bump()
         for code_attempt in code_attempts:
             code_attempt.cancel()
         for thread in code_threads:
@@ -528,6 +553,37 @@ class LocalExecutionCoordinator:
             self._code_threads[job_id] = thread
             thread.start()
 
+    def _await_approval(self, job_id: str, cancel_event: Event) -> ExecutionJob | None:
+        """Park a code job until its approval is decided, expires, or the run is cancelled.
+
+        Nothing polls. The thread sleeps on the repository's approval signal,
+        which a decision or an expiry moves, and otherwise wakes at its own
+        approval's deadline to persist the expiry -- so a pending approval still
+        expires during a live coordinator, not only at startup, at the moment it
+        lapses rather than a poll later. Cancelling a pending job is a denial,
+        which moves the signal, and shutdown moves it too. A bounded recheck is
+        a safety net for a change made behind the repository's back (another
+        process, a clock that jumped); it costs one read, never a write, and is
+        never what wakes a normal decision.
+
+        Returns the job as last read, or ``None`` when it no longer exists.
+        """
+
+        changes = self.repository.approval_changes
+        while True:
+            # Read the counter before the state it guards, so a change landing
+            # in between wakes the wait below instead of being slept through.
+            seen = changes.version
+            current = self.repository.get_job(job_id)
+            if current is None or current.approval_state != "pending" or cancel_event.is_set():
+                return current
+            remaining = self.repository.pending_approval_seconds(job_id)
+            timeout = _APPROVAL_RECHECK_SECONDS
+            if remaining is not None:
+                # A hair past the deadline, so the wake-up finds it expired.
+                timeout = min(timeout, max(0.0, remaining) + 0.01)
+            changes.wait(seen, timeout)
+
     def _run_code(self, job_id: str, cancel_event: Event) -> None:
         lease_owner = f"code-coordinator-{uuid4().hex}"
         attempt: LocalCodeAttempt | None = None
@@ -540,22 +596,18 @@ class LocalExecutionCoordinator:
                 return
             if current.approval_state == "expired":
                 self.repository.expire_approvals()
+                self._discard_stale_code_workspace(job_id)
                 return
-            next_approval_expiry_check = 0.0
-            while current.approval_state == "pending" and not cancel_event.is_set():
-                now = time.monotonic()
-                if now >= next_approval_expiry_check:
-                    # Pending approvals must expire during a live coordinator,
-                    # not only during process startup/recovery.
-                    self.repository.expire_approvals()
-                    next_approval_expiry_check = now + 0.25
-                time.sleep(0.05)
-                current = self.repository.get_job(job_id)
+            if current.approval_state == "pending":
+                current = self._await_approval(job_id, cancel_event)
                 if current is None:
                     return
             if current.approval_state == "expired":
                 self.repository.expire_approvals()
+                self._discard_stale_code_workspace(job_id)
                 return
+            if current.approval_state == "denied":
+                self._discard_stale_code_workspace(job_id)
             if cancel_event.is_set() or current.status in {"cancelled", "cancelling"} or current.approval_state in {"denied", "expired"}:
                 # A denial/expiry already reaches a terminal status through
                 # decide_approval()/expire_approvals(); this call is then a
@@ -666,11 +718,15 @@ class LocalExecutionCoordinator:
         except ApprovalExpiredError:
             # The store has already cancelled the job as approval_expired in
             # the transaction that refused the approval. Nothing ran and there
-            # is nothing left to finish.
+            # is nothing left to finish -- except the directory an earlier,
+            # crashed attempt may have left, which the lease-fenced cleanup
+            # below never reaches for an attempt that took no lease.
+            self._discard_stale_code_workspace(job_id)
             return
         except ApprovalTransitionError:
             # The approval changed under this attempt (denied, expired) between
             # the check above and the claim. Fail closed.
+            self._discard_stale_code_workspace(job_id)
             self._finish_code_failure(job_id, cancel_event, "approval_required")
         except Exception:
             self._finish_code_failure(job_id, cancel_event, "coordinator_failed")

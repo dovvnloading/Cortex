@@ -18,12 +18,13 @@ This is a small bounded subset of Python, not the real language. Allowed:
 - `for i in range(...):` - the only loop form. Every argument must be a plain
   positive whole number written out in full, spanning at most 10000 steps:
   `range(100)` and `range(1, 51)` are accepted; `range(n)` and
-  `range(len(items))` are not.
+  `range(len(items))` are not, in a loop or anywhere else.
 - comprehensions, whose `for` clauses must iterate such a `range(...)` too
 - arithmetic, comparisons, `and` / `or` / `not`, and `a if cond else b`.
-  Multiply by at most 100000, and keep exponents whole and between 0 and 1000.
+  Multiply by at most 100000 and keep a repeated list or string under 100000
+  items; exponents are whole numbers from 0 to 1000.
 - indexing and slicing: `items[0]`, `text[0:20]`, `data["key"]`, `grid[1][0]`
-- f-strings including format specs, and only these builtins:
+- f-strings with literal format specs, and only these builtins:
   `abs all any bool dict enumerate filter float int len list map max min
   print range round set sorted str sum tuple zip`
   (`enumerate`, `zip`, `map` and `filter` are only usable wrapped in

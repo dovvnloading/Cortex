@@ -178,6 +178,16 @@ class ExecutionLifecycle:
             return self.snapshot
         if self._state == "starting":
             return self.snapshot
+        if self._coordinator is not None:
+            # A coordinator that has not been shut down cleanly is still held:
+            # it may still be supervising this store. Building a second one
+            # beside it would have both launching workers and recovering the
+            # same jobs -- the new one's lease claim takes a live foreign lease
+            # on purpose. Only a successful stop() releases the old one.
+            _LOGGER.warning(
+                "Execution lifecycle start refused: the previous runtime has not stopped cleanly."
+            )
+            return self.snapshot
         self._state = "starting"
         self._recovered_job_ids = ()
         coordinator: LifecycleCoordinator | None = None
@@ -202,6 +212,9 @@ class ExecutionLifecycle:
                 try:
                     coordinator.shutdown()
                 except Exception as cleanup_exc:
+                    # Not shut down, so not forgotten: start() refuses to build
+                    # another until stop() gets this one down.
+                    self._coordinator = coordinator
                     _LOGGER.error(
                         "Execution lifecycle startup cleanup failed (%s).",
                         type(cleanup_exc).__name__,
@@ -215,12 +228,16 @@ class ExecutionLifecycle:
             return self.snapshot
 
     def stop(self) -> LifecycleSnapshot:
-        """Stop the coordinator exactly once and leave execution unavailable."""
+        """Stop the coordinator and leave execution unavailable.
+
+        The coordinator is released only once its shutdown has succeeded. If
+        shutdown fails it stays held, the lifecycle stays blocked, and calling
+        this again retries the shutdown.
+        """
         if self._state in {"disabled", "stopped"}:
             return self.snapshot
         self._state = "stopping"
         coordinator = self._coordinator
-        self._coordinator = None
         if coordinator is None:
             self._state = "stopped"
             return self.snapshot
@@ -234,6 +251,7 @@ class ExecutionLifecycle:
             self._state = "blocked"
             _LOGGER.error("Execution lifecycle stop failed (%s).", type(exc).__name__)
             return self.snapshot
+        self._coordinator = None
         self._state = "stopped"
         self._health = RuntimeHealth.blocked(
             code="runtime_stopped",

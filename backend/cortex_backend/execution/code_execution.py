@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ import sys
 import signal
 from threading import Event as ThreadEvent, Lock as ThreadLock, Thread
 import time
-from typing import Final, Any
+from typing import Final, Any, Literal, NamedTuple
 from collections.abc import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
@@ -53,6 +53,34 @@ MAX_CODE_AST_NODES = 4096
 MAX_CODE_AST_DEPTH = 32
 MAX_CODE_LOOP_ITERATIONS = 10_000
 MAX_CODE_TOTAL_ITERATIONS = 100_000
+# Static size bounds. They only ever apply to what the validator can work out
+# from literals -- a value that flows through a variable is not tracked -- so
+# they keep obviously oversized programs from being offered for approval; the
+# worker's memory limit and wall clock remain the bounds that always hold.
+#
+# What is NOT tracked, and so is accepted here and left to those worker limits
+# (tests/test_code_static_bounds.py runs each in a real worker):
+#   * a value carried through a name, which includes ``n = 10 ** 9`` followed
+#     by ``[0] * n`` (only a string literal repeated by a non-constant count is
+#     refused, as sequence_bound_required) and ``x *= 100000`` written twice on
+#     one string (each augmented assignment is checked alone);
+#   * any operand that is not a literal, a list/tuple/set/dict display, a
+#     comprehension, or a list(), tuple(), set(), sorted() or range() call, so
+#     ``str(1) * 100000 * 100000`` and ``f"a{1}" * 100000 * 100000`` chain a
+#     repeat whose size the validator never learns. Bounding them would also
+#     refuse ordinary arithmetic such as ``seconds * 86400 * 1000000``, because
+#     the validator cannot tell a number from a string.
+#
+# Longest list, tuple or string a repeated or joined literal expression may
+# build (the same number as the largest multiplier).
+MAX_CODE_SEQUENCE_ITEMS = MAX_CODE_TOTAL_ITERATIONS
+# Largest whole number, in bits, a literal expression may build.
+MAX_CODE_INT_BITS = 65_536
+# Items a program may build across every pass of the loops around the
+# expression that builds them.
+MAX_CODE_ALLOCATION_ITEMS = 10_000_000
+# Widest format width or precision a format spec may name.
+MAX_CODE_FORMAT_WIDTH = 10_000
 MAX_CODE_TIMEOUT_SECONDS = 10.0
 MAX_CODE_MEMORY_BYTES = 256 * 1024 * 1024
 MAX_CODE_VALUE_BYTES = 64 * 1024
@@ -66,7 +94,12 @@ MAX_CODE_PROCESS_ARGUMENT_BYTES = 16 * 1024
 MAX_CODE_NETWORK_REQUESTS = 4
 MAX_CODE_NETWORK_URL_CHARS = 2048
 MAX_CODE_NETWORK_RESPONSE_BYTES = MAX_CODE_OUTPUT_BYTES
-MAX_CODE_TRACE_EVENTS = 2_000_000
+# A budget of executed source *lines*, not instructions: the interpreter's
+# trace hook delivers one event per line (roughly two per loop iteration), so
+# this is about a million iterations of a small loop. It only catches a program
+# that keeps running many cheap statements; the parent's wall clock and the
+# job object are what bound everything else.
+MAX_CODE_TRACE_LINES = 2_000_000
 MAX_CODE_LIST_ENTRIES = 2048
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -285,11 +318,35 @@ _ALLOWED_UNARYOPS = (ast.UAdd, ast.USub, ast.Not)
 _ALLOWED_CMPOPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn, ast.Is, ast.IsNot)
 
 
+class _Size(NamedTuple):
+    """A static upper bound on how large an expression's value can get.
+
+    For a whole number ``bound`` limits its absolute value; for a list, tuple,
+    set, dict or string it limits the number of items.
+    """
+
+    kind: Literal["int", "seq"]
+    bound: int
+
+
+_PERCENT_SPEC = re.compile(r"%(?:\([^)]*\))?[-#0 +]*(\*|\d+)?(?:\.(\*|\d+))?")
+# The same spec for a place no key can close: past the template's last ``)``.
+_PERCENT_SPEC_UNKEYED = re.compile(r"%[-#0 +]*(\*|\d+)?(?:\.(\*|\d+))?")
+
+
 class _CodeValidator(ast.NodeVisitor):
     def __init__(self) -> None:
         self.nodes = 0
         self.depth = 0
+        # Times the code being visited runs: every enclosing loop and
+        # comprehension multiplies it, so nesting is bounded as a whole.
         self.loop_product = 1
+        # Filled bottom-up as each expression finishes, so working out a size
+        # never recurses deeper than the visit itself is allowed to.
+        self._sizes: dict[ast.AST, _Size] = {}
+        # The range() that a loop or comprehension iterates. Every other
+        # range() call is bounded by the same rules where it stands.
+        self._header_ranges: set[ast.AST] = set()
 
     def visit(self, node: ast.AST) -> Any:
         self.nodes += 1
@@ -299,7 +356,12 @@ class _CodeValidator(ast.NodeVisitor):
         if self.depth > MAX_CODE_AST_DEPTH:
             raise CodeExecutionError("source_too_complex")
         try:
-            return super().visit(node)
+            result = super().visit(node)
+            if isinstance(node, ast.expr):
+                size = self._size_of(node)
+                if size is not None:
+                    self._sizes[node] = size
+            return result
         finally:
             self.depth -= 1
 
@@ -364,6 +426,7 @@ class _CodeValidator(ast.NodeVisitor):
         bound = _constant_range_bound(node.iter)
         if bound is None:
             raise CodeExecutionError("bounded_range_required")
+        self._header_ranges.add(node.iter)
         return self._visit_bounded_loop(node, bound)
 
     def visit_comprehension(self, node: ast.comprehension) -> Any:
@@ -374,22 +437,33 @@ class _CodeValidator(ast.NodeVisitor):
         return self.generic_visit(node)
 
     def visit_ListComp(self, node: ast.ListComp) -> Any:
-        self._validate_comprehension_work(node.generators)
-        return self.generic_visit(node)
+        return self._visit_comprehension_scope(node, node.generators)
 
     def visit_SetComp(self, node: ast.SetComp) -> Any:
-        self._validate_comprehension_work(node.generators)
-        return self.generic_visit(node)
+        return self._visit_comprehension_scope(node, node.generators)
 
     def visit_DictComp(self, node: ast.DictComp) -> Any:
-        self._validate_comprehension_work(node.generators)
-        return self.generic_visit(node)
+        return self._visit_comprehension_scope(node, node.generators)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> Any:
-        self._validate_comprehension_work(node.generators)
-        return self.generic_visit(node)
+        return self._visit_comprehension_scope(node, node.generators)
 
-    def _validate_comprehension_work(self, generators: list[ast.comprehension]) -> None:
+    def _visit_comprehension_scope(self, node: ast.AST, generators: list[ast.comprehension]) -> Any:
+        """Visit a comprehension with its passes multiplied into the loops around it.
+
+        The body of a comprehension runs once per combination of its
+        generators, and once more for every pass of an enclosing loop or
+        comprehension. Checking each comprehension on its own let a
+        comprehension nested in another -- each fine alone -- run their
+        product.
+        """
+
+        passes = self._validate_comprehension_work(generators)
+        return self._visit_bounded_loop(node, passes)
+
+    def _validate_comprehension_work(self, generators: list[ast.comprehension]) -> int:
+        """Check every generator is a bounded range; return how many passes they make together."""
+
         product = 1
         for generator in generators:
             if generator.is_async or not isinstance(generator.iter, ast.Call) or not isinstance(generator.iter.func, ast.Name) or generator.iter.func.id != "range":
@@ -397,9 +471,11 @@ class _CodeValidator(ast.NodeVisitor):
             bound = _constant_range_bound(generator.iter)
             if bound is None:
                 raise CodeExecutionError("bounded_range_required")
+            self._header_ranges.add(generator.iter)
             product *= bound
             if product > MAX_CODE_TOTAL_ITERATIONS:
                 raise CodeExecutionError("loop_work_too_large")
+        return product
 
     def _visit_bounded_loop(self, node: ast.AST, bound: int) -> Any:
         previous = self.loop_product
@@ -412,30 +488,149 @@ class _CodeValidator(ast.NodeVisitor):
             self.loop_product = previous
 
     def visit_BinOp(self, node: ast.BinOp) -> Any:
-        if not isinstance(node.op, _ALLOWED_BINOPS):
+        self._check_operation(node.op, node.left, node.right)
+        return self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> Any:
+        # `x **= n` and `s *= n` are the same operations as their BinOp forms
+        # and used to skip every check made there, the operator allow-list
+        # included.
+        self._check_operation(node.op, None, node.value)
+        return self.generic_visit(node)
+
+    @staticmethod
+    def _check_operation(op: ast.operator, left: ast.expr | None, right: ast.expr) -> None:
+        """Apply the checks that need only the operator and its literal operands.
+
+        ``left`` is ``None`` for an augmented assignment, whose left operand is
+        the value already stored in a name.
+        """
+
+        if not isinstance(op, _ALLOWED_BINOPS):
             raise CodeExecutionError("operator_not_allowed")
-        if isinstance(node.op, ast.Pow):
+        if isinstance(op, ast.Pow):
             if (
-                not isinstance(node.right, ast.Constant)
-                or type(node.right.value) is not int
-                or not 0 <= node.right.value <= 1_000
+                not isinstance(right, ast.Constant)
+                or type(right.value) is not int
+                or not 0 <= right.value <= 1_000
             ):
                 raise CodeExecutionError("exponent_too_large")
         if (
-            isinstance(node.op, ast.Mult)
-            and isinstance(node.right, ast.Constant)
-            and type(node.right.value) is int
-            and abs(node.right.value) > MAX_CODE_TOTAL_ITERATIONS
+            isinstance(op, ast.Mult)
+            and isinstance(right, ast.Constant)
+            and type(right.value) is int
+            and abs(right.value) > MAX_CODE_TOTAL_ITERATIONS
         ):
             raise CodeExecutionError("sequence_too_large")
         if (
-            isinstance(node.op, ast.Mult)
-            and isinstance(node.left, ast.Constant)
-            and isinstance(node.left.value, (str, list, tuple, set, dict))
-            and not isinstance(node.right, ast.Constant)
+            isinstance(op, ast.Mult)
+            and isinstance(left, ast.Constant)
+            and isinstance(left.value, (str, list, tuple, set, dict))
+            and not isinstance(right, ast.Constant)
         ):
             raise CodeExecutionError("sequence_bound_required")
+        if isinstance(op, ast.Mod) and isinstance(left, ast.Constant) and isinstance(left.value, str):
+            _check_percent_format(left.value)
+
+    def visit_FormattedValue(self, node: ast.FormattedValue) -> Any:
+        spec = node.format_spec
+        if spec is not None:
+            # A nested replacement field ({w} inside the spec) picks the width
+            # while the program runs, out of the validator's sight.
+            if not isinstance(spec, ast.JoinedStr):
+                raise CodeExecutionError("format_width_not_constant")
+            text = ""
+            for part in spec.values:
+                if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
+                    raise CodeExecutionError("format_width_not_constant")
+                text += part.value
+            _check_format_numbers(text)
         return self.generic_visit(node)
+
+    def _size_of(self, node: ast.expr) -> _Size | None:
+        """Bound an expression's size from its already-visited parts, or ``None`` if unknown.
+
+        Only what literals decide is tracked; a name is unknown. It raises as
+        soon as a bound is beyond what the sandbox will allow, so a program
+        that can only ever run out of memory is refused before the user is
+        asked to approve it.
+        """
+
+        sizes = self._sizes
+        if isinstance(node, ast.Constant):
+            value = node.value
+            if type(value) is bool:
+                return _Size("int", 1)
+            if type(value) is int:
+                return self._checked_int(abs(value))
+            if type(value) is str:
+                return _Size("seq", len(value))
+            return None
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return _Size("seq", len(node.elts))
+        if isinstance(node, ast.Dict):
+            return _Size("seq", len(node.keys))
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            passes = 1
+            for generator in node.generators:
+                # Already validated as a literal range, so this is never None.
+                passes *= (
+                    _constant_range_bound(generator.iter)
+                    if isinstance(generator.iter, ast.Call)
+                    else None
+                ) or 0
+            return _Size("seq", passes)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = sizes.get(node.operand)
+            return operand if operand is not None and operand.kind == "int" else None
+        if isinstance(node, ast.BinOp):
+            return self._binop_size(node, sizes.get(node.left), sizes.get(node.right))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "range":
+                length = _constant_range_bound(node)
+                return None if length is None else _Size("seq", length)
+            if node.func.id in {"list", "tuple", "set", "sorted"} and len(node.args) == 1:
+                argument = sizes.get(node.args[0])
+                return argument if argument is not None and argument.kind == "seq" else None
+        return None
+
+    def _binop_size(self, node: ast.BinOp, left: _Size | None, right: _Size | None) -> _Size | None:
+        if left is None or right is None:
+            return None
+        op = node.op
+        if isinstance(op, ast.Pow):
+            # visit_BinOp already required a literal exponent from 0 to 1000.
+            exponent = node.right.value if isinstance(node.right, ast.Constant) else 0
+            if left.kind != "int" or not isinstance(exponent, int):
+                return None
+            if left.bound.bit_length() * exponent > MAX_CODE_INT_BITS:
+                raise CodeExecutionError("integer_too_large")
+            return _Size("int", left.bound**exponent)
+        if isinstance(op, ast.Mult):
+            if left.kind == "int" and right.kind == "int":
+                return self._checked_int(left.bound * right.bound)
+            if left.kind != right.kind:
+                return self._checked_sequence(left.bound * right.bound)
+            return None
+        if isinstance(op, (ast.Add, ast.Sub)):
+            if left.kind == "int" and right.kind == "int":
+                return self._checked_int(left.bound + right.bound)
+            if left.kind == "seq" and right.kind == "seq" and isinstance(op, ast.Add):
+                return self._checked_sequence(left.bound + right.bound)
+        return None
+
+    @staticmethod
+    def _checked_int(bound: int) -> _Size:
+        if bound.bit_length() > MAX_CODE_INT_BITS:
+            raise CodeExecutionError("integer_too_large")
+        return _Size("int", bound)
+
+    def _checked_sequence(self, length: int) -> _Size:
+        if length > MAX_CODE_SEQUENCE_ITEMS:
+            raise CodeExecutionError("sequence_too_large")
+        if length * self.loop_product > MAX_CODE_ALLOCATION_ITEMS:
+            raise CodeExecutionError("allocation_too_large")
+        return _Size("seq", length)
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
         if not isinstance(node.op, _ALLOWED_UNARYOPS):
@@ -466,11 +661,27 @@ class _CodeValidator(ast.NodeVisitor):
         if isinstance(node.func, ast.Name):
             if node.func.id not in _ALLOWED_CALLS:
                 raise CodeExecutionError("call_not_allowed")
+            if node.func.id == "range" and node not in self._header_ranges:
+                self._check_free_range(node)
         elif _cortex_attribute_chain(node.func) not in _ALLOWED_CORTEX_CALLS:
             raise CodeExecutionError("call_not_allowed")
         if node.keywords and any(keyword.arg is None for keyword in node.keywords):
             raise CodeExecutionError("call_not_allowed")
         return self.generic_visit(node)
+
+    def _check_free_range(self, node: ast.Call) -> None:
+        """Bound a range() that is not a loop header, such as ``list(range(n))``.
+
+        It is held to the same literal arguments and per-range cap as a loop
+        header, and it counts against the work of every loop around it: a
+        ``sum(range(10000))`` in a loop that runs 1000 times is ten million steps.
+        """
+
+        length = _constant_range_bound(node)
+        if length is None:
+            raise CodeExecutionError("bounded_range_required")
+        if self.loop_product * length > MAX_CODE_TOTAL_ITERATIONS:
+            raise CodeExecutionError("loop_work_too_large")
 
     def visit_Attribute(self, node: ast.Attribute) -> Any:
         # Capability objects are opaque. Only the exact broker methods may be
@@ -508,6 +719,56 @@ def _cortex_attribute_chain(node: ast.AST) -> tuple[str, ...] | None:
         return None
     parts.append("cortex")
     return tuple(reversed(parts))
+
+
+def _check_format_width(digits: str) -> None:
+    # Length first: a very long run of digits must never reach int().
+    if len(digits) > 6 or int(digits) > MAX_CODE_FORMAT_WIDTH:
+        raise CodeExecutionError("format_width_too_large")
+
+
+def _check_format_numbers(spec: str) -> None:
+    """Refuse a format spec whose width or precision would build an enormous string.
+
+    Every run of digits is treated as a width or a precision; a digit used as
+    the fill character is harmlessly caught by the same test.
+    """
+
+    for digits in re.findall(r"\d+", spec):
+        _check_format_width(digits)
+
+
+def _percent_specs(template: str) -> Iterator[re.Match[str]]:
+    """Every conversion spec in ``template``, found in one linear pass.
+
+    A ``(key)`` can only close if a ``)`` follows it. With ``finditer`` each
+    ``%(`` in an unclosed run scanned ahead to the end of the template for a
+    ``)`` that never came, so ``"%(" * 30000`` cost about 1.8 s of validator
+    CPU. One look for the template's last ``)`` says where keys stop being
+    possible: a ``%(`` before it always closes, and matches after it use the
+    pattern without a key.
+    """
+
+    last_close = template.rfind(")")
+    position = 0
+    while position < len(template):
+        pattern = _PERCENT_SPEC if position <= last_close else _PERCENT_SPEC_UNKEYED
+        match = pattern.search(template, position)
+        if match is None:
+            return
+        yield match
+        position = match.end()
+
+
+def _check_percent_format(template: str) -> None:
+    """Apply the same limit to a printf-style ``"%10d" % value`` template."""
+
+    for match in _percent_specs(template):
+        for field in match.groups():
+            if field == "*":
+                raise CodeExecutionError("format_width_not_constant")
+            if field is not None:
+                _check_format_width(field)
 
 
 def _constant_range_bound(node: ast.Call) -> int | None:
@@ -1383,21 +1644,26 @@ class _BoundedTextWriter(io.TextIOBase):
         return "".join(self._chunks)
 
 
-class _ExecutionGuard:
-    """Cooperative instruction watchdog for platforms without rlimit."""
+class _LineGuard:
+    """Cooperative line watchdog for platforms without rlimit.
+
+    It checks a line budget and the wall clock each time the interpreter starts
+    a new source line of the approved program. It does not see instructions:
+    one line that spends its whole time inside a single operation, a huge
+    integer power for instance, is never interrupted from here. That case is
+    kept out by the validator's static size bounds, and stopped by the parent's
+    wall clock and the job object's memory limit.
+    """
 
     def __init__(self) -> None:
         self.deadline = time.monotonic() + MAX_CODE_TIMEOUT_SECONDS
-        self.events = 0
+        self.lines = 0
 
     def trace(self, frame: Any, event: str, _arg: Any) -> Callable[..., Any]:
-        if frame.f_code.co_filename == "<cortex-code>":
-            if event == "call":
-                frame.f_trace_opcodes = True
-            elif event in {"line", "opcode"}:
-                self.events += 1
-                if self.events > MAX_CODE_TRACE_EVENTS or time.monotonic() >= self.deadline:
-                    raise CodeExecutionError("runtime_limit")
+        if event == "line" and frame.f_code.co_filename == "<cortex-code>":
+            self.lines += 1
+            if self.lines > MAX_CODE_TRACE_LINES or time.monotonic() >= self.deadline:
+                raise CodeExecutionError("runtime_limit")
         return self.trace
 
 
@@ -1429,7 +1695,7 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     }
     old_stdout, old_stderr = sys.stdout, sys.stderr
     old_trace = sys.gettrace()
-    guard = _ExecutionGuard()
+    guard = _LineGuard()
     try:
         sys.stdout, sys.stderr = stdout, stderr
         sys.settrace(guard.trace)

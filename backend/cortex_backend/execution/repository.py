@@ -15,7 +15,7 @@ import sqlite3
 import stat
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from threading import RLock
+from threading import Condition, RLock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -51,6 +51,8 @@ _SQLITE_CORRUPTION_CODES = frozenset({11, 26})
 # Python 3.10 does not expose sqlite_errorcode, so fall back to the message.
 _SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+# The name cleanup gives an artifact's file in quarantine: ``<artifact id>-<uuid hex>.artifact``.
+_QUARANTINE_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[0-9a-f]{32}\.artifact")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
@@ -130,6 +132,41 @@ class ArtifactCleanupBlocked(ExecutionRepositoryError):
     """A cleanup row could not be finished this time; a later pass may succeed."""
 
 
+class ChangeSignal:
+    """A counter waiters can sleep on until it moves, so nothing has to poll.
+
+    Read :attr:`version` *before* looking at the state being waited on, then
+    hand it to :meth:`wait`. A change that lands between that read and the
+    sleep has already moved the counter, so the wait returns at once instead of
+    sleeping through it.
+    """
+
+    def __init__(self) -> None:
+        self._condition = Condition()
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        with self._condition:
+            return self._version
+
+    def bump(self) -> None:
+        """Announce a change to everyone waiting."""
+
+        with self._condition:
+            self._version += 1
+            self._condition.notify_all()
+
+    def wait(self, since: int, timeout: float) -> bool:
+        """Sleep until the counter moves past ``since`` or ``timeout`` seconds pass.
+
+        Returns whether it moved. A wake-up is only a hint to look again.
+        """
+
+        with self._condition:
+            return self._condition.wait_for(lambda: self._version != since, timeout=timeout)
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCleanupResult:
     """Bounded cleanup work completed by one janitor pass.
@@ -173,6 +210,9 @@ class ExecutionRepository:
         # process. "Allow once" is one run in the process the user answered
         # in, so it cannot be spent by this one.
         self._opened_at = datetime.now(timezone.utc)
+        # Moves whenever an approval is decided or expires, so a job waiting
+        # for one can sleep instead of polling the store.
+        self.approval_changes = ChangeSignal()
         self._ensure_schema()
 
     @property
@@ -268,11 +308,8 @@ class ExecutionRepository:
                 else "The execution store was written by a newer version of Cortex "
                 "and could not be set aside."
             ) from exc
-        try:
-            # The retention window runs from now, not from the last write.
-            os.utime(aside)
-        except OSError:
-            pass
+        # The startup sweep that follows dates the copy from now, not from the
+        # last write, by marking it the first time it sees it.
         for suffix in ("-wal", "-shm"):
             # They describe the file just moved aside, so SQLite must not
             # replay them onto the empty replacement.
@@ -339,31 +376,80 @@ class ExecutionRepository:
         message = str(exc).lower()
         return any(marker in message for marker in _SQLITE_CORRUPTION_MESSAGES)
 
+    def _aside_marker_path(self, copy: Path) -> Path:
+        """The sidecar recording when Cortex first saw ``copy`` set aside.
+
+        Its own modification time is the start of the copy's retention window.
+        The name shares the copy's kind and id but not its prefix, so it never
+        matches the ``<store>.damaged-*`` patterns that find the copies.
+        """
+
+        tag = copy.name[len(self.db_path.name) + 1 :]
+        return copy.with_name(f"{self.db_path.name}.seen-{tag}")
+
+    def _mark_aside_copy_seen(self, copy: Path) -> None:
+        """Start ``copy``'s retention window now, unless one is already running."""
+
+        try:
+            with open(self._aside_marker_path(copy), "x"):
+                pass
+        except OSError:
+            pass  # Already marked, or unwritable: the next launch tries again.
+
     def _sweep_aside_copies(self) -> None:
-        """Reclaim set-aside stores older than the retention window.
+        """Reclaim set-aside stores whose retention window has run out.
 
         Nothing else ever removed them, and the artifact files their rows
         named are unreachable anyway, so each one was a permanent copy of a
-        store nobody could open. Best effort: a failure here never stops
-        startup, and only regular files with the exact set-aside name are
-        touched.
+        store nobody could open.
+
+        The window runs from when the copy was first seen, recorded in a
+        sidecar, and never from the copy's own modification time: that is when
+        the store last changed, and copies set aside by earlier builds -- which
+        promised to keep them for inspection -- carry no record of when.
+        Those are simply seen for the first time now, and get a full window.
+
+        Best effort: a failure here never stops startup, and only regular files
+        with the exact set-aside name (and its sidecar) are touched.
         """
 
-        pattern = re.compile(
-            rf"^{re.escape(self.db_path.name)}\.(?:damaged|newer)-[0-9a-f]{{32}}$"
-        )
+        name = re.escape(self.db_path.name)
+        tag = r"(?P<tag>(?:damaged|newer)-[0-9a-f]{32})"
+        copy_pattern = re.compile(rf"^{name}\.{tag}$")
+        marker_pattern = re.compile(rf"^{name}\.seen-{tag}$")
         cutoff = datetime.now(timezone.utc).timestamp() - ASIDE_COPY_RETENTION_SECONDS
         try:
-            candidates = [
-                entry for entry in self.db_path.parent.iterdir() if pattern.fullmatch(entry.name)
-            ]
+            entries = list(self.db_path.parent.iterdir())
         except OSError:
             return
-        for entry in candidates:
+        copies: dict[str, Path] = {}
+        markers: dict[str, Path] = {}
+        for entry in entries:
+            if (match := copy_pattern.fullmatch(entry.name)) is not None:
+                copies[match["tag"]] = entry
+            elif (match := marker_pattern.fullmatch(entry.name)) is not None:
+                markers[match["tag"]] = entry
+        for entry_tag, copy in copies.items():
+            marker = markers.get(entry_tag)
             try:
-                info = entry.lstat()
-                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                    entry.unlink()
+                if not stat.S_ISREG(copy.lstat().st_mode):
+                    continue
+                if marker is None:
+                    self._mark_aside_copy_seen(copy)
+                    continue
+                marker_info = marker.lstat()
+                if stat.S_ISREG(marker_info.st_mode) and marker_info.st_mtime < cutoff:
+                    copy.unlink()
+                    marker.unlink(missing_ok=True)
+            except OSError:
+                continue
+        for entry_tag, marker in markers.items():
+            if entry_tag in copies:
+                continue
+            # The copy is gone; nothing is left for the sidecar to date.
+            try:
+                if stat.S_ISREG(marker.lstat().st_mode):
+                    marker.unlink()
             except OSError:
                 continue
 
@@ -1009,9 +1095,29 @@ class ExecutionRepository:
                 data={"message": message, "approval_state": persisted_state},
                 now=now,
             )
+        # After the commit, so a woken waiter reads the decision, and before the
+        # expiry error below, since finding the approval expired settled it too.
+        self.approval_changes.bump()
         if expired:
             raise ApprovalTransitionError("Approval has expired.")
         return decision
+
+    def pending_approval_seconds(self, job_id: str) -> float | None:
+        """Seconds until a pending approval expires, by this repository's clock.
+
+        Negative once it is overdue but the sweep has not yet persisted that.
+        ``None`` when the job has no pending approval.
+        """
+
+        now = datetime.now(timezone.utc)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT expires_at FROM execution_approvals WHERE job_id = ? AND state = 'pending'",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return (datetime.fromisoformat(row["expires_at"]) - now).total_seconds()
 
     def expire_approvals(self, *, now: str | None = None) -> list[str]:
         cutoff = now or self._now()
@@ -1047,6 +1153,8 @@ class ExecutionRepository:
                     now=cutoff,
                 )
                 expired.append(job_id)
+        if expired:
+            self.approval_changes.bump()
         return expired
 
     def claim_supervisor_lease(
@@ -1814,6 +1922,12 @@ class ExecutionRepository:
         try:
             return self._advance_artifact_cleanup(artifact_id, path_text, quarantine_text, state), 0
         except ArtifactCleanupRejected as exc:
+            if not self._reclaim_quarantined_file(artifact_id, quarantine_text):
+                # Its quarantine file is still there and could not be removed
+                # this time. The row is the only record that it exists, so it
+                # stays and a later pass tries again.
+                self._requeue_artifact_cleanup(artifact_id)
+                return 0, 1
             self._discard_artifact_rows(artifact_id, exc)
             return 0, 1
         except ArtifactCleanupBlocked as exc:
@@ -1821,10 +1935,54 @@ class ExecutionRepository:
             self._requeue_artifact_cleanup(artifact_id)
             return 0, 1
 
+    def _reclaim_quarantined_file(self, artifact_id: str, quarantine_text: str) -> bool:
+        """Remove the file a rejected tombstone left in quarantine; False if it must be retried.
+
+        A row can be rejected because its *original* location no longer
+        validates (a moved data directory, a job directory swapped for a link)
+        after the artifact was already moved into quarantine. That file sits in
+        our own quarantine root, put there by this cleanup, and only the row
+        knows about it: discarding the row without removing it leaves it there
+        for good. Nothing outside the validated quarantine root is ever touched,
+        and neither is anything that is not a plain file.
+
+        After a moved data directory the row names the quarantine directory's
+        old absolute path, which is outside the current root, but the directory
+        moved too and the file is in it under the same name. Such a row is
+        matched by name in the current root, and only for a name this cleanup
+        gives that artifact's tombstone.
+        """
+
+        try:
+            quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        except ArtifactCleanupBlocked:
+            return False
+        except ArtifactCleanupRejected:
+            match = _QUARANTINE_FILE_NAME.fullmatch(re.split(r"[\\/]", quarantine_text)[-1])
+            if match is None or match.group("artifact_id") != artifact_id:
+                return True  # Not ours to touch; nothing here can be reclaimed.
+            try:
+                quarantine = self._validated_quarantine_path(self.quarantine_root / match.group(0))
+            except ArtifactCleanupRejected:
+                return True
+            except ArtifactCleanupBlocked:
+                return False
+        try:
+            if not stat.S_ISREG(quarantine.lstat().st_mode):
+                return True
+            quarantine.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+
     def _discard_artifact_rows(self, artifact_id: str, reason: ExecutionRepositoryError) -> None:
         """Drop an expired artifact's rows whose file this repository must not touch.
 
-        The file is left exactly where it is. The artifact was already expired
+        The artifact's own file is left exactly where it is (a file the cleanup
+        already moved into quarantine is reclaimed first, by
+        :meth:`_reclaim_quarantined_file`). The artifact was already expired
         and unreadable -- ``read_artifact`` applies the same containment rule --
         so the row protected nothing, and keeping it only blocked retention.
         Logs the kind of failure, never a path.
