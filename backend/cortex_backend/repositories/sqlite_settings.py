@@ -27,6 +27,7 @@ from .sqlite_backup import (
     find_interrupted_recovery,
     move_sidecars,
     put_sidecars_back,
+    replace_with_retry,
     snapshot_database,
     utc_now_iso,
 )
@@ -370,7 +371,7 @@ class SQLiteSettingsRepository:
             populate(temporary_path)
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
-            os.replace(temporary_path, destination)
+            replace_with_retry(temporary_path, destination)
             # Validating the copy opened it, so SQLite made "<temp>-wal" and
             # "<temp>-shm". os.replace moves only the file itself.
             for suffix in ("-wal", "-shm"):

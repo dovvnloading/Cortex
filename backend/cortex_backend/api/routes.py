@@ -13,10 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event as ThreadEvent, Thread
 import asyncio
+import errno
 import hashlib
 import json
 import logging
 import re
+import sqlite3
 from typing import Any, NoReturn, cast
 from uuid import uuid4
 
@@ -311,17 +313,24 @@ async def _start_generation_job(
     reservation: JobReservation | None = None,
     target_message_id: str | None = None,
     transcript: Sequence[Mapping[str, Any]] | None = None,
+    transcript_revision: int | None = None,
 ) -> tuple[JobSnapshot, str | None]:
     """Atomically admit, prepare, and run one authoritative generation job.
 
     A regeneration passes ``transcript``, the messages its route already read to
-    validate the target, so the chat is not read again. A new turn passes
-    nothing: admission needs only the chat's overview, and preparation reads
-    the transcript once, because the model needs it as history. Either way the
-    generation service is handed its history and never loads it itself.
+    validate the target, and ``transcript_revision``, the revision that read
+    returned (a regeneration changes a message without changing how many there
+    are, so the revision cannot be derived from the transcript), so the chat is
+    not read again. A new turn passes neither: admission needs only the chat's
+    overview, and preparation reads the transcript once, because the model
+    needs it as history. Either way the generation service is handed its
+    history and never loads it itself.
     """
-    if (target_message_id is None) != (transcript is None):
-        raise ValueError("a regeneration needs its transcript and a new turn has none")
+    regenerating = target_message_id is not None
+    if regenerating != (transcript is not None) or regenerating != (transcript_revision is not None):
+        raise ValueError(
+            "a regeneration needs its transcript and its revision and a new turn has neither"
+        )
     jobs = request.app.state.jobs
     candidate_thread_id = payload.thread_id or uuid4().hex
     if reservation is None:
@@ -347,12 +356,16 @@ async def _start_generation_job(
     try:
         target_position = -1
         target_role = ""
-        if transcript is not None and target_message_id is not None:
+        if (
+            transcript is not None
+            and target_message_id is not None
+            and transcript_revision is not None
+        ):
             # The route read the chat and answered 404 if it was missing.
             target_position, target_role = _regeneration_target(
                 transcript, target_message_id
             )
-            admission_revision = len(transcript)
+            admission_revision = transcript_revision
         else:
             # Only the revision is needed to admit a new turn, so read the
             # overview rather than every message of what may be a long thread.
@@ -459,8 +472,8 @@ async def _start_generation_job(
                 # The route validated this target against the transcript it
                 # read. That still holds as long as nothing was appended since:
                 # a chat only grows, and this reserved job is the only writer
-                # that replaces a reply. The message count is the revision, so
-                # the overview answers it without reading the transcript again.
+                # that replaces a reply. The overview carries the revision, so
+                # it answers this without reading the transcript again.
                 overview = deps.chats.get_chat_overview(thread_id)
                 if overview is None:
                     raise ChatDomainError("Chat not found.", code="not_found")
@@ -477,7 +490,7 @@ async def _start_generation_job(
             # and that write is guarded by the revision it was read at.
             current_chat = deps.chats.get_chat(thread_id)
             existing = list(current_chat.get("messages", ())) if current_chat else []
-            if len(existing) != admission_revision:
+            if (chat_revision(current_chat) if current_chat else 0) != admission_revision:
                 raise ChatDomainError(
                     "This chat changed. Reload it before generating again.",
                     code="stale_revision",
@@ -1467,6 +1480,34 @@ def _raise_job_error(exc: Exception) -> NoReturn:
     ) from exc
 
 
+# Windows reports a full volume as ERROR_DISK_FULL or ERROR_HANDLE_DISK_FULL,
+# which Python only sometimes maps to ENOSPC.
+_WINDOWS_DISK_FULL = frozenset({39, 112})
+
+
+def _is_disk_full(exc: BaseException) -> bool:
+    """Whether a repository failure, or anything it was raised from, is a full disk.
+
+    A store wraps what went wrong (``PersistenceError.cause``, or ``raise ...
+    from``), so the chain is followed. SQLite says "database or disk is full"
+    for SQLITE_FULL, and the file-copy paths raise ENOSPC.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and (
+            current.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC))
+            or getattr(current, "winerror", None) in _WINDOWS_DISK_FULL
+        ):
+            return True
+        if isinstance(current, sqlite3.OperationalError) and "disk is full" in str(current).lower():
+            return True
+        cause = getattr(current, "cause", None)
+        current = cause if isinstance(cause, BaseException) else current.__cause__
+    return False
+
+
 def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
@@ -1476,6 +1517,13 @@ def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     # reports "Could not list chats" can be matched to the failure.
     request_id = current_request_id()
     log_failure(logger, f"Cortex API {operation} failed", exc, request_id=request_id)
+    if _is_disk_full(exc):
+        # Not the server's fault and not a bug: nothing was saved because there
+        # is no room, and the user can fix that.
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=f"Could not {operation} because the disk is full. Free some disk space and try again.",
+        ) from exc
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"Could not {operation}." + (f" (Request ID: {request_id})" if request_id else ""),

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,97 @@ def test_moving_an_unknown_chat_reports_miss_without_raising(tmp_path: Path) -> 
     for repository in _repositories(tmp_path):
         repository.create_group("g1", "Research")
         assert repository.set_chat_group("missing-thread", "g1") is False
+
+
+class _InterleavingConnection(sqlite3.Connection):
+    """A connection that lets a test run another writer at a chosen statement.
+
+    ``before`` is called with each statement's text just before it executes, so
+    a test can land a second connection's write exactly between two statements
+    of the operation under test instead of hoping two threads collide.
+    """
+
+    before = None
+
+    def execute(self, sql, *args):
+        hook = type(self).before
+        if hook is not None:
+            hook(sql)
+        return super().execute(sql, *args)
+
+
+def test_concurrent_group_creation_never_produces_duplicate_positions(tmp_path: Path) -> None:
+    database = DatabaseManager(db_path=str(tmp_path / "chats.sqlite"))
+    workers = 8
+    start = threading.Barrier(workers)
+    failures: list[BaseException] = []
+
+    def create(index: int) -> None:
+        try:
+            start.wait(timeout=10)
+            database.create_group(f"g{index}", f"Group {index}")
+        except BaseException as exc:  # reported below, from the test thread
+            failures.append(exc)
+
+    threads = [threading.Thread(target=create, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "a group-creating thread did not finish"
+
+    assert failures == []
+    assert sorted(group["position"] for group in database.list_groups()) == list(range(workers))
+
+
+def test_a_group_deleted_while_a_chat_is_being_moved_cannot_orphan_the_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check that the group exists and the move must be one atomic step.
+
+    A second connection deletes the group at the moment the move is about to be
+    written. Whether that delete is held off until the move commits, or lands
+    first and refuses the move, the chat must never end up filed under a group
+    that is gone -- the sidebar hides such a chat until the next startup sweep.
+    """
+    path = str(tmp_path / "chats.sqlite")
+    database = DatabaseManager(db_path=path)
+    database.create_chat("t1", "Alpha")
+    database.create_group("g1", "Research")
+    real_connect = sqlite3.connect
+    interleaved: list[str] = []
+
+    def delete_the_group_now(sql: str) -> None:
+        if interleaved or not sql.lstrip().upper().startswith("UPDATE THREADS SET GROUP_ID = ?"):
+            return
+        interleaved.append("tried")
+        other = real_connect(path, timeout=0.05)
+        try:
+            other.execute("UPDATE threads SET group_id = NULL WHERE group_id = 'g1'")
+            other.execute("DELETE FROM chat_groups WHERE id = 'g1'")
+            other.commit()
+            interleaved[0] = "deleted"
+        except sqlite3.OperationalError:
+            interleaved[0] = "held off"
+        finally:
+            other.close()
+
+    def connect(*args, **kwargs):
+        kwargs.setdefault("factory", _InterleavingConnection)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    monkeypatch.setattr(_InterleavingConnection, "before", staticmethod(delete_the_group_now))
+    try:
+        database.set_chat_group("t1", "g1")
+    except PersistenceError:
+        pass  # a refused move is acceptable; an orphaned chat is not
+    monkeypatch.undo()
+
+    assert interleaved, "the second writer never got a chance to run"
+    known = {group["id"] for group in database.list_groups()}
+    filed_under = database.get_all_chats_summary()[0]["group_id"]
+    assert filed_under is None or filed_under in known
 
 
 # -- schema migration ------------------------------------------------------
@@ -474,20 +566,22 @@ def test_a_newer_database_is_refused_untouched_and_names_the_snapshot_to_restore
     refuse it. It now refuses first, and says which file goes back."""
     path = tmp_path / "newer.sqlite"
     _write_old_schema_database(path, user_version=99)
-    # What the newer release kept when it upgraded from versions 3 and 4, plus
-    # one from the future that this release could not read anyway.
-    for version in (3, 4, 7):
+    # What the newer release kept when it upgraded from versions 3 and 4 and from
+    # this release's own, plus one from the future that this release could not
+    # read anyway.
+    current = DatabaseManager.SCHEMA_VERSION
+    for version in (3, 4, current, current + 1):
         Path(f"{path}.pre-v{version}.bak").write_bytes(b"snapshot")
     before = path.read_bytes()
 
     with pytest.raises(PersistenceError, match=r"schema version 99") as refused:
         DatabaseManager(db_path=str(path))
 
-    assert "newer.sqlite.pre-v4.bak" in str(refused.value)
+    assert f"newer.sqlite.pre-v{current}.bak" in str(refused.value)
     # Restoring replaces the database, so the message says where to put it first.
     assert "move the current database" in str(refused.value)
     assert "written since the upgrade" in str(refused.value)
-    assert "pre-v7" not in str(refused.value)
+    assert f"pre-v{current + 1}" not in str(refused.value)
     assert str(tmp_path) not in str(refused.value)
     assert path.read_bytes() == before
 
@@ -617,6 +711,173 @@ def test_a_new_database_ends_up_with_the_same_shape_as_an_upgraded_one(tmp_path:
     assert _schema_names(tmp_path / "fresh.sqlite") == _schema_names(old)
     for table in ("threads", "messages", "chat_groups"):
         assert _column_names(tmp_path / "fresh.sqlite", table) == _column_names(old, table)
+
+
+ORIGINAL_OF_M1 = "m1 as the model wrote it"
+
+
+def _write_database_at(path: Path, version: int) -> None:
+    """A database as the release that stopped at schema ``version`` left it.
+
+    Built from the ladder's own first ``version`` steps, so it has exactly the
+    shape that release created: two chats, one with three messages and one
+    empty. From version 5 on the busy chat's answer also carries the original
+    text that a translated answer keeps beside what it displays.
+    """
+    connection = sqlite3.connect(path)
+    for step in range(1, version + 1):
+        storage._MIGRATIONS[step](connection)
+    connection.execute(
+        "INSERT INTO threads (id, title, timestamp) VALUES ('busy', 'Busy chat', '2026-01-02T00:00:00+00:00')"
+    )
+    connection.execute(
+        "INSERT INTO threads (id, title, timestamp) VALUES ('empty', 'Empty chat', '2026-01-01T00:00:00+00:00')"
+    )
+    for index, role in enumerate(("user", "assistant", "user")):
+        connection.execute(
+            "INSERT INTO messages (thread_id, role, content, timestamp) VALUES ('busy', ?, ?, ?)",
+            (role, f"m{index}", f"2026-01-02T00:00:0{index}+00:00"),
+        )
+    if version >= 5:
+        connection.execute(
+            "UPDATE messages SET original_content = ? WHERE thread_id = 'busy' AND content = 'm1'",
+            (ORIGINAL_OF_M1,),
+        )
+    connection.execute(f"PRAGMA user_version = {version}")
+    connection.commit()
+    connection.close()
+
+
+def _message_texts(path: Path, thread_id: str) -> list[str]:
+    probe = sqlite3.connect(path)
+    try:
+        return [
+            row[0]
+            for row in probe.execute(
+                "SELECT content FROM messages WHERE thread_id = ? ORDER BY timestamp, id", (thread_id,)
+            )
+        ]
+    finally:
+        probe.close()
+
+
+def _original_of(path: Path, content: str) -> str | None:
+    probe = sqlite3.connect(path)
+    try:
+        return probe.execute("SELECT original_content FROM messages WHERE content = ?", (content,)).fetchone()[0]
+    finally:
+        probe.close()
+
+
+def test_a_v4_database_upgrades_through_5_and_6_with_each_chats_revision_set_to_its_message_count(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.sqlite"
+    _write_database_at(path, 4)
+
+    database = DatabaseManager(db_path=str(path))
+
+    assert _user_version(path) == 6
+    assert database.load_chat_overview("busy")["revision"] == 3
+    assert database.load_chat_overview("empty")["revision"] == 0
+    assert [message["content"] for message in database.load_chat("busy")["messages"]] == ["m0", "m1", "m2"]
+    # Step 5 ran on the way: the column is there and the earlier answers have no original.
+    assert "original_content" in _column_names(path, "messages")
+    assert {message["original_content"] for message in database.load_chat("busy")["messages"]} == {None}
+    assert "revision" in _column_names(path, "threads")
+    # The upgrade kept what it started from, in the shape the previous release reads.
+    snapshot = Path(f"{path}.pre-v4.bak")
+    assert _user_version(snapshot) == 4
+    assert "revision" not in _column_names(snapshot, "threads")
+    assert "original_content" not in _column_names(snapshot, "messages")
+    assert not Path(f"{path}.pre-v5.bak").exists()  # one snapshot per upgrade, of where it began
+    # And the counter carries on from there.
+    database.add_message("busy", "user", "next", expected_revision=3)
+    assert database.load_chat_overview("busy")["revision"] == 4
+
+
+def test_a_v5_database_upgrades_to_v6_keeping_its_originals_and_backfilling_revisions(tmp_path: Path) -> None:
+    """A database written by the release that added ``original_content``."""
+    path = tmp_path / "chats.sqlite"
+    _write_database_at(path, 5)
+
+    database = DatabaseManager(db_path=str(path))
+
+    assert _user_version(path) == 6
+    assert database.load_chat_overview("busy")["revision"] == 3
+    assert database.load_chat_overview("empty")["revision"] == 0
+    messages = database.load_chat("busy")["messages"]
+    assert [message["content"] for message in messages] == ["m0", "m1", "m2"]
+    assert [message["original_content"] for message in messages] == [None, ORIGINAL_OF_M1, None]
+    snapshot = Path(f"{path}.pre-v5.bak")
+    assert _user_version(snapshot) == 5
+    assert "revision" not in _column_names(snapshot, "threads")
+    assert _original_of(snapshot, "m1") == ORIGINAL_OF_M1
+    assert not Path(f"{path}.pre-v4.bak").exists()
+    database.add_message("busy", "user", "next", expected_revision=3)
+    assert database.load_chat_overview("busy")["revision"] == 4
+
+
+@pytest.mark.parametrize("previous_release_reads", [4, 5], ids=["reads-4", "reads-5"])
+def test_the_previous_release_refuses_the_upgraded_database_and_the_named_snapshot_restores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_release_reads: int
+) -> None:
+    """The rollback procedure for the revision column, end to end.
+
+    Schema 6 is what this release writes. The release before it reads schema 5
+    and the one before that reads 4. Each must refuse the upgraded file without
+    touching it and name the snapshot to go back to; following that advice (move
+    the database and its logs aside, copy the snapshot into place) gives back
+    every chat as it was when the upgrade ran.
+    """
+    path = tmp_path / "chats.sqlite"
+    _write_database_at(path, previous_release_reads)
+    upgraded = DatabaseManager(db_path=str(path))
+    upgraded.add_message("busy", "user", "written after the upgrade", expected_revision=3)
+    monkeypatch.setattr(DatabaseManager, "SCHEMA_VERSION", previous_release_reads)
+    snapshot_name = f"{path.name}.pre-v{previous_release_reads}.bak"
+
+    with pytest.raises(PersistenceError, match="schema version 6") as refused:
+        DatabaseManager(db_path=str(path))
+    assert snapshot_name in str(refused.value)
+
+    aside = tmp_path / "aside"
+    aside.mkdir()
+    for suffix in ("", "-wal", "-shm"):
+        if Path(f"{path}{suffix}").exists():
+            shutil.move(f"{path}{suffix}", aside / f"{path.name}{suffix}")
+    shutil.copy2(tmp_path / snapshot_name, path)
+    DatabaseManager(db_path=str(path))  # the previous release opens it again
+
+    assert _user_version(path) == previous_release_reads
+    assert "revision" not in _column_names(path, "threads")
+    assert _message_texts(path, "busy") == ["m0", "m1", "m2"]
+    if previous_release_reads >= 5:
+        assert _original_of(path, "m1") == ORIGINAL_OF_M1
+    # What was written after the upgrade is still in the file that was moved aside.
+    assert _message_texts(aside / path.name, "busy") == ["m0", "m1", "m2", "written after the upgrade"]
+    # Going forward again upgrades the restored file once more.
+    monkeypatch.undo()
+    again = DatabaseManager(db_path=str(path))
+    assert _user_version(path) == 6
+    assert again.load_chat_overview("busy")["revision"] == 3
+
+
+def test_running_the_revision_step_again_never_lowers_a_revision(tmp_path: Path) -> None:
+    database = DatabaseManager(db_path=str(tmp_path / "chats.sqlite"))
+    database.add_message("t", "user", "q", thread_title="T")
+    answer = database.add_message("t", "assistant", "a")
+    database.replace_message("t", int(answer), "a again")
+    assert database.load_chat_overview("t")["revision"] == 3  # two messages, one regeneration
+
+    connection = sqlite3.connect(database.db_path)
+    try:
+        storage._MIGRATIONS[6](connection)
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert database.load_chat_overview("t")["revision"] == 3
 
 
 def test_a_chat_pointing_at_a_vanished_group_is_returned_to_ungrouped(tmp_path: Path) -> None:
