@@ -306,8 +306,8 @@ class ExecutionRepository:
                 else "The execution store was written by a newer version of Cortex "
                 "and could not be set aside."
             ) from exc
-        # The retention window runs from now, not from the last write.
-        self._mark_aside_copy_seen(aside)
+        # The startup sweep that follows dates the copy from now, not from the
+        # last write, by marking it the first time it sees it.
         for suffix in ("-wal", "-shm"):
             # They describe the file just moved aside, so SQLite must not
             # replay them onto the empty replacement.
