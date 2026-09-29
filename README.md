@@ -162,8 +162,12 @@ Code execution is a separate capability from scratch computation:
 3. The user chooses **Allow once** or **Deny**. Permissions are not carried into
    the next run.
 4. An isolated, short-lived worker applies source, time, memory, output, and
-   child-process limits. Host operations go through the brokered `cortex` API;
-   environment variables, credentials, and application secrets are not inherited.
+   child-process limits. Host operations go through the brokered `cortex` API.
+   The worker is started with Cortex's own environment and clears the
+   environment variables it inherited (keeping only the Windows system root)
+   before it runs any source or makes any brokered call; the network broker
+   also ignores proxy settings. That is a clearing step inside the worker, not
+   a launch with a clean environment.
 5. The task tray records the lifecycle and renders structured output. Stop,
    cancellation, timeout, denial, and revoke invalidate the grant.
 
