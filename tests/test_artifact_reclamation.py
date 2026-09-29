@@ -315,6 +315,45 @@ def test_the_sweep_never_follows_or_removes_a_link(tmp_path):
     assert link.is_symlink()
 
 
+def _make_junction(link: Path, target: Path) -> None:
+    """A real directory junction: a reparse point ``lstat`` reports as a plain directory."""
+
+    if os.name != "nt":
+        pytest.skip("directory junctions exist only on Windows")
+    import _winapi  # type: ignore[import-not-found]
+
+    try:
+        _winapi.CreateJunction(str(target), str(link))
+    except OSError:
+        pytest.skip("directory junctions cannot be created here")
+
+
+@pytest.mark.parametrize("name", ("job-junction", ".recipe-job-gone-abcd1234"))
+def test_the_sweep_never_follows_or_removes_a_junction(tmp_path, name):
+    """A symbolic link reads as a link to ``lstat``; a junction reads as a directory.
+
+    Only the reparse-point check stands between the sweep and the files the
+    junction leads to, so it needs a real junction to be tested at all.
+    """
+
+    repository = _repository(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / f".tmp-{'e' * 32}").write_bytes(b"not ours")
+    _age(outside / f".tmp-{'e' * 32}")
+    (outside / "output").write_bytes(b"not ours either")
+    junction = repository.artifact_root / name
+    _make_junction(junction, outside)
+    try:
+        assert repository.sweep_artifact_root() == 0
+
+        assert (outside / f".tmp-{'e' * 32}").read_bytes() == b"not ours"
+        assert (outside / "output").read_bytes() == b"not ours either"
+        assert junction.is_junction()
+    finally:
+        os.rmdir(junction)  # removes the junction itself and nothing behind it
+
+
 def test_the_sweep_is_bounded_and_resumes_where_it_stopped(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     directories = []

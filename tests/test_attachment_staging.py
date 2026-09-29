@@ -324,6 +324,32 @@ def test_a_retry_never_changes_the_payload_check_or_an_existing_success(executio
     assert conflict.value.code == "request_conflict"
 
 
+def test_a_repeated_request_reads_the_staged_bytes_as_their_owner_never_unscoped(
+    execution_repository, monkeypatch
+):
+    """``get_artifact`` is owner-scoped; the read that follows it must be too.
+
+    The two calls are separate queries, so an unscoped read would trust
+    whatever the first one saw.
+    """
+
+    repository, _boundary, service = _service_over(execution_repository)
+    content = _image_bytes()
+    service.stage(owner=OWNER, request_id="attach-owner", content=content)
+    real_read = repository.read_artifact
+    owners: list[str | None] = []
+
+    def recording(artifact_id, *, owner=None):
+        owners.append(owner)
+        return real_read(artifact_id, owner=owner)
+
+    monkeypatch.setattr(repository, "read_artifact", recording)
+
+    service.stage(owner=OWNER, request_id="attach-owner", content=content)
+
+    assert owners == [OWNER]
+
+
 def test_a_stager_finishing_after_its_job_was_retired_reports_failure_and_drops_the_artifact(
     execution_repository, monkeypatch
 ):
