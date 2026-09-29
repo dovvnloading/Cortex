@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     CodeProposalRejection,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationStats,
     MemoryCommand,
@@ -136,6 +137,27 @@ class FakeGenerationEngine:
 
     def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
         self._status_callback = callback
+
+    def plan_fixed_prompt(
+        self,
+        *,
+        query: str,
+        user_system_instructions: str | None,
+        memories_enabled: bool,
+        code_execution_eligible: bool,
+        bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
+        num_ctx: int,
+        model: str | None = None,
+    ) -> FixedPromptPlan:
+        """Keep everything: the fake has no real context pressure."""
+
+        del query, user_system_instructions, bypass_system_prompt, host_observations
+        del num_ctx, model
+        return FixedPromptPlan(
+            memories_enabled=memories_enabled,
+            code_execution_eligible=code_execution_eligible,
+        )
 
     def fit_memories_to_context(
         self,

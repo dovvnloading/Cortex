@@ -598,6 +598,14 @@ def test_the_service_uses_both_renderings_the_engine_returns() -> None:
         def set_status_callback(self, callback):
             del callback
 
+        def plan_fixed_prompt(self, *, memories_enabled, code_execution_eligible, **kwargs):
+            del kwargs
+            from cortex_backend.core.generation import FixedPromptPlan
+
+            return FixedPromptPlan(
+                memories_enabled=memories_enabled, code_execution_eligible=code_execution_eligible
+            )
+
         def fit_memories_to_context(self, memories, **kwargs):
             del kwargs
             return list(memories)

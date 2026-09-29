@@ -23,11 +23,13 @@ import httpx
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     CodeProposalRejection,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+    prompt_too_long_message,
 )
 from cortex_backend.execution.code_execution import (
     CodeCapabilities,
@@ -713,6 +715,66 @@ class SynthesisAgent:
         context_limit = max(256, int(num_ctx))
         return max(256, min(1024, context_limit // 4))
 
+    @classmethod
+    def plan_fixed_prompt(
+        cls,
+        *,
+        query: str,
+        user_system_instructions: str | None,
+        memories_enabled: bool,
+        code_execution_eligible: bool,
+        bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
+        num_ctx: int,
+        model: str | None = None,
+    ) -> FixedPromptPlan:
+        """Settle what the fixed part of a turn keeps, before any history or document is sized.
+
+        History and attachments are fitted to the room the fixed part leaves, so
+        they cannot help when the fixed part alone is too big: the system prompt,
+        the memory instructions (a few thousand characters whether or not there
+        is a memory yet), the code-task contract and the message itself can
+        together outgrow a small window, and a large message outgrows even the
+        default one. The runtime then truncates the prompt without saying so.
+
+        The optional parts go first -- the memory instructions and stored
+        memories, then the code-task contract -- and the plan says which went,
+        so the user can be told. ``fits`` is ``False`` when even the system
+        prompt, the user's instructions, tool observations and the message do
+        not fit: there is nothing left to drop, and such a turn is not sent.
+        """
+        limit = max(256, int(num_ctx)) - cls.output_token_reservation(num_ctx)
+        rungs = [(memories_enabled, code_execution_eligible)]
+        if memories_enabled:
+            rungs.append((False, code_execution_eligible))
+        if code_execution_eligible:
+            rungs.append((False, False))
+        for memories, contract in rungs:
+            prompt = PromptTemplate.build_synthesis_prompt(
+                query,
+                "No history available.",
+                [],
+                memories,
+                user_system_instructions,
+                code_execution_eligible=contract,
+                bypass_system_prompt=bypass_system_prompt,
+                host_observations=host_observations,
+            )
+            if cls.estimate_prompt_tokens(prompt, model) <= limit:
+                return FixedPromptPlan(
+                    memories_enabled=memories,
+                    code_execution_eligible=contract,
+                    dropped_memories=memories_enabled and not memories,
+                    dropped_code_contract=code_execution_eligible and not contract,
+                )
+        return FixedPromptPlan(
+            memories_enabled=False,
+            code_execution_eligible=False,
+            fits=False,
+            dropped_memories=memories_enabled,
+            dropped_code_contract=code_execution_eligible,
+        )
+
     @staticmethod
     def _chars_within(text: str, tokens: int, ratio: float) -> int:
         """How many leading characters of ``text`` fit in ``tokens``, margin included."""
@@ -1370,6 +1432,30 @@ class SynthesisAgent:
         # call always carries num_ctx, so the fallback only matters for options
         # built by hand without one.
         num_ctx = int(api_options.get("num_ctx", 8192))
+        # The last gate before the runtime. GenerationService settles this
+        # earlier and sizes history around the result, so a turn that comes
+        # through it always passes; this is for whatever calls the engine
+        # directly. Nothing known to overflow the window is ever sent -- the
+        # runtime would truncate it silently, system prompt first -- so a
+        # prompt whose fixed part is over the limit as given is refused, not
+        # trimmed here. Raised outside the try below on purpose: that block
+        # turns every failure into a runtime-failure message.
+        plan = self.plan_fixed_prompt(
+            query=query,
+            user_system_instructions=user_system_instructions,
+            memories_enabled=memories_enabled,
+            code_execution_eligible=self.code_execution_eligible,
+            bypass_system_prompt=self.bypass_system_prompt,
+            host_observations=host_observations,
+            num_ctx=num_ctx,
+            model=self.gen_model,
+        )
+        if not plan.fits or plan.dropped_memories or plan.dropped_code_contract:
+            raise ModelOperationError(
+                prompt_too_long_message(num_ctx),
+                operation="generation",
+                error_details="prompt_too_long",
+            )
         fitted_attachments = self.fit_attachments_to_context(
             attachments,
             query=query,

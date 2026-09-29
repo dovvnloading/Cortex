@@ -30,6 +30,10 @@ ProgressPhase = Literal[
     "history_truncated",
     # ``attachment_truncated``: document text was cut to fit the window.
     "attachment_truncated",
+    # ``prompt_trimmed``: the memory instructions, the code-task instructions,
+    # or both, were left out of this turn because the window could not hold
+    # them beside the system prompt and the message.
+    "prompt_trimmed",
     # ``context_full``: the runtime reported a prompt that filled the window,
     # so it may have discarded the oldest part of it on its own.
     "context_full",

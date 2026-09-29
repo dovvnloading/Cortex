@@ -421,6 +421,12 @@ async def _start_generation_job(
             compute_observation=compute_observation,
             attachments=resolved_attachments,
         )
+        # A message the model's window cannot hold is refused here, before the
+        # user turn is saved or a job starts. The client gets a rejected request
+        # rather than a failed job, so the text is still in the composer to
+        # shorten and the chat has nothing added to it. The prompt is otherwise
+        # sent to a runtime that truncates it silently, system prompt first.
+        await asyncio.to_thread(deps.generation.ensure_prompt_fits, generation_snapshot)
 
         user_message_id: str | None = None
         prepared_revision: int | None = None

@@ -11,6 +11,7 @@ import unittest
 
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationSnapshot,
     GenerationStats,
@@ -54,6 +55,12 @@ class _FakeEngine:
 
     def set_status_callback(self, callback) -> None:
         self._status_callback = callback
+
+    def plan_fixed_prompt(self, *, memories_enabled, code_execution_eligible, **kwargs):
+        del kwargs
+        return FixedPromptPlan(
+            memories_enabled=memories_enabled, code_execution_eligible=code_execution_eligible
+        )
 
     def fit_memories_to_context(
         self,

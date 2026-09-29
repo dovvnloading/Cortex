@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import inspect
 import logging
 from threading import Event
@@ -13,14 +13,17 @@ from typing import Any, Protocol
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     CodeProposalRejection,
+    FixedPromptPlan,
     GenerationAttachment,
     GenerationSnapshot,
     GenerationStats,
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+    prompt_too_long_message,
 )
 
+from .chat import ChatDomainError
 from .history_window import (
     HistoryWindowReport,
     describe_history_window,
@@ -106,6 +109,20 @@ def _history_notice(report: HistoryWindowReport) -> str:
     return " ".join(parts)
 
 
+def _prompt_trim_notice(plan: FixedPromptPlan) -> str:
+    """What the user is told when the memory or code-task instructions did not fit the window."""
+    left_out = []
+    if plan.dropped_memories:
+        left_out.append("Your saved memories")
+    if plan.dropped_code_contract:
+        left_out.append("the local code-task instructions")
+    return (
+        f"{' and '.join(left_out)} did not fit the model's context window, "
+        "so they were left out of this reply. "
+        "Raise the context window in Settings to include them."
+    )
+
+
 class GenerationEngine(Protocol):
     """Model-facing operations required by the generation use case.
 
@@ -125,6 +142,29 @@ class GenerationEngine(Protocol):
         ``None`` detaches it. The chat client behind a real engine is
         process-wide, so a callback left installed keeps the turn that made it
         -- and everything its closure holds -- alive past that turn's end.
+        """
+
+    def plan_fixed_prompt(
+        self,
+        *,
+        query: str,
+        user_system_instructions: str | None,
+        memories_enabled: bool,
+        code_execution_eligible: bool,
+        bypass_system_prompt: bool = False,
+        host_observations: str | None = None,
+        num_ctx: int,
+        model: str | None = None,
+    ) -> FixedPromptPlan:
+        """Settle which optional parts of the fixed prompt fit, or whether it fits at all.
+
+        Asked before memories, history and attachments are sized, because they
+        are all fitted to the room the fixed part leaves. The memory
+        instructions and the code-task contract are dropped from a turn whose
+        window cannot hold them, and the plan says so; ``fits`` is ``False``
+        when even the system prompt and the message do not fit, in which case
+        the turn is refused rather than sent to a runtime that would truncate
+        it without saying so.
         """
 
     def fit_memories_to_context(
@@ -299,6 +339,38 @@ class GenerationService:
         self._memory_loader = memory_loader
         self._engine_factory = engine_factory
 
+    @staticmethod
+    def _plan_fixed_prompt(
+        engine: GenerationEngine, snapshot: GenerationSnapshot, num_ctx: int
+    ) -> FixedPromptPlan:
+        return engine.plan_fixed_prompt(
+            query=snapshot.user_input,
+            user_system_instructions=snapshot.user_system_instructions,
+            memories_enabled=snapshot.memories_enabled,
+            code_execution_eligible=snapshot.code_execution_eligible,
+            bypass_system_prompt=snapshot.bypass_system_prompt,
+            host_observations=snapshot.host_observations,
+            num_ctx=num_ctx,
+            model=snapshot.model,
+        )
+
+    def ensure_prompt_fits(self, snapshot: GenerationSnapshot) -> None:
+        """Refuse a message the model's context window cannot hold, before the turn exists.
+
+        Called at admission, ahead of the user turn being saved and the job
+        starting, so the refusal reaches the person who typed it as a rejected
+        request: the message is still in the composer to shorten, nothing has
+        been added to the chat, and the runtime is never called. Only the
+        fixed part of the prompt is judged -- what is optional (memories, the
+        code-task instructions) is dropped later, and history and attachments
+        shrink to fit -- so this fails only for a message that could never be
+        sent.
+        """
+        num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
+        plan = self._plan_fixed_prompt(self._engine_factory(snapshot), snapshot, num_ctx)
+        if not plan.fits:
+            raise ChatDomainError(prompt_too_long_message(num_ctx), code="invalid_input")
+
     def generate(
         self,
         snapshot: GenerationSnapshot,
@@ -312,9 +384,6 @@ class GenerationService:
         self._check_cancelled(cancellation_event)
         self._publish(sink, snapshot, "analysis", "Analyzing the request...")
 
-        permanent_memories = (
-            list(self._memory_loader()) if snapshot.memories_enabled else []
-        )
         # A real snapshot always carries num_ctx (GENERATION_OVERRIDE_FIELDS
         # guarantees it); this fallback only matters for callers that build
         # model_options by hand, so it stays in step with GenerationSettings'
@@ -322,6 +391,49 @@ class GenerationService:
         num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
         self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
         engine = self._engine_factory(snapshot)
+        # Before anything else is sized: memories, history and attachments are
+        # all fitted to what the fixed part leaves, so a fixed part that is too
+        # big is settled first, and a message that cannot fit is refused here,
+        # ahead of any call to the runtime.
+        plan = self._plan_fixed_prompt(engine, snapshot, num_ctx)
+        if not plan.fits:
+            raise ModelOperationError(
+                prompt_too_long_message(num_ctx),
+                operation="generation",
+                error_details="prompt_too_long",
+            )
+        if plan.dropped_memories or plan.dropped_code_contract:
+            # A narrower turn is a different admission: the engine is built from
+            # it so the prompt it assembles is the one history was sized for,
+            # and a memory command or code proposal the model was never asked
+            # for is not acted on.
+            snapshot = replace(
+                snapshot,
+                memories_enabled=plan.memories_enabled,
+                code_execution_eligible=plan.code_execution_eligible,
+            )
+            engine = self._engine_factory(snapshot)
+            # Flags and a size only: nothing of the message or the memories.
+            logging.info(
+                "Left memories=%s and the code contract=%s out of a turn that did not fit a %d-token window.",
+                plan.dropped_memories,
+                plan.dropped_code_contract,
+                num_ctx,
+            )
+            self._publish(
+                sink,
+                snapshot,
+                "prompt_trimmed",
+                _prompt_trim_notice(plan),
+                data={
+                    "notice": True,
+                    "dropped_memories": plan.dropped_memories,
+                    "dropped_code_contract": plan.dropped_code_contract,
+                },
+            )
+        permanent_memories = (
+            list(self._memory_loader()) if snapshot.memories_enabled else []
+        )
         if snapshot.memories_enabled:
             permanent_memories = engine.fit_memories_to_context(
                 permanent_memories,
