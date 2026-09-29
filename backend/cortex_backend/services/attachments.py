@@ -26,6 +26,12 @@ from uuid import uuid4
 
 from PIL import Image
 
+from cortex_backend.execution.attachment_staging import (
+    ABANDONED_STAGE_SECONDS,
+    ATTACHMENT_INTERRUPTED,
+    ATTACHMENT_INTERRUPTED_MESSAGE,
+    STAGING_LEASE_SECONDS,
+)
 from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
 
 
@@ -357,8 +363,50 @@ class ChatAttachmentService:
         )
         if not created:
             return self._existing(job, payload, content)
+
+        # A stager that dies between creating the job and finishing it leaves a
+        # queued job that recovery cannot see unless it holds a lease, and that
+        # nothing else ever retires. Holding a short lease while the bytes are
+        # staged makes the job findable, and it is released on every exit that
+        # runs code. This is the same window the execution staging closes.
+        lease_owner = f"chat-attachment-stager-{uuid4().hex}"
         try:
-            artifact = self.repository.publish_artifact(
+            self.repository.claim_lease(
+                job.job_id, lease_owner=lease_owner, ttl_seconds=STAGING_LEASE_SECONDS
+            )
+        except ExecutionRepositoryError as exc:
+            self._fail(job.job_id)
+            raise ChatAttachmentError("attachment_persist_failed") from exc
+        try:
+            return self._stage_created(
+                job,
+                safe_name=safe_name,
+                kind=kind,
+                mime_type=mime_type,
+                content=content,
+                digest=digest,
+            )
+        finally:
+            try:
+                self.repository.release_lease(job.job_id, lease_owner=lease_owner)
+            except Exception:
+                pass  # It expires by itself; nothing here may replace the real outcome.
+
+    def _stage_created(
+        self,
+        job: Any,
+        *,
+        safe_name: str,
+        kind: str,
+        mime_type: str,
+        content: bytes,
+        digest: str,
+    ) -> ChatAttachment:
+        repository = self.repository
+        if repository is None:
+            raise ChatAttachmentError("attachment_unavailable")
+        try:
+            artifact = repository.publish_artifact(
                 job.job_id,
                 name=f"chat-{digest[:24]}.bin",
                 content=content,
@@ -374,7 +422,7 @@ class ChatAttachmentService:
                 kind=kind,
                 expires_at=artifact.expires_at,
             )
-            self.repository.transition(
+            repository.transition(
                 job.job_id,
                 status="succeeded",
                 event="completed",
@@ -384,18 +432,25 @@ class ChatAttachmentService:
             )
             return descriptor
         except (ExecutionRepositoryError, OSError) as exc:
-            try:
-                self.repository.transition(
-                    job.job_id,
-                    status="failed",
-                    event="failed",
-                    phase="failed",
-                    data={"message": "Chat attachment staging failed."},
-                    error="attachment_persist_failed",
-                )
-            except Exception:
-                pass
+            self._fail(job.job_id)
             raise ChatAttachmentError("attachment_persist_failed") from exc
+
+    def _fail(self, job_id: str) -> None:
+        """Record a failed staging job; best effort, because the caller is already raising."""
+
+        if self.repository is None:
+            return
+        try:
+            self.repository.transition(
+                job_id,
+                status="failed",
+                event="failed",
+                phase="failed",
+                data={"message": "Chat attachment staging failed."},
+                error="attachment_persist_failed",
+            )
+        except Exception:
+            pass
 
     def resolve(self, *, owner: str, descriptor: Mapping[str, Any] | ChatAttachment) -> ResolvedChatAttachment:
         _safe_owner(owner)
@@ -478,8 +533,36 @@ class ChatAttachmentService:
             return True
         return expiry <= now
 
+    def _retire_if_abandoned(self, job: Any) -> Any:
+        """Fail a job whose stager died, and return the job as it now reads.
+
+        The store decides, atomically, that nothing is working on it: no live
+        lease and no write for ABANDONED_STAGE_SECONDS. A job that is merely
+        slow, or that finished in the meantime, comes back as it is.
+        """
+
+        if self.repository is None:
+            return job
+        try:
+            current = self.repository.retire_abandoned_job(
+                job.job_id,
+                idle_seconds=ABANDONED_STAGE_SECONDS,
+                error=ATTACHMENT_INTERRUPTED,
+                message=ATTACHMENT_INTERRUPTED_MESSAGE,
+            )
+        except ExecutionRepositoryError:
+            return job
+        return job if current is None else current
+
     def _existing(self, job: Any, payload: Mapping[str, Any], content: bytes) -> ChatAttachment:
-        if job.profile != CHAT_ATTACHMENT_PROFILE or dict(job.payload) != dict(payload) or job.status != "succeeded":
+        if job.profile != CHAT_ATTACHMENT_PROFILE or dict(job.payload) != dict(payload):
+            raise ChatAttachmentError("attachment_request_conflict")
+        if job.status in {"queued", "running"}:
+            # Only the request that matches the job may retire it, and only a
+            # job nobody is working on: a stager killed part-way otherwise
+            # left it queued for good.
+            job = self._retire_if_abandoned(job)
+        if job.status != "succeeded":
             raise ChatAttachmentError("attachment_request_conflict")
         result = job.result
         descriptor = self._normalize_descriptor(result)

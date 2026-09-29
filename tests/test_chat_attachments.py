@@ -6,6 +6,7 @@ import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import hashlib
 from io import BytesIO
 from pathlib import Path
 import struct
@@ -20,6 +21,7 @@ from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.core.generation import GenerationAttachment
 import cortex_backend.services.attachments as attachments_module
 from cortex_backend.services.attachments import (
+    CHAT_ATTACHMENT_PROFILE,
     ChatAttachmentError,
     ChatAttachmentService,
     MAX_CHAT_IMAGE_DECODED_BYTES,
@@ -28,7 +30,12 @@ from cortex_backend.services.attachments import (
 )
 from cortex_backend.services.llm import PromptTemplate
 from cortex_backend.testing.fake_ollama import FakeOllamaState
-from cortex_backend.execution.repository import ExecutionRepository
+from cortex_backend.execution.attachment_staging import (
+    ABANDONED_STAGE_SECONDS,
+    ATTACHMENT_INTERRUPTED,
+    STAGING_LEASE_SECONDS,
+)
+from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
 from support import session_headers as _session
 
 
@@ -341,6 +348,202 @@ def test_durable_staging_is_idempotent_and_integrity_checked(tmp_path: Path):
     with pytest.raises(ChatAttachmentError) as foreign:
         service.resolve(owner="owner-b", descriptor=first)
     assert foreign.value.code == "attachment_unavailable"
+
+
+# -- A stager that dies part-way must not leave its job queued for good ---------------
+
+
+class _HardKill(BaseException):
+    """Stands in for a killed process: nothing in a ``finally`` runs when one dies."""
+
+
+_OWNER = "owner-a"
+_STAGED = b"durable reference"
+
+
+def _durable(tmp_path: Path) -> tuple[ExecutionRepository, ChatAttachmentService]:
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    return repository, ChatAttachmentService(repository)
+
+
+def _stage(service: ChatAttachmentService, request_id: str, content: bytes = _STAGED):
+    return service.stage(
+        owner=_OWNER, request_id=request_id, filename="reference.txt", content=content
+    )
+
+
+def _queued_job(repository: ExecutionRepository, request_id: str, job_id: str):
+    """A chat attachment job whose stager is gone: created, never finished."""
+
+    payload = {
+        "filename": "reference.txt",
+        "mime_type": "text/plain",
+        "kind": "document",
+        "size": len(_STAGED),
+        "sha256": hashlib.sha256(_STAGED).hexdigest(),
+    }
+    job, _ = repository.create_job(
+        job_id=job_id,
+        owner=_OWNER,
+        request_id=request_id,
+        profile=CHAT_ATTACHMENT_PROFILE,
+        payload=payload,
+    )
+    return job
+
+
+def _stage_and_die_holding_the_lease(service, repository, monkeypatch, request_id: str) -> str:
+    """Run a stage that is killed mid-way; return the job it left behind."""
+
+    def killed(*_args, **_kwargs):
+        raise _HardKill
+
+    with monkeypatch.context() as crash:
+        crash.setattr(repository, "publish_artifact", killed)
+        # A killed process never reaches its ``finally`` blocks.
+        crash.setattr(repository, "release_lease", lambda *_a, **_k: None)
+        with pytest.raises(_HardKill):
+            _stage(service, request_id)
+    (job,) = repository.list_jobs(owner=_OWNER)
+    return job.job_id
+
+
+def test_the_staging_lease_is_held_while_bytes_are_staged_and_released_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository, service = _durable(tmp_path)
+    real_publish = repository.publish_artifact
+    seen_during: list[str | None] = []
+
+    def observing(job_id, **kwargs):
+        seen_during.append(repository.lease_holder(job_id))
+        return real_publish(job_id, **kwargs)
+
+    monkeypatch.setattr(repository, "publish_artifact", observing)
+    _stage(service, "lease-held")
+
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert len(seen_during) == 1 and seen_during[0] is not None
+    assert job.status == "succeeded"
+    assert repository.lease_holder(job.job_id) is None
+
+
+def test_the_staging_lease_is_released_and_the_job_failed_when_staging_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository, service = _durable(tmp_path)
+
+    def refuses(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(repository, "publish_artifact", refuses)
+    with pytest.raises(ChatAttachmentError) as failure:
+        _stage(service, "lease-failed")
+
+    assert failure.value.code == "attachment_persist_failed"
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert (job.status, job.error) == ("failed", "attachment_persist_failed")
+    assert repository.lease_holder(job.job_id) is None
+
+
+def test_a_lease_that_cannot_be_taken_fails_the_job_instead_of_leaving_it_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository, service = _durable(tmp_path)
+
+    def refuses(*_args, **_kwargs):
+        raise ExecutionRepositoryError("SQLite execution operation failed.")
+
+    monkeypatch.setattr(repository, "claim_lease", refuses)
+    with pytest.raises(ChatAttachmentError) as failure:
+        _stage(service, "lease-refused")
+
+    assert failure.value.code == "attachment_persist_failed"
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert job.status == "failed"
+    with repository.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0] == 0
+
+
+def test_a_stager_that_died_holding_its_lease_is_found_by_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen_clock
+):
+    repository, service = _durable(tmp_path)
+    job_id = _stage_and_die_holding_the_lease(service, repository, monkeypatch, "crash-recovery")
+
+    assert repository.get_job(job_id).status == "queued"
+    assert repository.lease_holder(job_id) is not None
+    frozen_clock.advance(STAGING_LEASE_SECONDS + 1)
+    assert repository.recover_expired_leases() == [job_id]
+
+
+def test_a_retry_after_a_crashed_stage_retires_the_job_instead_of_leaving_it_queued_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen_clock
+):
+    """A kill between creating the job and finishing it left it queued for good.
+
+    Nothing ever finished it, so it stayed in the task tray, and the request id
+    answered the same conflict on every retry. The retry now retires a job
+    nobody is working on; the answer is unchanged and stable.
+    """
+
+    repository, service = _durable(tmp_path)
+    job_id = _stage_and_die_holding_the_lease(service, repository, monkeypatch, "crash-retry")
+    frozen_clock.advance(ABANDONED_STAGE_SECONDS + 1)
+
+    for _ in range(2):  # the answer is stable, not a one-off
+        with pytest.raises(ChatAttachmentError) as retry:
+            _stage(service, "crash-retry")
+        assert retry.value.code == "attachment_request_conflict"
+
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert (job.status, job.error) == ("failed", ATTACHMENT_INTERRUPTED)
+    assert [event.event for event in repository.events(job_id)].count("failed") == 1
+    assert repository.lease_holder(job_id) is None
+    assert repository.list_jobs(owner=_OWNER) == []  # no longer a task in the tray
+
+
+def test_a_recent_or_leased_stage_is_left_alone_by_a_retry(tmp_path: Path, frozen_clock):
+    repository, service = _durable(tmp_path)
+    job = _queued_job(repository, "quiet", "job-quiet")
+    frozen_clock.advance(ABANDONED_STAGE_SECONDS - 5)
+
+    with pytest.raises(ChatAttachmentError) as recent:
+        _stage(service, "quiet")
+    assert recent.value.code == "attachment_request_conflict"
+    assert repository.get_job(job.job_id).status == "queued"
+
+    # Old enough to be abandoned, but another stager holds a live lease on it.
+    frozen_clock.advance(ABANDONED_STAGE_SECONDS)
+    repository.claim_lease(job.job_id, lease_owner="another-stager", ttl_seconds=STAGING_LEASE_SECONDS)
+    with pytest.raises(ChatAttachmentError):
+        _stage(service, "quiet")
+    assert repository.get_job(job.job_id).status == "queued"
+
+
+def test_a_conflicting_retry_does_not_retire_the_job_it_conflicts_with(tmp_path: Path, frozen_clock):
+    repository, service = _durable(tmp_path)
+    job = _queued_job(repository, "conflict", "job-abandoned")
+    frozen_clock.advance(ABANDONED_STAGE_SECONDS * 2)
+
+    with pytest.raises(ChatAttachmentError) as conflict:
+        _stage(service, "conflict", content=b"different bytes")
+
+    assert conflict.value.code == "attachment_request_conflict"
+    assert repository.get_job(job.job_id).status == "queued"  # only the matching request may retire it
+
+
+def test_a_retry_never_changes_an_existing_success(tmp_path: Path, frozen_clock):
+    repository, service = _durable(tmp_path)
+    first = _stage(service, "done")
+    frozen_clock.advance(ABANDONED_STAGE_SECONDS * 10)
+
+    again = _stage(service, "done")
+
+    assert again == first
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert job.status == "succeeded"
 
 
 def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
