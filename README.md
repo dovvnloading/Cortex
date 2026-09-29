@@ -112,6 +112,11 @@ transcript.](.github/images/workspace-light.png)
   length cap. A local model can also be run raw: **Bypass Cortex's default
   system prompt** leaves the built-in identity and safety instructions out of
   the request entirely. It is off by default and takes a deliberate opt-in.
+- **Model loading.** When Ollama has to load a model into memory, the turn says
+  so instead of looking hung. Cortex asks Ollama to keep the model loaded for
+  five minutes after each turn; the `generation.keep_alive_minutes` setting
+  changes that (`0` leaves Ollama's own default alone, `-1` keeps the model
+  loaded until Ollama stops). It has no control in the Settings panel yet.
 - **Model details.** The Models panel shows each installed model's parameter
   size, quantization, and context length alongside its name, read from Ollama's
   existing model-detail response.

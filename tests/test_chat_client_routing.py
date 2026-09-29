@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -296,6 +297,200 @@ def test_ollama_chat_client_streams_the_full_response_when_not_cancelled() -> No
     assert result["message"]["content"] == "Hello"
     assert result["prompt_eval_count"] == 5
     assert result["eval_count"] == 3
+
+
+class _ResidencyOllama:
+    """An Ollama client stub that says which models are loaded and keeps the order of its calls."""
+
+    def __init__(self, resident=(), *, ps_error: Exception | None = None, ps_answer=None) -> None:
+        self.resident = list(resident)
+        self.ps_error = ps_error
+        self.ps_answer = ps_answer
+        self.events: list[str] = []
+        self.chat_kwargs: dict = {}
+
+    def ps(self):
+        self.events.append("ps")
+        if self.ps_error is not None:
+            raise self.ps_error
+        if self.ps_answer is not None:
+            return self.ps_answer
+        return SimpleNamespace(models=[SimpleNamespace(model=name) for name in self.resident])
+
+    def chat(self, *, model, messages, options, stream=False, **extra):
+        del model, messages
+        self.events.append("chat")
+        self.chat_kwargs = {"options": options, **extra}
+        if stream:
+            return iter([{"message": {"content": "hi"}, "done": True}])
+        return {"message": {"content": "hi"}}
+
+
+def _client_reporting_to(stub: _ResidencyOllama) -> OllamaChatClient:
+    client = OllamaChatClient(stub)
+    client.set_status_callback(lambda message: stub.events.append(f"status:{message}"))
+    return client
+
+
+def test_ollama_reports_a_loading_phase_when_the_model_is_not_resident() -> None:
+    stub = _ResidencyOllama(resident=["something-else:1b"])
+
+    _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    # Said before the request that pays for the load, not after it.
+    assert stub.events == ["ps", "status:Loading qwen3:8b into Ollama...", "chat"]
+
+
+@pytest.mark.parametrize(
+    ("resident", "asked"),
+    [
+        (["qwen3:8b"], "qwen3:8b"),
+        (["qwen3:8b", "other:1b"], "qwen3:8b"),
+        (["llama3:latest"], "llama3"),
+        (["llama3"], "llama3:latest"),
+    ],
+)
+def test_ollama_says_nothing_when_the_model_is_already_loaded(resident: list[str], asked: str) -> None:
+    stub = _ResidencyOllama(resident=resident)
+
+    _client_reporting_to(stub).chat(model=asked, messages=[], options={})
+
+    assert stub.events == ["ps", "chat"]
+
+
+def test_ollama_reads_a_loaded_model_from_a_mapping_answer_too() -> None:
+    stub = _ResidencyOllama(ps_answer={"models": [{"name": "qwen3:8b"}]})
+
+    _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    assert stub.events == ["ps", "chat"]
+
+
+@pytest.mark.parametrize(
+    "stub",
+    [
+        _ResidencyOllama(ps_error=ConnectionError("Ollama is not running")),
+        _ResidencyOllama(ps_answer=SimpleNamespace(unexpected=True)),
+        _ResidencyOllama(ps_answer={"models": None}),
+    ],
+)
+def test_ollama_reports_no_load_when_it_cannot_say_and_still_asks_the_model(
+    stub: _ResidencyOllama,
+) -> None:
+    result = _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    assert result["message"]["content"] == "hi"
+    assert stub.events == ["ps", "chat"]
+
+
+def test_ollama_does_not_ask_which_models_are_loaded_when_nobody_is_listening() -> None:
+    stub = _ResidencyOllama()
+    client = OllamaChatClient(stub)
+
+    client.chat(model="qwen3:8b", messages=[], options={})
+    client.set_status_callback(lambda message: None)
+    client.set_status_callback(None)
+    client.chat(model="qwen3:8b", messages=[], options={})
+
+    assert stub.events == ["chat", "chat"]
+
+
+def test_a_client_without_a_way_to_list_loaded_models_is_left_alone() -> None:
+    class _NoPs:
+        def chat(self, *, model, messages, options):
+            return {"message": {"content": "hi"}}
+
+    statuses: list[str] = []
+    client = OllamaChatClient(_NoPs())
+    client.set_status_callback(statuses.append)
+
+    assert client.chat(model="m", messages=[], options={})["message"]["content"] == "hi"
+    assert statuses == []
+
+
+def test_the_loading_phase_is_reported_on_the_streaming_path_and_not_for_a_cancelled_turn() -> None:
+    stub = _ResidencyOllama()
+    client = _client_reporting_to(stub)
+
+    client.chat(model="qwen3:8b", messages=[], options={}, cancellation_event=Event())
+    assert stub.events == ["ps", "status:Loading qwen3:8b into Ollama...", "chat"]
+
+    stub.events.clear()
+    stopped = Event()
+    stopped.set()
+    client.chat(model="qwen3:8b", messages=[], options={}, cancellation_event=stopped)
+    assert stub.events == []
+
+
+def test_the_routing_client_reaches_the_ollama_client_with_the_status_callback() -> None:
+    stub = _ResidencyOllama()
+    router = RoutingChatClient(OllamaChatClient(stub), _RecordingLlamaCppClient())
+    statuses: list[str] = []
+    router.set_status_callback(statuses.append)
+
+    router.chat(model="qwen3:8b", messages=[], options={})
+
+    assert statuses == ["Loading qwen3:8b into Ollama..."]
+
+
+def test_keep_alive_travels_as_a_request_field_and_not_as_an_option() -> None:
+    stub = _ResidencyOllama()
+
+    OllamaChatClient(stub).chat(
+        model="m",
+        messages=[],
+        options={"temperature": 0.5, "keep_alive": "5m", "grammar": "root ::= x"},
+    )
+
+    assert stub.chat_kwargs == {"options": {"temperature": 0.5}, "keep_alive": "5m"}
+
+
+def test_keep_alive_is_sent_on_the_streaming_path_too_and_only_when_asked_for() -> None:
+    stub = _ResidencyOllama()
+    client = OllamaChatClient(stub)
+
+    client.chat(model="m", messages=[], options={"keep_alive": -1}, cancellation_event=Event())
+    assert stub.chat_kwargs == {"options": {}, "keep_alive": -1}
+
+    client.chat(model="m", messages=[], options={"num_ctx": 4096}, cancellation_event=Event())
+    assert stub.chat_kwargs == {"options": {"num_ctx": 4096}}
+
+
+def test_the_keep_alive_setting_maps_to_what_ollama_is_sent() -> None:
+    from cortex_backend.services.chat_client import ollama_keep_alive
+
+    assert ollama_keep_alive(5) == "5m"
+    assert ollama_keep_alive(90) == "90m"
+    assert ollama_keep_alive(-1) == -1
+    # Zero leaves Ollama's own default alone; it is never sent, because Ollama
+    # itself would read a 0 as "unload the model right now".
+    assert ollama_keep_alive(0) is None
+
+
+def test_llamacpp_never_sees_keep_alive() -> None:
+    from cortex_backend.llamacpp.chat_client import _build_request_body
+
+    body = _build_request_body(
+        [{"role": "user", "content": "hi"}], {"temperature": 0.2, "keep_alive": "5m"}, stream=False
+    )
+
+    assert "keep_alive" not in body
+    assert body["temperature"] == 0.2
+
+
+def test_the_follow_up_calls_keep_the_turns_keep_alive_beside_its_window() -> None:
+    """The title and translation calls run last, and each restarts Ollama's unload timer."""
+    carried = {"num_ctx": 4096, "keep_alive": "30m", "temperature": 0.9, "seed": 7, "top_k": 3}
+
+    assert SynthesisAgent._auxiliary_options(carried, temperature=0.1) == {
+        "num_ctx": 4096,
+        "keep_alive": "30m",
+        "temperature": 0.1,
+    }
+    assert SynthesisAgent._auxiliary_options({"num_ctx": 4096}, temperature=0.2) == {
+        "num_ctx": 4096,
+        "temperature": 0.2,
+    }
 
 
 class _StaticProvider:

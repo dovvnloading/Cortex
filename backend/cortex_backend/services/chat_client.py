@@ -17,7 +17,7 @@ unconditionally without having to know which runtime will serve the call.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 import logging
 from threading import Event, Thread
@@ -50,6 +50,59 @@ def _without_llamacpp_only_options(options: dict) -> dict:
     if not any(key in options for key in LLAMACPP_ONLY_OPTION_KEYS):
         return options
     return {key: value for key, value in options.items() if key not in LLAMACPP_ONLY_OPTION_KEYS}
+
+
+# Ollama takes how long to keep a model loaded as a request field of its own,
+# not as a sampler option, but the options mapping is what carries a turn's
+# settings to whichever client serves it. So it travels there under this key and
+# ``OllamaChatClient`` lifts it out; llama.cpp's request builder reads only the
+# option keys it knows and never sees it.
+KEEP_ALIVE_OPTION = "keep_alive"
+
+
+def ollama_keep_alive(minutes: int) -> str | int | None:
+    """The ``keep_alive`` to send Ollama for a ``keep_alive_minutes`` setting.
+
+    ``None`` means send none (0: leave Ollama's own default alone); a negative
+    setting keeps the model loaded until Ollama is stopped.
+    """
+    if minutes == 0:
+        return None
+    return -1 if minutes < 0 else f"{minutes}m"
+
+
+def _split_keep_alive(options: dict) -> tuple[dict, dict[str, Any]]:
+    """``options`` without the ``keep_alive`` key, and that key as a request field."""
+    if KEEP_ALIVE_OPTION not in options:
+        return options, {}
+    keep_alive = options[KEEP_ALIVE_OPTION]
+    rest = {key: value for key, value in options.items() if key != KEEP_ALIVE_OPTION}
+    return rest, ({} if keep_alive is None else {KEEP_ALIVE_OPTION: keep_alive})
+
+
+def _field(item: object, name: str) -> Any:
+    """``item[name]`` for the mapping or the response object Ollama's client hands back."""
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _resident_model_names(response: object) -> set[str] | None:
+    """The tags ``ollama.Client.ps()`` says are loaded, or ``None`` if it did not say."""
+    models = _field(response, "models")
+    if models is None:
+        return None
+    names: set[str] = set()
+    for item in models:
+        name = _field(item, "model") or _field(item, "name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _same_model_tag(left: str, right: str) -> bool:
+    """Ollama reports ``llama3`` and ``llama3:latest`` for the same model."""
+    return left == right or left.removesuffix(":latest") == right.removesuffix(":latest")
 
 
 @contextmanager
@@ -174,6 +227,41 @@ class OllamaChatClient:
     ) -> None:
         self._client = client
         self._stream_client_factory = stream_client_factory
+        self._status_callback: Callable[[str], None] | None = None
+
+    def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Optional progress hook, set by the generation service around a turn.
+
+        Used for one thing: saying so when Ollama has to load the model into
+        memory, which after its idle timeout is ten seconds or more of a turn
+        that otherwise looks like Cortex has hung. ``None`` detaches it.
+        """
+        self._status_callback = callback
+
+    def _announce_model_load(self, model: str) -> None:
+        """Tell the status hook when ``model`` is not among the models Ollama has loaded.
+
+        Best effort, and only when someone is listening: it costs one small
+        request to Ollama, and a client that cannot say (no ``ps``, Ollama
+        unreachable, an answer of an unexpected shape) reports nothing rather
+        than guess. The chat call that follows is the one that reports a real
+        failure.
+        """
+        callback = self._status_callback
+        ps = getattr(self._client, "ps", None)
+        if callback is None or not callable(ps):
+            return
+        try:
+            resident = _resident_model_names(ps())
+        except Exception as exc:
+            # Only the type: a transport error can carry the address it used.
+            logger.warning(
+                "Cortex could not ask Ollama which models are loaded (%s).", type(exc).__name__
+            )
+            return
+        if resident is None or any(_same_model_tag(model, name) for name in resident):
+            return
+        callback(f"Loading {model} into Ollama...")
 
     def chat(
         self,
@@ -187,14 +275,13 @@ class OllamaChatClient:
     ) -> dict:
         # Rebound once up front so both the streaming and non-streaming
         # branches below are guaranteed to send the filtered mapping.
-        options = _without_llamacpp_only_options(options)
+        options, keep_alive = _split_keep_alive(_without_llamacpp_only_options(options))
         # Sent only when the caller made a choice, so the request an ordinary
         # chat turn produces is exactly what it was before ``think`` existed.
         # Only ``False`` is ever sent today: a request to turn reasoning off,
         # which asks nothing of a model that has no reasoning mode.
         extra: dict[str, Any] = {} if think is None else {"think": think}
-        if cancellation_event is None and on_delta is None:
-            return self._client.chat(model=model, messages=messages, options=options, **extra)
+        extra.update(keep_alive)
         if cancellation_event is not None and cancellation_event.is_set():
             # Already cancelled, so do not open a request at all. Otherwise
             # this waits for the model's first token before noticing -- the
@@ -206,6 +293,9 @@ class OllamaChatClient:
                 "done": True,
                 "done_reason": "cancelled",
             }
+        self._announce_model_load(model)
+        if cancellation_event is None and on_delta is None:
+            return self._client.chat(model=model, messages=messages, options=options, **extra)
         # A call Stop can reach streams through a client of its own so that
         # Stop can close it (see the class docstring). A call with nothing to
         # cancel has no need of one and keeps using the shared client.
@@ -363,9 +453,9 @@ class RoutingChatClient:
         return count if isinstance(count, int) else None
 
     def set_status_callback(self, callback: Any) -> None:
-        """Forward to whichever underlying client supports it (today, only
-        the llama.cpp client does -- Ollama calls don't have a comparable
-        "starting up" phase worth reporting)."""
+        """Forward to whichever underlying client supports it: the llama.cpp
+        client reports starting its server, the Ollama client reports loading
+        a model into memory."""
         for client in (self._ollama, self._llamacpp):
             setter = getattr(client, "set_status_callback", None)
             if callable(setter):

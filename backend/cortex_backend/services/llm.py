@@ -42,7 +42,7 @@ from cortex_backend.execution.code_execution import (
 from cortex_backend.services import token_budget
 from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
-from cortex_backend.services.chat_client import GGUF_PREFIX, LLAMACPP_ONLY_OPTION_KEYS
+from cortex_backend.services.chat_client import GGUF_PREFIX, KEEP_ALIVE_OPTION, LLAMACPP_ONLY_OPTION_KEYS
 from cortex_backend.services.code_feedback import (
     MAX_PROPOSAL_REPAIR_ATTEMPTS,
     describe_rejection,
@@ -1723,13 +1723,16 @@ class SynthesisAgent:
         an out-of-memory crash on a machine near its limit.
 
         Carrying the turn's own sizing forward keeps the loaded model
-        eligible for reuse. Temperature stays fixed: these calls want
-        determinism regardless of what the chat was set to.
+        eligible for reuse. So does ``keep_alive``: these calls run last, and
+        Ollama restarts its unload timer on each one, so one that left it out
+        would reset a longer setting to Ollama's default. Temperature stays
+        fixed: these calls want determinism regardless of what the chat was
+        set to.
         """
         options = {
             key: value
             for key, value in (carried or {}).items()
-            if key == "num_ctx" and value is not None
+            if key in ("num_ctx", KEEP_ALIVE_OPTION) and value is not None
         }
         options["temperature"] = temperature
         return options

@@ -31,6 +31,7 @@ from cortex_backend.services.chat import (
     normalize_title,
     title_from_first_message,
 )
+from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, ollama_keep_alive
 from cortex_backend.services.code_feedback import format_execution_observation
 from cortex_backend.services.code_prompt import should_offer_code_execution
 from cortex_backend.core.settings import (
@@ -1309,6 +1310,16 @@ def _generation_snapshot(
         settings.execution.code_execution_enabled
         and should_offer_code_execution(payload.user_input)
     )
+    model_options: dict[str, float | int | str] = dict(
+        _merged_model_options(settings, payload.options, code_turn=code_execution_eligible)
+    )
+    # A standing setting, not a per-request override: how long Ollama keeps the
+    # model loaded once this turn (and the title and translation calls that
+    # follow it) is done. Carried with the other options; the Ollama client
+    # lifts it out and llama.cpp never reads it.
+    keep_alive = ollama_keep_alive(settings.generation.keep_alive_minutes)
+    if keep_alive is not None:
+        model_options[KEEP_ALIVE_OPTION] = keep_alive
     return GenerationSnapshot(
         job_id=job_id,
         thread_id=payload.thread_id or "",
@@ -1316,9 +1327,7 @@ def _generation_snapshot(
         model=chat_model,
         title_model=title_model,
         translation_model=settings.models.translation,
-        model_options=_merged_model_options(
-            settings, payload.options, code_turn=code_execution_eligible
-        ),
+        model_options=model_options,
         memories_enabled=settings.memory.enabled,
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
