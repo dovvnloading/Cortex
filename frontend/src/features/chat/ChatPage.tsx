@@ -346,7 +346,7 @@ export function ChatPage({
       useUiStore.getState().notify("Memory saved.", "success");
       return true;
     } catch (error) {
-      useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not save memory.", "error");
+      useUiStore.getState().notify(describeApiError(error, "Could not save memory."), "error");
       return false;
     }
   }, [api]);
