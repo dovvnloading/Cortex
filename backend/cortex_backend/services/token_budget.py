@@ -70,19 +70,38 @@ _LEARN_UP = 0.3
 _MAX_TRACKED_MODELS = 32
 
 
+def count_wide_characters(text: str) -> int:
+    """How many characters of ``text`` are wide (CJK, kana, Hangul, emoji, ...).
+
+    Counting is a scan of the whole string, and a string that is nothing but
+    ASCII is answered without one. The count is additive: the wide characters
+    of a concatenation are the sum of those of its parts, so a caller that
+    grows a text piece by piece counts each piece once instead of rescanning
+    everything it has so far.
+    """
+    if not text or text.isascii():
+        return 0
+    return len(text) - len(_WIDE_CHAR.sub("", text))
+
+
 def split_wide_characters(text: str) -> tuple[int, int]:
     """``(ordinary characters, wide characters)`` in ``text``."""
-    if not text or text.isascii():
-        return len(text), 0
-    wide = len(text) - len(_WIDE_CHAR.sub("", text))
+    wide = count_wide_characters(text)
     return len(text) - wide, wide
+
+
+def estimate_tokens_from_counts(
+    length: int, wide: int, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
+) -> int:
+    """:func:`estimate_tokens` for a text known only by its length and wide-character count."""
+    ratio = max(chars_per_token, MIN_CHARS_PER_TOKEN)
+    return max(1, math.ceil((length - wide) / ratio) + math.ceil(wide * WIDE_TOKENS_PER_CHAR))
 
 
 def estimate_tokens(text: str | None, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
     """Estimated tokens in ``text``; at least one, and never fewer than one per wide character."""
-    ordinary, wide = split_wide_characters(str(text or ""))
-    ratio = max(chars_per_token, MIN_CHARS_PER_TOKEN)
-    return max(1, math.ceil(ordinary / ratio) + math.ceil(wide * WIDE_TOKENS_PER_CHAR))
+    value = str(text or "")
+    return estimate_tokens_from_counts(len(value), count_wide_characters(value), chars_per_token)
 
 
 def with_safety_margin(tokens: int) -> int:
@@ -192,7 +211,9 @@ __all__ = [
     "TokenRatioRegistry",
     "WIDE_CHAR_START",
     "WIDE_TOKENS_PER_CHAR",
+    "count_wide_characters",
     "estimate_tokens",
+    "estimate_tokens_from_counts",
     "measure_chars_per_token",
     "split_wide_characters",
     "with_safety_margin",

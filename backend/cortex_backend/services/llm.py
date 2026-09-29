@@ -1046,21 +1046,39 @@ class SynthesisAgent:
         """
 
         limit = max(256, int(num_ctx)) - cls.output_token_reservation(num_ctx)
+        ratio = token_budget.TOKEN_RATIOS.chars_per_token(model)
 
-        def prompt_tokens(history: str) -> int:
-            return cls.estimate_prompt_tokens(
-                PromptTemplate.build_synthesis_prompt(
-                    query,
-                    history,
-                    permanent_memories,
-                    memories_enabled,
-                    user_system_instructions,
-                    attachments,
-                    code_execution_eligible=code_execution_eligible,
-                    bypass_system_prompt=bypass_system_prompt,
-                    host_observations=host_observations,
-                ),
-                model,
+        # Every candidate prompt is this one with a different history in it, and
+        # the history is the only part that changes: it sits once, verbatim, in
+        # the final (user) message. So everything else is measured a single time,
+        # and a candidate costs its history's length plus its wide-character
+        # count. Rebuilding and rescanning the whole prompt for every candidate
+        # made the walk quadratic, and much worse for any text that is not
+        # plain ASCII (a single em dash sends every scan down the slow path).
+        *leading, holder = PromptTemplate.build_synthesis_prompt(
+            query,
+            "",
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            attachments,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+        )
+        fixed_tokens = token_budget.MESSAGE_OVERHEAD_TOKENS * (len(leading) + 1) + sum(
+            token_budget.estimate_tokens(str(message.get("content", "")), ratio) for message in leading
+        )
+        holder_text = str(holder.get("content", ""))
+        holder_length = len(holder_text)
+        holder_wide = token_budget.count_wide_characters(holder_text)
+
+        def prompt_tokens(history: str, wide: int) -> int:
+            return token_budget.with_safety_margin(
+                fixed_tokens
+                + token_budget.estimate_tokens_from_counts(
+                    holder_length + len(history), holder_wide + wide, ratio
+                )
             )
 
         selected: list[dict] = []
@@ -1069,6 +1087,8 @@ class SynthesisAgent:
         # thread's character count, and it was 87% of the cost of preparing a
         # turn. See _prepend_history_chunks for why prepending is exact.
         chunks: tuple[str, ...] = ()
+        # Wide characters across `chunks`, each chunk counted once when it joins.
+        chunks_wide = 0
 
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
@@ -1080,14 +1100,18 @@ class SynthesisAgent:
                 selected = [message, *selected]
                 continue
             candidate_chunks = cls._prepend_history_chunks(message, selected, chunks)
+            candidate_wide = chunks_wide
+            if len(candidate_chunks) > len(chunks):
+                candidate_wide += token_budget.count_wide_characters(candidate_chunks[0])
             history = cls._join_history_chunks(candidate_chunks)
             if index > 0:
                 # Older messages are being left out, so the note that says so
                 # is part of what this candidate costs.
                 history = with_omission_note(history)
-            if prompt_tokens(history) <= limit:
+            if prompt_tokens(history, cls._rendered_wide(candidate_chunks, candidate_wide)) <= limit:
                 selected = [message, *selected]
                 chunks = candidate_chunks
+                chunks_wide = candidate_wide
                 continue
             if not chunks and selected and selected[0].get("role") == "assistant":
                 shortened = cls._shorten_newest_answer(
@@ -1099,11 +1123,29 @@ class SynthesisAgent:
                 )
                 if shortened is not None:
                     trailing, chunks = shortened
+                    chunks_wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
                     selected = [message, *trailing]
                     continue
             break
 
         return selected
+
+    @staticmethod
+    def _rendered_wide(chunks: tuple[str, ...], counted: int) -> int:
+        """Wide characters in the rendered history, given ``counted`` across its chunks.
+
+        Rendering joins the chunks and strips the ends of the result. Every
+        chunk opens with ``User:``, so only the last one can lose anything --
+        trailing whitespace, of which a few characters (an ideographic space)
+        are wide.
+        """
+        if not chunks:
+            return 0
+        tail = chunks[-1]
+        trimmed = len(tail.rstrip())
+        if trimmed == len(tail):
+            return counted
+        return counted - token_budget.count_wide_characters(tail[trimmed:])
 
     @classmethod
     def _shorten_newest_answer(
@@ -1113,7 +1155,7 @@ class SynthesisAgent:
         *,
         older_messages: bool,
         limit: int,
-        prompt_tokens: Callable[[str], int],
+        prompt_tokens: Callable[[str, int], int],
     ) -> tuple[list[dict], tuple[str, ...]] | None:
         """Cut the newest answer down until its exchange takes half the history room.
 
@@ -1126,7 +1168,7 @@ class SynthesisAgent:
         """
         answer = selected[0]
         text = str(answer.get("content", ""))
-        empty_history = prompt_tokens(cls._join_history_chunks(()))
+        empty_history = prompt_tokens(cls._join_history_chunks(()), 0)
         room = limit - empty_history
         if room <= 0 or len(text) <= _MIN_SHORTENED_ANSWER_CHARS:
             return None
@@ -1139,7 +1181,8 @@ class SynthesisAgent:
             history = cls._join_history_chunks(chunks)
             if older_messages:
                 history = with_omission_note(history)
-            return trailing, chunks, prompt_tokens(history)
+            wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
+            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide))
 
         low, high = _MIN_SHORTENED_ANSWER_CHARS, len(text) - 1
         trailing, chunks, tokens = attempt(low)
