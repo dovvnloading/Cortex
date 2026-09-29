@@ -1124,8 +1124,12 @@ describe("App", () => {
       // Visible again: the visibilitychange listener refreshes immediately,
       // it doesn't wait for the next 1s tick.
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
-      await waitFor(() => expect(executionTaskCalls).toBe(2));
+      // Not a waitFor: the setInterval spy above also swallows waitFor's own
+      // polling interval, so it could only ever re-check when a re-render
+      // happened to mutate the DOM -- which every poll used to do, and an
+      // unchanged poll no longer does. Flushing the handler is deterministic.
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(executionTaskCalls).toBe(2);
     } finally {
       if (visibilityDescriptor) Object.defineProperty(document, "visibilityState", visibilityDescriptor);
       intervalSpy.mockRestore();

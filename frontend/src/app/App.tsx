@@ -273,6 +273,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const setModelProgress = useModelStore((state) => state.setModelProgress);
   const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
+  // What `executionTasks` currently holds, as text. Every poll response is a
+  // freshly parsed array, so comparing references can never say "unchanged";
+  // this can, and lets an idle poll skip the state write (and the whole-shell
+  // render that comes with it). "[]" matches the initial state above.
+  const executionTasksSignatureRef = useRef("[]");
   // The saved preference lives only in the settings store; the theme is
   // derived from it (and painted by useAppliedTheme), never copied into state.
   const theme = settings?.appearance?.theme ?? DEFAULT_THEME_PREFERENCE;
@@ -410,6 +415,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const refresh = Promise.resolve().then(async () => {
       try {
         const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+        const signature = JSON.stringify(response.tasks);
+        if (signature === executionTasksSignatureRef.current) return;
+        executionTasksSignatureRef.current = signature;
         setExecutionTasks(response.tasks);
       } catch {
         // A failed poll keeps the last list and the next tick retries.
@@ -449,7 +457,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const refreshLlamacppStatus = useCallback(async () => {
     try {
       const response = await api.system();
-      setLlamacppStatus(response.llamacpp ?? null);
+      const next = response.llamacpp ?? null;
+      // Every response parses to a new object, and the store notifies on any
+      // new reference, so an unchanged status would re-render the shell every
+      // two seconds for as long as a GGUF model is selected.
+      if (JSON.stringify(next) !== JSON.stringify(useModelStore.getState().llamacppStatus)) {
+        setLlamacppStatus(next);
+      }
     } catch {
       // Keep the last known status; the next tick retries.
     }
