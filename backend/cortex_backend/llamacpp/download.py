@@ -33,6 +33,12 @@ _HF_API_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 _HF_REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+$")
 _SAFE_FILENAME_PATTERN = re.compile(r"^[\w.\-]+\.gguf$", re.IGNORECASE)
 _HF_BLOB_URL_PATTERN = re.compile(r"^(https://huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
+# The one host that ever receives a Hugging Face access token. Its file CDN
+# (``cdn-lfs.huggingface.co`` and friends) is deliberately a different host and
+# never sees it: the resolver redirects there with a signed URL that needs no
+# credentials.
+_HF_HOST = "huggingface.co"
+_HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 # The first four bytes of every valid GGUF file (https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
 GGUF_MAGIC = b"GGUF"
 _GGUF_HEADER_BYTES = 24
@@ -174,8 +180,97 @@ def _normalize_huggingface_blob_url(url: str) -> str:
     return normalized
 
 
+def _huggingface_token() -> str | None:
+    """Return the user's Hugging Face access token from the environment, if any.
+
+    Read at request time and never stored, logged, or put in a URL: it exists
+    only as the ``Authorization`` header of a request to ``huggingface.co``. A
+    value that could not be a header (whitespace, control characters, non-ASCII)
+    is ignored rather than echoed anywhere.
+    """
+    for name in _HF_TOKEN_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value and value.isascii() and value.isprintable() and not any(c.isspace() for c in value):
+            return value
+    return None
+
+
+def _is_huggingface_url(url: str) -> bool:
+    """True only for an ``https://huggingface.co`` URL, not a look-alike or CDN host."""
+    try:
+        parts = urlsplit(url)
+        return (
+            parts.scheme.casefold() == "https"
+            and parts.hostname == _HF_HOST
+            and parts.port in (None, 443)
+            and parts.username is None
+            and parts.password is None
+        )
+    except ValueError:
+        return False
+
+
+def _authorization_headers(url: str) -> dict[str, str]:
+    """Credentials for one request, and only if that request goes to Hugging Face."""
+    if _is_huggingface_url(url):
+        token = _huggingface_token()
+        if token is not None:
+            return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
+def _explain_http_status(status_code: int, *, url: httpx.URL) -> str:
+    """A specific, safe-to-show reason for an unsuccessful HTTP response."""
+    if _is_huggingface_url(str(url)):
+        if status_code in (401, 403):
+            if _huggingface_token() is None:
+                return (
+                    "This Hugging Face repository is gated or private. Accept its terms on huggingface.co, "
+                    "create an access token there, set it in the HF_TOKEN environment variable, and restart Cortex."
+                )
+            return (
+                "Hugging Face refused the access token. This repository is gated or private: check that the "
+                "token is valid and that its account has accepted the repository's terms."
+            )
+        if status_code == 404:
+            return (
+                "Hugging Face has no such repository or file, or it is private. "
+                "Check the exact repository id and file name."
+            )
+        if status_code == 429:
+            return "Hugging Face is rate-limiting requests right now. Wait a few minutes and try again."
+        if status_code >= 500:
+            return f"Hugging Face had a server problem (HTTP {status_code}). Try again in a few minutes."
+        return f"Hugging Face answered with an unexpected error (HTTP {status_code})."
+    if status_code in (401, 403):
+        return (
+            f"The download server refused access (HTTP {status_code}). "
+            "The link may need a login, or it may have expired."
+        )
+    if status_code == 404:
+        return "The download server has no file at this link (HTTP 404). Check the URL."
+    if status_code == 429:
+        return "The download server is rate-limiting requests. Wait a few minutes and try again."
+    if status_code >= 500:
+        return f"The download server had a problem (HTTP {status_code}). Try again in a few minutes."
+    return f"The download server answered with an unexpected error (HTTP {status_code})."
+
+
+def _explain_transport_error(exc: httpx.TransportError) -> str:
+    """A specific, safe-to-show reason for a network-level failure."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "The connection timed out. Check your internet connection and try again."
+    if isinstance(exc, httpx.ConnectError):
+        return "Could not connect to the download server. Check your internet connection and try again."
+    return "The connection was interrupted before the download finished."
+
+
 def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | None = None) -> tuple[str, ...]:
-    """List ``*.gguf`` files in a public Hugging Face repo (unauthenticated)."""
+    """List ``*.gguf`` files in a Hugging Face repo.
+
+    Sends the user's ``HF_TOKEN`` (if set) so a private repository can be
+    listed; without one only public repositories are visible.
+    """
     if (
         not isinstance(repo_id, str)
         or _contains_control_character(repo_id)
@@ -183,13 +278,24 @@ def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | Non
     ):
         raise GGUFDownloadError("A Hugging Face repo id must look like 'owner/name'.")
     client = http_client or httpx
+    api_url = f"https://{_HF_HOST}/api/models/{repo_id}"
     try:
         response = client.get(
-            f"https://huggingface.co/api/models/{repo_id}",
+            api_url,
             params={"full": "true"},
+            headers=_authorization_headers(api_url),
             timeout=_HF_API_TIMEOUT,
         )
         response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise GGUFDownloadError(
+            _explain_http_status(exc.response.status_code, url=exc.request.url)
+        ) from exc
+    except httpx.TransportError as exc:
+        raise GGUFDownloadError(
+            "Could not reach Hugging Face to list this repo's files. "
+            + _explain_transport_error(exc)
+        ) from exc
     except httpx.HTTPError as exc:
         raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.") from exc
     try:
@@ -244,7 +350,13 @@ def download_gguf(
     try:
         current_url = _validate_download_url(url)
         for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
-            with client.stream("GET", current_url, follow_redirects=False, timeout=_DOWNLOAD_TIMEOUT) as response:
+            with client.stream(
+                "GET",
+                current_url,
+                headers=_authorization_headers(current_url),
+                follow_redirects=False,
+                timeout=_DOWNLOAD_TIMEOUT,
+            ) as response:
                 if response.is_redirect:
                     if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
                         raise GGUFDownloadError("The download exceeded the redirect limit.")
@@ -340,6 +452,12 @@ def download_gguf(
                         "Could not save the downloaded model to its destination folder."
                     ) from replace_exc
             temp_path.unlink(missing_ok=True)
+    except httpx.HTTPStatusError as exc:
+        raise GGUFDownloadError(
+            _explain_http_status(exc.response.status_code, url=exc.request.url)
+        ) from exc
+    except httpx.TransportError as exc:
+        raise GGUFDownloadError(_explain_transport_error(exc)) from exc
     except httpx.HTTPError as exc:
         raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
     finally:

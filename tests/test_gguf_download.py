@@ -38,6 +38,27 @@ def _mock_download_dns(monkeypatch) -> None:
     )
 
 
+_HF_TOKEN_VARIABLES = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+_SYNTHETIC_TOKEN = "hf_synthetic0test0token0value"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_huggingface_token(monkeypatch) -> None:
+    """A token in the developer's own environment must not leak into a test."""
+    for name in _HF_TOKEN_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
+_SYNTHETIC_TOKEN = "hf_synthetic0test0token0value"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_huggingface_token(monkeypatch) -> None:
+    """A token in the developer's own environment must not leak into a test."""
+    for name in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _valid_gguf_content(tmp_path: Path) -> bytes:
     """Build a small real GGUF fixture instead of testing magic-only bytes."""
     import numpy as np
@@ -753,3 +774,188 @@ def test_the_default_ceiling_admits_models_larger_than_eight_gibibytes(tmp_path:
     assert "larger than the" not in str(raised.value), (
         f"a 9 GiB model was refused by the size ceiling: {raised.value}"
     )
+
+
+# -- Hugging Face errors and access tokens ------------------------------------
+
+_HF_RESOLVE_URL = "https://huggingface.co/owner/model/resolve/main/model.gguf"
+
+
+def _status_client(status: int) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(status)))
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, "gated or private"),
+        (403, "gated or private"),
+        (404, "no such repository or file"),
+        (429, "rate-limiting"),
+        (503, "server problem"),
+    ],
+)
+def test_huggingface_status_codes_are_explained(tmp_path: Path, status: int, expected: str) -> None:
+    """A gated repo, a typo and a rate limit must not all read as an outage."""
+    with pytest.raises(GGUFDownloadError, match=expected) as download_error:
+        download_gguf(_HF_RESOLVE_URL, "model.gguf", tmp_path, http_client=_status_client(status))
+    with pytest.raises(GGUFDownloadError, match=expected) as listing_error:
+        list_huggingface_gguf_files("owner/model", http_client=_status_client(status))
+
+    for message in (str(download_error.value), str(listing_error.value)):
+        assert "Could not reach Hugging Face" not in message
+        assert "Could not download this file" not in message
+    assert not any(path.name.startswith(".download-") for path in tmp_path.iterdir())
+
+
+def test_a_gated_repository_message_says_how_to_supply_a_token(tmp_path: Path) -> None:
+    with pytest.raises(GGUFDownloadError, match="HF_TOKEN"):
+        download_gguf(_HF_RESOLVE_URL, "model.gguf", tmp_path, http_client=_status_client(401))
+
+
+def test_a_non_huggingface_status_error_does_not_blame_huggingface(tmp_path: Path) -> None:
+    with pytest.raises(GGUFDownloadError) as raised:
+        download_gguf(
+            "https://example.com/model.gguf", "model.gguf", tmp_path, http_client=_status_client(404)
+        )
+    assert "Hugging Face" not in str(raised.value)
+    assert "404" in str(raised.value)
+
+
+def test_a_cdn_status_error_after_a_huggingface_redirect_is_not_called_gated(tmp_path: Path) -> None:
+    """An expired signed CDN link is not a gating problem, whatever the status."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "huggingface.co":
+            return httpx.Response(302, headers={"Location": "https://cdn-lfs.huggingface.co/blob"})
+        return httpx.Response(403)
+
+    with pytest.raises(GGUFDownloadError) as raised:
+        download_gguf(
+            _HF_RESOLVE_URL,
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert "gated" not in str(raised.value)
+    assert "expired" in str(raised.value)
+
+
+def test_listing_reports_a_network_failure_as_unreachable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError, match="Could not reach Hugging Face.*Could not connect"):
+            list_huggingface_gguf_files("owner/model", http_client=client)
+
+
+def _recording_client(seen: list[tuple[str, str | None]], content: bytes) -> httpx.Client:
+    """Serve a Hugging Face resolve -> CDN redirect and record who saw credentials."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers.get("authorization")))
+        if request.url.host == "huggingface.co":
+            return httpx.Response(302, headers={"Location": "https://cdn-lfs.huggingface.co/blob/model.gguf"})
+        return httpx.Response(200, content=content)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_hf_token_is_not_forwarded_across_the_cdn_redirect(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setenv("HF_TOKEN", _SYNTHETIC_TOKEN)
+    seen: list[tuple[str, str | None]] = []
+
+    with caplog.at_level("DEBUG"):
+        destination = download_gguf(
+            _HF_RESOLVE_URL,
+            "model.gguf",
+            tmp_path,
+            http_client=_recording_client(seen, _valid_gguf_content(tmp_path)),
+        )
+
+    assert destination.is_file()
+    assert seen == [
+        ("huggingface.co", f"Bearer {_SYNTHETIC_TOKEN}"),
+        ("cdn-lfs.huggingface.co", None),
+    ]
+    assert _SYNTHETIC_TOKEN not in caplog.text
+
+
+def test_no_authorization_header_is_sent_without_a_token(tmp_path: Path) -> None:
+    seen: list[tuple[str, str | None]] = []
+    download_gguf(
+        _HF_RESOLVE_URL,
+        "model.gguf",
+        tmp_path,
+        http_client=_recording_client(seen, _valid_gguf_content(tmp_path)),
+    )
+    assert seen == [("huggingface.co", None), ("cdn-lfs.huggingface.co", None)]
+
+
+def test_hugging_face_hub_token_is_the_fallback_variable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HUGGINGFACE_HUB_TOKEN", _SYNTHETIC_TOKEN)
+    seen: list[tuple[str, str | None]] = []
+    download_gguf(
+        _HF_RESOLVE_URL,
+        "model.gguf",
+        tmp_path,
+        http_client=_recording_client(seen, _valid_gguf_content(tmp_path)),
+    )
+    assert seen[0] == ("huggingface.co", f"Bearer {_SYNTHETIC_TOKEN}")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/model.gguf",
+        "https://huggingface.co.evil.example/model.gguf",
+        "https://evilhuggingface.co/model.gguf",
+        "https://huggingface.co:8443/owner/model/resolve/main/model.gguf",
+    ],
+)
+def test_hf_token_is_never_sent_to_another_host(tmp_path: Path, monkeypatch, url: str) -> None:
+    monkeypatch.setenv("HF_TOKEN", _SYNTHETIC_TOKEN)
+    content = _valid_gguf_content(tmp_path)
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, content=content)
+
+    download_gguf(url, "model.gguf", tmp_path, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert seen == [None]
+
+
+def test_hf_token_is_used_for_the_file_listing(monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", _SYNTHETIC_TOKEN)
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"siblings": [{"rfilename": "model.gguf"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert list_huggingface_gguf_files("owner/model", http_client=client) == ("model.gguf",)
+    assert seen == [f"Bearer {_SYNTHETIC_TOKEN}"]
+
+
+@pytest.mark.parametrize("value", ["hf_bad\ntoken", "hf token", "hf_tökén", "   "])
+def test_a_malformed_hf_token_is_ignored(tmp_path: Path, monkeypatch, value: str) -> None:
+    monkeypatch.setenv("HF_TOKEN", value)
+    seen: list[tuple[str, str | None]] = []
+    download_gguf(
+        _HF_RESOLVE_URL,
+        "model.gguf",
+        tmp_path,
+        http_client=_recording_client(seen, _valid_gguf_content(tmp_path)),
+    )
+    assert all(header is None for _host, header in seen)
+
+
+def test_a_rejected_token_is_reported_without_being_echoed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", _SYNTHETIC_TOKEN)
+    with pytest.raises(GGUFDownloadError, match="refused the access token") as raised:
+        download_gguf(_HF_RESOLVE_URL, "model.gguf", tmp_path, http_client=_status_client(401))
+    assert _SYNTHETIC_TOKEN not in str(raised.value)
+    assert _SYNTHETIC_TOKEN not in str(raised.value.__cause__)
