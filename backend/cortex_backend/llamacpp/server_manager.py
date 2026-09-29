@@ -1418,10 +1418,15 @@ class LlamaServerManager:
                         self._last_health_check = time.monotonic()
                         self._stderr_tail = stderr_tail
                     ready = True
-                    if loaded_context is not None and loaded_context != num_ctx:
+                    # Only a shortfall is worth a warning: it is the case where
+                    # a conversation stops fitting sooner than the setting
+                    # promised. A window at or above the request (llama.cpp may
+                    # round the request up) costs the user nothing. The value
+                    # stays visible in status either way.
+                    if loaded_context is not None and loaded_context < num_ctx:
                         logger.warning(
-                            "The local model runtime reports a %d-token context "
-                            "window, not the %d tokens requested.",
+                            "The local model runtime loaded a %d-token context "
+                            "window, smaller than the %d tokens requested.",
                             loaded_context,
                             num_ctx,
                         )

@@ -640,8 +640,18 @@ def test_loaded_context_comes_from_props(
     assert manager.status.loaded_context is None
 
 
-def test_loaded_context_matching_the_request_is_not_warned_about(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
+@pytest.mark.parametrize(
+    ("requested", "loaded"),
+    [
+        (4096, 4096),
+        # A window larger than asked for is no shortfall: nothing in the
+        # conversation stops fitting sooner than the setting promised.
+        (4000, 4096),
+        (4096, 8192),
+    ],
+)
+def test_a_loaded_context_that_is_not_smaller_than_requested_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path, requested: int, loaded: int
 ) -> None:
     model_path = tmp_path / "model.gguf"
     manager = _manager(
@@ -649,14 +659,15 @@ def test_loaded_context_matching_the_request_is_not_warned_about(
         fetcher=_FakeFetcher(),
         launcher=_QueueLauncher([_FakePopen()]),
         http_client=_RecordingAttestationClient(
-            _props_with_context(model_path, {"n_ctx": 4096})
+            _props_with_context(model_path, {"n_ctx": loaded})
         ),
     )
 
     with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
-        manager.ensure_ready(model_path, num_ctx=4096)
+        manager.ensure_ready(model_path, num_ctx=requested)
 
-    assert manager.status.loaded_context == 4096
+    # Still reported truthfully through status, whatever it was.
+    assert manager.status.loaded_context == loaded
     assert not [r for r in caplog.records if "context" in r.getMessage()]
 
 
