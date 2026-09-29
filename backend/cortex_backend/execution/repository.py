@@ -69,6 +69,10 @@ _STRAY_FILE_GRACE_SECONDS = 600.0
 # single job directory.
 _SWEEP_ENTRY_BUDGET = 2_000
 _SWEEP_CHILD_LIMIT = 64
+# A path-component-safe job id, and a printable owner. The job id becomes a
+# directory name under the artifact root, so it is held to the same shape as an
+# artifact name; the owner never reaches the filesystem.
+_SAFE_OWNER = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
@@ -666,6 +670,13 @@ class ExecutionRepository:
     ) -> tuple[ExecutionJob, bool]:
         if not PROFILE_NAME_PATTERN.fullmatch(profile):
             raise ValueError("profile must be a bounded lowercase identifier")
+        # The job id names the job's artifact directory, so an id that could
+        # lead out of the artifact root is refused when the job is created, not
+        # only when its first artifact is published.
+        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+            raise ValueError("job_id must be a bounded path-safe identifier")
+        if not isinstance(owner, str) or _SAFE_OWNER.fullmatch(owner) is None:
+            raise ValueError("owner must be a bounded printable identifier")
         encoded = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = self._now()
         try:
@@ -1656,13 +1667,22 @@ class ExecutionRepository:
             raise ArtifactLimitError("Artifact exceeds the configured size limit.")
         if retention_seconds <= 0:
             raise ValueError("retention_seconds must be positive")
+        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
         if self.get_job(job_id) is None:
             raise ExecutionRepositoryError("Execution job does not exist.")
         artifact_id = uuid4().hex
         job_root = self.artifact_root / job_id
-        if job_root.exists() and _is_reparse_point(job_root):
-            raise ExecutionRepositoryError("Artifact root is unavailable.")
         root = self.artifact_root.resolve()
+        # Confined before anything is created: the check used to run after the
+        # mkdir, so a job id that led outside the root had already made its
+        # directories there by the time it was refused.
+        try:
+            planned = job_root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise ExecutionRepositoryError("Artifact root is unavailable.") from None
+        if _is_reparse_point(job_root) or planned.parent != root:
+            raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
         target = job_root / f"{artifact_id}-{name}"
         temporary = target.with_name(f".tmp-{artifact_id}")
         digest = hashlib.sha256(content).hexdigest()
@@ -1739,7 +1759,10 @@ class ExecutionRepository:
         *,
         owner: str | None = None,
     ) -> ExecutionArtifact | None:
-        """Return artifact metadata only when its owning job is visible."""
+        """Return artifact metadata only when its owning job is visible and it has not expired.
+
+        An expired artifact reads as absent, as it does in :meth:`read_artifact`.
+        """
 
         if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
             return None
@@ -1754,7 +1777,7 @@ class ExecutionRepository:
                 """,
                 (artifact_id, owner, owner),
             ).fetchone()
-        if row is None:
+        if row is None or self._is_expired(row["expires_at"]):
             return None
         return ExecutionArtifact(
             artifact_id=row["artifact_id"],
@@ -1768,20 +1791,28 @@ class ExecutionRepository:
             expires_at=row["expires_at"],
         )
 
-    def delete_artifact(self, artifact_id: str) -> None:
+    def delete_artifact(self, artifact_id: str, *, owner: str | None = None) -> None:
         """Remove one unpublished/rolled-back artifact record and file safely.
 
         The row goes first and the file after it, the order the retention
         cleanup uses. Removing the file first left a row pointing at nothing
         whenever the row's delete then failed to commit; the other way round
         the worst case is a file no row names, which the artifact-root sweep
-        reclaims.
+        reclaims. ``owner`` restricts the call to that owner's artifacts.
         """
 
+        if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
+            return
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT path FROM execution_artifacts WHERE artifact_id = ?",
-                (artifact_id,),
+                """
+                SELECT a.path
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.artifact_id = ?
+                  AND (? IS NULL OR j.owner = ?)
+                """,
+                (artifact_id, owner, owner),
             ).fetchone()
             if row is None:
                 return
@@ -1796,15 +1827,23 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
         self._remove_empty_artifact_directory(path.parent)
 
-    def read_artifact(self, artifact_id: str) -> bytes:
+    def read_artifact(self, artifact_id: str, *, owner: str | None = None) -> bytes:
+        if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
+            raise ExecutionRepositoryError("Artifact does not exist.")
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT path, size, sha256, expires_at FROM execution_artifacts WHERE artifact_id = ?",
-                (artifact_id,),
+                """
+                SELECT a.path, a.size, a.sha256, a.expires_at
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.artifact_id = ?
+                  AND (? IS NULL OR j.owner = ?)
+                """,
+                (artifact_id, owner, owner),
             ).fetchone()
         if row is None:
             raise ExecutionRepositoryError("Artifact does not exist.")
-        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+        if self._is_expired(row["expires_at"]):
             raise ExecutionRepositoryError("Artifact retention has expired.")
         try:
             expected_size = int(row["size"])
@@ -2240,6 +2279,18 @@ class ExecutionRepository:
             except OSError:
                 return False
         return True
+
+    @staticmethod
+    def _is_expired(expires_at: object, now: datetime | None = None) -> bool:
+        """Whether an artifact's expiry has passed; an unreadable expiry counts as passed."""
+
+        try:
+            expiry = datetime.fromisoformat(str(expires_at))
+        except ValueError:
+            return True
+        if expiry.tzinfo is None:
+            return True
+        return expiry <= (now or datetime.now(timezone.utc))
 
     def sweep_artifact_root(self, *, now: datetime | None = None, limit: int = 100) -> int:
         """Reclaim what a crash leaves under the artifact root; return how many things went.

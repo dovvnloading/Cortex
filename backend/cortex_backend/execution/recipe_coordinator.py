@@ -400,7 +400,7 @@ class RecipeExecutionCoordinator:
         if artifact.mime_type not in _MIME_TO_FORMAT:
             raise RecipeExecutionError("input_artifact_invalid")
         try:
-            content = self.repository.read_artifact(artifact.artifact_id)
+            content = self.repository.read_artifact(artifact.artifact_id, owner=owner)
             detected = sniff_artifact_mime(content)
         except (ExecutionRepositoryError, ArtifactBoundaryError):
             raise RecipeExecutionError("input_artifact_unavailable") from None

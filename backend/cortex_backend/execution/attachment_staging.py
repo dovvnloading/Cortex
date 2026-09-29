@@ -259,7 +259,7 @@ class AttachmentStagingService:
         ):
             raise AttachmentStagingError("attachment_result_invalid")
         try:
-            content = self.repository.read_artifact(artifact.artifact_id)
+            content = self.repository.read_artifact(artifact.artifact_id, owner=job.owner)
             if sha256(content).hexdigest() != artifact.sha256 or sniff_artifact_mime(content) != artifact.mime_type:
                 raise AttachmentStagingError("attachment_artifact_invalid")
         except AttachmentStagingError:

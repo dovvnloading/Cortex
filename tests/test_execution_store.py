@@ -1086,3 +1086,109 @@ def test_retire_abandoned_job_honours_a_stop_and_rejects_a_bad_idle_time(tmp_pat
             repository.retire_abandoned_job(
                 job.job_id, idle_seconds=bad, error="interrupted", message="Interrupted."
             )
+
+
+# -- job ids become directory names; artifact access is validated and can be owner-scoped ----
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    ["../escape", "..\\escape", "a/b", "a\\b", "", ".hidden", "x" * 201, "nul\x00byte", "C:evil"],
+)
+def test_create_job_refuses_a_job_id_that_could_leave_the_artifact_root(tmp_path, job_id):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="job_id"):
+        repository.create_job(
+            job_id=job_id,
+            owner="session-a",
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+
+    assert repository.list_jobs(owner="session-a", include_terminal=True) == []
+
+
+@pytest.mark.parametrize("owner", ["", "x" * 201, "line\nbreak", "nul\x00byte", None, 7])
+def test_create_job_refuses_an_owner_that_is_not_a_bounded_printable_string(tmp_path, owner):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="owner"):
+        repository.create_job(
+            job_id="job-1",
+            owner=owner,
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+
+
+def test_publish_confines_the_job_directory_before_it_creates_anything(tmp_path):
+    """The confinement check used to run after the mkdir.
+
+    A job row that predates the id check and names a path outside the root
+    made its directories there and only then failed.
+    """
+
+    repository = _repository(tmp_path)
+    now = "2030-01-01T00:00:00+00:00"
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO execution_jobs
+            (job_id, owner, request_id, profile, status, sequence, payload_json, created_at, updated_at)
+            VALUES (?, 'session-a', 'request-old', 'fake.v1', 'queued', 0, '{}', ?, ?)
+            """,
+            ("../escaped-directory", now, now),
+        )
+
+    with pytest.raises(ExecutionRepositoryError):
+        repository.publish_artifact("../escaped-directory", name="out.txt", content=b"x")
+
+    assert not (tmp_path / "escaped-directory").exists()
+    assert not (tmp_path / "artifacts" / ".." / "escaped-directory").exists()
+
+
+def test_an_expired_artifact_is_absent_from_get_as_well_as_from_read(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-expiry", owner="session-a", request_id="r", profile="fake.v1", payload={}
+    )
+    artifact = repository.publish_artifact(
+        job.job_id, name="out.txt", content=b"synthetic", mime_type="text/plain", retention_seconds=60
+    )
+    assert repository.get_artifact(artifact.artifact_id, owner="session-a") is not None
+
+    frozen_clock.advance(61)
+
+    assert repository.get_artifact(artifact.artifact_id, owner="session-a") is None
+    with pytest.raises(ExecutionRepositoryError, match="expired"):
+        repository.read_artifact(artifact.artifact_id)
+
+
+def test_read_and_delete_can_be_scoped_to_an_owner_and_validate_the_artifact_id(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-scope", owner="session-a", request_id="r", profile="fake.v1", payload={}
+    )
+    artifact = repository.publish_artifact(
+        job.job_id, name="out.txt", content=b"synthetic", mime_type="text/plain"
+    )
+
+    # Another owner sees nothing, and cannot delete it.
+    with pytest.raises(ExecutionRepositoryError, match="does not exist"):
+        repository.read_artifact(artifact.artifact_id, owner="session-b")
+    repository.delete_artifact(artifact.artifact_id, owner="session-b")
+    assert repository.read_artifact(artifact.artifact_id, owner="session-a") == b"synthetic"
+    assert repository.read_artifact(artifact.artifact_id) == b"synthetic"
+
+    # A malformed id is refused up front, exactly as get_artifact already did.
+    for bad in ("../x", "", "a/b", "x" * 201, None):
+        assert repository.get_artifact(bad) is None
+        with pytest.raises(ExecutionRepositoryError, match="does not exist"):
+            repository.read_artifact(bad)
+        repository.delete_artifact(bad)
+
+    repository.delete_artifact(artifact.artifact_id, owner="session-a")
+    assert repository.get_artifact(artifact.artifact_id) is None
