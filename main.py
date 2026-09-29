@@ -25,14 +25,18 @@ from app_factory import build_app  # noqa: E402
 from cortex_backend import __version__ as CORTEX_VERSION  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
+    WINDOW_TITLE,
     DesktopWindowConfig,
     DesktopWindowError,
     FrontendBuildError,
     InstanceLock,
+    InstanceRecord,
     WebViewRuntimeError,
+    WindowActivation,
     activate_process_window,
     ensure_frontend,
     ensure_webview2_runtime,
+    process_is_alive,
     run_desktop_window,
 )
 from cortex_backend.launcher.supervisor import (  # noqa: E402
@@ -55,6 +59,12 @@ MAX_STARTUP_LOG_BYTES = 64 * 1024
 # thread, together with the job registry's own cancellation grace and the
 # runtime teardown that follows.
 GRACEFUL_SHUTDOWN_SECONDS = 5.0
+# A second launch waits this long for the first instance's window (the first
+# opens it only after the frontend build and any WebView2 install); each
+# attempt searches for the window for POLL seconds, then rests RETRY seconds.
+SECOND_LAUNCH_WAIT_SECONDS = 90.0
+SECOND_LAUNCH_POLL_SECONDS = 1.0
+SECOND_LAUNCH_RETRY_SECONDS = 0.25
 _last_startup_log_path: Path | None = None
 # _launch records that stopping the backend failed; _run_web turns that into a
 # failing exit only when nothing else failed, and main() reads the result to
@@ -396,6 +406,65 @@ def _run_headless(*, backend, frontend, server) -> int:
     return 0 if server.should_exit else 1
 
 
+def _acquire_or_hand_off(
+    instance: InstanceLock, *, port: int, headless: bool
+) -> tuple[InstanceRecord | None, int]:
+    """Take the instance lock, or hand this launch over to the instance that holds it.
+
+    Returns ``(record, 0)`` when this process owns the lock and should start.
+    Otherwise the launch is over and the second element is its exit code.
+
+    The first instance opens its window only after the frontend build, the
+    readiness gate and possibly a WebView2 install -- minutes, on a source tree
+    -- and the second launch is exactly what an impatient user does during
+    that. So it waits, bounded, for the window instead of reporting a failure.
+    If the first instance dies meanwhile its lock is free, and this launch
+    starts normally. Nothing on this path is an error: the app is running or
+    starting, which is what the user asked for.
+    """
+    deadline = time.monotonic() + SECOND_LAUNCH_WAIT_SECONDS
+    while True:
+        record = instance.acquire(port=port)
+        if record is not None:
+            return record, 0
+        existing = instance.read_record()
+        if existing is None:
+            print(
+                "Cortex could not acquire its instance lock and no valid running-instance record exists.",
+                file=sys.stderr,
+            )
+            return None, 2
+        if headless:
+            print(f"Cortex is already running on loopback port {existing.port}.")
+            return None, 0
+        while process_is_alive(existing.pid):
+            outcome = activate_process_window(
+                existing.pid, title=WINDOW_TITLE, timeout=SECOND_LAUNCH_POLL_SECONDS
+            )
+            if outcome is WindowActivation.ACTIVATED:
+                return None, 0
+            if outcome is WindowActivation.NOT_FOREGROUND:
+                print(
+                    "Cortex is already running; its window could not be brought to the front.",
+                    file=sys.stderr,
+                )
+                return None, 0
+            if time.monotonic() >= deadline:
+                print("Cortex is still starting; its window has not appeared yet.", file=sys.stderr)
+                return None, 0
+            time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
+        # The instance that owned the lock has exited, so its lock should be
+        # free: go round and take it. If it never is, the record is stale in a
+        # way this cannot resolve, and that is a failure.
+        if time.monotonic() >= deadline:
+            print(
+                "Cortex is not running, but its instance lock could not be taken.",
+                file=sys.stderr,
+            )
+            return None, 2
+        time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
+
+
 def _run_web(args: argparse.Namespace) -> int:
     """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
     global _backend_abandoned_at_exit, _backend_stop_failed
@@ -451,25 +520,11 @@ def _launch(args: argparse.Namespace) -> int:
 
     try:
         with InstanceLock(paths.data_dir) as instance:
-            record = instance.acquire(port=backend_port)
+            record, handoff_exit = _acquire_or_hand_off(
+                instance, port=backend_port, headless=args.headless
+            )
             if record is None:
-                existing = instance.read_record()
-                if existing is None:
-                    print(
-                        "Cortex could not acquire its instance lock and no valid running-instance record exists.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                if args.headless:
-                    print(f"Cortex is already running on loopback port {existing.port}.")
-                    return 0
-                if not activate_process_window(existing.pid):
-                    print(
-                        "Cortex is already running, but its native window could not be activated.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                return 0
+                return handoff_exit
 
             if backend_listener is None:
                 try:
@@ -569,6 +624,7 @@ def _launch(args: argparse.Namespace) -> int:
                     DesktopWindowConfig(
                         url=_desktop_url(browser_port, token, handoff_secret),
                         storage_path=paths.webview_profile,
+                        title=WINDOW_TITLE,
                         icon_path=_app_asset_root() / "assets" / "cortex.ico",
                         debug=args.dev,
                     ),

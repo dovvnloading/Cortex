@@ -7,9 +7,12 @@ from collections.abc import Callable
 import ctypes
 import http.client
 import json
+import os
 from pathlib import Path
 import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -24,7 +27,7 @@ from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
 from cortex_backend.launcher import supervisor as supervisor_module
 from cortex_backend.launcher import webview_runtime as runtime_module
-from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
+from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError, WindowActivation
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
@@ -1673,3 +1676,275 @@ def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
         f"http://127.0.0.1:{fakes.record.port}/#bootstrap=fresh-token&handoff=handoff-secret"
     )
     assert "stale-token" not in config.url
+
+
+def _held_instance_class(acquired: list[bool], *, existing: object | None):
+    """An instance lock another process holds; ``acquired`` scripts each attempt.
+
+    ``acquired[i]`` says whether attempt ``i`` gets the lock (the last entry
+    repeats), and ``existing`` is the record left by the holder.
+    """
+    record = SimpleNamespace(pid=1234, port=0)
+    attempts: list[int] = []
+
+    class HeldInstance:
+        def __init__(self, _profile_dir):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            pass
+
+        def acquire(self, *, port):
+            attempts.append(port)
+            granted = acquired[min(len(attempts), len(acquired)) - 1]
+            if granted:
+                record.port = port
+            return record if granted else None
+
+        def read_record(self):
+            return existing
+
+        def read_secret(self, _record):
+            return "handoff-secret"
+
+    HeldInstance.attempts = attempts  # type: ignore[attr-defined]
+    return HeldInstance
+
+
+_FIRST_INSTANCE = SimpleNamespace(pid=4321, port=5555)
+
+
+def _second_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    activations: list[WindowActivation],
+    alive: list[bool] | None = None,
+    acquired: list[bool] | None = None,
+    existing: object | None = _FIRST_INSTANCE,
+    wait: float = 5.0,
+):
+    """Wire a launch that finds another instance already holding the lock.
+
+    ``activations`` scripts what each search for the first instance's window
+    finds (the last entry repeats) and ``alive`` whether it is still running.
+    Returns the launch fakes and the log of activation attempts.
+    """
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_WAIT_SECONDS", wait)
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_RETRY_SECONDS", 0.001)
+    held = _held_instance_class(acquired or [False], existing=existing)
+    fakes = _LaunchFakes(monkeypatch, tmp_path, instance_class=held)
+    attempts: list[tuple[int, str]] = []
+    liveness = alive or [True]
+    checks: list[int] = []
+
+    def activate(pid, *, title, timeout):
+        attempts.append((pid, title))
+        return activations[min(len(attempts), len(activations)) - 1]
+
+    def is_alive(_pid):
+        checks.append(1)
+        return liveness[min(len(checks), len(liveness)) - 1]
+
+    monkeypatch.setattr(launcher_main, "activate_process_window", activate)
+    monkeypatch.setattr(launcher_main, "process_is_alive", is_alive)
+    return fakes, attempts, held
+
+
+def test_second_launch_waits_for_the_first_instances_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A second double-click during a slow first launch is not an error.
+
+    The first instance opens its window only after the frontend build, the
+    readiness gate and possibly a WebView2 install. The second launch used to
+    look for that window for three seconds, then exit 2 and show "could not
+    start" -- with a message about a diagnostic log nobody had tried to write.
+    """
+    fakes, attempts, _held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[
+            WindowActivation.NO_WINDOW,
+            WindowActivation.NO_WINDOW,
+            WindowActivation.NO_WINDOW,
+            WindowActivation.ACTIVATED,
+        ],
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert attempts == [(4321, "Cortex")] * 4
+    assert fakes.calls == [], "the second launch must not start a second instance"
+    assert shown == []
+    assert "could not" not in capsys.readouterr().err
+
+
+def test_second_launch_starts_normally_when_the_first_instance_died(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        alive=[True, False],
+        acquired=[False, True],
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert len(attempts) == 1, "it kept looking for a window after the process was gone"
+    assert len(held.attempts) == 2, "the lock was not retried after the first instance died"
+    assert fakes.calls == ["runtime", "window"], "the launch did not go on to open its own window"
+
+
+def test_second_launch_gives_up_quietly_when_the_window_never_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NO_WINDOW], wait=0.05
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    started = time.monotonic()
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert time.monotonic() - started < 5
+    assert attempts, "it never looked for the window"
+    assert fakes.calls == []
+    assert shown == [], "an error dialog appeared for a launch that is merely slow"
+    assert "still starting" in capsys.readouterr().err
+
+
+def test_second_launch_reports_a_window_that_will_not_take_focus_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """An elevated first instance: the window exists but cannot be brought forward."""
+    _fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NOT_FOREGROUND]
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert len(attempts) == 1
+    assert shown == []
+    assert "could not be brought to the front" in capsys.readouterr().err
+
+
+def test_second_launch_fails_when_the_dead_instances_lock_can_never_be_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, _attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        alive=[False],
+        acquired=[False],
+        wait=0.05,
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    assert len(held.attempts) > 1
+    assert fakes.calls == []
+
+
+def test_second_launch_without_a_valid_record_is_still_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.ACTIVATED], existing=None
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    assert attempts == []
+    assert fakes.calls == []
+
+
+def test_second_headless_launch_reports_the_running_instance_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    _fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NO_WINDOW]
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert attempts == []
+    assert "already running on loopback port 5555" in capsys.readouterr().out
+
+
+class _FakeUser32:
+    """Records the window calls ``activate_process_window`` makes."""
+
+    def __init__(self, *, foreground: bool) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self._foreground = foreground
+
+        def show(hwnd, command):
+            self.calls.append(("ShowWindowAsync", command))
+            return 1
+
+        def focus(hwnd):
+            self.calls.append(("SetForegroundWindow", hwnd))
+            return 1 if self._foreground else 0
+
+        self.ShowWindowAsync = show
+        self.SetForegroundWindow = focus
+
+
+@pytest.mark.parametrize(
+    ("window", "foreground", "expected"),
+    [
+        (777, True, WindowActivation.ACTIVATED),
+        (777, False, WindowActivation.NOT_FOREGROUND),
+        (None, True, WindowActivation.NO_WINDOW),
+    ],
+)
+def test_activate_process_window_reports_what_actually_happened(
+    monkeypatch: pytest.MonkeyPatch,
+    window: int | None,
+    foreground: bool,
+    expected: WindowActivation,
+):
+    searched: list[tuple[int, str]] = []
+    user32 = _FakeUser32(foreground=foreground)
+    monkeypatch.setattr(
+        desktop_module,
+        "_find_process_window",
+        lambda pid, title, *, timeout: searched.append((pid, title)) or window,
+    )
+    monkeypatch.setattr(desktop_module.ctypes, "WinDLL", lambda *_a, **_k: user32, raising=False)
+
+    assert desktop_module.activate_process_window(4321, title="Cortex Test", timeout=0.01) is expected
+
+    assert searched == [(4321, "Cortex Test")]
+    if window is None:
+        assert user32.calls == []
+    else:
+        assert user32.calls == [("ShowWindowAsync", 9), ("SetForegroundWindow", 777)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses the Windows process APIs")
+def test_process_is_alive_tells_a_running_process_from_an_exited_one():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert desktop_module.process_is_alive(child.pid) is True
+        child.kill()
+        child.wait(timeout=10)
+        # The Popen object still holds its handle, so the process object
+        # exists but is signalled: that is "exited", not "alive".
+        assert desktop_module.process_is_alive(child.pid) is False
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+    assert desktop_module.process_is_alive(0) is False
+    assert desktop_module.process_is_alive(-5) is False

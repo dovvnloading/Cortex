@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import ctypes
 from ctypes import wintypes
+import enum
 import importlib
 import inspect
 import os
@@ -13,6 +14,9 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
+
+
+WINDOW_TITLE = "Cortex"
 
 
 class DesktopWindowError(RuntimeError):
@@ -23,7 +27,7 @@ class DesktopWindowError(RuntimeError):
 class DesktopWindowConfig:
     url: str
     storage_path: Path
-    title: str = "Cortex"
+    title: str = WINDOW_TITLE
     icon_path: Path | None = None
     width: int = 1440
     height: int = 960
@@ -278,11 +282,25 @@ def _apply_windows_dark_title_bar(*, pid: int, title: str) -> bool:
     return False
 
 
-def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
+class WindowActivation(enum.Enum):
+    """What ``activate_process_window`` found and did."""
+
+    ACTIVATED = "activated"
+    # No visible window with that title yet -- the instance may still be
+    # starting, or its window may be in another session or desktop.
+    NO_WINDOW = "no_window"
+    # The window exists but Windows would not give it the foreground, which
+    # is what an instance running elevated looks like from here.
+    NOT_FOREGROUND = "not_foreground"
+
+
+def activate_process_window(
+    pid: int, *, title: str = WINDOW_TITLE, timeout: float = 3.0
+) -> WindowActivation:
     """Restore and focus a top-level Windows window owned by ``pid``."""
-    hwnd = _find_process_window(pid, "Cortex", timeout=timeout)
+    hwnd = _find_process_window(pid, title, timeout=timeout)
     if hwnd is None:
-        return False
+        return WindowActivation.NO_WINDOW
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -290,5 +308,48 @@ def activate_process_window(pid: int, *, timeout: float = 3.0) -> bool:
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.SetForegroundWindow.restype = wintypes.BOOL
     user32.ShowWindowAsync(hwnd, 9)  # SW_RESTORE
-    user32.SetForegroundWindow(hwnd)
-    return True
+    if user32.SetForegroundWindow(hwnd):
+        return WindowActivation.ACTIVATED
+    return WindowActivation.NOT_FOREGROUND
+
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ACCESS_DENIED = 5
+
+
+def process_is_alive(pid: int) -> bool:
+    """Report whether the process ``pid`` is still running.
+
+    A process that exists but cannot be opened for lack of permission (an
+    instance running elevated) is alive. Anything else that cannot be opened,
+    and any process that has exited, counts as gone: the caller answers a
+    wrong "gone" by trying the instance lock, which arbitrates safely, and a
+    wrong "alive" would only make it wait.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform != "win32":  # pragma: no cover - Windows is the supported launcher target
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
