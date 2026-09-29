@@ -331,6 +331,13 @@ What is kept, all beside the database files in that folder:
   just before a release upgraded it from schema version `N`. It is written
   once per version and never replaced, and it is the file an older release can
   open.
+- If the chat or settings database is found corrupt at launch, Cortex restores
+  the newest verified backup and keeps what it replaced as
+  `<database>.corrupt-<id>`, with its write-ahead log beside it as
+  `<database>.corrupt-<id>-wal`. The restored data is the backup's, which is
+  the state at the previous launch; the diagnostics
+  (`/api/v1/diagnostics`, `chat_backup` and `settings_backup`) name the
+  quarantined file. Cortex never deletes it.
 
 To go back to an older release after a newer one upgraded the chat database:
 close Cortex, move `cortex_db.sqlite` and any `-wal` and `-shm` files beside it

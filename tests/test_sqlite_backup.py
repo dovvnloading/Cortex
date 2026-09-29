@@ -1,14 +1,21 @@
-"""The backup primitives the chat and settings stores share."""
+"""The backup and recovery primitives the chat and settings stores share."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sqlite3
 import time
 
 import pytest
 
-from cortex_backend.repositories.sqlite_backup import failure_detail, snapshot_database
+from cortex_backend.repositories import sqlite_backup
+from cortex_backend.repositories.sqlite_backup import (
+    failure_detail,
+    move_sidecars,
+    put_sidecars_back,
+    snapshot_database,
+)
 
 
 def _rows(path: Path) -> list[int]:
@@ -88,3 +95,90 @@ def test_failure_detail_keeps_the_error_type_but_never_its_message() -> None:
     assert detail == "Could not copy the database. (PermissionError)"
     assert "someone" not in detail
     assert failure_detail("Could not copy the database.", None) == "Could not copy the database."
+
+
+def _database_with_sidecars(directory: Path, name: str) -> Path:
+    database = directory / name
+    database.write_bytes(b"main file")
+    Path(f"{database}-wal").write_bytes(b"write-ahead log")
+    Path(f"{database}-shm").write_bytes(b"shared memory")
+    return database
+
+
+def test_move_sidecars_renames_both_beside_the_destination_and_reports_the_moves(
+    tmp_path: Path,
+) -> None:
+    database = _database_with_sidecars(tmp_path, "live.sqlite")
+    destination = tmp_path / "live.sqlite.corrupt-1"
+
+    moved = move_sidecars(database, destination)
+
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    assert Path(f"{destination}-wal").read_bytes() == b"write-ahead log"
+    assert Path(f"{destination}-shm").read_bytes() == b"shared memory"
+    assert len(moved) == 2
+
+    put_sidecars_back(moved)
+
+    assert Path(f"{database}-wal").read_bytes() == b"write-ahead log"
+    assert Path(f"{database}-shm").read_bytes() == b"shared memory"
+    assert not Path(f"{destination}-wal").exists()
+
+
+def test_move_sidecars_tolerates_a_database_with_no_sidecars(tmp_path: Path) -> None:
+    database = tmp_path / "live.sqlite"
+    database.write_bytes(b"main file")
+
+    assert move_sidecars(database, tmp_path / "elsewhere") == []
+
+
+def test_move_sidecars_never_overwrites_a_preserved_sidecar(tmp_path: Path) -> None:
+    database = _database_with_sidecars(tmp_path, "live.sqlite")
+    destination = tmp_path / "quarantine"
+    Path(f"{destination}-wal").write_bytes(b"an earlier preserved log")
+
+    with pytest.raises(FileExistsError):
+        move_sidecars(database, destination)
+
+    assert Path(f"{destination}-wal").read_bytes() == b"an earlier preserved log"
+    assert Path(f"{database}-wal").read_bytes() == b"write-ahead log"
+    assert Path(f"{database}-shm").read_bytes() == b"shared memory"
+
+
+def test_move_sidecars_undoes_a_partial_move_when_a_rename_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _database_with_sidecars(tmp_path, "live.sqlite")
+    real_replace = os.replace
+
+    def replace(source, destination, *args, **kwargs):
+        if str(source).endswith("-shm") and "quarantine" in str(destination):
+            raise PermissionError(13, "in use")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_backup.os, "replace", replace)
+
+    with pytest.raises(PermissionError):
+        move_sidecars(database, tmp_path / "quarantine")
+    monkeypatch.undo()
+
+    assert Path(f"{database}-wal").read_bytes() == b"write-ahead log"
+    assert Path(f"{database}-shm").read_bytes() == b"shared memory"
+    assert not list(tmp_path.glob("quarantine*"))
+
+
+def test_put_sidecars_back_never_overwrites_a_file_at_the_original_name(tmp_path: Path) -> None:
+    database = _database_with_sidecars(tmp_path, "live.sqlite")
+    destination = tmp_path / "quarantine"
+    moved = move_sidecars(database, destination)
+    # Something (another database) has since claimed the original log name.
+    Path(f"{database}-wal").write_bytes(b"belongs to a different database")
+
+    with pytest.raises(FileExistsError):
+        put_sidecars_back(moved)
+
+    assert Path(f"{database}-wal").read_bytes() == b"belongs to a different database"
+    assert Path(f"{destination}-wal").read_bytes() == b"write-ahead log"
+    # The other sidecar had no such conflict and still went back.
+    assert Path(f"{database}-shm").read_bytes() == b"shared memory"

@@ -1,17 +1,25 @@
-"""Backup primitives shared by the chat and settings databases.
+"""Backup and recovery primitives shared by the chat and settings databases.
 
 Both stores keep verified backups of a SQLite file that other connections may
-be writing to. The part of that which is easy to get subtly wrong lives here
-once:
+be writing to, and both can replace a corrupt primary from one of those
+backups. The parts of that which are easy to get subtly wrong live here once:
 
 * ``snapshot_database`` copies a live database through SQLite's online backup
   API, so the copy includes commits that are still only in the ``-wal``
   sidecar.
-* ``BackupStatus`` is what a store reports about the backup it took.
+* ``move_sidecars`` / ``put_sidecars_back`` set a crashed database's write-ahead
+  log aside instead of deleting it, and undo that when recovery is abandoned.
+* ``BackupStatus`` and ``RecoveryReport`` are what a store reports about the
+  backup it took and the recovery it performed.
+
+Nothing here deletes or overwrites a database or a write-ahead log.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -44,6 +52,29 @@ class BackupStatus(NamedTuple):
 
     state: BackupState
     detail: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryReport:
+    """A corrupt primary database was replaced from a verified backup.
+
+    ``recovered_from`` is the backup that was restored and
+    ``quarantined_path`` the file the corrupt primary was moved to; its
+    write-ahead log, if there was one, sits beside it as
+    ``<quarantined_path>-wal``. ``at`` is a UTC ISO timestamp.
+
+    The restored state is the one the backup captured, which is the state at
+    the previous launch: anything written since then is only in the
+    quarantined files.
+    """
+
+    recovered_from: str
+    quarantined_path: str
+    at: str
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def failure_detail(message: str, cause: BaseException | None) -> str:
@@ -95,3 +126,54 @@ def snapshot_database(
             target_connection.close()
     finally:
         source_connection.close()
+
+
+def move_sidecars(
+    database: str | os.PathLike[str], destination: str | os.PathLike[str]
+) -> list[tuple[Path, Path]]:
+    """Move ``<database>-wal`` and ``-shm`` beside ``destination``.
+
+    A crashed database's write-ahead log may hold its newest committed rows,
+    so it is renamed to ``<destination>-wal`` -- the name SQLite and
+    ``.recover`` look for next to that file -- rather than deleted. Returns
+    the ``(original, moved)`` pairs so the caller can undo the move. If any
+    rename fails, the ones already done are undone and ``OSError`` is raised;
+    a destination that already exists is never overwritten.
+    """
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for suffix in SIDECAR_SUFFIXES:
+            original = Path(f"{database}{suffix}")
+            if not original.exists():
+                continue
+            target = Path(f"{destination}{suffix}")
+            if target.exists():
+                raise FileExistsError("a preserved sidecar already exists at the destination")
+            os.replace(original, target)
+            moved.append((original, target))
+    except OSError:
+        try:
+            put_sidecars_back(moved)
+        except OSError:
+            logging.warning("Could not return a database sidecar after a failed quarantine.")
+        raise
+    return moved
+
+
+def put_sidecars_back(moved: list[tuple[Path, Path]]) -> None:
+    """Undo ``move_sidecars``. Tries every rename, then raises the first failure.
+
+    A file that has since appeared at the original name is left alone and the
+    preserved sidecar stays where it is: it could belong to a different
+    database, and overwriting a write-ahead log is exactly what this avoids.
+    """
+    first_error: OSError | None = None
+    for original, target in reversed(moved):
+        try:
+            if original.exists():
+                raise FileExistsError("a sidecar already exists at the original name")
+            os.replace(target, original)
+        except OSError as exc:
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error

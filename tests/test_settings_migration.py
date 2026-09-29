@@ -15,7 +15,9 @@ from fastapi.testclient import TestClient
 import app_factory
 from app_factory import build_app
 from cortex_backend.api import create_app
+from cortex_backend.core.paths import AppPaths
 from cortex_backend.testing import build_demo_dependencies
+from cortex_backend.repositories.chats import LegacyDatabaseChatRepository
 from cortex_backend.repositories.legacy_settings import LegacySettingsReader
 from cortex_backend.repositories.storage import (
     DatabaseManager,
@@ -354,6 +356,10 @@ def test_diagnostics_exposes_migration_and_setup_capabilities():
         payload = diagnostics.json()
         assert payload["settings_source"] == "memory"
         assert payload["ollama_setup_url"] == "https://ollama.com/download"
+        # The in-memory stores keep no backups, so they report none rather
+        # than a made-up "ok".
+        assert payload["chat_backup"] is None
+        assert payload["settings_backup"] is None
 
 
 def test_settings_live_in_their_own_database_not_the_chat_database(tmp_path: Path):
@@ -428,3 +434,125 @@ def test_adoption_is_skipped_cleanly_when_there_is_nothing_to_adopt(tmp_path: Pa
     second = tmp_path / "second_settings.sqlite"
     repository = SQLiteSettingsRepository(second, adopt_from=other_db)
     assert repository.load().settings is not None
+
+
+def _diagnostics_for(dependencies, *, base_url: str = "http://testserver") -> dict:
+    app = create_app(
+        dependencies,
+        allowed_hosts=("testserver", "127.0.0.1", "localhost", "::1"),
+    )
+    with TestClient(app, base_url=base_url) as client:
+        token = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": app.state.session_manager.bootstrap_token},
+        ).json()["session_token"]
+        response = client.get(
+            "/api/v1/diagnostics",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    return response.json()
+
+
+def _sqlite_dependencies(chat_database: DatabaseManager, settings: SQLiteSettingsRepository):
+    dependencies = build_demo_dependencies()
+    dependencies.chats = LegacyDatabaseChatRepository(chat_database)
+    dependencies.settings = settings
+    return dependencies
+
+
+def _chat_database_with_a_verified_backup(tmp_path: Path) -> DatabaseManager:
+    path = str(tmp_path / "chat.sqlite")
+    legacy = str(tmp_path / "legacy")
+    first = DatabaseManager(db_path=path, legacy_history_dir=legacy)
+    first.create_chat_from_messages("thread-1", "Title", [{"role": "user", "content": "hello"}])
+    return DatabaseManager(db_path=path, legacy_history_dir=legacy)
+
+
+def test_diagnostics_report_a_chat_database_recovery(tmp_path: Path):
+    """A user whose chat database was torn lost everything since the previous
+    launch and was told nothing. The diagnostics now name what happened and
+    where the quarantined file is."""
+    chat = _chat_database_with_a_verified_backup(tmp_path)
+    Path(chat.db_path).write_bytes(b"corrupt-primary")
+    recovered = DatabaseManager(db_path=chat.db_path, legacy_history_dir=chat.legacy_history_dir)
+    settings = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+
+    payload = _diagnostics_for(_sqlite_dependencies(recovered, settings))
+
+    chat_backup = payload["chat_backup"]
+    assert chat_backup["status"] == "ok"
+    assert chat_backup["recovery"]["quarantined_path"] == recovered.last_corrupt_path
+    assert chat_backup["recovery"]["recovered_from"] == recovered.backup_path
+    assert chat_backup["recovery"]["at"]
+    assert Path(chat_backup["recovery"]["quarantined_path"]).read_bytes() == b"corrupt-primary"
+    # The settings database was healthy, so it reports no recovery.
+    assert payload["settings_backup"]["recovery"] is None
+
+
+def test_diagnostics_report_a_settings_database_recovery(tmp_path: Path):
+    chat = _chat_database_with_a_verified_backup(tmp_path)
+    settings_path = tmp_path / "settings.sqlite"
+    first = SQLiteSettingsRepository(settings_path)
+    first.save(first.load().settings)
+    first.save(first.load().settings)
+    settings_path.write_bytes(b"corrupt-primary")
+    recovered = SQLiteSettingsRepository(settings_path)
+
+    payload = _diagnostics_for(_sqlite_dependencies(chat, recovered))
+
+    recovery = payload["settings_backup"]["recovery"]
+    assert recovery["quarantined_path"] == str(recovered.last_corrupt_path)
+    assert recovery["recovered_from"] == str(recovered.backup_path)
+    assert payload["chat_backup"]["recovery"] is None
+
+
+def test_diagnostics_report_a_failed_backup_without_naming_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    chat = _chat_database_with_a_verified_backup(tmp_path)
+    settings_path = tmp_path / "settings.sqlite"
+    seeded = SQLiteSettingsRepository(settings_path)
+    seeded.save(seeded.load().settings)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("cortex_backend.repositories.storage.snapshot_database", refuse)
+    monkeypatch.setattr("cortex_backend.repositories.sqlite_settings.snapshot_database", refuse)
+    failed_chat = DatabaseManager(db_path=chat.db_path, legacy_history_dir=chat.legacy_history_dir)
+    failed_settings = SQLiteSettingsRepository(settings_path)
+    monkeypatch.undo()
+
+    payload = _diagnostics_for(_sqlite_dependencies(failed_chat, failed_settings))
+
+    for key in ("chat_backup", "settings_backup"):
+        assert payload[key]["status"] == "failed"
+        assert payload[key]["recovery"] is None
+        assert payload[key]["detail"]
+        assert str(tmp_path) not in payload[key]["detail"]
+        assert "OSError" in payload[key]["detail"]
+
+
+def test_diagnostics_from_the_real_stack_report_recovery(tmp_path: Path):
+    """The wiring, not just the stores: build the application the launcher
+    builds, tear its chat database, and start it again."""
+    build_app(data_dir=tmp_path, serve_frontend=False)
+    AppPaths.from_data_dir(tmp_path).database.write_bytes(b"corrupt-primary")
+
+    app = build_app(data_dir=tmp_path, serve_frontend=False)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        token = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": app.state.session_manager.bootstrap_token},
+        ).json()["session_token"]
+        response = client.get(
+            "/api/v1/diagnostics",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    recovery = response.json()["chat_backup"]["recovery"]
+    assert recovery is not None
+    assert Path(recovery["quarantined_path"]).read_bytes() == b"corrupt-primary"
+    assert response.json()["settings_backup"]["recovery"] is None

@@ -1,9 +1,11 @@
 """Recovery tests for the settings database and its verified backups."""
 
+from datetime import datetime
 import errno
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 
@@ -445,3 +447,161 @@ def test_backup_includes_commits_a_concurrent_reader_keeps_in_the_wal(tmp_path: 
         reader.close()
 
     assert _payload_revision(repository.backup_path) == 1
+
+
+# -- BE-49: recovery is reported, and the crashed log is kept ---------------
+
+
+def test_recovery_is_reported_with_the_backup_used_and_the_quarantined_file(tmp_path: Path):
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    assert repository.recovery_report is None
+    repository.db_path.write_bytes(b"corrupt-primary")
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+
+    report = recovered.recovery_report
+    assert report is not None
+    assert report.recovered_from == str(repository.backup_path)
+    assert report.quarantined_path == str(recovered.last_corrupt_path)
+    assert Path(report.quarantined_path).read_bytes() == b"corrupt-primary"
+    assert datetime.fromisoformat(report.at).utcoffset() is not None
+
+
+def test_recovery_quarantines_the_crashed_write_ahead_log(tmp_path: Path):
+    """The restored primary must not replay the dead database's log, but the
+    log may hold the newest committed settings, so it is kept, not deleted."""
+    repository, original = _repository_with_valid_backup(tmp_path)
+    restored_revision = _payload_revision(repository.backup_path)
+    raw = sqlite3.connect(repository.db_path)
+    try:
+        raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("UPDATE cortex_settings SET revision = 41 WHERE id = 1")
+        raw.commit()
+        saved_wal = tmp_path / "captured.wal"
+        shutil.copy2(f"{repository.db_path}-wal", saved_wal)
+    finally:
+        raw.close()
+    repository.db_path.write_bytes(b"corrupt-primary")
+    shutil.copy2(saved_wal, f"{repository.db_path}-wal")
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+
+    assert _payload_revision(recovered.db_path) == restored_revision  # not 41
+    assert recovered.load().settings == original
+    assert not Path(f"{repository.db_path}-wal").exists()
+    assert recovered.recovery_report is not None
+    quarantined = recovered.recovery_report.quarantined_path
+    assert Path(f"{quarantined}-wal").read_bytes() == saved_wal.read_bytes()
+
+
+def test_a_failed_recovery_puts_the_write_ahead_log_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    repository.db_path.write_bytes(b"corrupt-primary")
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"newest committed frames")
+
+    def fail_recovery_copy(cls, source, destination):
+        raise SettingsRepositoryError("injected recovery failure")
+
+    monkeypatch.setattr(
+        SQLiteSettingsRepository, "_atomic_copy_database", classmethod(fail_recovery_copy)
+    )
+
+    with pytest.raises(SettingsRepositoryError, match="injected recovery failure"):
+        SQLiteSettingsRepository(repository.db_path)
+
+    assert repository.db_path.read_bytes() == b"corrupt-primary"
+    assert wal.read_bytes() == b"newest committed frames"
+    assert not list(tmp_path.glob("settings.sqlite.corrupt-*"))
+
+
+def test_recovery_that_cannot_set_the_write_ahead_log_aside_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Never delete the log to make room: refuse, and leave everything as found."""
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    repository.db_path.write_bytes(b"corrupt-primary")
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"newest committed frames")
+    backup_before = repository.backup_path.read_bytes()
+    real_replace = os.replace
+
+    def replace(source, destination, *args, **kwargs):
+        if str(source).endswith("-wal"):
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    with pytest.raises(SettingsRepositoryError, match="write-ahead log"):
+        SQLiteSettingsRepository(repository.db_path)
+    monkeypatch.undo()
+
+    assert repository.db_path.read_bytes() == b"corrupt-primary"
+    assert wal.read_bytes() == b"newest committed frames"
+    assert repository.backup_path.read_bytes() == backup_before
+    assert not list(tmp_path.glob("settings.sqlite.corrupt-*"))
+
+
+def test_recovery_that_cannot_move_the_primary_returns_the_write_ahead_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    repository.db_path.write_bytes(b"corrupt-primary")
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"newest committed frames")
+    real_replace = os.replace
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.abspath(source) == os.path.abspath(repository.db_path):
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    with pytest.raises(SettingsRepositoryError, match="corrupt settings database before recovery"):
+        SQLiteSettingsRepository(repository.db_path)
+    monkeypatch.undo()
+
+    assert repository.db_path.read_bytes() == b"corrupt-primary"
+    assert wal.read_bytes() == b"newest committed frames"
+    assert not list(tmp_path.glob("settings.sqlite.corrupt-*"))
+
+
+class _PowerLoss(BaseException):
+    """Stands in for the process dying: nothing after it gets to run."""
+
+
+def test_a_crash_between_setting_the_log_aside_and_moving_the_primary_recovers_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The log moves before the primary, so dying in between leaves a primary
+    that still looks corrupt -- and the next launch simply finishes the job,
+    with the crashed log still preserved rather than replayed or lost."""
+    repository, original = _repository_with_valid_backup(tmp_path)
+    repository.db_path.write_bytes(b"corrupt-primary")
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"newest committed frames")
+    real_replace = os.replace
+
+    def die_moving_the_primary(source, destination, *args, **kwargs):
+        if os.path.abspath(source) == os.path.abspath(repository.db_path):
+            raise _PowerLoss
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", die_moving_the_primary)
+    with pytest.raises(_PowerLoss):
+        SQLiteSettingsRepository(repository.db_path)
+    monkeypatch.undo()
+
+    assert repository.db_path.read_bytes() == b"corrupt-primary"
+    assert not wal.exists()
+    preserved = list(tmp_path.glob("settings.sqlite.corrupt-*-wal"))
+    assert [entry.read_bytes() for entry in preserved] == [b"newest committed frames"]
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+
+    assert recovered.load().settings == original
+    assert [entry.read_bytes() for entry in preserved] == [b"newest committed frames"]

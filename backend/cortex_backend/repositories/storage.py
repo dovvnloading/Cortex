@@ -29,8 +29,12 @@ from uuid import uuid4
 from cortex_backend.core.paths import AppPaths
 from cortex_backend.repositories.sqlite_backup import (
     BackupStatus,
+    RecoveryReport,
     failure_detail,
+    move_sidecars,
+    put_sidecars_back,
     snapshot_database,
+    utc_now_iso,
 )
 
 
@@ -148,10 +152,11 @@ class DatabaseManager:
         # cannot discard the only recovery copy (mirrors sqlite_settings.py).
         self.previous_backup_path = f"{self.backup_path}.1"
         self.last_corrupt_path: str | None = None
-        # What startup did about its backup. A backup that could not be
-        # written is reported here; it does not stop Cortex from starting on
-        # a healthy primary.
+        # What startup did about backups and recovery, for the diagnostics
+        # route. A backup that could not be written is reported here; it does
+        # not stop Cortex from starting on a healthy primary.
         self.backup_status = BackupStatus("ok")
+        self.recovery_report: RecoveryReport | None = None
         self.pre_upgrade_snapshot_path: str | None = None
         self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
@@ -282,31 +287,6 @@ class DatabaseManager:
                         cause=exc,
                     ) from exc
 
-    def _sidecar_paths(self) -> tuple[Path, ...]:
-        """The WAL sidecars SQLite keeps beside the primary database file."""
-        return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
-
-    def _discard_sidecars(self) -> None:
-        """Drop the write-ahead log left behind by the database we replaced.
-
-        The crash that corrupts the primary is the same event that leaves an
-        uncheckpointed -wal beside it. After recovery that log describes a
-        file that no longer exists, and SQLite cannot tell -- it would replay
-        the frames onto the restored backup and overwrite recovered rows with
-        content from the database just declared corrupt.
-
-        Only safe once the replacement is committed. On the rollback path the
-        original primary is put back, so its sidecars still describe it and
-        must survive.
-        """
-        for sidecar in self._sidecar_paths():
-            try:
-                sidecar.unlink(missing_ok=True)
-            except OSError:
-                # A locked sidecar is not worth failing recovery over; SQLite
-                # validates the log against the database header before replay.
-                logging.warning("Could not remove a stale chat database sidecar.")
-
     def _prepare_primary(self) -> None:
         """Validate the primary before backup rotation, recovering if needed.
 
@@ -315,6 +295,10 @@ class DatabaseManager:
         _create_tables), so this defends against the rarer catastrophic case
         -- a corrupt or unreadable primary -- using the same validated,
         two-generation backup rotation already proven in sqlite_settings.py.
+
+        This stays fail-closed. A corrupt primary with no usable backup, or a
+        recovery that cannot preserve what it is replacing, raises rather than
+        starting on an empty or half-restored database.
         """
         if not os.path.exists(self.db_path) or self._database_is_valid(self.db_path):
             return
@@ -322,39 +306,90 @@ class DatabaseManager:
         for candidate in (self.backup_path, self.previous_backup_path):
             if not self._database_is_valid(candidate):
                 continue
-            corrupt_path = f"{self.db_path}.corrupt-{uuid4().hex}"
-            try:
-                os.replace(self.db_path, corrupt_path)
-            except OSError as exc:
-                raise PersistenceError(
-                    "Could not preserve the corrupt chat database before recovery.",
-                    operation="recovery",
-                    cause=exc,
-                ) from exc
-            try:
-                self._atomic_copy_database(candidate, self.db_path)
-                self._discard_sidecars()
-            except PersistenceError:
-                try:
-                    os.replace(corrupt_path, self.db_path)
-                except OSError as rollback_exc:
-                    raise PersistenceError(
-                        "Chat database recovery failed and the corrupt primary could not be "
-                        f"restored; it remains at {corrupt_path}.",
-                        operation="recovery",
-                        cause=rollback_exc,
-                    ) from rollback_exc
-                raise
+            self.recovery_report = self._recover_from(candidate)
+            self.last_corrupt_path = self.recovery_report.quarantined_path
             logging.error(
                 "Chat database was corrupt; recovered from a verified backup. "
-                "The corrupt file was preserved for inspection (path omitted from logs)."
+                "The corrupt file and its write-ahead log were preserved for "
+                "inspection (path omitted from logs)."
             )
-            self.last_corrupt_path = corrupt_path
             return
 
         raise PersistenceError(
             "Chat database is corrupt and no valid backup is available.",
             operation="recovery",
+        )
+
+    def _recover_from(self, candidate: str) -> RecoveryReport:
+        """Replace the corrupt primary with ``candidate``, keeping everything it had.
+
+        The crash that corrupts the primary is the same event that leaves an
+        uncheckpointed -wal beside it. That log must not sit next to the
+        restored copy: SQLite cannot tell it describes a different database
+        and would replay its frames onto the backup, overwriting recovered
+        rows with content from the file just declared corrupt. But it may also
+        hold the newest committed messages, so it is moved next to the
+        quarantined primary (``<corrupt>-wal``) rather than deleted, where
+        ``sqlite3 .recover`` can still find it.
+
+        The log moves first. A crash between the two renames then leaves the
+        primary still detectably corrupt, so the next start repeats recovery;
+        the other order would leave a log with no database beside it, which
+        SQLite replays onto whatever file is created there next.
+
+        If the backup cannot be put in place, everything is moved back.
+        """
+        corrupt_path = f"{self.db_path}.corrupt-{uuid4().hex}"
+        try:
+            moved_sidecars = move_sidecars(self.db_path, corrupt_path)
+        except OSError as exc:
+            raise PersistenceError(
+                "Could not preserve the write-ahead log of the corrupt chat database "
+                "before recovery.",
+                operation="recovery",
+                cause=exc,
+            ) from exc
+        try:
+            os.replace(self.db_path, corrupt_path)
+        except OSError as exc:
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError:
+                logging.warning("Could not return the chat database write-ahead log.")
+            raise PersistenceError(
+                "Could not preserve the corrupt chat database before recovery.",
+                operation="recovery",
+                cause=exc,
+            ) from exc
+        try:
+            self._atomic_copy_database(candidate, self.db_path)
+        except PersistenceError:
+            try:
+                os.replace(corrupt_path, self.db_path)
+            except OSError as rollback_exc:
+                raise PersistenceError(
+                    "Chat database recovery failed and the corrupt primary could not be "
+                    f"restored; it remains at {corrupt_path}.",
+                    operation="recovery",
+                    cause=rollback_exc,
+                ) from rollback_exc
+            # The original primary is back, so its own log is the right one
+            # again. Restored second: with the primary in place, a log that
+            # cannot be returned is still safe on disk, just not replayed.
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError as rollback_exc:
+                raise PersistenceError(
+                    "Chat database recovery failed; the corrupt primary was restored but "
+                    f"its write-ahead log remains at {corrupt_path}-wal.",
+                    operation="recovery",
+                    cause=rollback_exc,
+                ) from rollback_exc
+            raise
+        return RecoveryReport(
+            recovered_from=candidate,
+            quarantined_path=corrupt_path,
+            at=utc_now_iso(),
         )
 
     def _create_backup(self) -> None:

@@ -926,6 +926,72 @@
         "title": "CropStep",
         "type": "object"
       },
+      "DatabaseBackupStatus": {
+        "additionalProperties": false,
+        "description": "How the startup backup and recovery of one database went.\n\n``status`` is ``failed`` when the backup could not be refreshed although\nthe database itself opened, and ``skipped`` when there was nothing to\nback up yet. ``recovery`` is set only when this launch had to restore a\ncorrupt database from its backup.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseRecoveryReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "failed",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "DatabaseBackupStatus",
+        "type": "object"
+      },
+      "DatabaseRecoveryReport": {
+        "additionalProperties": false,
+        "description": "A corrupt database was replaced from a verified backup at startup.\n\nThe restored data is the backup's, which reflects the previous launch;\nanything written since is in ``quarantined_path`` (and its ``-wal``).",
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "string"
+          },
+          "quarantined_path": {
+            "title": "Quarantined Path",
+            "type": "string"
+          },
+          "recovered_from": {
+            "title": "Recovered From",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recovered_from",
+          "quarantined_path",
+          "at"
+        ],
+        "title": "DatabaseRecoveryReport",
+        "type": "object"
+      },
       "DiagnosticsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -934,6 +1000,16 @@
             "default": "v1",
             "title": "Api Version",
             "type": "string"
+          },
+          "chat_backup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseBackupStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "connection": {
             "anyOf": [
@@ -997,6 +1073,16 @@
             },
             "title": "Required Models",
             "type": "array"
+          },
+          "settings_backup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseBackupStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "settings_source": {
             "title": "Settings Source",
