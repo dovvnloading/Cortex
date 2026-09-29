@@ -88,7 +88,11 @@ transcript.](.github/images/workspace-light.png)
   or Hugging Face repo, then select it from the same picker as everything else.
   The folder is searched a few levels deep, so the one-folder-per-repository
   layout downloaders use works as-is; a file appears as `gguf:<path>`, e.g.
-  `gguf:Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf`.
+  `gguf:Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf`. A download that drops resumes from
+  the bytes already stored, a split model (`-00001-of-00003`) is fetched whole or
+  not at all, and a gated Hugging Face repository works once its access token is
+  in the `HF_TOKEN` environment variable (it is sent to huggingface.co only,
+  never stored or logged).
 - **Composer model control.** Inspect the local inventory, switch models without
   leaving the composer, refresh the inventory, and stage local image or text
   attachments.

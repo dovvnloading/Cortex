@@ -6,6 +6,8 @@ in cortex_backend.api.routes.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
 from cortex_backend.api.jobs import (
@@ -17,7 +19,9 @@ from cortex_backend.api.routes import (
     _chat_response,
     _durable_owner,
     _raise_chat_attachment_error,
+    _raise_chat_domain_error,
     _raise_repository_error,
+    _regeneration_target,
     _reject_invalid_new_chat_thread_id,
     _request_fingerprint,
     _start_generation_job,
@@ -41,8 +45,9 @@ from cortex_backend.api.schemas import (
 from cortex_backend.api.security import SessionPrincipal
 from cortex_backend.repositories.chats import (
     ChatGroupNotFound,
-    ChatRepositoryError,
+    ChatNotFound,
     ChatRevisionConflict,
+    MessageNotFound,
 )
 from cortex_backend.services.attachments import ChatAttachmentError
 from cortex_backend.services.chat import (
@@ -57,6 +62,10 @@ from fastapi import (
     status,
 )
 from uuid import uuid4
+
+
+# The fields of a chat's overview that make up its sidebar summary.
+_SUMMARY_FIELDS = ("id", "title", "timestamp", "group_id")
 
 
 def register(router: APIRouter, *, require_session, dependencies) -> None:
@@ -122,7 +131,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            if deps.chats.get_chat(thread_id) is None:
+            if deps.chats.get_chat_overview(thread_id) is None:
                 raise HTTPException(status_code=404, detail="Chat not found.")
             deps.chats.rename_chat(thread_id, payload.title.strip())
             chat = deps.chats.get_chat(thread_id)
@@ -235,9 +244,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             moved = deps.chats.set_chat_group(thread_id, payload.group_id)
             if not moved:
                 raise HTTPException(status_code=404, detail="Chat not found.")
-            summary = next(
-                (item for item in deps.chats.list_summaries() if item["id"] == thread_id),
-                None,
+            overview = deps.chats.get_chat_overview(thread_id)
+            summary = (
+                {key: overview[key] for key in _SUMMARY_FIELDS}
+                if overview is not None
+                else None
             )
         except HTTPException:
             raise
@@ -259,7 +270,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         principal: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            existing = deps.chats.get_chat(thread_id)
+            existing = deps.chats.get_chat_overview(thread_id)
             if existing is None:
                 _reject_invalid_new_chat_thread_id(thread_id)
             attachment_refs = _validate_chat_attachment_refs(
@@ -284,7 +295,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         except ChatRevisionConflict as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ChatDomainError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            _raise_chat_domain_error(exc)
         except Exception as exc:
             _raise_repository_error("save message", exc)
         if chat is None:
@@ -313,8 +324,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             forked = deps.chats.get_chat(new_thread_id)
         except HTTPException:
             raise
-        except (ChatDomainError, ChatRepositoryError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ChatDomainError as exc:
+            _raise_chat_domain_error(exc)
+        except (ChatNotFound, MessageNotFound) as exc:
+            # Found a moment ago, gone by the time the copy ran.
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("fork chat", exc)
         if forked is None:
@@ -354,28 +368,13 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 )
             else:
                 try:
-                    chat = deps.chats.get_chat(thread_id)
+                    chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
                     if chat is None:
                         raise HTTPException(status_code=404, detail="Chat not found.")
-                    position = message_position(chat, payload.message_id)
                     messages = list(chat.get("messages", ()))
-                    if position != len(messages) - 1:
-                        raise ChatDomainError(
-                            "Only the final message can be regenerated."
-                        )
-                    target_role = messages[position].get("role")
-                    if target_role == "assistant":
-                        if (
-                            position == 0
-                            or messages[position - 1].get("role") != "user"
-                        ):
-                            raise ChatDomainError(
-                                "The selected response has no user turn to regenerate."
-                            )
-                    elif target_role != "user":
-                        raise ChatDomainError(
-                            "Only an assistant response or an unanswered message can be regenerated."
-                        )
+                    position, target_role = _regeneration_target(
+                        messages, payload.message_id
+                    )
                     # A dangling user turn (a prior attempt admitted this
                     # message, then failed before any reply was persisted) is
                     # itself the current turn to answer, so its own content
@@ -386,7 +385,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     ).strip()
                     if not user_input:
                         raise ChatDomainError(
-                            "A regeneration request needs user input."
+                            "A regeneration request needs user input.",
+                            code="invalid_input",
                         )
                     current_revision = chat_revision(chat)
                     if (
@@ -394,7 +394,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         and payload.base_revision != current_revision
                     ):
                         raise ChatDomainError(
-                            "This chat changed. Reload it before regenerating."
+                            "This chat changed. Reload it before regenerating.",
+                            code="stale_revision",
                         )
                     generation_payload = GenerationRequest(
                         request_id=payload.request_id,
@@ -412,7 +413,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         request_fingerprint=request_fingerprint,
                         reservation=reservation,
                         target_message_id=payload.message_id,
-                        history_messages=messages[:position],
+                        transcript=messages,
                     )
                 finally:
                     request.app.state.jobs.abort_reservation(
@@ -431,5 +432,5 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         except ChatRevisionConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ChatDomainError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            _raise_chat_domain_error(exc)
         return _accepted(snapshot)

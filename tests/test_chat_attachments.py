@@ -391,7 +391,9 @@ def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
                 "attachments": [attachment],
             },
         )
-        assert blocked.status_code == 409
+        # A request the chosen model cannot serve is invalid input, not a
+        # conflict with the state of the chat.
+        assert blocked.status_code == 422
         assert "does not support image input" in blocked.json()["detail"]
 
 
@@ -493,7 +495,7 @@ def test_a_local_gguf_model_refuses_an_image_instead_of_dropping_it(tmp_path):
             },
         )
 
-        assert blocked.status_code == 409, (
+        assert blocked.status_code == 422, (
             f"a GGUF model accepted an image it cannot see: {blocked.status_code}"
         )
         assert "does not support image input" in blocked.json()["detail"]

@@ -96,6 +96,10 @@ class ExecutionStoreUnavailable(ExecutionRepositoryError):
     """
 
 
+class ExecutionJobNotFound(ExecutionRepositoryError):
+    """The job does not exist, or belongs to another owner."""
+
+
 class LeaseConflict(ExecutionRepositoryError):
     """Another live coordinator owns the execution lease."""
 
@@ -902,7 +906,7 @@ class ExecutionRepository:
     def request_cancel(self, job_id: str) -> ExecutionJob:
         job = self.get_job(job_id)
         if job is None:
-            raise ExecutionRepositoryError("Execution job does not exist.")
+            raise ExecutionJobNotFound("Execution job does not exist.")
         if job.status in TerminalExecutionStatus:
             return job
         return self.transition(
@@ -1055,7 +1059,7 @@ class ExecutionRepository:
                 (job_id,),
             ).fetchone()
             if row is None or row["owner"] != owner:
-                raise ExecutionRepositoryError("Execution job does not exist.")
+                raise ExecutionJobNotFound("Execution job does not exist.")
             if row["state"] is None:
                 raise ApprovalPolicyError("Execution job does not require approval.")
             if row["status"] in TerminalExecutionStatus:

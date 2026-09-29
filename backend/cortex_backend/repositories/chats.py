@@ -16,6 +16,14 @@ class ChatRevisionConflict(ChatRepositoryError):
     """The chat changed after the caller read its expected revision."""
 
 
+class ChatNotFound(ChatRepositoryError):
+    """The referenced chat does not exist."""
+
+
+class MessageNotFound(ChatRepositoryError):
+    """The referenced message does not exist in its chat."""
+
+
 def _assistant_thoughts(role: str, thoughts: str | None) -> str | None:
     """Keep reasoning metadata scoped to assistant messages only."""
     return thoughts if role == "assistant" else None
@@ -169,7 +177,7 @@ class LegacyDatabaseChatRepository:
     def fork_chat(self, thread_id: str, message_id: str, new_thread_id: str) -> None:
         chat = self._database.load_chat(thread_id)
         if chat is None:
-            raise ChatRepositoryError("Chat does not exist.")
+            raise ChatNotFound("Chat does not exist.")
         messages = chat.get("messages", [])
         try:
             position = next(
@@ -177,7 +185,7 @@ class LegacyDatabaseChatRepository:
                 if str(item.get("id")) == str(message_id)
             )
         except StopIteration as exc:
-            raise ChatRepositoryError("Message does not exist.") from exc
+            raise MessageNotFound("Message does not exist.") from exc
         self._database.create_chat_from_messages(
             new_thread_id,
             f"Fork of {chat.get('title') or 'Untitled Chat'}",
@@ -378,7 +386,7 @@ class InMemoryChatRepository:
                         f"Chat revision changed (expected {expected_revision}, found 0)."
                     )
                 if thread_title is None:
-                    raise ChatRepositoryError("Chat does not exist.")
+                    raise ChatNotFound("Chat does not exist.")
                 self.create_chat(thread_id, thread_title)
                 chat = self._chats[thread_id]
             self._check_expected_revision(chat, expected_revision)
@@ -402,7 +410,7 @@ class InMemoryChatRepository:
         with self._lock:
             chat = self._chats.get(thread_id)
             if chat is None:
-                raise ChatRepositoryError("Chat does not exist.")
+                raise ChatNotFound("Chat does not exist.")
             chat["title"] = title
             chat["timestamp"] = self._timestamp()
 
@@ -414,14 +422,14 @@ class InMemoryChatRepository:
         with self._lock:
             source = self._chats.get(thread_id)
             if source is None:
-                raise ChatRepositoryError("Chat does not exist.")
+                raise ChatNotFound("Chat does not exist.")
             try:
                 position = next(
                     index for index, item in enumerate(source["messages"])
                     if str(item.get("id")) == str(message_id)
                 )
             except StopIteration as exc:
-                raise ChatRepositoryError("Message does not exist.") from exc
+                raise MessageNotFound("Message does not exist.") from exc
             copied = deepcopy(source)
             copied["id"] = new_thread_id
             copied["title"] = f"Fork of {source.get('title') or 'Untitled Chat'}"
@@ -452,7 +460,7 @@ class InMemoryChatRepository:
         with self._lock:
             chat = self._chats.get(thread_id)
             if chat is None:
-                raise ChatRepositoryError("Chat does not exist.")
+                raise ChatNotFound("Chat does not exist.")
             self._check_expected_revision(chat, expected_revision)
             for message in chat["messages"]:
                 if str(message.get("id")) == str(message_id):
@@ -469,4 +477,4 @@ class InMemoryChatRepository:
                         message["attachments"] = deepcopy(attachments)
                     chat["timestamp"] = self._timestamp()
                     return
-            raise ChatRepositoryError("Message does not exist.")
+            raise MessageNotFound("Message does not exist.")

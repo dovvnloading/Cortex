@@ -34,6 +34,7 @@ from .models import ExecutionJob, TerminalExecutionStatus
 from .recipe_provider import MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
 from .recipes import ImageTransformPlan, RecipeValidationError, parse_image_transform
 from .repository import (
+    ExecutionJobNotFound,
     ExecutionRepository,
     ExecutionRepositoryError,
     ExecutionTransitionConflict,
@@ -236,7 +237,7 @@ class RecipeExecutionCoordinator:
     def cancel(self, job_id: str, *, owner: str) -> ExecutionJob:
         job = self.repository.get_job(job_id, owner=owner)
         if job is None:
-            raise ValueError("execution job does not exist or is not owned by caller")
+            raise ExecutionJobNotFound("Execution job does not exist.")
         with self._lock:
             event = self._cancel_events.get(job_id)
             attempt = self._attempts.get(job_id)
