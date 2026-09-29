@@ -5,7 +5,8 @@ export type RuntimeDisableReason =
   | "no-model-selected"
   | "model-unavailable"
   | "ollama-unavailable"
-  | "gguf-runtime-failed";
+  | "gguf-runtime-failed"
+  | "gguf-runtime-needs-restart";
 
 export type RuntimeAvailability = {
   ready: boolean;
@@ -38,6 +39,17 @@ export function resolveRuntimeAvailability({
         ready: false,
         reason: "gguf-runtime-failed",
         message: llamacppStatus.last_error ?? "The local GGUF runtime failed to start. Check System settings and try again.",
+      };
+    }
+    // The manager parks in "stopping" with an error when it could not confirm
+    // that the old runtime process exited, and stays there until Cortex is
+    // restarted: every send would fail. A plain "stopping" (no error) is a
+    // teardown in flight and resolves by itself, so it does not block sending.
+    if (llamacppStatus.state === "stopping" && llamacppStatus.last_error) {
+      return {
+        ready: false,
+        reason: "gguf-runtime-needs-restart",
+        message: llamacppStatus.last_error,
       };
     }
     return { ready: true, reason: null, message: null };

@@ -37,6 +37,14 @@ function useLlamaRuntimeStatus(selectedModel: string | null): ModelRuntimeStatus
   if (llamacppStatus.state === "downloading_binary") return { tone: "starting", label: "Downloading runtime…", detail };
   if (llamacppStatus.state === "starting") return { tone: "starting", label: "Starting…", detail };
   if (llamacppStatus.state === "failed") return { tone: "failed", label: "Failed to start", detail };
+  if (llamacppStatus.state === "stopping") {
+    // "stopping" with an error is the runtime failing closed: the old process
+    // could not be confirmed gone and nothing will start until Cortex is
+    // restarted. Without an error it is an ordinary teardown in flight.
+    return llamacppStatus.last_error
+      ? { tone: "failed", label: "Needs restart", detail: llamacppStatus.last_error }
+      : { tone: "starting", label: "Stopping…", detail: llamacppStatus.last_restart_reason ?? null };
+  }
   return { tone: "idle", label: "Not loaded yet", detail: "Loads when you send a message." };
 }
 

@@ -254,7 +254,10 @@ describe("MessageComposer", () => {
   describe("local runtime status", () => {
     afterEach(() => useModelStore.setState({ llamacppStatus: null }));
 
-    function renderWithRuntime(state: "idle" | "starting" | "ready" | "failed", extra: { last_error?: string | null } = {}) {
+    function renderWithRuntime(
+      state: "idle" | "starting" | "ready" | "failed" | "stopping",
+      extra: { last_error?: string | null; last_restart_reason?: string | null } = {},
+    ) {
       useModelStore.setState({
         llamacppStatus: {
           state,
@@ -262,6 +265,7 @@ describe("MessageComposer", () => {
           loaded_model: state === "ready" ? "gguf:demo.gguf" : null,
           active_backend: state === "ready" ? "vulkan" : null,
           last_error: extra.last_error ?? null,
+          last_restart_reason: extra.last_restart_reason ?? null,
           models_directory: "",
         },
       });
@@ -294,6 +298,22 @@ describe("MessageComposer", () => {
 
       renderWithRuntime("failed", { last_error: "Vulkan device lost." });
       expect(screen.getByText("Failed to start")).toHaveAttribute("title", "Vulkan device lost.");
+    });
+
+    it("says a runtime that failed closed needs a restart instead of 'Not loaded yet'", () => {
+      const message = "The local model runtime did not exit cleanly; restart Cortex before trying again.";
+      const { container } = renderWithRuntime("stopping", { last_error: message });
+
+      expect(screen.getByText("Needs restart")).toHaveAttribute("title", message);
+      expect(screen.queryByText("Not loaded yet")).not.toBeInTheDocument();
+      expect(container.querySelector(".model-picker-status-failed")).toBeInTheDocument();
+    });
+
+    it("shows an ordinary teardown as stopping, with the reason it is happening", () => {
+      renderWithRuntime("stopping", { last_restart_reason: "the selected model changed" });
+
+      expect(screen.getByText("Stopping…")).toHaveAttribute("title", "the selected model changed");
+      expect(screen.queryByText("Needs restart")).not.toBeInTheDocument();
     });
   });
 });
