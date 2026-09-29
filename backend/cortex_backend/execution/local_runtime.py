@@ -60,6 +60,8 @@ from .recipe_coordinator import (
 )
 from .recipe_provider import RecipeImageProvider
 from .repository import (
+    ApprovalExpiredError,
+    ApprovalTransitionError,
     ExecutionRepository,
     ExecutionTransitionConflict,
     LeaseConflict,
@@ -385,6 +387,10 @@ class LocalExecutionCoordinator:
                     limit=200,
                 ):
                     if job.profile == CODE_EXECUTION_PROFILE:
+                        # Relaunching only re-enters the approval gate. A job
+                        # approved before this restart is refused there and
+                        # cancelled as approval_expired; one still pending
+                        # waits for a fresh decision.
                         self._launch_code(job.job_id)
             except Exception:
                 pass
@@ -554,7 +560,13 @@ class LocalExecutionCoordinator:
             if current.approval_state != "approved":
                 self._finish_code_failure(job_id, cancel_event, "approval_required")
                 return
-            self.repository.claim_lease(
+            # Spending the approval and taking the lease are one transaction.
+            # "Allow once" is one launch, in the process the user answered in:
+            # a relaunch after a crash, or after a restart, finds the approval
+            # spent or from an earlier process and is refused with the job
+            # cancelled as approval_expired, so the program cannot run again
+            # without a fresh prompt.
+            self.repository.claim_approved_lease(
                 job_id,
                 lease_owner=lease_owner,
                 ttl_seconds=self.lease_seconds,
@@ -643,6 +655,15 @@ class LocalExecutionCoordinator:
             # than reporting a coordinator fault: the user asked to stop and
             # the program has not produced a result.
             self._finish_code_failure(job_id, cancel_event, "cancelled")
+        except ApprovalExpiredError:
+            # The store has already cancelled the job as approval_expired in
+            # the transaction that refused the approval. Nothing ran and there
+            # is nothing left to finish.
+            return
+        except ApprovalTransitionError:
+            # The approval changed under this attempt (denied, expired) between
+            # the check above and the claim. Fail closed.
+            self._finish_code_failure(job_id, cancel_event, "approval_required")
         except Exception:
             self._finish_code_failure(job_id, cancel_event, "coordinator_failed")
         finally:

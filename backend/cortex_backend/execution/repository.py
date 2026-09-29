@@ -34,6 +34,10 @@ from .models import (
 SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
+# How long after the user's decision an approval can still be spent. The click
+# and the launch are normally milliseconds apart; anything older than this is a
+# grant that sat unclaimed, and consent does not keep.
+APPROVAL_GRANT_SECONDS = MAX_APPROVAL_TTL_SECONDS
 DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 # How long a database set aside as damaged, or as written by a newer build, is
 # kept for inspection before the startup sweep reclaims it.
@@ -106,6 +110,14 @@ class ApprovalTransitionError(ExecutionRepositoryError):
     """An approval decision is not valid for the current state."""
 
 
+class ApprovalExpiredError(ApprovalTransitionError):
+    """An approval was no longer valid when a worker tried to spend it.
+
+    The job has already been cancelled and its approval marked expired by the
+    time this is raised; nothing ran.
+    """
+
+
 class ArtifactLimitError(ExecutionRepositoryError):
     """An artifact exceeded the configured size limit."""
 
@@ -157,6 +169,10 @@ class ExecutionRepository:
         self.artifact_root = Path(artifact_root)
         self.max_artifact_bytes = max_artifact_bytes
         self._installation_principal_id: str | None = None
+        # An approval decided before this moment was granted to a previous
+        # process. "Allow once" is one run in the process the user answered
+        # in, so it cannot be spent by this one.
+        self._opened_at = datetime.now(timezone.utc)
         self._ensure_schema()
 
     @property
@@ -409,6 +425,10 @@ class ExecutionRepository:
                     created_at TEXT NOT NULL,
                     decided_at TEXT,
                     expires_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS execution_approval_uses (
+                    job_id TEXT PRIMARY KEY REFERENCES execution_jobs(job_id) ON DELETE CASCADE,
+                    used_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS execution_supervisor_leases (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1202,6 +1222,124 @@ class ExecutionRepository:
                 (job_id, lease_owner, expires_text),
             )
         return expires_text
+
+    def claim_approved_lease(
+        self, job_id: str, *, lease_owner: str, ttl_seconds: float = 30.0
+    ) -> str:
+        """Spend a job's one-time approval and claim its lease, atomically.
+
+        This is the only way a code job's approval becomes a run. "Allow once"
+        means one launch, in the process the user answered in, so the approval
+        is refused -- the job is cancelled with ``approval_expired`` and the
+        approval marked expired, in the same transaction -- when it
+
+        * was already spent by an earlier launch (a crash mid-run, then a
+          relaunch), or
+        * was decided before this process started, or
+        * was decided longer ago than ``APPROVAL_GRANT_SECONDS``.
+
+        Otherwise the approval is marked spent in the same transaction that
+        writes the lease, so no relaunch can reuse it: a crash mid-run costs
+        the user a fresh approval, which is the honest reading of "once".
+
+        A live lease held by another coordinator, and a cancellation that has
+        already committed, are refused *without* spending the approval:
+        nothing is about to run.
+        """
+
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_text = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        lapsed = False
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT profile, status FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise ExecutionRepositoryError("Execution job does not exist.")
+            if job["status"] in TerminalExecutionStatus:
+                raise ExecutionRepositoryError("Terminal execution jobs cannot be leased.")
+            if job["status"] == "cancelling":
+                raise ExecutionTransitionConflict(
+                    "Execution job is cancelling and cannot start."
+                )
+            lease = connection.execute(
+                "SELECT lease_owner, lease_expires_at FROM execution_leases WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if (
+                lease is not None
+                and lease["lease_owner"] != lease_owner
+                and datetime.fromisoformat(lease["lease_expires_at"]) > now
+            ):
+                raise LeaseConflict("Execution lease is owned by another coordinator.")
+            approval = connection.execute(
+                "SELECT state, decided_at FROM execution_approvals WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if approval is None or approval["state"] != "approved":
+                raise ApprovalTransitionError("Execution is not approved.")
+            already_spent = connection.execute(
+                "SELECT 1 FROM execution_approval_uses WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if already_spent is not None or not self._grant_is_current(approval["decided_at"], now):
+                lapsed = True
+                connection.execute(
+                    "UPDATE execution_approvals SET state = 'expired' WHERE job_id = ?",
+                    (job_id,),
+                )
+                connection.execute(
+                    "UPDATE execution_jobs SET error = 'approval_expired' WHERE job_id = ?",
+                    (job_id,),
+                )
+                connection.execute("DELETE FROM execution_leases WHERE job_id = ?", (job_id,))
+                self._append_event_connection(
+                    connection,
+                    job_id=job_id,
+                    event="code.cancelled" if job["profile"] == "code.exec.v1" else "cancelled",
+                    status="cancelled",
+                    phase="approval",
+                    data={"message": "Approval expired.", "approval_state": "expired"},
+                    now=now_text,
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO execution_approval_uses (job_id, used_at) VALUES (?, ?)",
+                    (job_id, now_text),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_leases (job_id, lease_owner, lease_expires_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(job_id) DO UPDATE SET
+                        lease_owner = excluded.lease_owner,
+                        lease_expires_at = excluded.lease_expires_at
+                    """,
+                    (job_id, lease_owner, expires_text),
+                )
+        if lapsed:
+            # Raised after the commit above, so the cancellation is durable.
+            raise ApprovalExpiredError("Approval is no longer valid.")
+        return expires_text
+
+    def _grant_is_current(self, decided_at: str | None, now: datetime) -> bool:
+        """Whether an approval decided at ``decided_at`` may still be spent.
+
+        Fails closed: a missing or unparseable decision time is not current.
+        """
+
+        if not isinstance(decided_at, str):
+            return False
+        try:
+            decided = datetime.fromisoformat(decided_at)
+        except ValueError:
+            return False
+        if decided.tzinfo is None:
+            return False
+        return decided >= self._opened_at and (now - decided).total_seconds() <= APPROVAL_GRANT_SECONDS
 
     def release_lease(self, job_id: str, *, lease_owner: str) -> None:
         with self.connect() as connection:
