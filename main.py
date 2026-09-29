@@ -188,7 +188,9 @@ def _prepare_cache_dir(paths: AppPaths) -> AppPaths:
     """Create the local cache root, or keep the caches with the data if it cannot be.
 
     Caches are an optimisation over where the data lives, so failing to prepare
-    their folder must never stop a launch that worked before it existed.
+    their folder must never stop a launch that worked before it existed. The
+    returned paths have also decided, once, where each cache folder lives, so
+    the window, the backend's manager and its API routes all use the same one.
     """
     if paths.local_fallback:
         LOGGER.warning(
@@ -203,8 +205,8 @@ def _prepare_cache_dir(paths: AppPaths) -> AppPaths:
             "caches stay in the data folder.",
             exc,
         )
-        return paths.without_cache_root()
-    return paths
+        paths = paths.without_cache_root()
+    return paths.with_resolved_caches()
 
 
 def _is_packaged() -> bool:

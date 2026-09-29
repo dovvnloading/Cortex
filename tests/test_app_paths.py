@@ -104,6 +104,55 @@ def test_a_cache_folder_already_under_local_appdata_wins(tmp_path: Path) -> None
     assert paths.default_gguf_models_dir == paths.cache_dir / "gguf_models"
 
 
+def test_where_each_cache_folder_lives_is_decided_once_and_stays_decided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy folder that appears after startup must not move a folder in use."""
+    monkeypatch.setattr(paths_module, "secure_private_path", lambda path, *, directory: Path(path))
+    chosen = launcher_main._prepare_cache_dir(AppPaths.for_windows(_environ(tmp_path)))
+    before = _cache_paths(chosen)
+    assert before == {name: chosen.cache_dir / name for name in CACHE_FOLDERS}
+
+    for name in CACHE_FOLDERS:
+        (chosen.data_dir / name).mkdir(parents=True)
+
+    assert _cache_paths(chosen) == before
+
+
+def test_resolving_the_cache_folders_pins_the_answer_without_creating_anything(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.for_windows(_environ(tmp_path))
+    (paths.data_dir / "gguf_models").mkdir(parents=True)
+
+    pinned = paths.with_resolved_caches()
+    # Decided from what exists now: the legacy folder is in use, the rest are new.
+    assert pinned.default_gguf_models_dir == paths.data_dir / "gguf_models"
+    assert pinned.llamacpp_runtime_dir == paths.cache_dir / "llamacpp_runtime"
+    assert pinned.webview_profile == paths.cache_dir / "webview"
+    assert not paths.cache_dir.exists()
+    # Later changes on disk no longer move any of them.
+    (paths.cache_dir / "gguf_models").mkdir(parents=True)
+    (paths.data_dir / "webview").mkdir(parents=True)
+    assert pinned.default_gguf_models_dir == paths.data_dir / "gguf_models"
+    assert pinned.webview_profile == paths.cache_dir / "webview"
+    # The same instance is still live, as every earlier caller expects.
+    assert paths.default_gguf_models_dir == paths.cache_dir / "gguf_models"
+    assert paths.webview_profile == paths.data_dir / "webview"
+    # And resolving twice is the same as resolving once.
+    assert pinned.with_resolved_caches() == pinned
+
+
+def test_giving_up_the_cache_root_also_drops_what_was_decided_for_it(tmp_path: Path) -> None:
+    pinned = AppPaths.for_windows(_environ(tmp_path)).with_resolved_caches()
+    assert pinned.webview_profile == pinned.cache_dir / "webview"
+
+    fallback = pinned.without_cache_root()
+
+    assert fallback.cache_dir == pinned.data_dir
+    assert _cache_paths(fallback) == {name: pinned.data_dir / name for name in CACHE_FOLDERS}
+
+
 def test_ensure_cache_dir_creates_only_the_root_and_secures_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -222,6 +271,24 @@ def test_the_composition_root_places_caches_where_the_launcher_resolved_them(
     assert app.state.required_paths[0] == paths.data_dir
     assert paths.database.is_file()
     assert not (paths.data_dir / "gguf_models").exists()
+
+
+def test_the_download_manager_and_the_routes_agree_on_the_gguf_folder_for_the_whole_run(
+    tmp_path: Path,
+) -> None:
+    """The manager re-reads its folder per call, the API kept a snapshot: they diverged."""
+    paths = AppPaths(
+        data_dir=(tmp_path / "data").resolve(),
+        cache_root=(tmp_path / "local").resolve(),
+    )
+    paths.data_dir.mkdir()
+    app = app_factory.build_app(paths=paths, serve_frontend=False)
+
+    (paths.data_dir / "gguf_models").mkdir()  # a legacy folder shows up after startup
+
+    manager_folder = Path(app.state.llamacpp_manager.status.models_directory)
+    assert manager_folder == app.state.default_gguf_models_dir
+    assert manager_folder == paths.cache_dir / "gguf_models"
 
 
 def test_a_cache_folder_that_cannot_be_prepared_does_not_stop_the_launch(

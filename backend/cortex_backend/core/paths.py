@@ -16,6 +16,12 @@ from pathlib import PureWindowsPath
 ORGANIZATION_NAME = "ChatLLM"
 APPLICATION_NAME = "ChatLLM-Assistant"
 
+# The reproducible folders that may live under the local cache root.
+_WEBVIEW_FOLDER = "webview"
+_LLAMACPP_RUNTIME_FOLDER = "llamacpp_runtime"
+_GGUF_MODELS_FOLDER = "gguf_models"
+_CACHE_FOLDERS = (_WEBVIEW_FOLDER, _LLAMACPP_RUNTIME_FOLDER, _GGUF_MODELS_FOLDER)
+
 
 class AppPathError(RuntimeError):
     """Raised when Cortex cannot resolve a safe application-data directory."""
@@ -133,6 +139,10 @@ class AppPaths:
     # True when %APPDATA% was a network path and ``data_dir`` is under
     # %LOCALAPPDATA% instead, so the launcher can say so in its log.
     local_fallback: bool = False
+    # Where each cache folder lives once ``with_resolved_caches`` has decided it
+    # (folder name, path). Empty until then, and every cache property answers
+    # from what is on disk at the time it is asked.
+    resolved_caches: tuple[tuple[str, Path], ...] = ()
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike[str]) -> AppPaths:
@@ -249,9 +259,18 @@ class AppPaths:
         Earlier releases kept these folders inside ``data_dir``. A folder that is
         already there keeps being used where it is -- nothing is moved, copied
         or deleted -- and only a folder that exists nowhere yet is created under
-        ``cache_dir``. A folder already under ``cache_dir`` always wins, so the
-        answer does not flip once a new install has started filling it.
+        ``cache_dir``. A folder already under ``cache_dir`` always wins, so a new
+        install that has started filling it keeps it.
+
+        This is a live look at the disk: a legacy folder that appears later
+        moves the answer for a folder that does not exist under ``cache_dir``
+        yet. Code that must agree with itself over a whole run therefore uses
+        ``with_resolved_caches``, which decides once; the launcher does that
+        before anything reads a cache folder.
         """
+        for pinned_name, pinned in self.resolved_caches:
+            if pinned_name == name:
+                return pinned
         legacy = self.data_dir / name
         if self.cache_root is None or self.cache_root == self.data_dir:
             return legacy
@@ -263,21 +282,34 @@ class AppPaths:
     @property
     def webview_profile(self) -> Path:
         """Keep native webview state isolated from every installed browser profile."""
-        return self._cache_child("webview")
+        return self._cache_child(_WEBVIEW_FOLDER)
 
     @property
     def llamacpp_runtime_dir(self) -> Path:
         """Cached, app-managed llama-server binaries. Never user-facing."""
-        return self._cache_child("llamacpp_runtime")
+        return self._cache_child(_LLAMACPP_RUNTIME_FOLDER)
 
     @property
     def default_gguf_models_dir(self) -> Path:
         """Default GGUF drop/download folder when ModelSettings.gguf_directory is unset."""
-        return self._cache_child("gguf_models")
+        return self._cache_child(_GGUF_MODELS_FOLDER)
+
+    def with_resolved_caches(self) -> AppPaths:
+        """The same paths with where each cache folder lives decided once, now.
+
+        Nothing is created, moved or copied: each folder is located exactly as
+        ``_cache_child`` does, and the answer is then kept on the returned paths
+        so a folder cannot be found in one place by one consumer and in another
+        by the next. Resolving paths that are already resolved changes nothing.
+        """
+        return replace(
+            self,
+            resolved_caches=tuple((name, self._cache_child(name)) for name in _CACHE_FOLDERS),
+        )
 
     def without_cache_root(self) -> AppPaths:
         """The same paths with every cache folder kept under ``data_dir``."""
-        return replace(self, cache_root=None)
+        return replace(self, cache_root=None, resolved_caches=())
 
     def ensure_data_dir(self) -> Path:
         """Create the data root only when a caller explicitly requests it."""

@@ -73,6 +73,9 @@ def build_app(
     """
     if paths is None:
         paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
+    # One answer for every consumer below: the llama.cpp manager re-reads its
+    # models folder on each call while the API routes keep the value from here.
+    paths = paths.with_resolved_caches()
     execution_repository = ExecutionRepository(
         paths.execution_database,
         paths.execution_artifacts,
