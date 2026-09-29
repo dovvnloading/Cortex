@@ -47,10 +47,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Node 24 ships npm 11. `npm update --package-lock-only` on the npm 10 that
+      # Node 22 ships crashes on this lock file ("Cannot read properties of null
+      # (reading 'edgesOut')"), and this job only rewrites the lock, so it does not
+      # need to match the Node version the checks run on.
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Refresh the Python locks
         shell: pwsh
