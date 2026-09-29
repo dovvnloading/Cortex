@@ -185,6 +185,7 @@ export interface DatabaseRecoveryReport {
   recovered_from: string;
   quarantined_path: string;
   at: string;
+  adopted_sidecars?: Array<string>;
 }
 
 export interface DiagnosticsResponse {

@@ -485,9 +485,24 @@ def test_diagnostics_report_a_chat_database_recovery(tmp_path: Path):
     assert chat_backup["recovery"]["quarantined_path"] == recovered.last_corrupt_path
     assert chat_backup["recovery"]["recovered_from"] == recovered.backup_path
     assert chat_backup["recovery"]["at"]
+    assert chat_backup["recovery"]["adopted_sidecars"] == []
     assert Path(chat_backup["recovery"]["quarantined_path"]).read_bytes() == b"corrupt-primary"
     # The settings database was healthy, so it reports no recovery.
     assert payload["settings_backup"]["recovery"] is None
+
+
+def test_diagnostics_name_the_logs_a_recovery_adopted_from_an_interrupted_attempt(tmp_path: Path):
+    chat = _chat_database_with_a_verified_backup(tmp_path)
+    (tmp_path / f"chat.sqlite.corrupt-{'a' * 32}-wal").write_bytes(b"left by an interrupted attempt")
+    Path(chat.db_path).write_bytes(b"corrupt-primary")
+    recovered = DatabaseManager(db_path=chat.db_path, legacy_history_dir=chat.legacy_history_dir)
+    settings = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+
+    payload = _diagnostics_for(_sqlite_dependencies(recovered, settings))
+
+    recovery = payload["chat_backup"]["recovery"]
+    assert recovery["adopted_sidecars"] == [f"{recovery['quarantined_path']}-wal"]
+    assert Path(recovery["adopted_sidecars"][0]).read_bytes() == b"left by an interrupted attempt"
 
 
 def test_diagnostics_report_a_settings_database_recovery(tmp_path: Path):

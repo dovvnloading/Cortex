@@ -969,8 +969,16 @@
       },
       "DatabaseRecoveryReport": {
         "additionalProperties": false,
-        "description": "A corrupt database was replaced from a verified backup at startup.\n\nThe restored data is the backup's, which reflects the previous launch;\nanything written since is in ``quarantined_path`` (and its ``-wal``).",
+        "description": "A corrupt database was replaced from a verified backup at startup.\n\nThe restored data is the backup's, which reflects the previous launch;\nanything written since is in ``quarantined_path`` (and its ``-wal``).\n``adopted_sidecars`` names write-ahead-log files an earlier, interrupted\nrecovery had left under a different name and that were moved beside it.",
         "properties": {
+          "adopted_sidecars": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Adopted Sidecars",
+            "type": "array"
+          },
           "at": {
             "title": "At",
             "type": "string"

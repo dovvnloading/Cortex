@@ -1026,6 +1026,7 @@ def _backup_response(repository: object) -> DatabaseBackupStatus | None:
                 recovered_from=recovery.recovered_from,
                 quarantined_path=recovery.quarantined_path,
                 at=recovery.at,
+                adopted_sidecars=recovery.adopted_sidecars,
             )
             if recovery is not None
             else None
