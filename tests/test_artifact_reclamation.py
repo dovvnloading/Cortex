@@ -315,6 +315,47 @@ def test_the_sweep_never_follows_or_removes_a_link(tmp_path):
     assert link.is_symlink()
 
 
+def _make_junction(link: Path, target: Path) -> None:
+    """A real directory junction: a reparse point ``lstat`` reports as a plain directory."""
+
+    if os.name != "nt":
+        pytest.skip("directory junctions exist only on Windows")
+    if not hasattr(Path, "is_junction"):
+        pytest.skip("this interpreter cannot recognise a junction (Path.is_junction arrived in 3.12)")
+    import _winapi  # type: ignore[import-not-found]
+
+    try:
+        _winapi.CreateJunction(str(target), str(link))
+    except OSError:
+        pytest.skip("directory junctions cannot be created here")
+
+
+@pytest.mark.parametrize("name", ("job-junction", ".recipe-job-gone-abcd1234"))
+def test_the_sweep_never_follows_or_removes_a_junction(tmp_path, name):
+    """A symbolic link reads as a link to ``lstat``; a junction reads as a directory.
+
+    Only the reparse-point check stands between the sweep and the files the
+    junction leads to, so it needs a real junction to be tested at all.
+    """
+
+    repository = _repository(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / f".tmp-{'e' * 32}").write_bytes(b"not ours")
+    _age(outside / f".tmp-{'e' * 32}")
+    (outside / "output").write_bytes(b"not ours either")
+    junction = repository.artifact_root / name
+    _make_junction(junction, outside)
+    try:
+        assert repository.sweep_artifact_root() == 0
+
+        assert (outside / f".tmp-{'e' * 32}").read_bytes() == b"not ours"
+        assert (outside / "output").read_bytes() == b"not ours either"
+        assert junction.exists(), "the junction itself was removed"
+    finally:
+        os.rmdir(junction)  # removes the junction itself and nothing behind it
+
+
 def test_the_sweep_is_bounded_and_resumes_where_it_stopped(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     directories = []
@@ -338,6 +379,103 @@ def test_the_sweep_is_bounded_and_resumes_where_it_stopped(tmp_path, monkeypatch
     assert removed == 6
     with pytest.raises(ValueError):
         repository.sweep_artifact_root(limit=0)
+
+
+def _stale_temporary_files(directory: Path, count: int) -> list[Path]:
+    """``count`` stranded ``.tmp-*`` files, old enough for the sweep to remove."""
+
+    made = []
+    for index in range(count):
+        stale = directory / f".tmp-{index:032x}"
+        stale.write_bytes(b"half a write")
+        _age(stale)
+        made.append(stale)
+    return made
+
+
+@pytest.mark.parametrize("limit", (1, 2, 7, 64, 65, 100))
+def test_a_pass_never_removes_more_than_its_limit_even_inside_one_directory(tmp_path, limit):
+    """The limit was checked only between entries.
+
+    With ``limit=1`` one directory of 64 stale files lost all 64 of them and
+    then itself -- 65 removals -- in a single pass.
+    """
+
+    repository = _repository(tmp_path)
+    directory = repository.artifact_root / "job-big"
+    directory.mkdir()
+    _stale_temporary_files(directory, repository_module._SWEEP_CHILD_LIMIT)
+
+    per_pass = []
+    for _ in range(80):  # bounded: 65 things to remove
+        per_pass.append(repository.sweep_artifact_root(limit=limit))
+        if not directory.exists():
+            break
+
+    assert max(per_pass) <= limit
+    assert sum(per_pass) == repository_module._SWEEP_CHILD_LIMIT + 1  # every file, then the directory
+    assert not directory.exists()
+
+
+def test_an_entry_cut_short_by_the_limit_is_resumed_not_skipped(tmp_path):
+    repository = _repository(tmp_path)
+    first = repository.artifact_root / "job-a"
+    second = repository.artifact_root / "job-b"
+    for directory, count in ((first, 3), (second, 1)):
+        directory.mkdir()
+        _stale_temporary_files(directory, count)
+
+    # Six things to remove, two per pass. A pass that ran out of allowance inside
+    # job-a must come back to job-a, not move on and leave the rest of it behind.
+    assert repository.sweep_artifact_root(limit=2) == 2
+    assert len(list(first.iterdir())) == 1, "the first pass should have stopped inside job-a"
+    assert len(list(second.iterdir())) == 1
+
+    assert repository.sweep_artifact_root(limit=2) == 2  # job-a's last file, then job-a itself
+    assert not first.exists(), "job-a was not finished before the sweep went on to job-b"
+    assert len(list(second.iterdir())) == 1, "job-b was touched before job-a was finished"
+
+    assert repository.sweep_artifact_root(limit=2) == 2  # job-b's file, then job-b itself
+    assert not second.exists()
+    assert repository.sweep_artifact_root(limit=2) == 0
+
+
+def test_the_limit_bounds_staging_and_legacy_directories_as_well_as_job_directories(tmp_path):
+    repository = _repository(tmp_path)
+    _job(repository, "job-done", finished=True)
+    for index in range(3):
+        staging = repository.artifact_root / f".recipe-job-done-abcd123{index}"
+        staging.mkdir()
+        (staging / "output").write_bytes(b"synthetic")
+    (repository.artifact_root / ".artifact_quarantine").mkdir()
+
+    per_pass = []
+    for _ in range(8):  # bounded: four things to remove
+        per_pass.append(repository.sweep_artifact_root(limit=1))
+        if per_pass[-1] == 0:
+            break
+
+    assert per_pass == [1, 1, 1, 1, 0]
+    assert [entry.name for entry in repository.artifact_root.iterdir()] == [".quarantine"]
+
+
+def test_the_entry_budget_stops_a_pass_early_and_the_next_one_carries_on(tmp_path, monkeypatch):
+    """The clause was never exercised: the earlier test would pass without it."""
+
+    repository = _repository(tmp_path)
+    monkeypatch.setattr(repository_module, "_SWEEP_ENTRY_BUDGET", 3)
+    for index in range(6):
+        (repository.artifact_root / f"job-{index}").mkdir()
+
+    per_pass = []
+    for _ in range(10):  # bounded: at most one pass per entry
+        per_pass.append(repository.sweep_artifact_root(limit=100))
+        if not any((repository.artifact_root / f"job-{index}").exists() for index in range(6)):
+            break
+
+    assert max(per_pass) <= 3, "one pass looked at more entries than its budget allows"
+    assert len([removed for removed in per_pass if removed]) >= 2
+    assert sum(per_pass) == 6
 
 
 def test_the_sweep_never_removes_an_unexpired_artifact_or_a_directory_a_publish_just_made(tmp_path):

@@ -80,6 +80,7 @@ class ChatRepository(Protocol):
         stats: dict[str, Any] | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> str: ...
 
     def rename_chat(self, thread_id: str, title: str) -> None: ...
@@ -99,6 +100,7 @@ class ChatRepository(Protocol):
         attachments: list[dict[str, Any]] | None = None,
         stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> None: ...
 
 
@@ -227,6 +229,7 @@ class LegacyDatabaseChatRepository:
         attachments: list[dict[str, Any]] | None = None,
         stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> None:
         try:
             self._database.replace_message(
@@ -238,6 +241,7 @@ class LegacyDatabaseChatRepository:
                 attachments=attachments,
                 stats=stats,
                 expected_revision=expected_revision,
+                original_content=original_content,
             )
         except Exception as exc:
             typed = _typed_failure(exc)
@@ -407,6 +411,7 @@ class InMemoryChatRepository:
         stats: dict[str, Any] | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> str:
         with self._lock:
             chat = self._chats.get(thread_id)
@@ -433,6 +438,7 @@ class InMemoryChatRepository:
                     "thoughts": _assistant_thoughts(role, thoughts),
                     "attachments": deepcopy(attachments) or None,
                     "stats": (deepcopy(stats) or None) if role == "assistant" else None,
+                    "original_content": original_content if role == "assistant" else None,
                 }
             )
             chat["timestamp"] = self._timestamp()
@@ -499,6 +505,7 @@ class InMemoryChatRepository:
         attachments: list[dict[str, Any]] | None = None,
         stats: dict[str, Any] | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> None:
         with self._lock:
             chat = self._chats.get(thread_id)
@@ -514,6 +521,7 @@ class InMemoryChatRepository:
                         sources=deepcopy(sources) or None,
                         thoughts=thoughts,
                         stats=deepcopy(stats) or None,
+                        original_content=original_content,
                         timestamp=self._timestamp(),
                     )
                     if attachments is not None:

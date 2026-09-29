@@ -11,56 +11,6 @@ ConnectionStatus = Literal["connecting", "connected", "error"]
 
 
 @dataclass(frozen=True)
-class GenerationResult:
-    """Outcome of one interactive response-generation job."""
-
-    success: bool
-    response: str | None = None
-    thoughts: str | None = None
-    error: str | None = None
-    error_details: str | None = None
-    job_id: str | None = None
-    thread_id: str | None = None
-    memory_command: MemoryCommand | None = None
-
-    @classmethod
-    def succeeded(
-        cls,
-        response: str,
-        thoughts: str | None,
-        *,
-        job_id: str,
-        thread_id: str,
-        memory_command: MemoryCommand | None = None,
-    ) -> GenerationResult:
-        return cls(
-            success=True,
-            response=response,
-            thoughts=thoughts,
-            job_id=job_id,
-            thread_id=thread_id,
-            memory_command=memory_command,
-        )
-
-    @classmethod
-    def failed(
-        cls,
-        error: str,
-        *,
-        error_details: str | None = None,
-        job_id: str,
-        thread_id: str,
-    ) -> GenerationResult:
-        return cls(
-            success=False,
-            error=error,
-            error_details=error_details,
-            job_id=job_id,
-            thread_id=thread_id,
-        )
-
-
-@dataclass(frozen=True)
 class ConnectionResult:
     """User-facing outcome of the Ollama startup check."""
 

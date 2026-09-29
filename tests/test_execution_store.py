@@ -601,6 +601,102 @@ def test_fake_coordinator_cancellation_is_terminal_and_ordered(tmp_path):
         coordinator.shutdown()
 
 
+def test_job_listings_carry_what_the_per_job_lookups_would_return(tmp_path, frozen_clock):
+    """``list_job_listings`` is ``list_jobs`` plus the reads the tray used to repeat.
+
+    For every job, in every state, the listing's newest event and approval must
+    equal what ``events`` and ``get_approval`` return for it, in the order
+    ``list_jobs`` uses, for the owner asked about and nobody else.
+    """
+
+    repository = _repository(tmp_path)
+
+    def make(job_id: str, *, owner: str = "session-a", profile: str = "fake.v1") -> None:
+        repository.create_job(
+            job_id=job_id, owner=owner, request_id=f"request-{job_id}", profile=profile, payload={}
+        )
+        frozen_clock.advance(1)
+
+    make("queued")
+    make("running")
+    repository.transition(
+        "running", status="running", event="started", phase="running", data={"message": "Working."}
+    )
+    frozen_clock.advance(1)
+    make("finished")
+    repository.transition(
+        "finished", status="succeeded", event="completed", phase="completed", data={"message": "Done."}
+    )
+    frozen_clock.advance(1)
+    make("pending", profile="artifact.extended.v1")
+    repository.request_approval(
+        "pending", owner="session-a", scope_digest="scope", reason="Needs a look.", ttl_seconds=100
+    )
+    make("decided", profile="artifact.extended.v1")
+    repository.request_approval(
+        "decided", owner="session-a", scope_digest="scope", reason="Approved one.", ttl_seconds=100
+    )
+    repository.decide_approval("decided", owner="session-a", decision="approved")
+    make("lapsed", profile="artifact.extended.v1")
+    repository.request_approval(
+        "lapsed", owner="session-a", scope_digest="scope", reason="Left waiting.", ttl_seconds=5
+    )
+    frozen_clock.advance(10)
+    make("someone-elses", owner="session-b")
+    # A job whose newest event is gone reads as having none, exactly as
+    # events(after_sequence=sequence - 1) does.
+    make("orphaned")
+    make("behind")
+    repository.transition(
+        "behind", status="running", event="started", phase="running", data={"message": "Was working."}
+    )
+    with repository.connect() as connection:
+        for job_id in ("orphaned", "behind"):
+            connection.execute(
+                "DELETE FROM execution_events WHERE job_id = ? AND sequence = "
+                "(SELECT MAX(sequence) FROM execution_events WHERE job_id = ?)",
+                (job_id, job_id),
+            )
+
+    for include_terminal in (False, True):
+        expected = repository.list_jobs(owner="session-a", include_terminal=include_terminal)
+        listings = repository.list_job_listings(owner="session-a", include_terminal=include_terminal)
+
+        assert [listing.job for listing in listings] == expected
+        assert "someone-elses" not in {listing.job.job_id for listing in listings}
+        for listing in listings:
+            job = listing.job
+            events = repository.events(job.job_id, after_sequence=max(0, job.sequence - 1))
+            assert listing.latest_event == (events[-1] if events else None), job.job_id
+            assert listing.approval == repository.get_approval(job.job_id, owner="session-a"), (
+                job.job_id
+            )
+
+    by_id = {listing.job.job_id: listing for listing in listings}
+    assert by_id["running"].latest_event.phase == "running"
+    assert by_id["running"].latest_event.data["message"] == "Working."
+    assert by_id["finished"].latest_event.data["message"] == "Done."
+    assert by_id["queued"].approval is None
+    assert by_id["orphaned"].latest_event is None
+    # An older event is still there, but it is behind the job's own sequence.
+    assert repository.events("behind") and by_id["behind"].latest_event is None
+    assert by_id["pending"].approval.state == "pending"
+    assert by_id["pending"].approval.reason == "Needs a look."
+    assert by_id["decided"].approval.state == "approved"
+    assert by_id["lapsed"].approval.state == "expired"
+    assert by_id["lapsed"].job.approval_state == "expired"
+
+
+@pytest.mark.parametrize("limit", [0, -1, 201])
+def test_job_listings_refuse_an_unusable_limit_or_owner(tmp_path, limit):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="limit"):
+        repository.list_job_listings(owner="session-a", limit=limit)
+    with pytest.raises(ValueError, match="owner"):
+        repository.list_job_listings(owner="")
+
+
 def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     fake_job, _ = repository.create_job(

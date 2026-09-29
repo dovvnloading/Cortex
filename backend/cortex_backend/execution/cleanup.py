@@ -178,7 +178,7 @@ class ExecutionCleanupSupervisor:
                     raise RuntimeError("cleanup returned an invalid result")
                 # After the rows, so a directory the pass just emptied is
                 # already gone by the time the sweep looks at it.
-                swept = self.repository.sweep_artifact_root(limit=self.batch_size)
+                swept = self._sweep()
                 if self._lease_lost.is_set():
                     raise RuntimeError("cleanup lease lost")
                 self._increment(
@@ -214,6 +214,24 @@ class ExecutionCleanupSupervisor:
                     )
         finally:
             self._run_lock.release()
+
+    def _sweep(self) -> int:
+        """Sweep the artifact root, keeping a failure from undoing the retention pass.
+
+        The retention pass has already committed by now, so the sweep failing
+        (a locked store, an unreadable directory) must not record the whole
+        pass as failed and drop its counters. The failure is logged by type
+        only, kept in ``last_error`` and simply retried on the next pass.
+        """
+
+        try:
+            return self.repository.sweep_artifact_root(limit=self.batch_size)
+        except Exception as exc:
+            self._increment(last_error=type(exc).__name__)
+            _LOGGER.warning(
+                "Cortex artifact-root sweep failed (%s); it will be retried.", type(exc).__name__
+            )
+            return 0
 
     def _run(self) -> None:
         while not self._stop_event.is_set():

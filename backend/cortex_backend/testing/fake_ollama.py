@@ -67,6 +67,10 @@ class FakeOllamaState:
     # a real locally-managed runtime (llama.cpp) uses, end to end through
     # the real SSE event schema, not just the in-process ProgressEvent shape.
     status_updates: tuple[str, ...] = ()
+    # The models ``GET /api/ps`` reports as loaded in memory. Empty, like a
+    # freshly started Ollama, so a real client asking before its first request
+    # is told the model has to be loaded.
+    loaded_models: set[str] = field(default_factory=set)
 
 
 DEFAULT_MODEL_SHOW_DETAILS: dict[str, Any] = {
@@ -81,6 +85,22 @@ def _show_payload(state: FakeOllamaState, model: str) -> dict[str, Any]:
         "capabilities": list(state.model_capabilities.get(model, ("completion",))),
         "details": overrides.get("details", DEFAULT_MODEL_SHOW_DETAILS["details"]),
         "model_info": overrides.get("model_info", DEFAULT_MODEL_SHOW_DETAILS["model_info"]),
+    }
+
+
+def _running_model(state: FakeOllamaState, model: str) -> dict[str, Any]:
+    """One entry of ``/api/ps``, with the fields a real Ollama sends."""
+    details = state.model_details.get(model, DEFAULT_MODEL_SHOW_DETAILS).get(
+        "details", DEFAULT_MODEL_SHOW_DETAILS["details"]
+    )
+    return {
+        "name": model,
+        "model": model,
+        "size": 5_137_025_024,
+        "digest": "0" * 64,
+        "details": details,
+        "expires_at": "2099-01-01T00:00:00Z",
+        "size_vram": 5_137_025_024,
     }
 
 
@@ -211,38 +231,6 @@ class FakeGenerationEngine:
         del bypass_system_prompt, host_observations, model
         return tuple(attachments)
 
-    def fit_history_to_context(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None = None,
-        bypass_system_prompt: bool = False,
-        host_observations: str | None = None,
-        attachments: Sequence[GenerationAttachment] = (),
-        model: str | None = None,
-    ) -> str:
-        del (
-            model,
-            query,
-            permanent_memories,
-            memories_enabled,
-            user_system_instructions,
-            num_ctx,
-            code_execution_eligible,
-            bypass_system_prompt,
-            host_observations,
-            attachments,
-        )
-        return "\n".join(
-            f"{message.get('role', 'unknown')}: {message.get('content', '')}"
-            for message in messages
-        )
-
     def fit_history(
         self,
         messages: list[dict[str, Any]],
@@ -260,18 +248,21 @@ class FakeGenerationEngine:
     ) -> tuple[str, Sequence[Mapping[str, Any]]]:
         """Return the flattened transcript and the messages that produced it."""
 
-        flattened = self.fit_history_to_context(
-            messages,
-            query=query,
-            permanent_memories=permanent_memories,
-            memories_enabled=memories_enabled,
-            user_system_instructions=user_system_instructions,
-            num_ctx=num_ctx,
-            code_execution_eligible=code_execution_eligible,
-            bypass_system_prompt=bypass_system_prompt,
-            host_observations=host_observations,
-            attachments=attachments,
-            model=model,
+        del (
+            model,
+            query,
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            num_ctx,
+            code_execution_eligible,
+            bypass_system_prompt,
+            host_observations,
+            attachments,
+        )
+        flattened = "\n".join(
+            f"{message.get('role', 'unknown')}: {message.get('content', '')}"
+            for message in messages
         )
         return flattened, list(messages)
 
@@ -372,6 +363,13 @@ def create_fake_ollama_app(state: FakeOllamaState | None = None) -> FastAPI:
             return {"unexpected": "payload"}
         return {
             "models": [{"name": model} for model in sorted(fake_state.installed_models)]
+        }
+
+    @app.get("/api/ps")
+    def ps() -> dict[str, Any]:
+        """The models Ollama has loaded, in the shape ``ollama.Client.ps()`` parses."""
+        return {
+            "models": [_running_model(fake_state, model) for model in sorted(fake_state.loaded_models)]
         }
 
     @app.post("/api/pull")

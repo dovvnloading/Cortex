@@ -5,15 +5,6 @@ export interface AddMemoryRequest {
   memo: string;
 }
 
-export interface AddMessageRequest {
-  role: "user" | "assistant" | "system";
-  content: string;
-  base_revision?: number | null;
-  sources?: Array<unknown> | null;
-  thoughts?: string | null;
-  attachments?: Array<ChatAttachment> | null;
-}
-
 export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
@@ -306,6 +297,7 @@ export interface GenerationSettings {
   seed?: number;
   system_instructions?: string;
   bypass_system_prompt?: boolean;
+  keep_alive_minutes?: number;
 }
 
 export interface GenerationStats {
@@ -336,9 +328,15 @@ export interface HealthResponse {
   status?: "ok";
 }
 
+export interface HuggingFaceFileEntry {
+  path: string;
+  size?: number | null;
+}
+
 export interface HuggingFaceFileListResponse {
   repo_id: string;
   files?: Array<string>;
+  entries?: Array<HuggingFaceFileEntry>;
 }
 
 export interface ImageTransformPlan {
@@ -376,6 +374,7 @@ export interface JobStatusResponse {
   thread_id?: string | null;
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   sequence: number;
+  can_cancel?: boolean;
   error?: string | null;
   result?: Record<string, unknown> | null;
 }

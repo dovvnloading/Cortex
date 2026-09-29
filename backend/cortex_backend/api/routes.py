@@ -33,6 +33,7 @@ from cortex_backend.services.chat import (
     normalize_title,
     title_from_first_message,
 )
+from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, ollama_keep_alive
 from cortex_backend.services.code_feedback import format_execution_observation
 from cortex_backend.services.code_prompt import should_offer_code_execution
 from cortex_backend.core.settings import (
@@ -68,7 +69,13 @@ from cortex_backend.execution.lifecycle import (
     ScratchCapable,
 )
 from cortex_backend.services.model_catalog import GGUF_PREFIX
-from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
+from cortex_backend.execution.models import (
+    ExecutionApproval,
+    ExecutionEvent,
+    ExecutionJob,
+    ExecutionJobListing,
+    TerminalExecutionStatus,
+)
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionError,
 )
@@ -80,6 +87,7 @@ from cortex_backend.execution.scratch_compute import (
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import (
+    JobKind,
     JobNotFound,
     JobOwnershipError,
     JobReservation,
@@ -104,8 +112,10 @@ from .schemas import (
     InstalledModel,
     SettingsMigrationReport as SettingsMigrationReportResponse,
 )
+from .observability import current_request_id, log_failure
 from .security import SessionPrincipal
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
 # The most memory suggestions one answer can put in front of the user, and the
@@ -180,9 +190,9 @@ def _call_with_timeout(
     return outcome[0] if outcome else None
 
 
-# A client may supply the id of a chat that does not exist yet -- both
-# add_message() and _start_generation_job() then create that chat using the
-# client's literal string as its permanent primary key. A server-generated id
+# A client may supply the id of a chat that does not exist yet --
+# _start_generation_job() then creates that chat using the client's literal
+# string as its permanent primary key. A server-generated id
 # is always uuid4().hex (32 lowercase hex characters), which trivially
 # satisfies this pattern, so the cap below never bites a legitimate id; it
 # exists only to keep a client from turning the primary key into something
@@ -540,7 +550,7 @@ async def _start_generation_job(
             except Exception as exc:
                 # Keeping a partial answer is a courtesy; a chat that moved on
                 # underneath it must not turn Stop into a failure.
-                logging.warning(
+                logger.warning(
                     "Cortex could not keep a stopped answer (%s).", type(exc).__name__
                 )
                 return {"cancelled": True}
@@ -594,6 +604,15 @@ async def _start_generation_job(
             if not sink.begin_commit("persisting", "Saving the response."):
                 return keep_stopped_answer(shown)
             stats_payload = asdict(result.stats) if result.stats else None
+            # With translation on, ``response`` is the translation the user
+            # reads. The answer as the model wrote it is kept beside it, for the
+            # next turn's history and for the title; it is passed only when
+            # there is one, so an untranslated turn calls the repository exactly
+            # as it always has.
+            original_answer = getattr(result, "original_response", None)
+            original_kwargs = (
+                {"original_content": original_answer} if original_answer else {}
+            )
             if target_message_id is None or target_is_dangling_user_turn:
                 assistant_message_id = deps.chats.add_message(
                     thread_id,
@@ -602,6 +621,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
             else:
                 deps.chats.replace_message(
@@ -611,6 +631,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
                 assistant_message_id = target_message_id
 
@@ -628,7 +649,7 @@ async def _start_generation_job(
                     thread_id=thread_id,
                 )
             except Exception as exc:
-                logging.warning(
+                logger.warning(
                     "Cortex code proposal queueing failed (%s).", type(exc).__name__
                 )
             if code_execution_job_id:
@@ -691,13 +712,13 @@ async def _start_generation_job(
                         raw_title = _call_with_timeout(
                             title_generator,
                             generation_snapshot,
-                            result.response,
+                            original_answer or result.response,
                             timeout=CHAT_TITLE_TIMEOUT_SECONDS,
                             cancel=title_cancel,
                             cancellation_event=title_cancel,
                         )
                     except Exception as exc:  # optional title work must not fail a chat
-                        logging.warning(
+                        logger.warning(
                             "Cortex chat title generation failed (%s).",
                             type(exc).__name__,
                         )
@@ -712,7 +733,7 @@ async def _start_generation_job(
                         deps.chats.rename_chat(thread_id, generated_title)
                         title = generated_title
                     except Exception as exc:
-                        logging.warning(
+                        logger.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
                         )
             # rename_chat above may have moved the title, and the assistant
@@ -986,7 +1007,7 @@ def _proposed_memories(deps: BackendDependenciesProtocol, command: Any) -> list[
     except Exception as exc:
         # Showing a suggestion the store already holds is harmless: the user
         # decides, and saving a duplicate is a no-op.
-        logging.warning(
+        logger.warning(
             "Cortex could not compare memory suggestions with saved memories (%s).",
             type(exc).__name__,
         )
@@ -1322,6 +1343,16 @@ def _generation_snapshot(
         settings.execution.code_execution_enabled
         and should_offer_code_execution(payload.user_input)
     )
+    model_options: dict[str, float | int | str] = dict(
+        _merged_model_options(settings, payload.options, code_turn=code_execution_eligible)
+    )
+    # A standing setting, not a per-request override: how long Ollama keeps the
+    # model loaded once this turn (and the title and translation calls that
+    # follow it) is done. Carried with the other options; the Ollama client
+    # lifts it out and llama.cpp never reads it.
+    keep_alive = ollama_keep_alive(settings.generation.keep_alive_minutes)
+    if keep_alive is not None:
+        model_options[KEEP_ALIVE_OPTION] = keep_alive
     return GenerationSnapshot(
         job_id=job_id,
         thread_id=payload.thread_id or "",
@@ -1329,9 +1360,7 @@ def _generation_snapshot(
         model=chat_model,
         title_model=title_model,
         translation_model=settings.models.translation,
-        model_options=_merged_model_options(
-            settings, payload.options, code_turn=code_execution_eligible
-        ),
+        model_options=model_options,
         memories_enabled=settings.memory.enabled,
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
@@ -1396,18 +1425,34 @@ def _job_response(snapshot: JobSnapshot) -> JobStatusResponse:
         thread_id=snapshot.thread_id,
         status=snapshot.status,
         sequence=snapshot.sequence,
+        can_cancel=snapshot.can_cancel,
         error=snapshot.error,
         result=dict(snapshot.result) if snapshot.result is not None else None,
     )
 
 
 def _job_status(
-    request: Request, job_id: str, principal: SessionPrincipal
+    request: Request,
+    job_id: str,
+    principal: SessionPrincipal,
+    *,
+    kind: JobKind | None = None,
 ) -> JobSnapshot:
+    """Read one of this owner's jobs; with ``kind``, only if it is of that kind.
+
+    A job of another kind reads as unknown -- the same 404 as an id that does
+    not exist -- so the ``/generations`` family cannot be used to read, follow
+    or stop a model or download job.
+    """
     try:
-        return request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
+        snapshot: JobSnapshot = request.app.state.jobs.status(
+            job_id, owner=_durable_owner(principal)
+        )
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
+    if kind is not None and snapshot.kind != kind:
+        _raise_job_error(JobNotFound(job_id))
+    return snapshot
 
 
 # What each ChatDomainError code means to an HTTP client. A client decides from
@@ -1466,7 +1511,12 @@ def _is_disk_full(exc: BaseException) -> bool:
 def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
-    logging.error("Cortex API %s failed (%s).", operation, type(exc).__name__)
+    # The class and the frames it passed through, never its text: a repository
+    # error can quote the very content that failed to save. The request id ties
+    # this line to the caller's response, which carries it too, so a person who
+    # reports "Could not list chats" can be matched to the failure.
+    request_id = current_request_id()
+    log_failure(logger, f"Cortex API {operation} failed", exc, request_id=request_id)
     if _is_disk_full(exc):
         # Not the server's fault and not a bug: nothing was saved because there
         # is no room, and the user can fix that.
@@ -1476,7 +1526,7 @@ def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
         ) from exc
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail=f"Could not {operation}.",
+        detail=f"Could not {operation}." + (f" (Request ID: {request_id})" if request_id else ""),
     ) from exc
 
 
@@ -1640,6 +1690,7 @@ def _attachment_owner(request: Request, principal: SessionPrincipal) -> str:
 
 def _raise_chat_attachment_error(exc: ChatAttachmentError) -> NoReturn:
     messages = {
+        "attachment_filename_invalid": "The file name is too long or contains only punctuation.",
         "attachment_too_large": "Files must be 10 MB or smaller.",
         "attachment_type_unsupported": "Cortex supports images and common text/code/config documents.",
         "attachment_not_text": "That document is not a readable text file.",
@@ -1720,43 +1771,6 @@ def _resolve_generation_attachments(
     return tuple(resolved)
 
 
-def _validate_chat_attachment_refs(
-    request: Request,
-    deps: BackendDependenciesProtocol,
-    principal: SessionPrincipal,
-    references: list[ChatAttachment],
-) -> list[ChatAttachment]:
-    """Validate metadata-only message writes against the local attachment store."""
-
-    if not references:
-        return []
-    if len(references) > MAX_CHAT_ATTACHMENTS:
-        raise ChatDomainError(
-            "A message can include at most eight attachments.", code="invalid_input"
-        )
-    if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
-        raise ChatDomainError(
-            "The combined attachment size is too large for one message.",
-            code="invalid_input",
-        )
-    service = _chat_attachment_service(request, deps)
-    owner = _attachment_owner(request, principal)
-    normalized: list[ChatAttachment] = []
-    seen: set[str] = set()
-    for reference in references:
-        if reference.attachment_id in seen:
-            raise ChatDomainError(
-                "The same attachment cannot be added twice.", code="invalid_input"
-            )
-        seen.add(reference.attachment_id)
-        try:
-            resolved = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
-        except ChatAttachmentError:
-            raise
-        normalized.append(ChatAttachment.model_validate(resolved.descriptor.as_dict()))
-    return normalized
-
-
 def _execution_repository(request: Request):
     return _execution_runtime(request).repository
 
@@ -1778,6 +1792,20 @@ def _execution_message(event: ExecutionEvent | None) -> str | None:
 def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatusResponse:
     event = _execution_latest_event(repository, job)
     approval = repository.get_approval(job.job_id, owner=job.owner)
+    return _execution_status_from(job, event, approval)
+
+
+def _execution_status_from(
+    job: ExecutionJob,
+    event: ExecutionEvent | None,
+    approval: ExecutionApproval | None,
+) -> ExecutionStatusResponse:
+    """Describe a job from what has already been read about it.
+
+    One place builds the response for the single-job routes, which look the
+    event and approval up per request, and for the task list, which gets them
+    from its one listing query, so the two cannot describe a job differently.
+    """
     approval_state = approval.state if approval is not None else job.approval_state
     code_fields = _code_job_fields(job)
     return ExecutionStatusResponse(
@@ -1805,8 +1833,9 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
     )
 
 
-def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
-    response = _execution_status_response(repository, job)
+def _execution_task_summary(listing: ExecutionJobListing) -> ExecutionTaskSummary:
+    job = listing.job
+    response = _execution_status_from(job, listing.latest_event, listing.approval)
     code_fields = _code_job_fields(job, include_result=True)
     if job.profile != CODE_EXECUTION_PROFILE:
         code_fields = {"result": _generic_execution_result(job.result)}

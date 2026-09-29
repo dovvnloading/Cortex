@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, ChevronDown, Code2, Download, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary } from "../../../../contracts/cortex-api";
 
 type ExecutionApprovalDecision = ExecutionApprovalDecisionRequest["decision"];
@@ -57,11 +57,13 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
     ? `${pendingApprovals.length} task${pendingApprovals.length === 1 ? " requires" : "s require"} your approval.`
     : activeTasks.length
       ? `${activeTasks.length} local task${activeTasks.length === 1 ? " is" : "s are"} running.`
-      : latestTerminalTask?.status === "failed"
-        ? "The latest local task failed."
-        : latestTerminalTask?.status === "cancelled"
-          ? "The latest local task was cancelled."
-      : "The latest local task is complete.";
+      : latestTerminalTask?.approval_state === "expired"
+        ? "The latest task's approval expired before it was decided."
+        : latestTerminalTask?.status === "failed"
+          ? "The latest local task failed."
+          : latestTerminalTask?.status === "cancelled"
+            ? "The latest local task was cancelled."
+        : "The latest local task is complete.";
 
   const stop = async (jobId: string) => {
     if (!onCancel || cancelling.has(jobId)) return;
@@ -191,7 +193,7 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
                     {showsWorking && <span className="loading-spinner execution-task-spinner" aria-hidden="true" />}
                     <strong>{approvalPending ? task.approval_reason || "Approval required" : displayMessage}</strong>
                   </div>
-                  <span>{approvalPending ? formatApprovalMeta(task) : formatTaskStatus(task.status)}</span>
+                  <span>{approvalPending ? formatApprovalMeta(task) : formatTaskLabel(task)}</span>
                   {task.result && <GenericResult result={task.result} onDownloadArtifact={onDownloadArtifact} />}
                 </div>
               )}
@@ -241,8 +243,11 @@ function CodeTaskSummary({
   onDecideApproval?: (decision: ExecutionApprovalDecision) => void;
 }) {
   const title = task.intent_summary || task.approval_reason || task.message || "Local Python task";
-  const status = approvalPending ? "Approval needed" : formatTaskStatus(task.status);
+  const approvalExpired = task.approval_state === "expired";
   const sourceReviewed = Boolean(codeSource && sourceMetadataMatchesTask(task, codeSource));
+  const status = approvalPending
+    ? <>Approval needed<ApprovalCountdown expiresAt={task.approval_expires_at} /></>
+    : formatTaskLabel(task);
   return (
     <div className="execution-task-code-content">
       <div className="execution-task-code-heading">
@@ -269,8 +274,11 @@ function CodeTaskSummary({
       {approvalPending && !sourceReviewed && (
         <div className="execution-task-warning" role="note"><AlertTriangle size={13} aria-hidden="true" /><span>Open and verify the generated source before allowing this task.</span></div>
       )}
+      {approvalExpired && (
+        <div className="execution-task-warning" role="note"><AlertTriangle size={13} aria-hidden="true" /><span>The approval window closed before this task was allowed, so it did not run. Ask for it again to run it.</span></div>
+      )}
       {task.result && <CodeResult result={task.result} />}
-      {onLoadSource && (
+      {onLoadSource && !approvalExpired && (
         <details className="execution-task-code-details" onToggle={(event) => { if (event.currentTarget.open) onLoadSource(); }}>
           <summary><ChevronDown size={13} aria-hidden="true" />Review generated source</summary>
           {loadingSource && <span className="execution-task-source-loading">Loading source…</span>}
@@ -358,6 +366,9 @@ function CodeTaskState({
 }) {
   if (approvalPending) {
     return <span className="execution-task-state execution-task-state-review">Review</span>;
+  }
+  if (task.approval_state === "expired") {
+    return <span className="execution-task-state execution-task-state-expired">Expired</span>;
   }
   if (showsWorking) {
     return <span className="execution-task-state execution-task-state-running">Running</span>;
@@ -462,6 +473,41 @@ function formatBytes(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** How often the remaining approval time is recomputed. */
+const APPROVAL_TICK_MS = 30_000;
+
+/**
+ * "· expires in N min" for a pending approval, kept current on a 30 second tick
+ * and once more at the deadline. It owns its clock, so it starts from the real
+ * time whenever an approval appears rather than from when the tray mounted.
+ */
+function ApprovalCountdown({ expiresAt }: { expiresAt?: string | null }) {
+  const deadline = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (Number.isNaN(deadline)) return undefined;
+    const tick = window.setInterval(() => setNow(Date.now()), APPROVAL_TICK_MS);
+    const untilDeadline = deadline - Date.now();
+    // A hair past the deadline, so the wake-up finds it closed. Longer waits are
+    // covered by the tick; setTimeout cannot hold more than about 24 days.
+    const atDeadline = untilDeadline > 0 && untilDeadline < 2 ** 31
+      ? window.setTimeout(() => setNow(Date.now()), untilDeadline + 50)
+      : undefined;
+    return () => {
+      window.clearInterval(tick);
+      if (atDeadline !== undefined) window.clearTimeout(atDeadline);
+    };
+  }, [deadline]);
+  if (Number.isNaN(deadline)) return null;
+  return <> · {formatApprovalRemaining(deadline - now)}</>;
+}
+
+function formatApprovalRemaining(remainingMs: number): string {
+  if (remainingMs <= 0) return "expiring now";
+  if (remainingMs < 60_000) return "expires in under a minute";
+  return `expires in ${Math.ceil(remainingMs / 60_000)} min`;
+}
+
 function formatApprovalMeta(task: ExecutionTaskSummary): string {
   const profile = task.profile.replace(/\.v\d+$/, "").replaceAll(".", " ");
   if (!task.approval_expires_at) return `Action required · ${profile}`;
@@ -489,6 +535,14 @@ function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
 
 function formatTaskStatus(status: ExecutionTaskSummary["status"]): string {
   return status === "cancelling" ? "Stopping" : `${status[0].toUpperCase()}${status.slice(1)}`;
+}
+
+/**
+ * An expired approval ends as a cancelled task, which read as "Cancelled" and
+ * gave no hint that the person's own window had closed.
+ */
+function formatTaskLabel(task: ExecutionTaskSummary): string {
+  return task.approval_state === "expired" ? "Expired" : formatTaskStatus(task.status);
 }
 
 function formatCodeFailure(task: ExecutionTaskSummary): string {

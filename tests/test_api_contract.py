@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -11,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 import pytest
@@ -411,13 +412,10 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
 
         chat = client.post("/api/v1/chats", json={"title": "New Chat"}, headers=headers)
         thread_id = chat.json()["id"]
-        message = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert message.status_code == 200
-        assert len(message.json()["messages"]) == 1
+        app.state.dependencies.chats.add_message(thread_id, "user", "hello")
+        reloaded = client.get(f"/api/v1/chats/{thread_id}", headers=headers)
+        assert reloaded.status_code == 200
+        assert len(reloaded.json()["messages"]) == 1
 
         assert (
             client.post(
@@ -447,58 +445,47 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         assert "qwen3:8b" in models.json()["installed_models"]
 
 
-def test_add_message_rejects_malformed_new_chat_thread_id():
-    """A client-chosen thread_id only becomes a new chat's id if it is safe.
+def test_clients_cannot_author_assistant_turns():
+    """The only way into a chat's transcript is a generation, never a raw write.
 
-    ``POST /chats/{thread_id}/messages`` creates a brand new chat using the
-    literal path segment as its permanent id whenever no chat with that id
-    exists yet. A pathological id (whitespace, a slash-like sequence, a
-    control character, ...) must be rejected with 422 before that happens.
+    ``POST /chats/{id}/messages`` used to accept any role, so any session could
+    fabricate the assistant and system turns the model is later shown as
+    history. Nothing in the app called it. It is gone, and a caller that tries
+    the old shape gets a plain 404 and changes nothing.
     """
 
     dependencies = build_demo_dependencies()
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    dependencies.chats.create_chat("existing-chat", "Existing")
     with TestClient(app) as client:
         headers = _session(client, app)
-        for bad_thread_id in ("has space", "control\x07char", "semi;colon"):
-            encoded = quote(bad_thread_id, safe="")
-            response = client.post(
-                f"/api/v1/chats/{encoded}/messages",
-                json={"role": "user", "content": "hello"},
-                headers=headers,
-            )
-            assert response.status_code == 422, bad_thread_id
-            assert "thread_id" in response.json()["detail"]
-            assert dependencies.chats.get_chat(bad_thread_id) is None
+        for role in ("assistant", "system", "user"):
+            for thread_id in ("existing-chat", "brand-new-chat"):
+                response = client.post(
+                    f"/api/v1/chats/{thread_id}/messages",
+                    json={"role": role, "content": "forged turn"},
+                    headers=headers,
+                )
+                assert response.status_code in {404, 405}, (role, thread_id)
+
+        assert dependencies.chats.get_chat("existing-chat")["messages"] == []
+        assert dependencies.chats.get_chat("brand-new-chat") is None
+
+    documented = {
+        (method, path)
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+    }
+    assert ("post", "/api/v1/chats/{thread_id}/messages") not in documented
 
 
-def test_add_message_with_valid_new_thread_id_creates_chat():
-    """A well-formed client-chosen thread_id may still create a brand new chat."""
+def test_generation_with_preexisting_nonconforming_chat_id_still_works():
+    """A chat id that predates the new-chat id check keeps working unconditionally.
 
-    dependencies = build_demo_dependencies()
-    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        new_thread_id = "Client-Chosen_Thread-123"
-        response = client.post(
-            f"/api/v1/chats/{new_thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert response.status_code == 200
-        assert response.json()["id"] == new_thread_id
-        chat = dependencies.chats.get_chat(new_thread_id)
-        assert chat is not None
-        assert chat["messages"][0]["content"] == "hello"
-
-
-def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
-    """A chat id that predates this check keeps working unconditionally.
-
-    The new format check only ever gates chat *creation*. Looking up or
-    appending to an already-existing chat -- however it got its id -- must
-    keep succeeding for backward compatibility with any local database
-    populated before this validation existed.
+    The format check only ever gates chat *creation*. Sending another turn to an
+    already-existing chat -- however it got its id -- must keep succeeding for
+    backward compatibility with any local database populated before the
+    validation existed.
     """
 
     dependencies = build_demo_dependencies()
@@ -507,14 +494,13 @@ def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
     with TestClient(app) as client:
         headers = _session(client, app)
-        encoded = quote(legacy_thread_id, safe="")
         response = client.post(
-            f"/api/v1/chats/{encoded}/messages",
-            json={"role": "user", "content": "hello"},
+            "/api/v1/generations",
+            json={"thread_id": legacy_thread_id, "user_input": "hello"},
             headers=headers,
         )
-        assert response.status_code == 200
-        assert response.json()["id"] == legacy_thread_id
+        assert response.status_code == 202
+        assert response.json()["thread_id"] == legacy_thread_id
         chat = dependencies.chats.get_chat(legacy_thread_id)
         assert chat["messages"][0]["content"] == "hello"
 
@@ -656,6 +642,195 @@ def test_generation_conflict_and_cancellation_are_explicit():
             "cancelling",
             "cancelled",
         ]
+
+
+def _preflight(client: TestClient, *, origin: str, headers: str, path: str = "/api/v1/session/handoff"):
+    return client.options(
+        path,
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": headers,
+        },
+    )
+
+
+def test_preflight_allows_the_handoff_header():
+    """A page on another loopback port can renew its session.
+
+    The client sends ``X-Cortex-Handoff`` on ``POST /session/handoff``. The
+    preflight used to leave it off the allow list, so a client pointed at a
+    loopback API origin could not rebootstrap after its session expired.
+    """
+
+    _, client = _client()
+    with client:
+        allowed = _preflight(
+            client,
+            origin="http://localhost:5173",
+            headers="x-cortex-handoff, content-type, authorization, last-event-id",
+        )
+        assert allowed.status_code == 200
+        assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+        offered = {
+            name.strip().lower()
+            for name in allowed.headers["access-control-allow-headers"].split(",")
+        }
+        assert {"x-cortex-handoff", "authorization", "content-type", "last-event-id"} <= offered
+
+        # The list is exact, and only loopback origins are trusted.
+        assert _preflight(client, origin="http://localhost:5173", headers="x-something-else").status_code == 400
+        assert _preflight(client, origin="https://example.test", headers="x-cortex-handoff").status_code == 400
+        assert _preflight(client, origin="http://localhost.example.test", headers="x-cortex-handoff").status_code == 400
+
+
+def test_generation_routes_refuse_non_generation_jobs():
+    """``/generations`` is the chat family; a model job is not its to read or stop.
+
+    ``/jobs`` is the generic family and answers for every kind. Reading a
+    ``models`` job through ``/generations`` used to succeed, and cancelling it
+    there stopped it, so the two families were interchangeable by accident.
+    """
+
+    dependencies = build_demo_dependencies()
+    pull_started = Event()
+    pull_saw_cancel = Event()
+
+    def blocked_pull(model, *, progress_callback=None, cancellation_event=None, verify=True):
+        del model, progress_callback, verify
+        pull_started.set()
+        # Bounded: a cancel that never arrives ends the job instead of hanging it.
+        if cancellation_event is not None and cancellation_event.wait(timeout=5.0):
+            pull_saw_cancel.set()
+        return False
+
+    dependencies.models.pull_model = blocked_pull
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        pull = client.post("/api/v1/models/pulls", json={"model": "tiny:latest"}, headers=headers)
+        assert pull.status_code == 202
+        model_job = pull.json()["job_id"]
+        assert pull_started.wait(timeout=5.0), "the model job did not start"
+
+        unknown = client.get("/api/v1/generations/no-such-job", headers=headers)
+        assert unknown.status_code == 404
+        for method, path in (
+            ("GET", f"/api/v1/generations/{model_job}"),
+            ("POST", f"/api/v1/generations/{model_job}/cancel"),
+            ("GET", f"/api/v1/generations/{model_job}/events"),
+        ):
+            refused = client.request(method, path, headers=headers)
+            assert refused.status_code == 404, (method, path)
+            # Indistinguishable from an id that does not exist.
+            assert refused.json() == unknown.json(), (method, path)
+
+        # The refused cancel changed nothing: the job is untouched ...
+        still = client.get(f"/api/v1/jobs/{model_job}", headers=headers)
+        assert still.status_code == 200
+        assert still.json()["kind"] == "models"
+        assert still.json()["status"] == "running"
+        assert not pull_saw_cancel.is_set()
+
+        # ... and the generic family still stops it.
+        stopped = client.post(f"/api/v1/jobs/{model_job}/cancel", headers=headers)
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "cancelling"
+        wait_until(pull_saw_cancel.is_set, timeout=5.0, describe="the pull to see the cancel")
+
+        # A generation job is served by both families.
+        generation = client.post(
+            "/api/v1/generations",
+            json={"thread_id": "kind-check", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        for family in ("generations", "jobs"):
+            served = client.get(f"/api/v1/{family}/{generation['job_id']}", headers=headers)
+            assert served.status_code == 200, family
+            assert served.json()["kind"] == "generation"
+
+    tags = {tag["name"]: tag["description"] for tag in app.openapi()["tags"]}
+    assert "generic job family" in tags["jobs"]
+    assert "kind generation" in tags["generations"]
+
+
+def test_cancel_after_commit_reports_it_cannot_cancel():
+    """A Stop that arrives after the commit point says it was not honoured.
+
+    The status stays ``running`` because the answer is being saved, which is
+    also what a job that simply has not noticed the Stop yet looks like. The
+    ``can_cancel`` flag is what tells the two apart.
+    """
+
+    dependencies = build_demo_dependencies(
+        ollama_state=FakeOllamaState(generation_delay_seconds=0.3)
+    )
+    past_commit = Event()
+    release_title = Event()
+
+    def title_after_commit(snapshot, response, cancellation_event=None):
+        del snapshot, response, cancellation_event
+        past_commit.set()
+        release_title.wait(timeout=10.0)
+        return "Committed title"
+
+    dependencies.generation.generate_chat_title = title_after_commit
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            before = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-early", "thread_id": "early", "user_input": "slow"},
+                headers=headers,
+            ).json()
+            early = client.get(f"/api/v1/generations/{before['job_id']}", headers=headers).json()
+            assert early["status"] in {"queued", "running"}
+            assert early["can_cancel"] is True
+            honoured = client.post(
+                f"/api/v1/generations/{before['job_id']}/cancel", headers=headers
+            ).json()
+            assert honoured["status"] == "cancelling"
+            assert honoured["can_cancel"] is False  # nothing further to cancel
+            wait_until(
+                lambda: client.get(
+                    f"/api/v1/generations/{before['job_id']}", headers=headers
+                ).json()["status"]
+                == "cancelled",
+                describe="the early Stop to finish",
+            )
+
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-late", "thread_id": "late", "user_input": "hello"},
+                headers=headers,
+            ).json()
+            assert past_commit.wait(timeout=10.0), "the job did not reach its commit point"
+
+            refused = client.post(
+                f"/api/v1/generations/{accepted['job_id']}/cancel", headers=headers
+            )
+            assert refused.status_code == 200
+            assert refused.json()["status"] == "running"
+            assert refused.json()["can_cancel"] is False
+            polled = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert polled.json()["can_cancel"] is False
+            # The generic family reports the same thing.
+            assert client.get(
+                f"/api/v1/jobs/{accepted['job_id']}", headers=headers
+            ).json()["can_cancel"] is False
+
+            release_title.set()
+            with client.stream(
+                "GET", f"/api/v1/generations/{accepted['job_id']}/events", headers=headers
+            ) as response:
+                events = _events("".join(response.iter_text()))
+            assert events[-1]["event"] == "generation.completed"
+            finished = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert finished.json()["status"] == "succeeded"
+            assert finished.json()["can_cancel"] is False
+    finally:
+        release_title.set()
 
 
 def test_fake_ollama_server_and_model_failures_are_deterministic():
@@ -1691,3 +1866,282 @@ def test_proposed_memories_ignore_a_value_that_is_not_a_memory_command(command):
     from cortex_backend.api.routes import _proposed_memories
 
     assert _proposed_memories(_stub_deps(), command) == []
+
+
+# --- request ids and failure logging ----------------------------------------
+
+
+def _error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_repository_failures_log_frames_and_request_id_but_not_the_message(
+    app, client, headers, caplog, monkeypatch
+):
+    """A failure is findable from what the caller was told, and says nothing anyone typed.
+
+    Repository errors quote the content that failed to save, so the log gets the
+    exception class and the source locations it passed through -- never its text.
+    """
+
+    def list_summaries():
+        try:
+            raise ValueError("SECRET cause: the user's private prompt")
+        except ValueError as cause:
+            raise RuntimeError("SECRET: the user's private prompt") from cause
+
+    monkeypatch.setattr(app.state.dependencies.chats, "list_summaries", list_summaries)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.get("/api/v1/chats", headers=headers)
+
+    assert response.status_code == 500
+    request_id = response.headers["X-Request-ID"]
+    assert re.fullmatch(r"[0-9a-f]{12}", request_id)
+    # The caller can quote it: it is in the body the UI shows, not only a header.
+    assert response.json()["detail"] == f"Could not list chats. (Request ID: {request_id})"
+
+    (record,) = _error_records(caplog)
+    text = record.getMessage()
+    assert record.name == "cortex_backend.api.routes"
+    assert record.request_id == request_id
+    assert f"request={request_id}" in text
+    assert "RuntimeError" in text and "caused by ValueError" in text
+    # Frames: where the route caught it and where the repository raised it.
+    assert "cortex_backend/api/routers/chats.py" in text
+    assert "in list_summaries" in text
+    assert "SECRET" not in caplog.text and "private prompt" not in caplog.text
+    assert record.exc_info is None
+
+
+def test_every_response_carries_a_fresh_request_id_and_ignores_the_callers(client, headers):
+    first = client.get("/api/v1/chats", headers=headers)
+    second = client.get("/api/v1/chats", headers=headers)
+    forged = client.get(
+        "/api/v1/chats", headers={**headers, "X-Request-ID": "attacker-chosen-id"}
+    )
+    refused = client.get("/api/v1/chats")
+    unknown = client.get("/api/v1/chats/does-not-exist", headers=headers)
+
+    ids = [response.headers["X-Request-ID"] for response in (first, second, forged, refused, unknown)]
+    assert refused.status_code == 401 and unknown.status_code == 404
+    assert all(re.fullmatch(r"[0-9a-f]{12}", request_id) for request_id in ids)
+    assert len(set(ids)) == len(ids)
+
+
+def test_a_streamed_response_carries_the_request_id_too(client, headers):
+    accepted = client.post(
+        "/api/v1/generations",
+        json={"request_id": "stream-id-1", "user_input": "hello"},
+        headers=headers,
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    with client.stream(
+        "GET", f"/api/v1/generations/{accepted.json()['job_id']}/events", headers=headers
+    ) as stream:
+        streamed_id = stream.headers["X-Request-ID"]
+        "".join(stream.iter_text())
+
+    assert re.fullmatch(r"[0-9a-f]{12}", streamed_id)
+    assert streamed_id != accepted.headers["X-Request-ID"]
+
+
+def test_a_worker_thread_failure_logs_the_job_and_the_request_that_started_it(
+    app, client, headers, caplog, monkeypatch
+):
+    def generate(*args, **kwargs):
+        raise RuntimeError("SECRET: text from the user's message")
+
+    monkeypatch.setattr(app.state.dependencies.generation, "generate", generate)
+
+    with caplog.at_level(logging.ERROR):
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "worker-failure-1", "user_input": "hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["job_id"]
+        wait_until(
+            lambda: client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["status"] == "failed",
+            describe="the generation job to fail",
+        )
+
+    (record,) = _error_records(caplog)
+    text = record.getMessage()
+    assert record.name == "cortex_backend.api.jobs"
+    assert record.request_id == accepted.headers["X-Request-ID"]
+    assert f"request={accepted.headers['X-Request-ID']}" in text
+    assert f"job={job_id}" in text
+    assert "RuntimeError" in text
+    assert "SECRET" not in caplog.text and "user's message" not in caplog.text
+
+
+def test_failure_descriptions_hold_only_class_and_source_locations():
+    from cortex_backend.api.observability import describe_failure
+
+    def inner():
+        raise KeyError("SECRET-KEY")
+
+    def outer():
+        try:
+            inner()
+        except KeyError as cause:
+            raise OSError("SECRET-PATH C:/Users/someone/private.txt") from cause
+
+    try:
+        outer()
+    except OSError as exc:
+        description = describe_failure(exc)
+
+    lines = description.splitlines()
+    assert lines[0] == "OSError"
+    assert "caused by KeyError" in lines
+    assert any(line.endswith("in inner") for line in lines)
+    assert "SECRET" not in description and "someone" not in description
+    # Locations are file:line in function, with no directory above the package or the file name.
+    assert all(re.fullmatch(r"  [\w./-]+\.py:\d+ in [\w<>]+", line) for line in lines if line.startswith("  "))
+
+
+def test_failure_descriptions_are_bounded():
+    from cortex_backend.api.observability import describe_failure
+
+    def recurse(depth: int):
+        if depth == 0:
+            raise RuntimeError("bottom")
+        recurse(depth - 1)
+
+    try:
+        recurse(200)
+    except RuntimeError as exc:
+        description = describe_failure(exc)
+
+    assert len(description.splitlines()) <= 1 + 30
+    # The innermost frames are the ones kept.
+    assert "in recurse" in description
+
+
+def test_the_request_id_is_not_visible_outside_a_request():
+    from cortex_backend.api.observability import current_request_id
+
+    assert current_request_id() is None
+
+
+def _assert_fresh_request_id(response) -> str:
+    request_id = response.headers["X-Request-ID"]
+    assert re.fullmatch(r"[0-9a-f]{12}", request_id)
+    return request_id
+
+
+def test_a_refused_host_carries_the_request_id(client, headers):
+    """The middleware is outermost, so a refusal it never sees the route of still has an id."""
+    response = client.get("/api/v1/system", headers={**headers, "Host": "evil.example"})
+
+    assert response.status_code == 400
+    _assert_fresh_request_id(response)
+
+
+@pytest.mark.parametrize("how", ["declared_length", "chunked"])
+def test_an_oversized_body_refusal_carries_the_request_id(client, headers, how):
+    from cortex_backend.api.app import MAX_REQUEST_BODY_BYTES
+
+    if how == "declared_length":
+        # Refused on the header alone, before any of the body is read.
+        request = {"content": b"x", "headers": {"Content-Length": str(MAX_REQUEST_BODY_BYTES + 1)}}
+    else:
+        chunk = b"x" * (64 * 1024)
+        request = {"content": (chunk for _ in range(MAX_REQUEST_BODY_BYTES // len(chunk) + 1))}
+
+    # Not the attachment routes: those keep a larger ceiling than every other POST.
+    response = client.post(
+        "/api/v1/generations",
+        headers={**headers, "Content-Type": "application/json", **request.pop("headers", {})},
+        **request,
+    )
+
+    assert response.status_code == 413
+    _assert_fresh_request_id(response)
+
+
+def test_a_cors_preflight_carries_the_request_id(client):
+    """A preflight is answered by the CORS middleware without reaching the app."""
+    response = client.options(
+        "/api/v1/chats",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    _assert_fresh_request_id(response)
+
+
+def _add_unhandled_failure_route(app) -> None:
+    def unhandled_failure():
+        try:
+            raise ValueError("SECRET cause: the user's private prompt")
+        except ValueError as cause:
+            raise RuntimeError("SECRET: the user's private prompt") from cause
+
+    app.add_api_route("/api/v1/unhandled-failure-probe", unhandled_failure, methods=["GET"])
+
+
+def test_an_unhandled_exception_is_a_500_that_carries_and_logs_the_request_id(app, caplog):
+    """The exception no route dealt with used to get a plain-text 500 with no id at all."""
+    _add_unhandled_failure_route(app)
+
+    with caplog.at_level(logging.ERROR), TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/unhandled-failure-probe")
+
+    assert response.status_code == 500
+    request_id = _assert_fresh_request_id(response)
+    assert response.headers["content-type"] == "application/json"
+    # Generic, and quotable: nothing of the exception's text is in what the caller is told.
+    assert response.json() == {"detail": f"Internal server error. (Request ID: {request_id})"}
+
+    (record,) = _error_records(caplog)
+    text = record.getMessage()
+    assert record.request_id == request_id
+    assert f"request={request_id}" in text
+    assert "RuntimeError" in text and "caused by ValueError" in text
+    assert "in unhandled_failure" in text
+    assert "SECRET" not in caplog.text and "private prompt" not in caplog.text
+    assert "SECRET" not in response.text
+
+
+def test_an_unhandled_exception_still_reaches_the_server_and_the_test_client(app):
+    _add_unhandled_failure_route(app)
+
+    with TestClient(app) as client, pytest.raises(RuntimeError):
+        client.get("/api/v1/unhandled-failure-probe")
+
+
+def test_a_failure_after_the_response_started_is_logged_and_raised_with_no_second_response(caplog):
+    from cortex_backend.api.observability import RequestIdMiddleware
+
+    async def broken_stream(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"part", "more_body": True})
+        raise RuntimeError("SECRET: broke part way through")
+
+    sent: list[dict] = []
+
+    async def record_sent(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "GET", "path": "/stream", "headers": []}
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+        asyncio.run(RequestIdMiddleware(broken_stream)(scope, receive, record_sent))
+
+    assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]
+    assert sent[0]["status"] == 200
+    (record,) = _error_records(caplog)
+    assert record.request_id == dict(sent[0]["headers"])[b"x-request-id"].decode()
+    assert "SECRET" not in caplog.text

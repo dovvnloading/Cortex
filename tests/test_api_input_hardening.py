@@ -12,6 +12,7 @@ import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -20,12 +21,20 @@ import httpx
 import pytest
 
 from cortex_backend.api import create_app
-from cortex_backend.api.app import MAX_REQUEST_BODY_BYTES, RequestBodyLimitMiddleware
+from cortex_backend.api.app import (
+    ATTACHMENT_STAGING_PATHS,
+    MAX_ATTACHMENT_BODY_BYTES,
+    MAX_REQUEST_BODY_BYTES,
+    RequestBodyLimitMiddleware,
+)
 from cortex_backend.execution.recipes import (
     MAX_PIXELS,
     RecipeValidationError,
     parse_image_transform,
 )
+from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth
+from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
+from cortex_backend.execution.recipe_coordinator import RecipeExecutionCoordinator
 from cortex_backend.execution.repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
@@ -167,18 +176,23 @@ class _Seeded:
     assistant_message_id: str
 
 
+def _chats(client: TestClient):
+    """The chat repository behind ``client``'s app, for seeding a transcript.
+
+    There is no route that writes a raw turn -- a client can only generate one --
+    so a scenario that needs an assistant reply or a system note already in a
+    chat puts it there the way the generation worker does.
+    """
+    return client.app.state.dependencies.chats
+
+
 def _seed_chat(
     client: TestClient, headers: dict[str, str], ollama_state: FakeOllamaState
 ) -> _Seeded:
     chat = client.post("/api/v1/chats", json={"title": "Status codes"}, headers=headers).json()
-    for role, content in (("user", "hello"), ("assistant", "hi there")):
-        chat = client.post(
-            f"/api/v1/chats/{chat['id']}/messages",
-            json={"role": role, "content": content},
-            headers=headers,
-        ).json()
-    user, assistant = chat["messages"]
-    return _Seeded(client, headers, ollama_state, chat["id"], user["id"], assistant["id"])
+    user_id = _chats(client).add_message(chat["id"], "user", "hello")
+    assistant_id = _chats(client).add_message(chat["id"], "assistant", "hi there")
+    return _Seeded(client, headers, ollama_state, chat["id"], user_id, assistant_id)
 
 
 def _regenerate(seeded: _Seeded, message_id: str, **extra: object) -> httpx.Response:
@@ -206,12 +220,10 @@ def _regenerate_a_message_that_is_no_longer_last(seeded: _Seeded) -> httpx.Respo
 
 
 def _regenerate_a_message_that_is_not_a_reply(seeded: _Seeded) -> httpx.Response:
-    note = seeded.client.post(
-        f"/api/v1/chats/{seeded.thread_id}/messages",
-        json={"role": "system", "content": "a note, not a reply"},
-        headers=seeded.headers,
-    ).json()
-    return _regenerate(seeded, note["messages"][-1]["id"])
+    note_id = _chats(seeded.client).add_message(
+        seeded.thread_id, "system", "a note, not a reply"
+    )
+    return _regenerate(seeded, note_id)
 
 
 def _regenerate_from_a_stale_revision(seeded: _Seeded) -> httpx.Response:
@@ -328,6 +340,68 @@ def test_a_job_that_does_not_exist_is_still_a_404_for_approval_and_cancel(tmp_pa
 
     assert decision.status_code == 404
     assert cancel.status_code == 404
+
+
+def _app_over_a_real_coordinator(kind: str, tmp_path: Path):
+    """The API over the coordinator that ships, not the deterministic double.
+
+    The route maps ``ExecutionJobNotFound`` to 404, so each coordinator's own
+    ``cancel`` has to raise exactly that for a job it cannot find.
+    """
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    if kind == "local":
+        app = create_app(
+            build_demo_dependencies(),
+            allowed_hosts=("testserver",),
+            preview=True,
+            execution_coordinator=LocalExecutionCoordinator(repository, code_timeout_seconds=3.0),
+        )
+    else:
+        lifecycle = ExecutionLifecycle(
+            repository,
+            coordinator_factory=lambda repo: RecipeExecutionCoordinator(repo, lambda _job: None),
+            health_check=RuntimeHealth.ready,
+            enabled=True,
+            profile="local",
+        )
+        app = create_app(
+            build_demo_dependencies(),
+            allowed_hosts=("testserver",),
+            execution_lifecycle=lifecycle,
+            installation_principal_id=repository.installation_principal_id,
+        )
+    return app, repository
+
+
+@pytest.mark.parametrize("kind", ["local", "recipe"])
+def test_cancelling_an_unknown_or_foreign_job_is_a_404_on_the_real_coordinators(
+    tmp_path: Path, kind: str
+) -> None:
+    app, repository = _app_over_a_real_coordinator(kind, tmp_path)
+    repository.create_job(
+        job_id="someone-elses-job",
+        owner="f" * 64,
+        request_id="someone-elses-request",
+        profile="fake.v1",
+        payload={},
+    )
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        unknown = client.post("/api/v1/execution/no-such-job/cancel", headers=headers)
+        foreign = client.post("/api/v1/execution/someone-elses-job/cancel", headers=headers)
+        decision = client.post(
+            "/api/v1/execution/no-such-job/approval",
+            json={"decision": "approved"},
+            headers=headers,
+        )
+
+    for response in (unknown, foreign):
+        assert response.status_code == 404, response.text
+        assert response.json() == {"detail": "Execution job not found."}
+    assert decision.status_code == 404, decision.text
+    # A job that is not the caller's is not stopped by asking.
+    assert repository.get_job("someone-elses-job").status == "queued"
 
 
 @pytest.mark.parametrize("blank", ["   ", "\t\n", "​", ""])
@@ -504,7 +578,7 @@ def test_a_refusal_carries_the_cors_headers_a_browser_needs_to_read_it() -> None
         headers = session_headers(client, app)
 
         response = client.post(
-            "/api/v1/attachments",
+            "/api/v1/chats",
             content=b"x" * (MAX_REQUEST_BODY_BYTES + 1),
             headers={
                 **headers,
@@ -522,7 +596,7 @@ def test_the_largest_legitimate_attachment_is_still_accepted() -> None:
     a full-size file, base64-encoded."""
     app, attachments = _app_with_recording_attachments()
     encoded = base64.b64encode(b"a" * MAX_CHAT_ATTACHMENT_BYTES).decode("ascii")
-    assert len(encoded) < MAX_REQUEST_BODY_BYTES
+    assert len(encoded) < MAX_ATTACHMENT_BODY_BYTES
     with TestClient(app) as client:
         headers = session_headers(client, app)
 
@@ -532,6 +606,147 @@ def test_the_largest_legitimate_attachment_is_still_accepted() -> None:
 
     assert response.status_code == 201, response.text[:200]
     assert attachments.staged == ["limit-1"]
+
+
+def _concrete(path: str) -> str:
+    """A served path with each ``{parameter}`` filled in."""
+    return re.sub(r"\{[^}]+\}", "SAMPLE", path)
+
+
+def _writing_operations(app: Any) -> list[tuple[str, str]]:
+    """Every (method, concrete path) the API serves that takes a request body."""
+    return sorted(
+        (method.upper(), _concrete(path))
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+        if method in {"post", "put", "patch", "delete"}
+    )
+
+
+def test_a_body_over_one_mebibyte_is_refused_on_every_route_but_the_uploads() -> None:
+    """The ceiling bounds bytes, not memory: an authenticated 8 MiB body of junk
+    JSON keys cost roughly 400 to 750 MiB and two seconds, because validation
+    builds an error for every key before the handler clips the report to 50.
+
+    Only an attachment upload has a reason to be large, so every other route that
+    takes a body now stops at 1 MiB, before anything parses it.
+    """
+    app, attachments = _app_with_recording_attachments()
+    over = b"x" * (MAX_REQUEST_BODY_BYTES + 1)
+    operations = [
+        (method, path)
+        for method, path in _writing_operations(app)
+        if not (method == "POST" and path in ATTACHMENT_STAGING_PATHS)
+    ]
+    assert len(operations) >= 20, "the route table was not read"
+    with TestClient(app) as client:
+        headers = {**session_headers(client, app), "Content-Type": "application/json"}
+
+        accepted = [
+            (method, path)
+            for method, path in operations
+            if client.request(method, path, content=over, headers=headers).status_code != 413
+        ]
+
+    assert accepted == []
+    assert attachments.staged == []
+
+
+def test_an_over_ceiling_body_without_a_length_is_cut_off_on_an_ordinary_route() -> None:
+    app, _ = _app_with_recording_attachments()
+    chunk = b"x" * 65536
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.put(
+            "/api/v1/settings",
+            content=(chunk for _ in range((MAX_REQUEST_BODY_BYTES // len(chunk)) + 1)),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 413, response.text[:200]
+
+
+def test_a_body_exactly_at_the_ceiling_still_reaches_the_route() -> None:
+    """The limit refuses what is over it, not what is at it: this body is
+    invalid, so the route answers it with a validation error rather than 413."""
+    app, _ = _app_with_recording_attachments()
+    prefix, suffix = b'{"title":"', b'"}'
+    body = prefix + b"x" * (MAX_REQUEST_BODY_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(body) == MAX_REQUEST_BODY_BYTES
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        response = client.post(
+            "/api/v1/chats",
+            content=body,
+            headers={**headers, "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422, response.text[:200]
+
+
+def test_the_two_upload_routes_keep_the_larger_ceiling() -> None:
+    app, attachments = _app_with_recording_attachments()
+    two_mebibytes = base64.b64encode(b"a" * (2 * 1024 * 1024)).decode("ascii")
+    assert len(two_mebibytes) > MAX_REQUEST_BODY_BYTES
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        chat_upload = client.post(
+            "/api/v1/attachments", json=_stage_request(two_mebibytes), headers=headers
+        )
+        # No recipe runtime is configured here, so this route answers 404: the
+        # point is that it was not stopped at the door with a 413.
+        recipe_upload = client.post(
+            "/api/v1/execution/attachments",
+            json={"request_id": "big-recipe-upload", "content_base64": two_mebibytes},
+            headers=headers,
+        )
+        too_big = client.post(
+            "/api/v1/execution/attachments",
+            content=b"x" * (MAX_ATTACHMENT_BODY_BYTES + 1),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        wrong_method = client.put(
+            "/api/v1/attachments",
+            content=b"x" * (MAX_REQUEST_BODY_BYTES + 1),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+
+    assert chat_upload.status_code == 201, chat_upload.text[:200]
+    assert attachments.staged == ["limit-1"]
+    assert recipe_upload.status_code != 413
+    assert too_big.status_code == 413
+    # The larger ceiling belongs to the POST that stages a file, nothing else.
+    assert wrong_method.status_code == 413
+
+
+def test_the_larger_ceiling_covers_exactly_the_routes_that_upload_a_file() -> None:
+    """A new upload route must be added to the list, and a route that is not an
+    upload must not be: either mistake is otherwise invisible until it bites."""
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    document = app.openapi()
+    schemas = document["components"]["schemas"]
+
+    def body_schema(operation: dict[str, Any]) -> dict[str, Any]:
+        reference = (
+            operation.get("requestBody", {})
+            .get("content", {})
+            .get("application/json", {})
+            .get("schema", {})
+            .get("$ref", "")
+        )
+        return schemas.get(reference.rsplit("/", 1)[-1], {})
+
+    uploading = {
+        path
+        for path, operations in document["paths"].items()
+        for operation in operations.values()
+        if "content_base64" in body_schema(operation).get("properties", {})
+    }
+
+    assert uploading == set(ATTACHMENT_STAGING_PATHS)
 
 
 class _Downstream:
@@ -561,6 +776,7 @@ def _drive(
     *,
     chunks: list[bytes],
     path: str = "/api/v1/echo",
+    method: str = "POST",
     content_length: bytes | None = None,
     scope_type: str = "http",
 ) -> list[dict[str, Any]]:
@@ -578,7 +794,7 @@ def _drive(
         sent.append(message)
 
     headers = [(b"content-length", content_length)] if content_length is not None else []
-    scope = {"type": scope_type, "path": path, "headers": headers}
+    scope = {"type": scope_type, "path": path, "method": method, "headers": headers}
     asyncio.run(app(scope, receive, send))
     return sent
 
@@ -668,3 +884,46 @@ def test_a_malformed_length_header_falls_back_to_counting_the_bytes() -> None:
 
     assert _statuses(fine) == [200]
     assert _statuses(too_much) == [413]
+
+
+def _limited_with_an_upload_path() -> tuple[_Downstream, RequestBodyLimitMiddleware]:
+    downstream = _Downstream()
+    return downstream, RequestBodyLimitMiddleware(
+        downstream, max_body_bytes=10, larger_bodies={"/api/v1/upload": 100}
+    )
+
+
+def test_a_named_post_path_gets_its_own_larger_ceiling() -> None:
+    downstream, limited = _limited_with_an_upload_path()
+
+    declared = _drive(limited, chunks=[b"x" * 60], path="/api/v1/upload", content_length=b"60")
+    chunked = _drive(limited, chunks=[b"x" * 60, b"x" * 40], path="/api/v1/upload")
+
+    assert _statuses(declared) == [200]
+    assert _statuses(chunked) == [200] and downstream.received == 160
+
+
+def test_the_larger_ceiling_is_a_ceiling_too() -> None:
+    downstream, limited = _limited_with_an_upload_path()
+
+    declared = _drive(limited, chunks=[b"x" * 101], path="/api/v1/upload", content_length=b"101")
+    chunked = _drive(limited, chunks=[b"x" * 60, b"x" * 41], path="/api/v1/upload")
+
+    assert _statuses(declared) == [413]
+    assert _statuses(chunked) == [413] and downstream.saw_disconnect is True
+
+
+def test_the_larger_ceiling_is_for_that_exact_path_and_method_only() -> None:
+    downstream, limited = _limited_with_an_upload_path()
+
+    elsewhere = _drive(limited, chunks=[b"x" * 11], path="/api/v1/other", content_length=b"11")
+    longer = _drive(limited, chunks=[b"x" * 11], path="/api/v1/upload/extra", content_length=b"11")
+    prefixed = _drive(limited, chunks=[b"x" * 11], path="/api/v1/uploads", content_length=b"11")
+    trailing_slash = _drive(limited, chunks=[b"x" * 11], path="/api/v1/upload/", content_length=b"11")
+    other_method = _drive(
+        limited, chunks=[b"x" * 11], path="/api/v1/upload", method="PUT", content_length=b"11"
+    )
+
+    for refused in (elsewhere, longer, prefixed, trailing_slash, other_method):
+        assert _statuses(refused) == [413]
+    assert downstream.called is False

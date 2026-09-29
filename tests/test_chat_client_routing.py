@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
+import logging
 import time
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,6 +21,7 @@ from cortex_backend.llamacpp.server_manager import ServerHandle
 from cortex_backend.services.chat_client import OllamaChatClient, RoutingChatClient
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.testing.fake_llamacpp import FakeLlamaCppState, create_fake_llamacpp_app
+from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 
 
 class _RecordingOllamaClient:
@@ -296,6 +301,276 @@ def test_ollama_chat_client_streams_the_full_response_when_not_cancelled() -> No
     assert result["message"]["content"] == "Hello"
     assert result["prompt_eval_count"] == 5
     assert result["eval_count"] == 3
+
+
+class _ResidencyOllama:
+    """An Ollama client stub that says which models are loaded and keeps the order of its calls."""
+
+    def __init__(self, resident=(), *, ps_error: Exception | None = None, ps_answer=None) -> None:
+        self.resident = list(resident)
+        self.ps_error = ps_error
+        self.ps_answer = ps_answer
+        self.events: list[str] = []
+        self.chat_kwargs: dict = {}
+
+    def ps(self):
+        self.events.append("ps")
+        if self.ps_error is not None:
+            raise self.ps_error
+        if self.ps_answer is not None:
+            return self.ps_answer
+        return SimpleNamespace(models=[SimpleNamespace(model=name) for name in self.resident])
+
+    def chat(self, *, model, messages, options, stream=False, **extra):
+        del model, messages
+        self.events.append("chat")
+        self.chat_kwargs = {"options": options, **extra}
+        if stream:
+            return iter([{"message": {"content": "hi"}, "done": True}])
+        return {"message": {"content": "hi"}}
+
+
+def _client_reporting_to(stub: _ResidencyOllama) -> OllamaChatClient:
+    client = OllamaChatClient(stub)
+    client.set_status_callback(lambda message: stub.events.append(f"status:{message}"))
+    return client
+
+
+def test_ollama_reports_a_loading_phase_when_the_model_is_not_resident() -> None:
+    stub = _ResidencyOllama(resident=["something-else:1b"])
+
+    _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    # Said before the request that pays for the load, not after it.
+    assert stub.events == ["ps", "status:Loading qwen3:8b into Ollama...", "chat"]
+
+
+@pytest.mark.parametrize(
+    ("resident", "asked"),
+    [
+        (["qwen3:8b"], "qwen3:8b"),
+        (["qwen3:8b", "other:1b"], "qwen3:8b"),
+        (["llama3:latest"], "llama3"),
+        (["llama3"], "llama3:latest"),
+    ],
+)
+def test_ollama_says_nothing_when_the_model_is_already_loaded(resident: list[str], asked: str) -> None:
+    stub = _ResidencyOllama(resident=resident)
+
+    _client_reporting_to(stub).chat(model=asked, messages=[], options={})
+
+    assert stub.events == ["ps", "chat"]
+
+
+def test_ollama_reads_a_loaded_model_from_a_mapping_answer_too() -> None:
+    stub = _ResidencyOllama(ps_answer={"models": [{"name": "qwen3:8b"}]})
+
+    _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    assert stub.events == ["ps", "chat"]
+
+
+@pytest.mark.parametrize(
+    "stub",
+    [
+        _ResidencyOllama(ps_error=ConnectionError("Ollama is not running")),
+        _ResidencyOllama(ps_answer=SimpleNamespace(unexpected=True)),
+        _ResidencyOllama(ps_answer={"models": None}),
+    ],
+)
+def test_ollama_reports_no_load_when_it_cannot_say_and_still_asks_the_model(
+    stub: _ResidencyOllama,
+) -> None:
+    result = _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+
+    assert result["message"]["content"] == "hi"
+    assert stub.events == ["ps", "chat"]
+
+
+def test_ollama_does_not_ask_which_models_are_loaded_when_nobody_is_listening() -> None:
+    stub = _ResidencyOllama()
+    client = OllamaChatClient(stub)
+
+    client.chat(model="qwen3:8b", messages=[], options={})
+    client.set_status_callback(lambda message: None)
+    client.set_status_callback(None)
+    client.chat(model="qwen3:8b", messages=[], options={})
+
+    assert stub.events == ["chat", "chat"]
+
+
+def test_a_client_without_a_way_to_list_loaded_models_is_left_alone() -> None:
+    class _NoPs:
+        def chat(self, *, model, messages, options):
+            return {"message": {"content": "hi"}}
+
+    statuses: list[str] = []
+    client = OllamaChatClient(_NoPs())
+    client.set_status_callback(statuses.append)
+
+    assert client.chat(model="m", messages=[], options={})["message"]["content"] == "hi"
+    assert statuses == []
+
+
+def test_the_loading_phase_is_reported_on_the_streaming_path_and_not_for_a_cancelled_turn() -> None:
+    stub = _ResidencyOllama()
+    client = _client_reporting_to(stub)
+
+    client.chat(model="qwen3:8b", messages=[], options={}, cancellation_event=Event())
+    assert stub.events == ["ps", "status:Loading qwen3:8b into Ollama...", "chat"]
+
+    stub.events.clear()
+    stopped = Event()
+    stopped.set()
+    client.chat(model="qwen3:8b", messages=[], options={}, cancellation_event=stopped)
+    assert stub.events == []
+
+
+def test_the_routing_client_reaches_the_ollama_client_with_the_status_callback() -> None:
+    stub = _ResidencyOllama()
+    router = RoutingChatClient(OllamaChatClient(stub), _RecordingLlamaCppClient())
+    statuses: list[str] = []
+    router.set_status_callback(statuses.append)
+
+    router.chat(model="qwen3:8b", messages=[], options={})
+
+    assert statuses == ["Loading qwen3:8b into Ollama..."]
+
+
+def test_the_fake_ollama_lists_no_running_models_unless_it_is_told_which_are_loaded(
+    ollama_state: FakeOllamaState,
+) -> None:
+    with TestClient(create_fake_ollama_app(ollama_state)) as http:
+        assert http.get("/api/ps").json() == {"models": []}
+
+        ollama_state.loaded_models.add("qwen3:8b")
+        (running,) = http.get("/api/ps").json()["models"]
+
+    assert running["name"] == running["model"] == "qwen3:8b"
+    assert running["details"]["family"] and running["expires_at"] and running["size_vram"]
+
+
+@contextmanager
+def _fake_ollama_listening(state: FakeOllamaState) -> Iterator[str]:
+    """The fake Ollama's HTTP app on a loopback port, for the real ``ollama`` client to call."""
+    import uvicorn
+    from support import wait_until
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_fake_ollama_app(state), host="127.0.0.1", port=0, log_level="warning", lifespan="off"
+        )
+    )
+    thread = Thread(target=server.run, name="cortex-test-fake-ollama", daemon=True)
+    thread.start()
+    try:
+        wait_until(
+            lambda: server.started or not thread.is_alive(), timeout=10, describe="the fake Ollama to listen"
+        )
+        assert server.started, "the fake Ollama did not start"
+        yield f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+class _EchoOllamaWithRealPs:
+    """``ps`` answered by a real ``ollama`` client; ``chat`` by an echo, since only ``ps`` is under test."""
+
+    def __init__(self, real_client) -> None:
+        self._real_client = real_client
+
+    def ps(self):
+        return self._real_client.ps()
+
+    def chat(self, *, model, messages, options, **extra):
+        return {"message": {"content": "hi"}}
+
+
+@pytest.mark.parametrize(
+    ("ollama_state", "announced"),
+    [
+        pytest.param({}, ["Loading qwen3:8b into Ollama..."], id="nothing-loaded"),
+        pytest.param({"loaded_models": {"qwen3:8b"}}, [], id="model-loaded"),
+    ],
+    indirect=["ollama_state"],
+)
+def test_a_real_ollama_client_learns_from_the_fake_whether_the_model_is_loaded(
+    ollama_state: FakeOllamaState, announced: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without ``/api/ps`` the fake answered 404: no message, and a warning on every turn."""
+    import ollama
+
+    statuses: list[str] = []
+    with caplog.at_level(logging.WARNING), _fake_ollama_listening(ollama_state) as host:
+        client = OllamaChatClient(_EchoOllamaWithRealPs(ollama.Client(host=host)))
+        client.set_status_callback(statuses.append)
+
+        result = client.chat(model="qwen3:8b", messages=[], options={})
+
+    assert result["message"]["content"] == "hi"
+    assert statuses == announced
+    assert "could not ask Ollama" not in caplog.text
+
+
+def test_keep_alive_travels_as_a_request_field_and_not_as_an_option() -> None:
+    stub = _ResidencyOllama()
+
+    OllamaChatClient(stub).chat(
+        model="m",
+        messages=[],
+        options={"temperature": 0.5, "keep_alive": "5m", "grammar": "root ::= x"},
+    )
+
+    assert stub.chat_kwargs == {"options": {"temperature": 0.5}, "keep_alive": "5m"}
+
+
+def test_keep_alive_is_sent_on_the_streaming_path_too_and_only_when_asked_for() -> None:
+    stub = _ResidencyOllama()
+    client = OllamaChatClient(stub)
+
+    client.chat(model="m", messages=[], options={"keep_alive": -1}, cancellation_event=Event())
+    assert stub.chat_kwargs == {"options": {}, "keep_alive": -1}
+
+    client.chat(model="m", messages=[], options={"num_ctx": 4096}, cancellation_event=Event())
+    assert stub.chat_kwargs == {"options": {"num_ctx": 4096}}
+
+
+def test_the_keep_alive_setting_maps_to_what_ollama_is_sent() -> None:
+    from cortex_backend.services.chat_client import ollama_keep_alive
+
+    assert ollama_keep_alive(5) == "5m"
+    assert ollama_keep_alive(90) == "90m"
+    assert ollama_keep_alive(-1) == -1
+    # Zero leaves Ollama's own default alone; it is never sent, because Ollama
+    # itself would read a 0 as "unload the model right now".
+    assert ollama_keep_alive(0) is None
+
+
+def test_llamacpp_never_sees_keep_alive() -> None:
+    from cortex_backend.llamacpp.chat_client import _build_request_body
+
+    body = _build_request_body(
+        [{"role": "user", "content": "hi"}], {"temperature": 0.2, "keep_alive": "5m"}, stream=False
+    )
+
+    assert "keep_alive" not in body
+    assert body["temperature"] == 0.2
+
+
+def test_the_follow_up_calls_keep_the_turns_keep_alive_beside_its_window() -> None:
+    """The title and translation calls run last, and each restarts Ollama's unload timer."""
+    carried = {"num_ctx": 4096, "keep_alive": "30m", "temperature": 0.9, "seed": 7, "top_k": 3}
+
+    assert SynthesisAgent._auxiliary_options(carried, temperature=0.1) == {
+        "num_ctx": 4096,
+        "keep_alive": "30m",
+        "temperature": 0.1,
+    }
+    assert SynthesisAgent._auxiliary_options({"num_ctx": 4096}, temperature=0.2) == {
+        "num_ctx": 4096,
+        "temperature": 0.2,
+    }
 
 
 class _StaticProvider:
@@ -1832,11 +2107,12 @@ def test_routing_tokenize_asks_only_the_llamacpp_client() -> None:
     )
 
 
-def test_the_adapter_reports_the_whole_prompt_beside_the_part_the_server_evaluated() -> None:
-    """A cached prefix makes ``prompt_n`` a fraction of the prompt.
+def test_adapt_prefers_total_prompt_tokens_over_processed_count() -> None:
+    """A cached prefix makes ``timings.prompt_n`` a fraction of the prompt.
 
-    ``prompt_eval_count`` keeps its meaning (what was evaluated); calibrating
-    the token estimate needs the whole prompt, which only ``usage`` carries.
+    ``prompt_eval_count`` is what is saved with the message and what says a
+    prompt filled the window, so it has to be the whole prompt; the evaluated
+    count is only the fallback for a server that sends no usage.
     """
     adapted = _adapt_to_ollama_shape(
         {
@@ -1846,15 +2122,49 @@ def test_the_adapter_reports_the_whole_prompt_beside_the_part_the_server_evaluat
         },
         elapsed_seconds=1.0,
     )
-    assert adapted["prompt_eval_count"] == 7
+    assert adapted["prompt_eval_count"] == 120
     assert adapted["prompt_token_count"] == 120
+    # The time is the time spent on what was evaluated, and stays that.
+    assert adapted["prompt_eval_duration"] == 5_000_000
 
-    # No usage block, or a malformed one: the key is simply absent.
+    # No usage block, or a malformed one: the evaluated count is all there is,
+    # and the key that promises the whole prompt is simply absent.
     for usage in (None, {}, {"prompt_tokens": "many"}, {"prompt_tokens": True}):
         adapted = _adapt_to_ollama_shape(
-            {"choices": [{"message": {"content": "hi"}}], "usage": usage}, elapsed_seconds=1.0
+            {
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": usage,
+                "timings": {"prompt_n": 7, "prompt_ms": 5.0},
+            },
+            elapsed_seconds=1.0,
         )
+        assert adapted["prompt_eval_count"] == 7
         assert "prompt_token_count" not in adapted
+
+    # Nothing at all is reported as nothing, not as a made-up number.
+    adapted = _adapt_to_ollama_shape(
+        {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": "many"}},
+        elapsed_seconds=1.0,
+    )
+    assert adapted["prompt_eval_count"] is None
+
+
+def test_a_cached_prompt_that_filled_the_window_is_still_reported_as_full() -> None:
+    """The saved figure feeds the "context is full" notice; a cache hit must not hide it."""
+    from cortex_backend.services.llm import _extract_stats
+
+    adapted = _adapt_to_ollama_shape(
+        {
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 8000, "completion_tokens": 3},
+            "timings": {"prompt_n": 40, "predicted_n": 3, "prompt_ms": 5.0, "predicted_ms": 30.0},
+        },
+        elapsed_seconds=1.0,
+    )
+
+    stats = _extract_stats(adapted)
+
+    assert stats is not None and stats.prompt_eval_count == 8000
 
 
 def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -> None:
@@ -1879,5 +2189,5 @@ def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -
         cancellation_event=Event(),
     )
 
-    assert response["prompt_eval_count"] == 9
+    assert response["prompt_eval_count"] == 321
     assert response["prompt_token_count"] == 321

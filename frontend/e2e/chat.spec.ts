@@ -180,8 +180,8 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   await expect(page.getByText("Settings saved.")).toBeVisible();
   await page.getByRole("button", { name: "Memory", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Remember tea");
-  page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "Clear all" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Clear all memories" }).click();
   await expect(page.getByText("Permanent memories cleared.")).toBeVisible();
   await page.getByLabel("New memory").fill("Remember local data");
   await page.getByRole("button", { name: "Add memory" }).click();

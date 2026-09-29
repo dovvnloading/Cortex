@@ -18,17 +18,13 @@ from cortex_backend.api.routes import (
     _accepted,
     _chat_response,
     _durable_owner,
-    _raise_chat_attachment_error,
     _raise_chat_domain_error,
     _raise_repository_error,
     _regeneration_target,
-    _reject_invalid_new_chat_thread_id,
     _request_fingerprint,
     _start_generation_job,
-    _validate_chat_attachment_refs,
 )
 from cortex_backend.api.schemas import (
-    AddMessageRequest,
     ChatGroup,
     ChatResponse,
     ChatSummary,
@@ -49,7 +45,6 @@ from cortex_backend.repositories.chats import (
     ChatRevisionConflict,
     MessageNotFound,
 )
-from cortex_backend.services.attachments import ChatAttachmentError
 from cortex_backend.services.chat import (
     ChatDomainError,
     chat_revision,
@@ -259,48 +254,6 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         if summary is None:
             raise HTTPException(status_code=404, detail="Chat not found.")
         return ChatSummary.model_validate(summary)
-
-
-    @router.post("/chats/{thread_id}/messages", response_model=ChatResponse)
-    def add_message(
-        thread_id: str,
-        payload: AddMessageRequest,
-        request: Request,
-        deps: BackendDependenciesProtocol = Depends(dependencies),
-        principal: SessionPrincipal = Depends(require_session),
-    ) -> ChatResponse:
-        try:
-            existing = deps.chats.get_chat_overview(thread_id)
-            if existing is None:
-                _reject_invalid_new_chat_thread_id(thread_id)
-            attachment_refs = _validate_chat_attachment_refs(
-                request,
-                deps,
-                principal,
-                payload.attachments or [],
-            )
-            deps.chats.add_message(
-                thread_id,
-                payload.role,
-                payload.content,
-                sources=payload.sources,
-                thoughts=payload.thoughts,
-                attachments=[attachment.model_dump(mode="json") for attachment in attachment_refs],
-                thread_title="New Chat" if existing is None else None,
-                expected_revision=payload.base_revision,
-            )
-            chat = deps.chats.get_chat(thread_id)
-        except ChatAttachmentError as exc:
-            _raise_chat_attachment_error(exc)
-        except ChatRevisionConflict as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        except ChatDomainError as exc:
-            _raise_chat_domain_error(exc)
-        except Exception as exc:
-            _raise_repository_error("save message", exc)
-        if chat is None:
-            raise HTTPException(status_code=500, detail="Message did not persist.")
-        return _chat_response(chat)
 
 
     @router.post(
