@@ -34,7 +34,22 @@ from .models import (
 SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
+# How long after the user's decision an approval can still be spent. The click
+# and the launch are normally milliseconds apart; anything older than this is a
+# grant that sat unclaimed, and consent does not keep.
+APPROVAL_GRANT_SECONDS = MAX_APPROVAL_TTL_SECONDS
 DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+# How long a database set aside as damaged, or as written by a newer build, is
+# kept for inspection before the startup sweep reclaims it.
+ASIDE_COPY_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_CONNECT_TIMEOUT_SECONDS = 10.0
+# SQLite primary result codes that say the file's *contents* are bad
+# (SQLITE_CORRUPT, SQLITE_NOTADB). Everything else -- busy, locked, cannot
+# open, I/O error, disk full, read-only, permission -- says only that the file
+# could not be read *right now*, which is no reason to touch it.
+_SQLITE_CORRUPTION_CODES = frozenset({11, 26})
+# Python 3.10 does not expose sqlite_errorcode, so fall back to the message.
+_SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
@@ -70,6 +85,15 @@ class ExecutionRepositoryError(RuntimeError):
     """Safe repository boundary error."""
 
 
+class ExecutionStoreUnavailable(ExecutionRepositoryError):
+    """The store could not be read right now; nothing on disk was changed.
+
+    Retrying later is safe. It is raised instead of treating an unreadable
+    file as a damaged one, because "locked by a scanner" and "corrupt" need
+    opposite answers.
+    """
+
+
 class LeaseConflict(ExecutionRepositoryError):
     """Another live coordinator owns the execution lease."""
 
@@ -86,17 +110,41 @@ class ApprovalTransitionError(ExecutionRepositoryError):
     """An approval decision is not valid for the current state."""
 
 
+class ApprovalExpiredError(ApprovalTransitionError):
+    """An approval was no longer valid when a worker tried to spend it.
+
+    The job has already been cancelled and its approval marked expired by the
+    time this is raised; nothing ran.
+    """
+
+
 class ArtifactLimitError(ExecutionRepositoryError):
     """An artifact exceeded the configured size limit."""
 
 
+class ArtifactCleanupRejected(ExecutionRepositoryError):
+    """A cleanup row can never be honoured safely: its paths are not ours to touch."""
+
+
+class ArtifactCleanupBlocked(ExecutionRepositoryError):
+    """A cleanup row could not be finished this time; a later pass may succeed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCleanupResult:
-    """Bounded cleanup work completed by one janitor pass."""
+    """Bounded cleanup work completed by one janitor pass.
+
+    ``skipped`` counts artifact rows whose files were deliberately left alone
+    because they could not be reclaimed safely -- a path outside the artifact
+    root, a link, an unexpected file type, a failed move. A skipped row never
+    stops the rest of the pass; the count exists so the supervisor can make
+    the condition visible instead of the store growing silently.
+    """
 
     artifacts: int = 0
     jobs: int = 0
     events: int = 0
+    skipped: int = 0
 
     @property
     def rows(self) -> int:
@@ -121,6 +169,10 @@ class ExecutionRepository:
         self.artifact_root = Path(artifact_root)
         self.max_artifact_bytes = max_artifact_bytes
         self._installation_principal_id: str | None = None
+        # An approval decided before this moment was granted to a previous
+        # process. "Allow once" is one run in the process the user answered
+        # in, so it cannot be spent by this one.
+        self._opened_at = datetime.now(timezone.utc)
         self._ensure_schema()
 
     @property
@@ -130,14 +182,24 @@ class ExecutionRepository:
             self._installation_principal_id = self._load_or_create_installation_principal()
         return self._installation_principal_id
 
+    def _new_connection(self) -> sqlite3.Connection:
+        """Open a connection with the settings every reader of this store uses."""
+
+        connection = sqlite3.connect(self.db_path, timeout=_CONNECT_TIMEOUT_SECONDS)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {int(_CONNECT_TIMEOUT_SECONDS * 1000)}")
+            connection.execute("PRAGMA foreign_keys = ON")
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(self.db_path, timeout=10.0)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA busy_timeout = 10000")
-            connection.execute("PRAGMA foreign_keys = ON")
+            connection = self._new_connection()
             yield connection
             connection.commit()
         except sqlite3.Error as exc:
@@ -161,12 +223,15 @@ class ExecutionRepository:
         self.quarantine_root.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(self.quarantine_root) or _has_reparse_parent(self.quarantine_root):
             raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
-        self._rebuild_if_damaged()
         with _SCHEMA_LOCK:
+            # One lock across the check and the DDL, so two repositories built
+            # in the same process cannot both decide to set the file aside.
+            self._rebuild_if_damaged()
+            self._sweep_aside_copies()
             self._ensure_schema_locked()
 
     def _rebuild_if_damaged(self) -> None:
-        """Replace an unreadable execution store instead of refusing to start.
+        """Replace an execution store this build cannot use, without losing it.
 
         This database holds only transient bookkeeping -- jobs, events, leases
         and artifact rows -- and it is written on every job, every event and
@@ -174,32 +239,40 @@ class ExecutionRepository:
         shutdown. It is also the first dependency the app builds, and unlike
         the chat and settings stores it has no backup and no recovery. A torn
         page therefore took the whole application down: no chat, no settings,
-        nothing, over disposable state.
+        nothing, over disposable state. A profile copied back from a newer
+        build did the same, and the DDL had already been written to it by the
+        time the version was checked.
 
         Nothing here is authored by the user, so rebuilding is both the
-        cheapest and the most correct answer. The damaged file is kept beside
-        the new one for inspection rather than deleted.
+        cheapest and the most correct answer -- but only for a file that is
+        positively known to be unusable: corrupt, or written by a newer
+        schema. A file that merely could not be read this time (locked by a
+        scanner or a backup agent, briefly unreadable, disk full) is left
+        exactly as it is and reported as retryable, because renaming it would
+        turn a healthy store into an empty one. The set-aside file is kept
+        beside the new one for inspection rather than deleted.
         """
         if not self.db_path.exists():
             return
-        try:
-            connection = sqlite3.connect(self.db_path)
-            try:
-                result = connection.execute("PRAGMA integrity_check").fetchone()
-            finally:
-                connection.close()
-            if result is not None and str(result[0]).lower() == "ok":
-                return
-        except sqlite3.Error:
-            pass  # Unreadable at all: the same answer.
+        verdict = self._inspect_store()
+        if verdict == "ok":
+            return
 
-        damaged = self.db_path.with_name(f"{self.db_path.name}.damaged-{uuid4().hex}")
+        aside = self.db_path.with_name(f"{self.db_path.name}.{verdict}-{uuid4().hex}")
         try:
-            os.replace(self.db_path, damaged)
+            os.replace(self.db_path, aside)
         except OSError as exc:
             raise ExecutionRepositoryError(
                 "The execution store is damaged and could not be replaced."
+                if verdict == "damaged"
+                else "The execution store was written by a newer version of Cortex "
+                "and could not be set aside."
             ) from exc
+        try:
+            # The retention window runs from now, not from the last write.
+            os.utime(aside)
+        except OSError:
+            pass
         for suffix in ("-wal", "-shm"):
             # They describe the file just moved aside, so SQLite must not
             # replay them onto the empty replacement.
@@ -207,10 +280,92 @@ class ExecutionRepository:
                 self.db_path.with_name(f"{self.db_path.name}{suffix}").unlink(missing_ok=True)
             except OSError:
                 pass
-        _LOGGER.error(
-            "The execution store was unreadable and has been rebuilt. "
-            "In-flight job state was lost; the damaged file was kept for inspection."
+        if verdict == "damaged":
+            _LOGGER.error(
+                "The execution store was unreadable and has been rebuilt. "
+                "In-flight job state was lost; the damaged file was kept for inspection."
+            )
+        else:
+            _LOGGER.warning(
+                "The execution store was written by a newer version of Cortex and "
+                "has been set aside. In-flight job state was not carried over."
+            )
+
+    def _inspect_store(self) -> Literal["ok", "damaged", "newer"]:
+        """Classify the existing database file without writing to it.
+
+        Only positive evidence returns ``damaged`` (corruption) or ``newer``
+        (a schema version this build does not know). Anything else that stops
+        the file being read raises :class:`ExecutionStoreUnavailable` and
+        leaves it alone. This runs before any DDL, so a newer store is never
+        modified on its way to being refused.
+        """
+
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._new_connection()
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if result is None or str(result[0]).lower() != "ok":
+                return "damaged"
+            try:
+                row = connection.execute(
+                    "SELECT version FROM execution_schema WHERE id = 1"
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
+                return "ok"  # A fresh or pre-versioning file: the DDL creates it.
+            try:
+                version = int(row["version"]) if row is not None else 0
+            except (TypeError, ValueError):
+                return "damaged"
+            return "newer" if version > SCHEMA_VERSION else "ok"
+        except sqlite3.Error as exc:
+            if self._is_corruption(exc):
+                return "damaged"
+            raise ExecutionStoreUnavailable(
+                "The execution store could not be opened right now and was left "
+                "untouched. Try again shortly."
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _is_corruption(exc: sqlite3.Error) -> bool:
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int):
+            return (code & 0xFF) in _SQLITE_CORRUPTION_CODES
+        message = str(exc).lower()
+        return any(marker in message for marker in _SQLITE_CORRUPTION_MESSAGES)
+
+    def _sweep_aside_copies(self) -> None:
+        """Reclaim set-aside stores older than the retention window.
+
+        Nothing else ever removed them, and the artifact files their rows
+        named are unreachable anyway, so each one was a permanent copy of a
+        store nobody could open. Best effort: a failure here never stops
+        startup, and only regular files with the exact set-aside name are
+        touched.
+        """
+
+        pattern = re.compile(
+            rf"^{re.escape(self.db_path.name)}\.(?:damaged|newer)-[0-9a-f]{{32}}$"
         )
+        cutoff = datetime.now(timezone.utc).timestamp() - ASIDE_COPY_RETENTION_SECONDS
+        try:
+            candidates = [
+                entry for entry in self.db_path.parent.iterdir() if pattern.fullmatch(entry.name)
+            ]
+        except OSError:
+            return
+        for entry in candidates:
+            try:
+                info = entry.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                continue
 
     def _ensure_schema_locked(self) -> None:
         with self.connect() as connection:
@@ -271,6 +426,10 @@ class ExecutionRepository:
                     decided_at TEXT,
                     expires_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS execution_approval_uses (
+                    job_id TEXT PRIMARY KEY REFERENCES execution_jobs(job_id) ON DELETE CASCADE,
+                    used_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS execution_supervisor_leases (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     lease_owner TEXT NOT NULL,
@@ -306,6 +465,10 @@ class ExecutionRepository:
                 raise ExecutionRepositoryError("Execution schema version is missing.")
             current_version = int(row["version"])
             if current_version > SCHEMA_VERSION:
+                # _rebuild_if_damaged() already sets a newer store aside before
+                # any DDL runs; reaching this means another process upgraded
+                # the file between that check and now. Refuse rather than
+                # migrate it backwards.
                 raise ExecutionRepositoryError("Execution schema is newer than this build.")
             if current_version < SCHEMA_VERSION:
                 principal = self._ensure_installation_principal_connection(connection)
@@ -423,27 +586,41 @@ class ExecutionRepository:
             return job, False
 
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
-        now = self._now()
         with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT j.*,
-                       COALESCE(
-                           CASE
-                               WHEN a.state = 'pending' AND a.expires_at <= ? THEN 'expired'
-                               ELSE a.state
-                           END,
-                           'not_required'
-                       ) AS approval_state
-                FROM execution_jobs j
-                LEFT JOIN execution_approvals a ON a.job_id = j.job_id
-                WHERE j.job_id = ?
-                """,
-                (now, job_id),
-            ).fetchone()
+            row = self._read_job(connection, job_id, self._now())
         if row is None or (owner is not None and row["owner"] != owner):
             return None
         return self._job_from_row(row)
+
+    @staticmethod
+    def _read_job(
+        connection: sqlite3.Connection, job_id: str, now: str
+    ) -> sqlite3.Row | None:
+        """Read one job with its effective approval state on ``connection``.
+
+        A pending approval past its expiry reads as ``expired`` even before
+        the sweeper has persisted that, and a job with no approval row reads
+        as ``not_required``. Every reader that reports a job goes through
+        here so they cannot disagree about it.
+        """
+
+        row: sqlite3.Row | None = connection.execute(
+            """
+            SELECT j.*,
+                   COALESCE(
+                       CASE
+                           WHEN a.state = 'pending' AND a.expires_at <= ? THEN 'expired'
+                           ELSE a.state
+                       END,
+                       'not_required'
+                   ) AS approval_state
+            FROM execution_jobs j
+            LEFT JOIN execution_approvals a ON a.job_id = j.job_id
+            WHERE j.job_id = ?
+            """,
+            (now, job_id),
+        ).fetchone()
+        return row
 
     def replace_job_payload(
         self,
@@ -559,9 +736,6 @@ class ExecutionRepository:
         expected_status: ExecutionStatus | None = None,
     ) -> ExecutionJob:
         now = self._now()
-        terminal_owner: str | None = None
-        updated: sqlite3.Row | None = None
-        updated_owner: str | None = None
         with self.connect() as connection:
             # Serialize lifecycle transitions before reading the current
             # sequence. Workers and cancellation requests may transition the
@@ -574,19 +748,7 @@ class ExecutionRepository:
             ).fetchone()
             if row is None:
                 raise ExecutionRepositoryError("Execution job does not exist.")
-            if row["status"] in TerminalExecutionStatus:
-                # A worker can race with cancellation or recovery. Terminal
-                # state is immutable; late callbacks must not append a second
-                # terminal event or overwrite the validated result. Record the
-                # owner and re-derive the job via get_job() below, once this
-                # connection is closed: this row comes from a bare
-                # `SELECT * FROM execution_jobs` with no execution_approvals
-                # join, so it has no approval_state column, and
-                # _job_from_row() would silently default it to
-                # "not_required" even when the job was actually approved or
-                # denied before it reached its terminal status.
-                terminal_owner = row["owner"]
-            else:
+            if row["status"] not in TerminalExecutionStatus:
                 if expected_status is not None and row["status"] != expected_status:
                     raise ExecutionTransitionConflict(
                         f"Execution job is {row['status']}, not {expected_status}."
@@ -634,45 +796,22 @@ class ExecutionRepository:
                     """,
                     (job_id, sequence, event, status, phase, encoded_data, now),
                 )
-                updated = connection.execute(
-                    "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
-                ).fetchone()
-                if updated is None:
-                    raise ExecutionRepositoryError("job row vanished after update")
-                # Defer approval-state computation until this connection
-                # closes, for the same reason as the terminal race guard
-                # above: this row comes from a bare
-                # `SELECT * FROM execution_jobs` with no execution_approvals
-                # join, so it has no approval_state column, and
-                # _job_from_row() would silently default it to
-                # "not_required" even when the job was actually approved or
-                # denied on its way to this (possibly terminal) status.
-                # self.get_job() below re-derives the real value via the
-                # join once the transaction has committed.
-                updated_owner = row["owner"]
-        if terminal_owner is not None:
-            # Delegate to the already-correct get_job() instead of
-            # maintaining a second copy of the approval-join query (the same
-            # pattern used for create_job()'s duplicate-request fallback).
-            # The connection above is already closed, so this cannot collide
-            # with the transaction we just held.
-            job = self.get_job(job_id, owner=terminal_owner)
-            if job is not None:
-                return job
-            # The job vanished between the terminal check and this re-read
-            # (e.g. a concurrent purge) -- fall back to the original row so
-            # the race guard still returns a job rather than raising.
-            return self._job_from_row(row)
-        if updated is None:
-            raise ExecutionRepositoryError("job row vanished after update")
-        job = self.get_job(job_id, owner=updated_owner)
-        if job is not None:
-            return job
-        # The job vanished between the update above and this re-read (e.g. a
-        # concurrent purge) -- fall back to the freshly updated row so the
-        # caller still gets the status/result it just wrote, rather than
-        # raising.
-        return self._job_from_row(updated)
+            # Terminal state is immutable: a worker can race with cancellation
+            # or recovery, and a late callback must neither append a second
+            # terminal event nor overwrite the validated result, so that case
+            # writes nothing and reports the job as it stands.
+            #
+            # Either way the answer is read here, inside the transaction that
+            # holds the write lock, with the approval join get_job() uses.
+            # Reading it back after the commit made the return value "whatever
+            # the row says now" rather than "what this call committed": a
+            # concurrent actor could advance the job in between, and the HTTP
+            # 202 body and every coordinator decision built on the result
+            # would describe a state this call never wrote.
+            snapshot = self._read_job(connection, job_id, now)
+            if snapshot is None:
+                raise ExecutionRepositoryError("job row vanished after update")
+            return self._job_from_row(snapshot)
 
     def request_cancel(self, job_id: str) -> ExecutionJob:
         job = self.get_job(job_id)
@@ -1084,6 +1223,124 @@ class ExecutionRepository:
             )
         return expires_text
 
+    def claim_approved_lease(
+        self, job_id: str, *, lease_owner: str, ttl_seconds: float = 30.0
+    ) -> str:
+        """Spend a job's one-time approval and claim its lease, atomically.
+
+        This is the only way a code job's approval becomes a run. "Allow once"
+        means one launch, in the process the user answered in, so the approval
+        is refused -- the job is cancelled with ``approval_expired`` and the
+        approval marked expired, in the same transaction -- when it
+
+        * was already spent by an earlier launch (a crash mid-run, then a
+          relaunch), or
+        * was decided before this process started, or
+        * was decided longer ago than ``APPROVAL_GRANT_SECONDS``.
+
+        Otherwise the approval is marked spent in the same transaction that
+        writes the lease, so no relaunch can reuse it: a crash mid-run costs
+        the user a fresh approval, which is the honest reading of "once".
+
+        A live lease held by another coordinator, and a cancellation that has
+        already committed, are refused *without* spending the approval:
+        nothing is about to run.
+        """
+
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_text = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        lapsed = False
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT profile, status FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise ExecutionRepositoryError("Execution job does not exist.")
+            if job["status"] in TerminalExecutionStatus:
+                raise ExecutionRepositoryError("Terminal execution jobs cannot be leased.")
+            if job["status"] == "cancelling":
+                raise ExecutionTransitionConflict(
+                    "Execution job is cancelling and cannot start."
+                )
+            lease = connection.execute(
+                "SELECT lease_owner, lease_expires_at FROM execution_leases WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if (
+                lease is not None
+                and lease["lease_owner"] != lease_owner
+                and datetime.fromisoformat(lease["lease_expires_at"]) > now
+            ):
+                raise LeaseConflict("Execution lease is owned by another coordinator.")
+            approval = connection.execute(
+                "SELECT state, decided_at FROM execution_approvals WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if approval is None or approval["state"] != "approved":
+                raise ApprovalTransitionError("Execution is not approved.")
+            already_spent = connection.execute(
+                "SELECT 1 FROM execution_approval_uses WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if already_spent is not None or not self._grant_is_current(approval["decided_at"], now):
+                lapsed = True
+                connection.execute(
+                    "UPDATE execution_approvals SET state = 'expired' WHERE job_id = ?",
+                    (job_id,),
+                )
+                connection.execute(
+                    "UPDATE execution_jobs SET error = 'approval_expired' WHERE job_id = ?",
+                    (job_id,),
+                )
+                connection.execute("DELETE FROM execution_leases WHERE job_id = ?", (job_id,))
+                self._append_event_connection(
+                    connection,
+                    job_id=job_id,
+                    event="code.cancelled" if job["profile"] == "code.exec.v1" else "cancelled",
+                    status="cancelled",
+                    phase="approval",
+                    data={"message": "Approval expired.", "approval_state": "expired"},
+                    now=now_text,
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO execution_approval_uses (job_id, used_at) VALUES (?, ?)",
+                    (job_id, now_text),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_leases (job_id, lease_owner, lease_expires_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(job_id) DO UPDATE SET
+                        lease_owner = excluded.lease_owner,
+                        lease_expires_at = excluded.lease_expires_at
+                    """,
+                    (job_id, lease_owner, expires_text),
+                )
+        if lapsed:
+            # Raised after the commit above, so the cancellation is durable.
+            raise ApprovalExpiredError("Approval is no longer valid.")
+        return expires_text
+
+    def _grant_is_current(self, decided_at: str | None, now: datetime) -> bool:
+        """Whether an approval decided at ``decided_at`` may still be spent.
+
+        Fails closed: a missing or unparseable decision time is not current.
+        """
+
+        if not isinstance(decided_at, str):
+            return False
+        try:
+            decided = datetime.fromisoformat(decided_at)
+        except ValueError:
+            return False
+        if decided.tzinfo is None:
+            return False
+        return decided >= self._opened_at and (now - decided).total_seconds() <= APPROVAL_GRANT_SECONDS
+
     def release_lease(self, job_id: str, *, lease_owner: str) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -1369,7 +1626,9 @@ class ExecutionRepository:
         cutoff = cutoff_time.isoformat()
         job_cutoff = (cutoff_time - timedelta(seconds=terminal_job_retention_seconds)).isoformat()
 
-        removed_artifacts = self._resume_artifact_cleanup(limit=limit)
+        removed_artifacts, skipped = self._resume_artifact_cleanup(limit=limit)
+        # Skipped rows do not spend the budget: they are counted, re-queued or
+        # dropped, and must never crowd out the rows that can be reclaimed.
         remaining_artifacts = max(0, limit - removed_artifacts)
         if remaining_artifacts:
             with self.connect() as connection:
@@ -1386,19 +1645,30 @@ class ExecutionRepository:
                     """,
                     (cutoff, remaining_artifacts),
                 ).fetchall()
-            validated = [
-                (str(row["artifact_id"]), self._validated_cleanup_path(Path(row["path"])))
-                for row in artifact_rows
-            ]
-            for artifact_id, path in validated:
+            for artifact_row in artifact_rows:
+                artifact_id = str(artifact_row["artifact_id"])
                 quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
-                self._validated_quarantine_path(quarantine)
-                self._record_artifact_cleanup(artifact_id, path, quarantine)
-                removed_artifacts += self._resume_artifact_cleanup(limit=1)
+                try:
+                    path = self._validated_cleanup_path(Path(artifact_row["path"]))
+                    self._validated_quarantine_path(quarantine)
+                    self._record_artifact_cleanup(artifact_id, path, quarantine)
+                except ArtifactCleanupRejected as exc:
+                    self._discard_artifact_rows(artifact_id, exc)
+                    skipped += 1
+                    continue
+                except ArtifactCleanupBlocked as exc:
+                    _LOGGER.debug("Skipped an expired artifact (%s).", type(exc).__name__)
+                    skipped += 1
+                    continue
+                reclaimed, deferred = self._finish_artifact_cleanup(
+                    artifact_id, str(path), str(quarantine), "pending"
+                )
+                removed_artifacts += reclaimed
+                skipped += deferred
 
         remaining = max(0, limit - removed_artifacts)
         if remaining == 0:
-            return ExecutionCleanupResult(artifacts=removed_artifacts)
+            return ExecutionCleanupResult(artifacts=removed_artifacts, skipped=skipped)
         with self.connect() as connection:
             jobs = connection.execute(
                 """
@@ -1438,45 +1708,52 @@ class ExecutionRepository:
             artifacts=removed_artifacts,
             jobs=removed_jobs,
             events=removed_events,
+            skipped=skipped,
         )
 
     def _validated_cleanup_path(self, path: Path) -> Path:
-        """Validate a source path without following an untrusted reparse hop."""
+        """Validate a source path without following an untrusted reparse hop.
+
+        Raises :class:`ArtifactCleanupRejected` when the path is not one this
+        repository may ever touch (outside the artifact root, a link, not a
+        regular file), and :class:`ArtifactCleanupBlocked` when it merely could
+        not be examined this time.
+        """
 
         root = self.artifact_root.resolve()
         quarantine_root = self.quarantine_root.resolve()
         if _is_reparse_point(path):
-            raise ExecutionRepositoryError("Artifact path is unavailable.")
+            raise ArtifactCleanupRejected("Artifact path is unavailable.")
         try:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError):
-            raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+            raise ArtifactCleanupBlocked("Artifact path is unavailable.") from None
         if (
             not resolved.is_relative_to(root)
             or resolved == root
             or resolved.is_relative_to(quarantine_root)
             or _has_reparse_parent(path)
         ):
-            raise ExecutionRepositoryError("Artifact path is unavailable.")
+            raise ArtifactCleanupRejected("Artifact path is unavailable.")
         if path.exists():
             try:
                 info = path.lstat()
             except OSError:
-                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
+                raise ArtifactCleanupBlocked("Artifact path is unavailable.") from None
             if not stat.S_ISREG(info.st_mode):
-                raise ExecutionRepositoryError("Artifact path is unavailable.")
+                raise ArtifactCleanupRejected("Artifact path is unavailable.")
         return path
 
     def _validated_quarantine_path(self, path: Path) -> Path:
         root = self.quarantine_root.resolve()
         if _is_reparse_point(path):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+            raise ArtifactCleanupRejected("Artifact quarantine is unavailable.")
         try:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.") from None
+            raise ArtifactCleanupBlocked("Artifact quarantine is unavailable.") from None
         if not resolved.is_relative_to(root) or resolved == root or _has_reparse_parent(path):
-            raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
+            raise ArtifactCleanupRejected("Artifact quarantine is unavailable.")
         return path
 
     def _record_artifact_cleanup(
@@ -1493,7 +1770,9 @@ class ExecutionRepository:
                 (artifact_id, str(path), str(quarantine), self._now()),
             )
 
-    def _resume_artifact_cleanup(self, *, limit: int) -> int:
+    def _resume_artifact_cleanup(self, *, limit: int) -> tuple[int, int]:
+        """Finish up to ``limit`` recorded tombstones; return (reclaimed, skipped)."""
+
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -1505,66 +1784,141 @@ class ExecutionRepository:
                 (limit,),
             ).fetchall()
         removed = 0
+        skipped = 0
         for row in rows:
-            artifact_id = str(row["artifact_id"])
-            path = self._validated_cleanup_path(Path(row["path"]))
-            quarantine = self._validated_quarantine_path(Path(row["quarantine_path"]))
-            state = str(row["state"])
-            if state not in {"pending", "quarantined", "finalized"}:
-                raise ExecutionRepositoryError("Artifact cleanup state is invalid.")
-            if state == "pending":
-                source_exists = path.exists()
-                quarantine_exists = quarantine.exists()
-                if source_exists and quarantine_exists:
-                    raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
-                if source_exists:
-                    try:
-                        path.replace(quarantine)
-                    except OSError:
-                        raise ExecutionRepositoryError("Artifact cleanup failed.") from None
-                with self.connect() as connection:
-                    connection.execute(
-                        "UPDATE execution_artifact_cleanup SET state = 'quarantined' WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                state = "quarantined"
-            if state == "quarantined":
-                with self.connect() as connection:
-                    deleted = connection.execute(
-                        "DELETE FROM execution_artifacts WHERE artifact_id = ?",
-                        (artifact_id,),
-                    ).rowcount
-                    connection.execute(
-                        "UPDATE execution_artifact_cleanup SET state = 'finalized' WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                removed += int(deleted or 0)
-                state = "finalized"
-            if state == "finalized":
+            reclaimed, deferred = self._finish_artifact_cleanup(
+                str(row["artifact_id"]),
+                str(row["path"]),
+                str(row["quarantine_path"]),
+                str(row["state"]),
+            )
+            removed += reclaimed
+            skipped += deferred
+        return removed, skipped
+
+    def _finish_artifact_cleanup(
+        self, artifact_id: str, path_text: str, quarantine_text: str, state: str
+    ) -> tuple[int, int]:
+        """Finish one tombstone, containing anything wrong with that row.
+
+        A row that can never be honoured (its paths are outside the artifact
+        root, a link, or the wrong kind of file -- which a moved data directory
+        does to every pre-existing row) is discarded without touching any file.
+        A row that could not be finished this time is sent to the back of the
+        queue. Either way the rest of the pass goes on: one bad row used to
+        raise out of the whole pass before terminal-job retention ran, so the
+        store grew for good with nothing visible. Failures of the database
+        itself are not row problems and still propagate.
+        """
+
+        try:
+            return self._advance_artifact_cleanup(artifact_id, path_text, quarantine_text, state), 0
+        except ArtifactCleanupRejected as exc:
+            self._discard_artifact_rows(artifact_id, exc)
+            return 0, 1
+        except ArtifactCleanupBlocked as exc:
+            _LOGGER.debug("Deferred an artifact cleanup row (%s).", type(exc).__name__)
+            self._requeue_artifact_cleanup(artifact_id)
+            return 0, 1
+
+    def _discard_artifact_rows(self, artifact_id: str, reason: ExecutionRepositoryError) -> None:
+        """Drop an expired artifact's rows whose file this repository must not touch.
+
+        The file is left exactly where it is. The artifact was already expired
+        and unreadable -- ``read_artifact`` applies the same containment rule --
+        so the row protected nothing, and keeping it only blocked retention.
+        Logs the kind of failure, never a path.
+        """
+
+        _LOGGER.debug("Discarded an unusable artifact cleanup row (%s).", type(reason).__name__)
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+            connection.execute(
+                "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+
+    def _requeue_artifact_cleanup(self, artifact_id: str) -> None:
+        """Move a row that could not be finished behind everything else.
+
+        Ordering is the only thing ``created_at`` is used for here, so a row
+        that keeps failing rotates to the back instead of holding the head of
+        every batch.
+        """
+
+        try:
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET created_at = ? WHERE artifact_id = ?",
+                    (self._now(), artifact_id),
+                )
+        except ExecutionRepositoryError:
+            pass  # It stays where it is and is tried again next pass.
+
+    def _advance_artifact_cleanup(
+        self, artifact_id: str, path_text: str, quarantine_text: str, state: str
+    ) -> int:
+        path = self._validated_cleanup_path(Path(path_text))
+        quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        if state not in {"pending", "quarantined", "finalized"}:
+            raise ArtifactCleanupRejected("Artifact cleanup state is invalid.")
+        removed = 0
+        if state == "pending":
+            source_exists = path.exists()
+            quarantine_exists = quarantine.exists()
+            if source_exists and quarantine_exists:
+                raise ArtifactCleanupBlocked("Artifact quarantine is unavailable.")
+            if source_exists:
                 try:
-                    quarantine.unlink(missing_ok=True)
+                    path.replace(quarantine)
                 except OSError:
-                    raise ExecutionRepositoryError("Artifact cleanup failed.") from None
-                with self.connect() as connection:
-                    connection.execute(
-                        "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
-                        (artifact_id,),
-                    )
-                # Artifacts live one directory per job, and removing the last
-                # file left the directory itself behind forever. Every
-                # attachment and every execution added one, so a long-lived
-                # workspace accumulates empty directories without bound.
-                # rmdir only succeeds when it is genuinely empty, so a job
-                # with artifacts still retained keeps its directory.
-                #
-                # The artifact's own directory, and never a root. Every
-                # tombstone is a file directly inside the single quarantine
-                # directory created when the repository was opened, so it is
-                # empty by design the moment the last one is unlinked --
-                # sweeping it here deleted it on the very first expiry and
-                # left every later quarantine hop with no parent to move
-                # into.
-                self._remove_empty_artifact_directory(path.parent)
+                    raise ArtifactCleanupBlocked("Artifact cleanup failed.") from None
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET state = 'quarantined' WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            state = "quarantined"
+        if state == "quarantined":
+            with self.connect() as connection:
+                deleted = connection.execute(
+                    "DELETE FROM execution_artifacts WHERE artifact_id = ?",
+                    (artifact_id,),
+                ).rowcount
+                connection.execute(
+                    "UPDATE execution_artifact_cleanup SET state = 'finalized' WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            removed += int(deleted or 0)
+            state = "finalized"
+        if state == "finalized":
+            try:
+                quarantine.unlink(missing_ok=True)
+            except OSError:
+                raise ArtifactCleanupBlocked("Artifact cleanup failed.") from None
+            with self.connect() as connection:
+                connection.execute(
+                    "DELETE FROM execution_artifact_cleanup WHERE artifact_id = ?",
+                    (artifact_id,),
+                )
+            # Artifacts live one directory per job, and removing the last
+            # file left the directory itself behind forever. Every
+            # attachment and every execution added one, so a long-lived
+            # workspace accumulates empty directories without bound.
+            # rmdir only succeeds when it is genuinely empty, so a job
+            # with artifacts still retained keeps its directory.
+            #
+            # The artifact's own directory, and never a root. Every
+            # tombstone is a file directly inside the single quarantine
+            # directory created when the repository was opened, so it is
+            # empty by design the moment the last one is unlinked --
+            # sweeping it here deleted it on the very first expiry and
+            # left every later quarantine hop with no parent to move
+            # into.
+            self._remove_empty_artifact_directory(path.parent)
         return removed
 
     def _remove_empty_artifact_directory(self, directory: Path) -> None:

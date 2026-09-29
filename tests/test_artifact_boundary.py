@@ -292,7 +292,13 @@ def test_repository_read_rejects_database_size_tampering(tmp_path: Path):
         repository.read_artifact(artifact.artifact_id)
 
 
-def test_repository_expiry_cleanup_fails_closed_for_external_database_paths(tmp_path: Path):
+def test_repository_expiry_cleanup_never_touches_external_database_paths(tmp_path: Path):
+    """A row pointing outside the artifact root is contained, not obeyed.
+
+    The pass used to raise on such a row, which also stopped every other row
+    and every job behind it from being reclaimed. The invariant that matters
+    is unchanged: the external file is never moved or deleted.
+    """
     repository, job_id = _repository(tmp_path)
     source = tmp_path / "input.txt"
     source.write_text("safe", encoding="utf-8")
@@ -305,9 +311,12 @@ def test_repository_expiry_cleanup_fails_closed_for_external_database_paths(tmp_
             (str(external), artifact.artifact_id),
         )
 
-    with pytest.raises(ExecutionRepositoryError):
-        repository.cleanup_expired(now="9999-01-01T00:00:00+00:00")
+    result = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00")
+
+    assert (result.artifacts, result.skipped) == (0, 1)
     assert external.read_text(encoding="utf-8") == "must remain"
+    assert repository.get_artifact(artifact.artifact_id) is None
+    assert list(repository.quarantine_root.iterdir()) == []
 
 
 def test_output_limits_and_invalid_claims_fail_before_publication(tmp_path: Path):

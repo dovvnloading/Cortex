@@ -232,6 +232,35 @@ def test_cleanup_supervisor_handles_failure_and_releases_lease(tmp_path, monkeyp
     repository.release_cleanup_lease(lease_owner="retry")
 
 
+def test_cleanup_supervisor_reports_rows_it_could_not_reclaim_and_still_succeeds(
+    tmp_path, caplog
+):
+    """A poisoned row is a visible metric, not a failed pass that hides the store growing."""
+    repository = _repository(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"not ours")
+    poisoned = _terminal_job(repository, "poisoned")
+    artifact = repository.publish_artifact(
+        poisoned.job_id, name="poisoned.txt", content=b"x", mime_type="text/plain"
+    )
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_artifacts SET path = ?, expires_at = ? WHERE artifact_id = ?",
+            (str(outside), "2000-01-01T00:00:00+00:00", artifact.artifact_id),
+        )
+    supervisor = ExecutionCleanupSupervisor(repository, terminal_job_retention_seconds=0)
+
+    with caplog.at_level(logging.WARNING, logger="cortex.execution.cleanup"):
+        assert supervisor.run_once() is True
+
+    assert supervisor.metrics.failures == 0
+    assert supervisor.metrics.successes == 1
+    assert supervisor.metrics.artifacts_skipped == 1
+    assert outside.read_bytes() == b"not ours"
+    assert "could not safely reclaim" in caplog.text
+    assert str(tmp_path) not in caplog.text
+
+
 def test_cleanup_supervisor_skips_live_peer_and_local_overlap(tmp_path):
     repository = _repository(tmp_path)
     first = ExecutionCleanupSupervisor(repository)
