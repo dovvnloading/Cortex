@@ -1000,3 +1000,89 @@ def test_a_job_record_declares_no_lease_fields_it_never_fills(tmp_path):
     names = {field.name for field in dataclasses.fields(ExecutionJob)}
     assert names.isdisjoint({"lease_owner", "lease_expires_at"})
     assert not hasattr(held, "lease_owner")
+
+
+def _job(repository, job_id, *, profile="fake.v1"):
+    job, _ = repository.create_job(
+        job_id=job_id,
+        owner="session-a",
+        request_id=f"request-{job_id}",
+        profile=profile,
+        payload={},
+    )
+    return job
+
+
+def test_retire_abandoned_job_fails_only_a_job_nothing_is_working_on(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    idle = _job(repository, "job-idle")
+    leased = _job(repository, "job-leased")
+    awaiting = _job(repository, "job-awaiting", profile="code.exec.v1")
+    done = _job(repository, "job-done")
+    repository.transition(
+        done.job_id, status="succeeded", event="completed", phase="completed", data={}, result={"v": 1}
+    )
+    frozen_clock.advance(200)
+    young = _job(repository, "job-young")
+    repository.claim_lease(leased.job_id, lease_owner="worker", ttl_seconds=30)
+    repository.request_approval(awaiting.job_id, owner="session-a", scope_digest="digest", reason="run")
+
+    def retire(job_id):
+        return repository.retire_abandoned_job(
+            job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+        )
+
+    retired = retire(idle.job_id)
+    assert retired is not None and (retired.status, retired.error) == ("failed", "interrupted")
+    assert repository.events(idle.job_id)[-1].event == "failed"
+    assert [job.status for job in map(retire, (leased.job_id, awaiting.job_id, young.job_id))] == [
+        "queued",
+        "queued",
+        "queued",
+    ]
+    assert retire(done.job_id).status == "succeeded"
+    assert retire("job-that-does-not-exist") is None
+
+    # Idempotent: a second call neither rewrites nor appends.
+    before = repository.events(idle.job_id)
+    assert retire(idle.job_id).status == "failed"
+    assert repository.events(idle.job_id) == before
+
+
+def test_retire_abandoned_job_takes_an_expired_lease_and_clears_it(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job = _job(repository, "job-dead-worker")
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=30)
+
+    frozen_clock.advance(60)  # the lease is expired, the job has been quiet for a minute
+    still_recent = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+    assert still_recent.status == "queued"
+
+    frozen_clock.advance(100)
+    retired = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+    assert retired.status == "failed"
+    assert repository.lease_holder(job.job_id) is None
+
+
+def test_retire_abandoned_job_honours_a_stop_and_rejects_a_bad_idle_time(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job = _job(repository, "job-cancelling")
+    repository.request_cancel(job.job_id)
+    frozen_clock.advance(500)
+
+    retired = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+
+    # The user already pressed Stop: an abandoned job ends as they asked.
+    assert (retired.status, retired.error) == ("cancelled", "cancelled")
+    assert repository.events(job.job_id)[-1].event == "cancelled"
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError):
+            repository.retire_abandoned_job(
+                job.job_id, idle_seconds=bad, error="interrupted", message="Interrupted."
+            )

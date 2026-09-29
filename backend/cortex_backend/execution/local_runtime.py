@@ -28,6 +28,12 @@ from typing import Any
 from uuid import uuid4
 
 from .artifact_boundary import ArtifactBoundary
+from .attachment_staging import (
+    ABANDONED_STAGE_SECONDS,
+    ATTACHMENT_INTERRUPTED,
+    ATTACHMENT_INTERRUPTED_MESSAGE,
+    ATTACHMENT_STAGE_PROFILE,
+)
 from .code_execution import (
     CODE_EXECUTION_PAYLOAD_SCHEMA,
     CODE_EXECUTION_PROFILE,
@@ -421,9 +427,12 @@ class LocalExecutionCoordinator:
             self._recipe.recover_jobs(recovered)
             for job_id in recovered:
                 job = self.repository.get_job(job_id)
-                if job is None or job.profile != SCRATCH_COMPUTE_PROFILE:
+                if job is None:
                     continue
-                self._recover_scratch(job)
+                if job.profile == SCRATCH_COMPUTE_PROFILE:
+                    self._recover_scratch(job)
+                elif job.profile == ATTACHMENT_STAGE_PROFILE:
+                    self._fail_interrupted_attachment(job)
             try:
                 owner = self.repository.installation_principal_id
                 for job in self.repository.list_jobs(
@@ -437,6 +446,8 @@ class LocalExecutionCoordinator:
                         # cancelled as approval_expired; one still pending
                         # waits for a fresh decision.
                         self._launch_code(job.job_id)
+                    elif job.profile == ATTACHMENT_STAGE_PROFILE:
+                        self._retire_abandoned_attachment(job)
             except Exception:
                 pass
         except Exception:
@@ -454,6 +465,42 @@ class LocalExecutionCoordinator:
             self._supervisor_lease_active = False
             raise
         return recovered
+
+    def _fail_interrupted_attachment(self, job: ExecutionJob) -> None:
+        """Finish a staging job whose stager died holding its lease.
+
+        Nothing ever resumes an attachment: the bytes came from a request that
+        is gone. Left alone the job stayed queued for good -- a task in the
+        tray that could not be cleared, and a request id that answered "in
+        progress" from then on.
+        """
+
+        if job.status in TerminalExecutionStatus:
+            return
+        try:
+            self.repository.transition(
+                job.job_id,
+                status="failed",
+                event="failed",
+                phase="recovery",
+                data={"message": ATTACHMENT_INTERRUPTED_MESSAGE},
+                error=ATTACHMENT_INTERRUPTED,
+            )
+        except Exception:
+            pass
+
+    def _retire_abandoned_attachment(self, job: ExecutionJob) -> None:
+        """Retire a staging job that never got as far as holding a lease."""
+
+        try:
+            self.repository.retire_abandoned_job(
+                job.job_id,
+                idle_seconds=ABANDONED_STAGE_SECONDS,
+                error=ATTACHMENT_INTERRUPTED,
+                message=ATTACHMENT_INTERRUPTED_MESSAGE,
+            )
+        except Exception:
+            pass
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         if timeout < 0:

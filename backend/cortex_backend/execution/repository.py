@@ -1534,6 +1534,87 @@ class ExecutionRepository:
                 recovered.append(job_id)
         return recovered
 
+    def retire_abandoned_job(
+        self,
+        job_id: str,
+        *,
+        idle_seconds: float,
+        error: str,
+        message: str,
+    ) -> ExecutionJob | None:
+        """Fail a job that no one is working on and return it as it now reads.
+
+        A job is abandoned when it is not terminal, has no live lease, has had
+        no write for ``idle_seconds`` and is not waiting on an approval. All of
+        that is decided in the transaction that writes the failure, so a worker
+        that claims the lease or a Stop that lands a moment earlier is never
+        overwritten. Anything else -- including a timestamp that does not
+        parse -- leaves the job untouched: failing a live job is the harm here,
+        leaving a dead one for a later pass is not. A job the user had already
+        stopped ends ``cancelled``, not ``failed``.
+
+        This is the way out for work whose worker died between creating the job
+        and finishing it without ever being recovered: recovery only sees jobs
+        that hold a lease row. ``None`` means the job does not exist.
+        """
+
+        if isinstance(idle_seconds, bool) or idle_seconds <= 0:
+            raise ValueError("idle_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, updated_at FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] not in TerminalExecutionStatus and self._is_abandoned(
+                connection, job_id, row["updated_at"], now, idle_seconds
+            ):
+                # A Stop the user already pressed is honoured, not relabelled.
+                stopped = row["status"] == "cancelling"
+                connection.execute("DELETE FROM execution_leases WHERE job_id = ?", (job_id,))
+                connection.execute(
+                    "UPDATE execution_jobs SET error = ? WHERE job_id = ?",
+                    ("cancelled" if stopped else error, job_id),
+                )
+                self._append_event_connection(
+                    connection,
+                    job_id=job_id,
+                    event="cancelled" if stopped else "failed",
+                    status="cancelled" if stopped else "failed",
+                    phase="recovery",
+                    data={"message": "Execution cancellation recovered." if stopped else message},
+                    now=now_text,
+                )
+            snapshot = self._read_job(connection, job_id, now_text)
+            return None if snapshot is None else self._job_from_row(snapshot)
+
+    @staticmethod
+    def _is_abandoned(
+        connection: sqlite3.Connection,
+        job_id: str,
+        updated_at: str,
+        now: datetime,
+        idle_seconds: float,
+    ) -> bool:
+        """Whether a non-terminal job has no lease, no pending consent and no recent write."""
+
+        if connection.execute(
+            "SELECT 1 FROM execution_approvals WHERE job_id = ?", (job_id,)
+        ).fetchone() is not None:
+            return False
+        lease = connection.execute(
+            "SELECT lease_expires_at FROM execution_leases WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        try:
+            if lease is not None and datetime.fromisoformat(lease["lease_expires_at"]) > now:
+                return False
+            return (now - datetime.fromisoformat(updated_at)).total_seconds() >= idle_seconds
+        except (TypeError, ValueError):
+            return False
+
     def publish_artifact(
         self,
         job_id: str,
