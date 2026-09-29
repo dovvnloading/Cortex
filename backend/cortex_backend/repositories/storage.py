@@ -11,6 +11,7 @@ migration path DatabaseManager offers, not what this module is.
 """
 
 import logging
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
@@ -26,6 +27,11 @@ from threading import Lock, RLock
 from uuid import uuid4
 
 from cortex_backend.core.paths import AppPaths
+from cortex_backend.repositories.sqlite_backup import (
+    BackupStatus,
+    failure_detail,
+    snapshot_database,
+)
 
 
 def _utc_now_iso() -> str:
@@ -142,6 +148,10 @@ class DatabaseManager:
         # cannot discard the only recovery copy (mirrors sqlite_settings.py).
         self.previous_backup_path = f"{self.backup_path}.1"
         self.last_corrupt_path: str | None = None
+        # What startup did about its backup. A backup that could not be
+        # written is reported here; it does not stop Cortex from starting on
+        # a healthy primary.
+        self.backup_status = BackupStatus("ok")
         self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
         # diagnostics useful without copying them into process logs.
@@ -150,7 +160,7 @@ class DatabaseManager:
         with self._write_lock:
             self._prepare_primary()
             self._create_tables()
-            self._create_backup()
+            self._refresh_startup_backup()
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -211,6 +221,30 @@ class DatabaseManager:
     @classmethod
     def _atomic_copy_database(cls, source: str, destination: str) -> None:
         """Copy a verified SQLite file without exposing a partial destination."""
+        cls._publish_verified_copy(destination, lambda temporary: shutil.copy2(source, temporary))
+
+    @classmethod
+    def _atomic_snapshot_database(cls, source: str, destination: str) -> None:
+        """Snapshot a live database, including uncheckpointed commits, into ``destination``.
+
+        Same publish rules as _atomic_copy_database, but the bytes come from
+        SQLite's online backup API instead of a file copy, so a reader that
+        pins the write-ahead log cannot make the backup silently stale.
+        """
+        cls._publish_verified_copy(
+            destination, lambda temporary: snapshot_database(source, temporary)
+        )
+
+    @classmethod
+    def _publish_verified_copy(
+        cls, destination: str, populate: Callable[[str], object]
+    ) -> None:
+        """Fill a temporary file, verify it, and only then move it into place.
+
+        ``destination`` is replaced atomically or not at all, so a failure at
+        any step (a full disk, a locked file, a failed integrity check)
+        leaves whatever was there before exactly as it was.
+        """
         temporary_path: str | None = None
         try:
             fd, temporary_path = tempfile.mkstemp(
@@ -219,7 +253,7 @@ class DatabaseManager:
                 dir=os.path.dirname(destination) or ".",
             )
             os.close(fd)
-            shutil.copy2(source, temporary_path)
+            populate(temporary_path)
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
             os.replace(temporary_path, destination)
@@ -230,7 +264,7 @@ class DatabaseManager:
             # without this the data directory grows by two dead files a launch.
             _discard_sidecars_for(temporary_path)
             temporary_path = None
-        except (OSError, shutil.Error) as exc:
+        except (OSError, shutil.Error, sqlite3.Error) as exc:
             raise PersistenceError(
                 "Could not copy the chat database safely.", operation="backup", cause=exc
             ) from exc
@@ -327,30 +361,56 @@ class DatabaseManager:
         Called once at startup (after _prepare_primary and schema init), not
         on every message write -- unlike settings, chat writes happen on
         every turn, and a full-file copy on each one would not scale.
+
+        The primary is read through SQLite's online backup API, not copied
+        as a file after a checkpoint: in WAL mode recent commits can live
+        only in the -wal sidecar, and wal_checkpoint(TRUNCATE) does not raise
+        when a reader keeps it from finishing.
         """
         with self._write_lock:
-            if not os.path.exists(self.db_path) or not self._database_is_valid(self.db_path):
+            if not os.path.exists(self.db_path):
                 return
+            if not self._database_is_valid(self.db_path):
+                raise PersistenceError(
+                    "Could not back up a chat database that failed validation.",
+                    operation="backup",
+                )
             try:
-                # In WAL mode, recent commits can still live only in the
-                # sidecar -wal file; copying just the main file without
-                # checkpointing first could back up a database that is
-                # missing them. TRUNCATE folds the WAL back into the main
-                # file and removes the sidecar, so a plain file copy is a
-                # complete, self-contained snapshot.
-                with self.connect() as connection:
-                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 # Preserve the prior verified backup before replacing the
                 # current generation. If the new copy fails, .bak stays intact.
                 if self._database_is_valid(self.backup_path):
                     self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-                self._atomic_copy_database(self.db_path, self.backup_path)
+                self._atomic_snapshot_database(self.db_path, self.backup_path)
             except PersistenceError:
                 raise
             except OSError as exc:
                 raise PersistenceError(
                     "Could not create a chat database backup.", operation="backup", cause=exc
                 ) from exc
+
+    def _refresh_startup_backup(self) -> None:
+        """Take the startup backup without letting its failure stop the launch.
+
+        The backup is a safety copy, and at this point the primary has been
+        validated and opened. A full disk, a scanner holding the file, or a
+        read-only .bak would otherwise turn "no spare copy" into "cannot
+        chat", when chatting needs kilobytes. The failure is logged and
+        reported through ``backup_status``; the previous backups are left
+        exactly as they were, because every write into them is atomic.
+        """
+        try:
+            self._create_backup()
+        except PersistenceError as exc:
+            self._note_backup_failure(str(exc), exc.cause)
+
+    def _note_backup_failure(self, message: str, cause: BaseException | None) -> None:
+        # Never log the exception text: an OS error carries the private path.
+        logging.error(
+            "Chat database backup failed; continuing with the existing backups (%s).",
+            type(cause).__name__ if cause is not None else "no cause recorded",
+        )
+        if self.backup_status.state != "failed":
+            self.backup_status = BackupStatus("failed", failure_detail(message, cause))
 
     def _create_tables(self):
         """Creates the necessary tables in the database if they don't exist."""

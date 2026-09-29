@@ -5,12 +5,16 @@ validated-backup, corrupt-primary recovery pattern, now shared by the chat
 store.
 """
 
+import errno
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 
 import pytest
 
+from cortex_backend.repositories import storage
 from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
 
@@ -203,3 +207,165 @@ def test_a_failed_recovery_keeps_the_original_sidecars(tmp_path: Path) -> None:
         )
 
     assert wal.exists()
+
+
+def _reopen(manager: DatabaseManager) -> DatabaseManager:
+    return DatabaseManager(
+        db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir
+    )
+
+
+def _leftover_temporaries(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir() if ".tmp" in entry.name)
+
+
+# -- BE-46: a failed startup backup must not make Cortex unlaunchable -------
+
+
+def test_a_failed_startup_backup_does_not_block_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, original = _manager_with_data(tmp_path)
+    backup_before = Path(manager.backup_path).read_bytes()
+
+    def fail_copy(cls, source, destination):
+        raise PersistenceError("injected copy failure", operation="backup")
+
+    monkeypatch.setattr(DatabaseManager, "_atomic_copy_database", classmethod(fail_copy))
+
+    reopened = _reopen(manager)
+
+    assert reopened.backup_status[0] == "failed"
+    assert reopened.load_chat("thread-1") == original
+    reopened.add_message("thread-1", "assistant", "still writable")
+    assert len(reopened.load_chat("thread-1")["messages"]) == 2
+    assert Path(manager.backup_path).read_bytes() == backup_before
+
+
+def _full_disk_while_snapshotting(monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager) -> None:
+    def full(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(storage, "snapshot_database", full)
+
+
+def _full_disk_while_rotating(monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager) -> None:
+    def full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(storage.shutil, "copy2", full)
+
+
+def _backup_file_locked_by_another_program(
+    monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager
+) -> None:
+    real_replace = os.replace
+    locked = os.path.normcase(os.path.abspath(manager.backup_path))
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(destination)) == locked:
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+
+def _snapshot_that_fails_verification(
+    monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager
+) -> None:
+    def torn(_source, destination, **_kwargs):
+        Path(destination).write_bytes(b"torn snapshot")
+
+    monkeypatch.setattr(storage, "snapshot_database", torn)
+
+
+@pytest.mark.parametrize(
+    "inject",
+    [
+        _full_disk_while_snapshotting,
+        _full_disk_while_rotating,
+        _backup_file_locked_by_another_program,
+        _snapshot_that_fails_verification,
+    ],
+    ids=["disk-full-snapshot", "disk-full-rotation", "backup-locked", "snapshot-corrupt"],
+)
+def test_startup_survives_every_way_the_backup_can_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject
+) -> None:
+    """The primary is healthy, so chatting must keep working and the existing
+    backups must come through untouched -- then the next launch recovers."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    backup_before = Path(manager.backup_path).read_bytes()
+    inject(monkeypatch, manager)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    state, detail = reopened.backup_status
+    assert state == "failed"
+    assert detail and str(tmp_path) not in detail
+    assert reopened.load_chat("thread-1")["title"] == "Changed after the last backup"
+    assert Path(manager.backup_path).read_bytes() == backup_before
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert DatabaseManager._database_is_valid(manager.previous_backup_path)
+    assert _leftover_temporaries(tmp_path) == []
+
+    healthy = _reopen(manager)
+    assert healthy.backup_status == ("ok", None)
+    assert Path(manager.backup_path).read_bytes() != backup_before
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace an open file")
+def test_a_backup_file_held_open_by_another_program_does_not_block_startup(tmp_path: Path) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    backup_before = Path(manager.backup_path).read_bytes()
+
+    with open(manager.backup_path, "rb"):
+        reopened = _reopen(manager)
+
+    assert reopened.backup_status[0] == "failed"
+    assert reopened.load_chat("thread-1") is not None
+    assert Path(manager.backup_path).read_bytes() == backup_before
+    assert _leftover_temporaries(tmp_path) == []
+
+
+def test_a_corrupt_primary_still_refuses_to_start_without_a_usable_backup(tmp_path: Path) -> None:
+    """Non-fatal backups must not loosen the recovery path: that stays closed."""
+    manager, _ = _manager_with_data(tmp_path)
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    Path(manager.backup_path).write_bytes(b"corrupt-backup")
+    Path(manager.previous_backup_path).write_bytes(b"corrupt-older-backup")
+
+    with pytest.raises(PersistenceError, match="no valid backup"):
+        _reopen(manager)
+
+    assert Path(manager.db_path).read_bytes() == b"corrupt-primary"
+
+
+# -- BE-48: the backup must include commits still in the write-ahead log ----
+
+
+def test_backup_includes_commits_a_concurrent_reader_keeps_in_the_wal(tmp_path: Path) -> None:
+    """While a reader pins the log, wal_checkpoint(TRUNCATE) cannot finish and
+    reports it only through its return value, so a file copy of the main
+    database would be an older -- yet perfectly valid -- state."""
+    manager, _ = _manager_with_data(tmp_path)
+    reader = sqlite3.connect(manager.db_path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM messages").fetchall()
+
+        manager.add_message("thread-1", "assistant", "committed while a reader held the log")
+        assert Path(f"{manager.db_path}-wal").stat().st_size > 0
+
+        manager._create_backup()
+    finally:
+        reader.close()
+
+    backup = sqlite3.connect(Path(manager.backup_path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        contents = [row[0] for row in backup.execute("SELECT content FROM messages")]
+    finally:
+        backup.close()
+    assert "committed while a reader held the log" in contents
