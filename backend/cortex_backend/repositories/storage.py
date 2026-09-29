@@ -1170,17 +1170,34 @@ class DatabaseManager:
         os.makedirs(archive_dir, exist_ok=True)
         return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
 
+    @staticmethod
+    def _retired_directory_name(directory: str) -> str | None:
+        """An unused ``<dir>.retired`` name (``.retired-2``, ``.retired-3``, ...), or None."""
+        base = os.path.normpath(directory)
+        for number in range(1, 1000):
+            candidate = f"{base}.retired" if number == 1 else f"{base}.retired-{number}"
+            if not os.path.lexists(candidate):
+                return candidate
+        return None
+
     def _retire_legacy_directory(self) -> None:
         """Take the legacy history directory out of the way once it holds nothing.
 
         Migrated files move to ``<dir>_migrated_<time>`` and unreadable ones to
         ``<dir>/quarantine``, so the directory itself outlives every pass, and
-        with it the "legacy history found" warning on every launch. It is
-        removed only when it is empty (an empty ``quarantine`` folder counts as
-        empty), and only with ``rmdir``, which the operating system refuses for
-        a directory that holds anything: no chat file, quarantined or not, and
-        no stray file of the user's is ever moved or deleted here. A directory
-        that still holds any of them is left exactly as it is.
+        with it the "legacy history found" warning on every launch. Once it is
+        verified to hold nothing (an empty ``quarantine`` folder counts as
+        nothing) it is renamed to ``<dir>.retired`` -- ``.retired-2`` and so on
+        if that name is taken -- and never deleted: no folder, empty or not, is
+        removed by this. Renaming rather than ``rmdir`` was chosen so that
+        nothing is destroyed even if the emptiness check is wrong or a file
+        lands in the folder between the check and the rename: whatever is in it
+        is still there, under the new name, and the ``.retired`` folder is one
+        the user can delete when they like. The name is not the one the
+        migration looks at, so the folder is not scanned again. No chat file,
+        quarantined or not, and no stray file of the user's is ever moved or
+        deleted here: a directory that still holds any of them is left exactly
+        as it is.
         """
         directory = self.legacy_history_dir
         quarantine = os.path.join(directory, "quarantine")
@@ -1201,15 +1218,19 @@ class DatabaseManager:
                     "folder of the old chat history directory."
                 )
                 return
-            if has_quarantine:
-                os.rmdir(quarantine)
-            os.rmdir(directory)
+            retired_as = self._retired_directory_name(directory)
+            if retired_as is None:
+                return
+            os.rename(directory, retired_as)
         except OSError as exc:
             logging.info(
                 "The old chat history directory was left where it is (%s).", type(exc).__name__
             )
             return
-        logging.info("The old chat history directory held nothing more and was removed.")
+        logging.info(
+            "The old chat history directory held nothing more and was renamed to %s.",
+            os.path.basename(retired_as),
+        )
 
     def migrate_from_json_if_needed(self) -> MigrationResult:
         """Migrate valid legacy files transactionally and isolate invalid files."""

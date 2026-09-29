@@ -417,8 +417,9 @@ What is kept, all beside the database files in that folder:
   old database does not add those seconds to every launch.
 - Chats imported from the old JSON `chat_history` folder are moved to
   `chat_history_migrated_<time>` and files that could not be read to
-  `chat_history/quarantine`. The `chat_history` folder itself is removed only
-  once it is completely empty; anything still in it is left alone.
+  `chat_history/quarantine`. Once the `chat_history` folder is completely empty
+  it is renamed to `chat_history.retired` (never deleted, so it is yours to
+  remove); anything still in it is left where it is.
 
 Cortex needs write-ahead logging, so the data directory has to be on a local
 drive SQLite can use it on; some network, cloud-synced and removable drives

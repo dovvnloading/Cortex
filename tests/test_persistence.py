@@ -623,7 +623,9 @@ def test_a_second_migration_pass_is_silent_and_retires_the_source_directory(
     archives = list(tmp_path.glob("chat_history_migrated_*"))
     assert len(archives) == 1
     assert sorted(entry.name for entry in archives[0].iterdir()) == ["one.json", "two.json"]
-    assert not legacy.exists()  # nothing left in it, so it is gone
+    assert not legacy.exists()  # nothing left in it, so it is out of the way ...
+    retired = tmp_path / "chat_history.retired"
+    assert retired.is_dir() and list(retired.iterdir()) == []  # ... under a name that says so
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -647,6 +649,67 @@ def test_an_empty_legacy_directory_is_retired_without_a_warning(
     assert result == storage.MigrationResult()
     assert _warnings(caplog) == []
     assert not legacy.exists()
+    # Renamed as it was, so the folder that was empty is still there, still empty, and not deleted.
+    retired = tmp_path / "chat_history.retired"
+    assert [entry.name for entry in retired.iterdir()] == ["quarantine"]
+    assert list((retired / "quarantine").iterdir()) == []
+
+
+def test_retiring_the_legacy_directory_never_deletes_a_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    (legacy / "quarantine").mkdir()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a folder was deleted")
+
+    monkeypatch.setattr(storage.os, "rmdir", forbidden)
+    monkeypatch.setattr(storage.shutil, "rmtree", forbidden)
+    manager.migrate_from_json_if_needed()
+    monkeypatch.undo()
+
+    assert (tmp_path / "chat_history.retired" / "quarantine").is_dir()
+
+
+def test_a_retired_name_that_is_taken_is_never_reused(tmp_path: Path) -> None:
+    """History dropped into the old folder again is imported again, and retired under a new name."""
+    manager, legacy = _legacy_manager(tmp_path)
+    manager.migrate_from_json_if_needed()
+    first = tmp_path / "chat_history.retired"
+    (first / "kept.txt").write_text("from the first retirement", encoding="utf-8")
+    assert first.is_dir() and not legacy.exists()
+
+    legacy.mkdir()
+    _legacy_chat(legacy, "again")
+    result = manager.migrate_from_json_if_needed()
+
+    assert result.migrated == 1
+    assert (first / "kept.txt").read_text(encoding="utf-8") == "from the first retirement"
+    second = tmp_path / "chat_history.retired-2"
+    assert second.is_dir() and list(second.iterdir()) == []
+    assert not legacy.exists()
+
+
+def test_a_folder_that_cannot_be_renamed_is_left_where_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+
+    def held(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "held by another program")
+
+    monkeypatch.setattr(storage.os, "rename", held)
+    with caplog.at_level(logging.INFO):
+        result = manager.migrate_from_json_if_needed()
+    monkeypatch.undo()
+
+    assert result == storage.MigrationResult()
+    assert legacy.is_dir() and not (tmp_path / "chat_history.retired").exists()
+    assert _warnings(caplog) == []
+    # The next launch, with the folder free, retires it.
+    manager.migrate_from_json_if_needed()
+    assert not legacy.exists() and (tmp_path / "chat_history.retired").is_dir()
 
 
 def test_quarantined_files_keep_the_legacy_directory_and_are_never_touched(
