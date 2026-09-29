@@ -120,13 +120,13 @@ def _frontend_root() -> Path:
 
 def _resource_root() -> Path:
     if _is_packaged():
-        return Path(sys._MEIPASS)
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]  # set by PyInstaller
     return ROOT / "packaging" / ".runtime"
 
 
 def _app_asset_root() -> Path:
     """Resolve assets from the source tree or PyInstaller's bundled root."""
-    return Path(sys._MEIPASS) if _is_packaged() else ROOT
+    return Path(sys._MEIPASS) if _is_packaged() else ROOT  # type: ignore[attr-defined]  # set by PyInstaller
 
 
 def _free_port() -> int:
@@ -352,7 +352,9 @@ def _run_web(args: argparse.Namespace) -> int:
 
     if args.build_frontend:
         try:
-            dist = ensure_frontend(
+            # Annotated as optional because the launch path below assigns None
+            # to the same name when the dev server serves the frontend.
+            dist: Path | None = ensure_frontend(
                 frontend_root,
                 force=True,
                 packaged=packaged,

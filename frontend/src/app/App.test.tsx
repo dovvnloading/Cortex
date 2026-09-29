@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import { resolveRuntimeAvailability } from "./runtimeAvailability";
@@ -11,12 +11,29 @@ import { ToastProvider } from "./ToastProvider";
 
 describe("App", () => {
   /**
+   * Load the two React.lazy routes once, before any test runs.
+   *
+   * The first test to need ChatPage or SettingsPanel otherwise pays for vitest
+   * to resolve and transform that whole module graph inside its own time
+   * limit: about nine seconds on an idle machine, more than the 15 second
+   * limit on a busy one. Doing it here puts that cost in a hook with its own
+   * ceiling, so a test's time covers what the test does and every test starts
+   * from the same warm state, whatever order or load it runs under.
+   */
+  beforeAll(async () => {
+    await Promise.all([
+      import("../features/chat/ChatPage"),
+      import("../features/settings/SettingsPanel"),
+    ]);
+  }, 120_000);
+
+  /**
    * Open Settings and wait for its lazily-imported panel.
    *
    * SettingsPanel is a React.lazy dynamic import, so the first click renders a
-   * Suspense fallback while vitest resolves and transforms the module. Under a
-   * full 31-file run that resolution can outlast findBy's 1s default, which
-   * made this an intermittent "Unable to find role=button name=AI Model".
+   * Suspense fallback while React resolves the (already loaded, see the
+   * warm-up above) module. findBy's 1s default is still too short for that
+   * render on a loaded machine, so the wait is bounded explicitly.
    */
   const openModelSettings = async (user: ReturnType<typeof userEvent.setup>) => {
     await user.click(screen.getByRole("link", { name: "Settings" }));
@@ -277,25 +294,19 @@ describe("App", () => {
       return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
     });
 
-    // This test targets recovery from an expired stream session, not the
-    // scheduler-dependent time needed to transform the lazy chat route.
-    await import("../features/chat/ChatPage");
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
     // Wait for the recovery stream's 401 to notify the session listener and
-    // return the app to its unauthenticated boundary. This explicit timeout
-    // is independent of (and was previously shorter than headroom under) the
-    // global testTimeout in vitest.config.ts -- under full-suite load the two
-    // could elapse at effectively the same moment, failing the test even
-    // though the app was still working correctly.
-    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 12_000 })).toBeVisible();
+    // return the app to its unauthenticated boundary. The lazy chat route is
+    // already loaded (see the beforeAll above), so this is a few loopback
+    // round trips; the bound is explicit only because findBy's 1s default is
+    // too short for them on a loaded machine.
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 10_000 })).toBeVisible();
     expect(callsTo(fetcher, "/generations/job-expired/events")).toHaveLength(1);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
     expect(JSON.parse(window.sessionStorage.getItem("cortex.active.generation") ?? "null")).toMatchObject({ jobId: "job-expired" });
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
-    // Explicit ceiling: this waits on the lazily-loaded chat route and a real
-    // 401 round trip, and the default 15s has been outrun on a busy machine.
-  }, 45_000);
+  });
 
   it("resumes the running generation once the session is back after a failed renewal", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
@@ -341,24 +352,22 @@ describe("App", () => {
       return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
     });
 
-    await import("../features/chat/ChatPage");
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
     // The first attach is refused and cannot be renewed yet, so the app falls
     // back to onboarding -- with the generation still tracked, not discarded.
-    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 12_000 })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 10_000 })).toBeVisible();
     expect(JSON.parse(window.sessionStorage.getItem("cortex.active.generation") ?? "null")).toMatchObject({ jobId: "job-expired" });
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
 
     // The session comes back; the workspace re-attaches and finishes the job.
     releaseHandoff();
-    await waitFor(() => expect(callsTo(fetcher, "/generations/job-expired/events")).toHaveLength(2), { timeout: 12_000 });
-    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }), { timeout: 12_000 });
+    await waitFor(() => expect(callsTo(fetcher, "/generations/job-expired/events")).toHaveLength(2), { timeout: 10_000 });
+    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }), { timeout: 10_000 });
     expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();
     expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
     expect(handoffs).toBe(2);
-    // Three bounded waits in sequence (12s each), so the default 15s cannot cover it.
-  }, 45_000);
+  });
 
   it("returns to onboarding when a model job stream reports an expired session", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");

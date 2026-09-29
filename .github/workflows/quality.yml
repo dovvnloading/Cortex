@@ -1,14 +1,27 @@
 name: Quality
 
-# Split into two jobs so a pull request gets fast feedback:
+# The gates run as independent jobs so a pull request gets feedback from each
+# in parallel instead of waiting behind one long serial job, and the first red
+# one shows up in about the time its own checks take:
 #
-#   fast   Lint, tests, contracts, and the frontend. Runs on every PR and on
-#          main. The full local tier covers the same fast gates; the quick tier
-#          omits browser and bundle checks for iteration (see CONTRIBUTING.md).
+#   changes    Decides whether a pull request touches anything but a few
+#              documents. Only those documents skip the gates below.
 #
-#   heavy  Windows packaging -- the launcher bundle, the one-folder build, and
-#          a smoke test of the packaged executable. Runs after the fast and
-#          supported-Python jobs on PRs, pushes, and manual dispatch.
+#   lint       Lockfiles, Ruff, the workflow linters, mypy, byte-compilation
+#              and generated-contract drift.
+#   backend    The headless test suite under branch coverage, the coverage
+#              floor, and the artifact-boundary review.
+#   frontend   Types, lint, unit tests under coverage, and the bundle build.
+#   e2e        The Playwright browser tests.
+#
+#   heavy      Windows packaging -- the launcher bundle, the one-folder build,
+#              and a smoke test of the packaged executable. Runs only after
+#              lint, backend, frontend and e2e have passed.
+#
+# The Python compatibility matrix is in python-compatibility.yml: it repeats
+# the suite on other interpreters and is not needed to review a pull request.
+# The full local tier covers the same gates as the jobs here; the quick tier
+# omits the browser and bundle checks for iteration (see CONTRIBUTING.md).
 
 on:
   push:
@@ -20,10 +33,60 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run it left going. A push to
+# main is never cancelled or replaced: each commit on main keeps its own
+# result, so a failure can be traced to the commit that caused it.
+concurrency:
+  group: quality-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  fast:
+  changes:
+    # A job that is skipped reports success, so a document-only pull request
+    # still ends green even if these checks are ever made required. That is why
+    # this is a job the others depend on rather than `paths-ignore`, which
+    # would leave the required checks pending forever.
+    name: Detect document-only changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # The pull request ref is a merge commit whose first parent is the base
+      # branch tip, so two commits of history are enough to list its files.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      # "Documents" is deliberately a short list. AGENTS.md, CONTRIBUTING.md,
+      # Change_Log.md and the templates under .github are read by tests, so a
+      # change to them still runs everything. Anything unrecognised, and any
+      # event other than a pull request, counts as code.
+      - name: Classify the changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            echo "Changed files:"
+            echo "$changed"
+            if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(README\.md|SECURITY\.md|LICENSE|docs/.*)$'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Code changed: $code"
+
+  lint:
+    name: Lint, types and contracts
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,13 +99,6 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-dev.lock.txt
-
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       # requirements*.lock.txt pin exact versions and hashes for every
       # dependency (direct and transitive) resolved for this job's Python
@@ -82,7 +138,7 @@ jobs:
         run: python -m pip install -r requirements-dev.lock.txt
 
       - name: Lint Python
-        run: python -m ruff check backend tests tools main.py app_factory.py
+        run: python -m ruff check backend tests tools main.py app_factory.py scripts
 
       # Both linters are console scripts pinned in the dev lock, so this runs
       # the same versions as scripts/check.ps1. actionlint catches workflow
@@ -101,12 +157,6 @@ jobs:
       - name: Type-check Python
         run: python -m mypy
 
-      - name: Run headless tests
-        run: python -m pytest
-
-      - name: Run the artifact boundary review
-        run: python tools/artifact_boundary_review.py --json --strict
-
       - name: Compile application modules
         run: python -m compileall -q main.py app_factory.py backend
 
@@ -114,41 +164,10 @@ jobs:
         run: |
           python tools/generate_contracts.py --check
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Install Playwright Chromium
-        working-directory: frontend
-        run: npx playwright install chromium
-
-      - name: Check frontend types
-        working-directory: frontend
-        run: npm run typecheck
-
-      - name: Lint frontend
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Run frontend unit tests
-        working-directory: frontend
-        run: npm test -- --run
-
-      - name: Run frontend browser tests
-        working-directory: frontend
-        timeout-minutes: 10
-        run: npm run e2e -- --workers=1
-
-      - name: Build frontend bundle
-        working-directory: frontend
-        run: npm run build
-
-  python-compatibility:
-    name: Python ${{ matrix.python-version }} compatibility
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+  backend:
+    name: Backend tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -160,26 +179,150 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock.txt
 
-      # Deliberately loose, unlocked pins here: this job's purpose is to
-      # catch a dependency that only breaks on one specific Python version,
-      # which a lock resolved for a single interpreter (see the `fast` and
-      # `heavy` jobs) cannot exercise. Do not switch this to
-      # requirements-dev.lock.txt.
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.lock.txt
 
-      - name: Lint Python
-        run: python -m ruff check backend tests tools main.py app_factory.py
+      # Branch coverage over the package (see [tool.coverage] in
+      # pyproject.toml). The XML is written before the floor is checked so a
+      # run that falls under it still leaves the report to read.
+      - name: Run headless tests with coverage
+        run: python -m coverage run -m pytest
 
-      - name: Run Python tests
-        run: python -m pytest -q
+      - name: Write the coverage report
+        run: python -m coverage xml
 
-      - name: Compile application modules
-        run: python -m compileall -q main.py app_factory.py backend
+      - name: Enforce the coverage floor
+        run: python -m coverage report
+
+      - name: Upload backend coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Run the artifact boundary review
+        run: python tools/artifact_boundary_review.py --json --strict
+
+  frontend:
+    name: Frontend checks
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend types
+        run: npm run typecheck
+
+      - name: Lint frontend
+        run: npm run lint
+
+      # Vitest fails the step when a coverage threshold in vitest.config.ts is
+      # missed, so this is both the unit-test run and the coverage floor.
+      - name: Run frontend unit tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload frontend coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Build frontend bundle
+        run: npm run build
+
+  e2e:
+    name: Browser tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # Playwright's browsers live inside the workspace so the cache below has
+      # one unambiguous path and every step reads the same place.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The real-API spec starts scripts/e2e_backend.py, which needs the
+      # runtime dependencies (not the dev tools) at their locked versions.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.lock.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # Keyed on the Playwright version the lock installed, so a bump fetches
+      # the matching browser and nothing else invalidates the cache.
+      - name: Read the pinned Playwright version
+        id: playwright
+        working-directory: frontend
+        shell: pwsh
+        run: |
+          $version = node -p "require('@playwright/test/package.json').version"
+          if (-not $version) { throw "Could not read the installed Playwright version." }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .playwright-browsers
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # Downloads only what the cache did not restore.
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install chromium
+
+      - name: Run frontend browser tests
+        working-directory: frontend
+        timeout-minutes: 10
+        run: npm run e2e -- --workers=1
 
   dependency-review:
     # Fails a pull request that adds a dependency with a known vulnerability,
@@ -199,8 +342,10 @@ jobs:
 
   heavy:
     # Packaging is slow, but a green PR must prove that launcher and runtime
-    # changes still produce a build that starts.
-    needs: [fast, python-compatibility]
+    # changes still produce a build that starts. It waits for every gate above
+    # so a run that is going to fail on lint does not spend the packaging
+    # minutes first; when they are skipped (document-only) so is this.
+    needs: [lint, backend, frontend, e2e]
     runs-on: windows-latest
     timeout-minutes: 90
     steps:

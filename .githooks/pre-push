@@ -14,6 +14,31 @@ if [ "$CORTEX_SKIP_HOOK" = "1" ]; then
     exit 0
 fi
 
+# Git lists the refs being pushed on stdin, one "<local ref> <local sha>
+# <remote ref> <remote sha>" line each. A tag names a commit that was already
+# checked when its branch was pushed, and a deletion sends no code at all, so a
+# push made up of nothing else has nothing to verify. Read stdin only when it
+# is not a terminal, so running this script by hand still runs the checks, and
+# skip only when at least one ref was listed and none of them carries code: an
+# empty or unreadable list means "run the checks", never "skip".
+if [ ! -t 0 ]; then
+    refs_seen=0
+    needs_checks=0
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        refs_seen=1
+        case "$remote_ref" in
+            refs/tags/*) continue ;;
+        esac
+        case "$local_sha" in
+            *[!0]*) needs_checks=1 ;;
+        esac
+    done
+    if [ "$refs_seen" = "1" ] && [ "$needs_checks" = "0" ]; then
+        echo "pre-push: only tags or deletions are being pushed -- skipping local checks."
+        exit 0
+    fi
+fi
+
 repo_root=$(git rev-parse --show-toplevel)
 script="$repo_root/scripts/check.ps1"
 

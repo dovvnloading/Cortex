@@ -10,6 +10,7 @@ README tells users to install from says something different.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -72,16 +73,19 @@ def test_supported_python_versions_match_the_compatibility_matrix(project: dict)
     tested; a version in the matrix but not requires-python is tested and then
     refused at install time.
     """
-    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
-        encoding="utf-8"
-    )
+    workflows = REPOSITORY_ROOT / ".github" / "workflows"
+    matrix = (workflows / "python-compatibility.yml").read_text(encoding="utf-8")
     matrix_line = next(
-        line for line in workflow.splitlines() if line.strip().startswith("python-version: [")
+        line for line in matrix.splitlines() if line.strip().startswith("python-version: [")
     )
     tested = {
         part.strip().strip('"').strip("'")
         for part in matrix_line.split("[", 1)[1].rstrip("]").split(",")
     }
+    # The matrix leaves out the interpreter the locked Quality jobs already run
+    # the whole suite on, so that one counts as tested too.
+    quality = (workflows / "quality.yml").read_text(encoding="utf-8")
+    tested |= set(re.findall(r'python-version: "(\d+\.\d+)"', quality))
 
     requires = project["requires-python"]
     assert requires.startswith(">="), f"unexpected requires-python form: {requires}"
