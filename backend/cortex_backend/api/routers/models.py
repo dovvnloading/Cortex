@@ -32,8 +32,10 @@ from cortex_backend.llamacpp.download import (
     DownloadSource,
     GGUFDownloadError,
     download_gguf,
+    download_gguf_set,
     list_huggingface_gguf_files,
     resolve_download_url,
+    split_gguf_parts,
 )
 from cortex_backend.services.models import ModelPullProgress
 from dataclasses import asdict
@@ -219,6 +221,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             )
         except GGUFDownloadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # A file named like one part of a split model ("-00001-of-00003") is
+        # useless alone, so the job fetches every part, all or nothing.
+        parts = split_gguf_parts(url, filename)
 
         def runner(sink, cancel_event):
             sink.publish_progress("gguf_download", "starting", data={"filename": filename})
@@ -235,6 +240,15 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     },
                 )
 
+            if parts is not None:
+                download_gguf_set(
+                    parts,
+                    directory,
+                    progress_callback=publish,
+                    cancellation_event=cancel_event,
+                )
+                # The first part names the whole set in the model list.
+                return {"filename": parts[0][1], "parts": len(parts)}
             download_gguf(
                 url,
                 filename,
