@@ -24,7 +24,7 @@ from cortex_backend.llamacpp.errors import (
     ServerLaunchError,
     ServerStartTimeoutError,
 )
-from cortex_backend.llamacpp.server_manager import LlamaServerManager
+from cortex_backend.llamacpp.server_manager import _LISTENING_PORT_RE, LlamaServerManager
 
 
 class _FakePopen:
@@ -38,8 +38,14 @@ class _FakePopen:
         # llama-server chooses the ephemeral port itself and reports it once
         # its listening socket is bound. The manager must wait for this line
         # before probing, rather than selecting and closing a port first.
+        # This is the current (pinned build) shape: timestamp, level, the
+        # "srv" logger tag, then a right-aligned function-name column and the
+        # message. The function name is illustrative -- only the message text
+        # matters to the manager. The previous "server is listening on ... -
+        # starting the main loop" wording is covered separately by
+        # test_listening_port_pattern_reads_both_log_line_formats.
         self.stdout = io.BytesIO(
-            b"main: server is listening on http://127.0.0.1:43125 - starting the main loop\n"
+            b"0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
         )
 
     def poll(self):
@@ -372,6 +378,80 @@ def test_start_never_puts_the_api_key_on_the_command_line(tmp_path: Path) -> Non
     # The child must still inherit the parent's environment (PATH, etc.),
     # not just the injected key.
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+@pytest.mark.parametrize(
+    ("backend", "gpu_layers"),
+    [("cpu", "0"), ("vulkan", "auto")],
+)
+def test_launch_argv_contract(tmp_path: Path, backend: str, gpu_layers: str) -> None:
+    """Pin the exact command line handed to llama-server.
+
+    Every flag here is load-bearing: dropping ``--host`` would widen the bind
+    address, ``--port 0`` is what lets the child pick its own free port, and
+    flipping the GPU-layer value between the builds would either starve the GPU
+    build or make the CPU build try to offload. A refactor that changes any of
+    them must change this test on purpose.
+    """
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=backend,
+    )
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=6144)
+
+    assert launcher.launch_args == [
+        [
+            str(Path(f"/fake/{backend}/llama-server.exe")),
+            "-m", str(model_path),
+            "-c", "6144",
+            "--host", "127.0.0.1",
+            "--port", "0",
+            "--reasoning-format", "deepseek",
+            "-ngl", gpu_layers,
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("line", "port"),
+    [
+        # Current format: "srv <function>: listening on <address>".
+        ("0.01.234.567 I srv         start: listening on http://127.0.0.1:43125", 43125),
+        ("srv          main: listening on http://127.0.0.1:8080", 8080),
+        # Previous format, still emitted by older builds.
+        (
+            "main: server is listening on http://127.0.0.1:43125 - starting the main loop",
+            43125,
+        ),
+        ("LISTENING ON http://127.0.0.1:5", 5),
+    ],
+)
+def test_listening_port_pattern_reads_both_log_line_formats(line: str, port: int) -> None:
+    match = _LISTENING_PORT_RE.search(line)
+
+    assert match is not None
+    assert int(match.group(1)) == port
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "srv          main: listening on http://0.0.0.0:8080",
+        "srv          main: listening on http://localhost:8080",
+        "srv          main: listening on http://127.0.0.1:",
+        "srv    load_model: loading model 'C:/models/model.gguf'",
+        "0.00.385.497 I srv          init: The UI is disabled",
+        "",
+    ],
+)
+def test_listening_port_pattern_ignores_other_lines(line: str) -> None:
+    assert _LISTENING_PORT_RE.search(line) is None
 
 
 def test_start_rejects_a_generic_200_service_as_not_llamacpp(tmp_path: Path) -> None:
