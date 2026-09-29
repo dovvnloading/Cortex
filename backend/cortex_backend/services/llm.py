@@ -258,6 +258,16 @@ _FENCE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The tags the response parser acts on (plus the legacy ones it strips). Small
+# models repeat what they were shown, and the parser cannot tell an echoed tag
+# from the model's own proposal, so a document that carries one could make
+# Cortex ask to clear memory or run code. Both are still gated by the user,
+# but a nuisance prompt caused by a file is an injection surface all the same.
+_COMMAND_TAG_RE = re.compile(
+    r"</?\s*(?:memory_command|code_execution_request|memo|clear_memory)\b[^>]*>",
+    re.IGNORECASE,
+)
+
 
 def _fence_untrusted(label: str, body: str, *, notice: str | None = None) -> str:
     """Wrap ``body`` in a ``BEGIN/END UNTRUSTED {label} DATA`` fence it cannot escape.
@@ -270,8 +280,13 @@ def _fence_untrusted(label: str, body: str, *, notice: str | None = None) -> str
     literal ``END UNTRUSTED ... DATA`` could make the model believe the
     untrusted section closed early, with whatever text follows in ``body``
     then read as if it came after the fence.
+
+    Command tags are neutralized for the same reason: the model must not be
+    handed a ready-made ``<memory_command>`` to echo. The user's own standing
+    instructions do not pass through here; they are policy, not data.
     """
     safe_body = _FENCE_MARKER_RE.sub("[UNTRUSTED FENCE MARKER REMOVED]", body)
+    safe_body = _COMMAND_TAG_RE.sub("[TAG REMOVED]", safe_body)
     lines = [f"BEGIN UNTRUSTED {label} DATA"]
     if notice:
         lines.append(notice)
