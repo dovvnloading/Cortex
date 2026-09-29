@@ -15,6 +15,7 @@ import sys
 
 import pytest
 
+from sqlite_faults import volume_without_write_ahead_logging
 from cortex_backend.repositories import storage
 from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
@@ -241,10 +242,10 @@ def test_a_failed_startup_backup_does_not_block_startup(
     manager, original = _manager_with_data(tmp_path)
     backup_before = Path(manager.backup_path).read_bytes()
 
-    def fail_copy(cls, source, destination):
-        raise PersistenceError("injected copy failure", operation="backup")
+    def fail_snapshot(cls, source, destination, **_kwargs):
+        raise PersistenceError("injected snapshot failure", operation="backup")
 
-    monkeypatch.setattr(DatabaseManager, "_atomic_copy_database", classmethod(fail_copy))
+    monkeypatch.setattr(DatabaseManager, "_atomic_snapshot_database", classmethod(fail_snapshot))
 
     reopened = _reopen(manager)
 
@@ -262,25 +263,34 @@ def _full_disk_while_snapshotting(monkeypatch: pytest.MonkeyPatch, manager: Data
     monkeypatch.setattr(storage, "snapshot_database", full)
 
 
-def _full_disk_while_rotating(monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager) -> None:
-    def full(*_args, **_kwargs):
-        raise OSError(errno.ENOSPC, "No space left on device")
+def _refuse_renames(monkeypatch: pytest.MonkeyPatch, *, source: str | None = None, destination: str | None = None):
+    """Make os.replace fail the way Windows does for a file another program holds open."""
+    real_replace = os.replace
 
-    monkeypatch.setattr(storage.shutil, "copy2", full)
+    def normal(path) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    def replace(src, dst, *args, **kwargs):
+        if (source is not None and normal(src) == normal(source)) or (
+            destination is not None and normal(dst) == normal(destination)
+        ):
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
 
 
 def _backup_file_locked_by_another_program(
     monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager
 ) -> None:
-    real_replace = os.replace
-    locked = os.path.normcase(os.path.abspath(manager.backup_path))
+    # An open file cannot be renamed, so the current backup cannot be set aside.
+    _refuse_renames(monkeypatch, source=manager.backup_path)
 
-    def replace(source, destination, *args, **kwargs):
-        if os.path.normcase(os.path.abspath(destination)) == locked:
-            raise PermissionError(errno.EACCES, "The process cannot access the file")
-        return real_replace(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", replace)
+def _previous_generation_locked_by_another_program(
+    monkeypatch: pytest.MonkeyPatch, manager: DatabaseManager
+) -> None:
+    _refuse_renames(monkeypatch, destination=manager.previous_backup_path)
 
 
 def _snapshot_that_fails_verification(
@@ -296,11 +306,11 @@ def _snapshot_that_fails_verification(
     "inject",
     [
         _full_disk_while_snapshotting,
-        _full_disk_while_rotating,
         _backup_file_locked_by_another_program,
+        _previous_generation_locked_by_another_program,
         _snapshot_that_fails_verification,
     ],
-    ids=["disk-full-snapshot", "disk-full-rotation", "backup-locked", "snapshot-corrupt"],
+    ids=["disk-full-snapshot", "backup-locked", "previous-generation-locked", "snapshot-corrupt"],
 )
 def test_startup_survives_every_way_the_backup_can_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject
@@ -514,4 +524,556 @@ def test_a_crash_between_setting_the_log_aside_and_moving_the_primary_recovers_n
     recovered = _reopen(manager)
 
     assert recovered.load_chat("thread-1") == original
-    assert [entry.read_bytes() for entry in preserved] == [b"newest committed frames"]
+    # The log did not stay stranded under the first attempt's name: the second
+    # recovery moved it beside the primary it quarantined (see the adoption
+    # tests below).
+    assert recovered.recovery_report is not None
+    beside_the_quarantined_file = Path(f"{recovered.recovery_report.quarantined_path}-wal")
+    assert beside_the_quarantined_file.read_bytes() == b"newest committed frames"
+
+
+def _chat_ids(path: str) -> set[str]:
+    probe = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return {row[0] for row in probe.execute("SELECT id FROM threads")}
+    finally:
+        probe.close()
+
+
+# -- BE-50: WAL is read back, and NORMAL is only applied on top of it -------
+
+
+def test_a_volume_that_cannot_do_write_ahead_logging_is_refused_before_anything_is_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "chat.sqlite"
+    volume_without_write_ahead_logging(monkeypatch)
+
+    with pytest.raises(PersistenceError, match="write-ahead logging") as refused:
+        DatabaseManager(db_path=str(db_path), legacy_history_dir=str(tmp_path / "legacy"))
+    monkeypatch.undo()
+
+    assert "--data-dir" in str(refused.value)
+    assert str(tmp_path) not in str(refused.value)
+    probe = sqlite3.connect(db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert probe.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0
+    finally:
+        probe.close()
+
+
+def test_an_existing_database_on_a_volume_without_wal_is_left_at_its_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    probe = sqlite3.connect(manager.db_path)
+    try:
+        probe.execute("PRAGMA user_version = 3")
+        probe.commit()
+    finally:
+        probe.close()
+    volume_without_write_ahead_logging(monkeypatch)
+
+    with pytest.raises(PersistenceError, match="write-ahead logging"):
+        _reopen(manager)
+    monkeypatch.undo()
+
+    probe = sqlite3.connect(manager.db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        probe.close()
+    assert _chat_ids(manager.db_path) == {"thread-1"}
+
+
+def test_an_existing_install_on_a_volume_without_wal_is_told_to_copy_its_data_before_moving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing --data-dir at an empty folder starts with no chats, which reads as
+    data loss. The refusal has to say the chats are still where they were and how
+    to bring them along."""
+    manager, _ = _manager_with_data(tmp_path)
+    database_before = Path(manager.db_path).read_bytes()
+    files_before = sorted(entry.name for entry in tmp_path.iterdir())
+    volume_without_write_ahead_logging(monkeypatch)
+
+    with pytest.raises(PersistenceError, match="write-ahead logging") as refused:
+        _reopen(manager)
+    monkeypatch.undo()
+
+    message = " ".join(str(refused.value).split())
+    assert "nothing was deleted or modified" in message.lower()
+    assert "copy the existing data files" in message
+    assert "-wal" in message and "-shm" in message
+    assert message.index("copy the existing data files") < message.index("--data-dir")
+    assert "empty" in message
+    assert str(tmp_path) not in message
+    # ... and that is true: the refusal changed nothing.
+    assert Path(manager.db_path).read_bytes() == database_before
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == files_before
+    assert _chat_ids(manager.db_path) == {"thread-1"}
+
+
+def test_synchronous_normal_is_only_applied_once_write_ahead_logging_is_confirmed(
+    tmp_path: Path,
+) -> None:
+    """NORMAL loses durability guarantees in the rollback-journal modes, so
+    until WAL has been read back the connection keeps SQLite's default (FULL)."""
+    manager = DatabaseManager(
+        db_path=str(tmp_path / "chat.sqlite"), legacy_history_dir=str(tmp_path / "legacy")
+    )
+    NORMAL, FULL = 1, 2
+
+    with manager.connect() as connection:
+        assert connection.execute("PRAGMA synchronous").fetchone()[0] == NORMAL
+        assert str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+
+    manager._wal_confirmed = False
+    with manager.connect() as connection:
+        assert connection.execute("PRAGMA synchronous").fetchone()[0] == FULL
+
+
+# -- BE-51: one full read of the primary, one snapshot, no second copy ------
+
+
+def test_startup_backup_rotation_reads_the_primary_once_and_renames_the_old_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    old_backup = Path(manager.backup_path).read_bytes()
+    checks: list[tuple[str, bool]] = []
+    snapshots: list[str] = []
+    outgoing_checks: list[str] = []
+    real_is_valid = DatabaseManager._database_is_valid
+    real_snapshot = storage.snapshot_database
+    real_outgoing_check = storage.quick_check_at_rest
+
+    def spy_is_valid(path: str, *, quick: bool = False) -> bool:
+        checks.append((os.path.basename(path), quick))
+        return real_is_valid(path, quick=quick)
+
+    def spy_snapshot(source, destination, **kwargs):
+        snapshots.append(os.path.basename(str(source)))
+        return real_snapshot(source, destination, **kwargs)
+
+    def spy_outgoing_check(path, **kwargs):
+        outgoing_checks.append(os.path.basename(str(path)))
+        return real_outgoing_check(path, **kwargs)
+
+    def no_byte_copies(*_args, **_kwargs):
+        raise AssertionError("rotation must rename the old generation, not copy it")
+
+    monkeypatch.setattr(DatabaseManager, "_database_is_valid", staticmethod(spy_is_valid))
+    monkeypatch.setattr(storage, "snapshot_database", spy_snapshot)
+    monkeypatch.setattr(storage, "quick_check_at_rest", spy_outgoing_check)
+    monkeypatch.setattr(storage.shutil, "copy2", no_byte_copies)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    full = [name for name, quick in checks if not quick]
+    quick_checks = [name for name, quick in checks if quick]
+    assert full == ["chat.sqlite"], "the primary gets exactly one full integrity check"
+    assert len(quick_checks) == 1 and quick_checks[0].endswith(".tmp"), "only the new snapshot is re-checked"
+    assert outgoing_checks == ["chat.sqlite.bak"], "the backup being rotated is checked once, bounded"
+    assert snapshots == ["chat.sqlite"], "one snapshot of the primary"
+    assert reopened.backup_status == ("ok", None)
+    # The old backup was renamed into the older slot, byte for byte.
+    assert Path(manager.previous_backup_path).read_bytes() == old_backup
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _chat_ids(manager.backup_path) == {"thread-1"}
+
+
+def test_recovering_from_the_older_generation_keeps_it_instead_of_rotating_a_bad_backup_over_it(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    older_generation = Path(manager.previous_backup_path).read_bytes()
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    Path(manager.backup_path).write_bytes(b"corrupt-backup")
+
+    recovered = _reopen(manager)
+
+    assert recovered.recovery_report is not None
+    assert recovered.recovery_report.recovered_from == manager.previous_backup_path
+    assert Path(manager.previous_backup_path).read_bytes() == older_generation
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert recovered.backup_status == ("ok", None)
+
+
+def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old backup is set aside only after the new one is written and
+    verified. If the new one is then refused its name (an antivirus scan holding
+    the temporary file, say), .bak must not be left missing."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    backup_before = Path(manager.backup_path).read_bytes()
+    real_replace = os.replace
+    refused: list[str] = []
+    backup = os.path.normcase(os.path.abspath(manager.backup_path))
+
+    def replace(source, destination, *args, **kwargs):
+        if (
+            os.path.normcase(os.path.abspath(destination)) == backup
+            and str(source).endswith(".tmp")
+            and not refused
+        ):
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert refused
+    assert reopened.backup_status[0] == "failed"
+    assert Path(manager.backup_path).read_bytes() == backup_before
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _leftover_temporaries(tmp_path) == []
+    assert _reopen(manager).backup_status == ("ok", None)
+
+
+def _stray_files(directory: Path) -> list[str]:
+    """Anything a rotation may set aside while it works and must not leave behind."""
+    return sorted(entry.name for entry in directory.iterdir() if entry.name.endswith((".old", ".tmp")))
+
+
+def test_a_backup_that_cannot_take_its_place_keeps_both_generations_where_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting .bak aside means renaming it over .bak.1, which used to destroy the
+    older generation for good: when the new snapshot was then refused its name,
+    .bak came back but .bak.1 did not, and the older verified copy was gone."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    newest_before = Path(manager.backup_path).read_bytes()
+    older_before = Path(manager.previous_backup_path).read_bytes()
+    assert newest_before != older_before
+    real_replace = os.replace
+    refused: list[str] = []
+    backup = os.path.normcase(os.path.abspath(manager.backup_path))
+
+    def replace(source, destination, *args, **kwargs):
+        if (
+            os.path.normcase(os.path.abspath(destination)) == backup
+            and str(source).endswith(".tmp")
+            and not refused
+        ):
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert refused
+    assert reopened.backup_status[0] == "failed"
+    assert Path(manager.backup_path).read_bytes() == newest_before
+    assert Path(manager.previous_backup_path).read_bytes() == older_before
+    assert _stray_files(tmp_path) == []
+
+    # The next launch rotates as usual, and the older generation is then let go.
+    assert _reopen(manager).backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == newest_before
+    assert _stray_files(tmp_path) == []
+
+
+def test_rotation_still_works_where_the_file_system_cannot_make_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    newest_before = Path(manager.backup_path).read_bytes()
+
+    def no_hard_links(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "This file system does not support hard links")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == newest_before
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _stray_files(tmp_path) == []
+
+
+def test_a_backup_that_cannot_be_set_aside_leaves_the_older_generation_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    newest_before = Path(manager.backup_path).read_bytes()
+    older_before = Path(manager.previous_backup_path).read_bytes()
+    _refuse_renames(monkeypatch, source=manager.backup_path)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert reopened.backup_status[0] == "failed"
+    assert Path(manager.backup_path).read_bytes() == newest_before
+    assert Path(manager.previous_backup_path).read_bytes() == older_before
+    assert _stray_files(tmp_path) == []
+
+
+def test_a_rotted_newest_backup_does_not_displace_the_older_verified_generation(
+    tmp_path: Path,
+) -> None:
+    """The outgoing .bak used to be renamed over .bak.1 without being looked at,
+    so a backup that had rotted between two launches pushed the last good copy out
+    and left one good backup and one rotten one."""
+    manager, _ = _manager_with_data(tmp_path)
+    older_generation = Path(manager.previous_backup_path).read_bytes()
+    Path(manager.backup_path).write_bytes(b"rotted since the last launch")
+
+    reopened = _reopen(manager)
+
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == older_generation
+    assert DatabaseManager._database_is_valid(manager.previous_backup_path)
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _chat_ids(manager.backup_path) == {"thread-1"}
+    assert _stray_files(tmp_path) == []
+
+    # Once .bak is healthy again the rotation carries on as before.
+    healthy_backup = Path(manager.backup_path).read_bytes()
+    assert _reopen(manager).backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == healthy_backup
+
+
+def test_a_backup_with_a_damaged_page_does_not_displace_the_older_generation(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    older_generation = Path(manager.previous_backup_path).read_bytes()
+    damaged = bytearray(Path(manager.backup_path).read_bytes())
+    page_size = 4096
+    damaged[page_size : 2 * page_size] = bytes(page_size)
+    Path(manager.backup_path).write_bytes(bytes(damaged))
+    assert not storage.quick_check_at_rest(manager.backup_path, time_limit=30.0)
+
+    _reopen(manager)
+
+    assert Path(manager.previous_backup_path).read_bytes() == older_generation
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+
+
+def test_checking_the_outgoing_backup_leaves_nothing_beside_it_and_gives_up_on_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "big.sqlite"
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("CREATE TABLE filler (body TEXT)")
+        writer.executemany("INSERT INTO filler VALUES (?)", [("x" * 500,)] * 2000)
+        writer.commit()
+    finally:
+        writer.close()
+
+    assert storage.quick_check_at_rest(str(path), time_limit=30.0)
+    assert not storage.quick_check_at_rest(str(path), time_limit=0.0), "a check that overruns is not a pass"
+    assert not storage.quick_check_at_rest(str(tmp_path / "missing.sqlite"), time_limit=30.0)
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["big.sqlite"]
+
+
+# -- Recovery that was interrupted ------------------------------------------
+
+
+def _crash_after_the_primary_moved_aside(
+    manager: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Corrupt the primary, then die between quarantining it and publishing the
+    restored copy. Returns the quarantined file."""
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+
+    def die_before_publishing(cls, source, destination):
+        raise _PowerLoss
+
+    monkeypatch.setattr(DatabaseManager, "_atomic_copy_database", classmethod(die_before_publishing))
+    with pytest.raises(_PowerLoss):
+        _reopen(manager)
+    monkeypatch.undo()
+
+    assert not Path(manager.db_path).exists()
+    (quarantined,) = Path(manager.db_path).parent.glob("chat.sqlite.corrupt-*")
+    assert quarantined.read_bytes() == b"corrupt-primary"
+    return quarantined
+
+
+def test_a_recovery_interrupted_after_the_primary_moved_aside_is_finished_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no primary the next launch used to create an empty database, back
+    it up over the good backup, and on the launch after that push the good one
+    out of the second generation as well."""
+    manager, original = _manager_with_data(tmp_path)
+    quarantined = _crash_after_the_primary_moved_aside(manager, monkeypatch)
+
+    recovered = _reopen(manager)
+
+    assert recovered.load_chat("thread-1") == original
+    report = recovered.recovery_report
+    assert report is not None
+    assert Path(report.quarantined_path) == quarantined
+    assert report.recovered_from == manager.backup_path
+    assert recovered.last_corrupt_path == str(quarantined)
+    assert quarantined.read_bytes() == b"corrupt-primary"
+    # Neither generation was replaced by a backup of an empty database.
+    assert _chat_ids(manager.backup_path) == {"thread-1"}
+    assert _chat_ids(manager.previous_backup_path) == {"thread-1"}
+    # And the launch after that one changes nothing about that.
+    _reopen(manager)
+    assert _chat_ids(manager.previous_backup_path) == {"thread-1"}
+    assert len(list(tmp_path.glob("chat.sqlite.corrupt-*"))) == 1
+
+
+def test_finishing_an_interrupted_recovery_that_cannot_publish_leaves_no_empty_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, original = _manager_with_data(tmp_path)
+    _crash_after_the_primary_moved_aside(manager, monkeypatch)
+    backups_before = (
+        Path(manager.backup_path).read_bytes(),
+        Path(manager.previous_backup_path).read_bytes(),
+    )
+
+    def full_disk(cls, source, destination):
+        raise PersistenceError("injected publish failure", operation="backup")
+
+    monkeypatch.setattr(DatabaseManager, "_atomic_copy_database", classmethod(full_disk))
+    with pytest.raises(PersistenceError, match="injected publish failure"):
+        _reopen(manager)
+    monkeypatch.undo()
+
+    assert not Path(manager.db_path).exists(), "an empty database must not stand in for the lost one"
+    assert (
+        Path(manager.backup_path).read_bytes(),
+        Path(manager.previous_backup_path).read_bytes(),
+    ) == backups_before
+
+    assert _reopen(manager).load_chat("thread-1") == original
+
+
+def test_an_interrupted_recovery_does_not_replay_a_stray_log_onto_the_restored_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, original = _manager_with_data(tmp_path)
+    quarantined = _crash_after_the_primary_moved_aside(manager, monkeypatch)
+    stray = Path(f"{manager.db_path}-wal")
+    stray.write_bytes(b"frames that belong to the quarantined database")
+
+    recovered = _reopen(manager)
+
+    assert recovered.load_chat("thread-1") == original
+    assert Path(f"{quarantined}-wal").read_bytes() == b"frames that belong to the quarantined database"
+    assert not stray.exists()
+
+
+def test_a_missing_primary_with_nothing_quarantined_starts_a_new_database(tmp_path: Path) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{manager.db_path}{suffix}").unlink(missing_ok=True)
+
+    fresh = _reopen(manager)
+
+    assert fresh.recovery_report is None
+    assert fresh.get_all_chats_summary() == []
+
+
+def test_a_missing_primary_beside_a_quarantined_file_but_no_valid_backup_starts_a_new_one(
+    tmp_path: Path,
+) -> None:
+    """There is nothing to restore from, so this is not a recovery it can
+    finish; the quarantined file is left exactly where it is."""
+    manager, _ = _manager_with_data(tmp_path)
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{manager.db_path}{suffix}").unlink(missing_ok=True)
+    Path(manager.backup_path).write_bytes(b"corrupt-backup")
+    Path(manager.previous_backup_path).write_bytes(b"corrupt-older-backup")
+    quarantined = tmp_path / f"chat.sqlite.corrupt-{'b' * 32}"
+    quarantined.write_bytes(b"corrupt-primary")
+
+    fresh = _reopen(manager)
+
+    assert fresh.recovery_report is None
+    assert quarantined.read_bytes() == b"corrupt-primary"
+
+
+# -- Logs stranded by an interrupted recovery -------------------------------
+
+
+def test_recovery_adopts_logs_an_interrupted_attempt_left_under_another_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first attempt moved the log and died before moving the primary. The
+    second one quarantines the primary under a new name, which left the log
+    under the first attempt's name with no database beside it, where
+    ``sqlite3 .recover`` would never look for it."""
+    manager, original = _manager_with_data(tmp_path)
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    Path(f"{manager.db_path}-wal").write_bytes(b"newest committed frames")
+    Path(f"{manager.db_path}-shm").write_bytes(b"shared memory index")
+    real_replace = os.replace
+
+    def die_moving_the_primary(source, destination, *args, **kwargs):
+        if os.path.abspath(source) == os.path.abspath(manager.db_path):
+            raise _PowerLoss
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", die_moving_the_primary)
+    with pytest.raises(_PowerLoss):
+        _reopen(manager)
+    monkeypatch.undo()
+    stranded = sorted(tmp_path.glob("chat.sqlite.corrupt-*-*"))
+    assert len(stranded) == 2
+
+    recovered = _reopen(manager)
+
+    report = recovered.recovery_report
+    assert report is not None
+    quarantined = report.quarantined_path
+    assert Path(f"{quarantined}-wal").read_bytes() == b"newest committed frames"
+    # The shared-memory index is rebuilt state that SQLite rewrites whenever it
+    # opens the file, so only its presence is preserved, not its bytes.
+    assert Path(f"{quarantined}-shm").exists()
+    assert sorted(report.adopted_sidecars) == sorted([f"{quarantined}-wal", f"{quarantined}-shm"])
+    assert not any(entry.exists() for entry in stranded)
+    assert recovered.load_chat("thread-1") == original
+
+
+def test_a_log_beside_its_own_quarantined_file_is_not_adopted(tmp_path: Path) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    earlier = tmp_path / f"chat.sqlite.corrupt-{'a' * 32}"
+    earlier.write_bytes(b"an earlier corrupt primary")
+    Path(f"{earlier}-wal").write_bytes(b"its own log")
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+
+    recovered = _reopen(manager)
+
+    assert recovered.recovery_report is not None
+    assert recovered.recovery_report.adopted_sidecars == ()
+    assert Path(f"{earlier}-wal").read_bytes() == b"its own log"
+
+
+def test_adoption_never_overwrites_a_log_already_beside_the_quarantined_file(tmp_path: Path) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    orphan = tmp_path / f"chat.sqlite.corrupt-{'c' * 32}-wal"
+    orphan.write_bytes(b"stranded by an earlier attempt")
+    Path(manager.db_path).write_bytes(b"corrupt-primary")
+    Path(f"{manager.db_path}-wal").write_bytes(b"the log of the primary being quarantined now")
+
+    recovered = _reopen(manager)
+
+    report = recovered.recovery_report
+    assert report is not None
+    assert Path(f"{report.quarantined_path}-wal").read_bytes() == b"the log of the primary being quarantined now"
+    assert report.adopted_sidecars == ()
+    assert orphan.read_bytes() == b"stranded by an earlier attempt"

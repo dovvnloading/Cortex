@@ -310,11 +310,14 @@ class DatabaseRecoveryReport(APIModel):
 
     The restored data is the backup's, which reflects the previous launch;
     anything written since is in ``quarantined_path`` (and its ``-wal``).
+    ``adopted_sidecars`` names write-ahead-log files an earlier, interrupted
+    recovery had left under a different name and that were moved beside it.
     """
 
     recovered_from: str
     quarantined_path: str
     at: str
+    adopted_sidecars: tuple[str, ...] = ()
 
 
 class DatabaseBackupStatus(APIModel):

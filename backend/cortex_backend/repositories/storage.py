@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import os
 import json
 import re
@@ -30,11 +31,24 @@ from cortex_backend.core.paths import AppPaths
 from cortex_backend.repositories.sqlite_backup import (
     BackupStatus,
     RecoveryReport,
+    adopt_orphaned_sidecars,
     failure_detail,
+    find_interrupted_recovery,
     move_sidecars,
+    open_at_rest,
     put_sidecars_back,
+    quick_check_at_rest,
     snapshot_database,
     utc_now_iso,
+)
+from cortex_backend.repositories.sqlite_schema import (
+    Migration,
+    SchemaTooNewError,
+    WriteAheadLogUnavailableError,
+    add_column_if_missing,
+    open_for_upgrade,
+    prepare_database,
+    stored_version,
 )
 
 
@@ -112,6 +126,12 @@ MAX_LEGACY_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _LEGACY_ATTACHMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _LEGACY_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
+# How long the backup about to be rotated into the older slot may take to prove
+# it is still whole. A check that overruns counts as a failure, which keeps the
+# older generation, so this only bounds startup; it does not decide anything a
+# healthy backup would not pass in a few seconds.
+_OUTGOING_BACKUP_CHECK_SECONDS = 30.0
+
 def _discard_sidecars_for(database_path: str | Path) -> None:
     """Remove the -wal/-shm SQLite leaves beside a database file.
 
@@ -126,6 +146,134 @@ def _discard_sidecars_for(database_path: str | Path) -> None:
             # Best effort: a locked sidecar is stale clutter, never a reason
             # to fail a backup that has already been written correctly.
             logging.warning("Could not remove a temporary database sidecar.")
+
+
+# -- Schema ladder --------------------------------------------------------------
+#
+# Step n brings a chat database from version n-1 to n, and DatabaseManager runs
+# each missing step in its own transaction together with the user_version bump
+# (see sqlite_schema.prepare_database). Steps must be idempotent: a file written
+# before versioning existed reports version 0 although it may already hold part
+# of the shape. Add a step by appending the next number here and raising
+# DatabaseManager.SCHEMA_VERSION; never edit a step that has shipped.
+
+
+def _migrate_to_v1(connection: sqlite3.Connection) -> None:
+    """Base tables: threads, messages, and their lookup indexes."""
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS threads (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        );
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            sources TEXT,
+            thoughts TEXT,
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        );
+    """)
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread_timestamp "
+        "ON messages(thread_id, timestamp, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_threads_timestamp ON threads(timestamp)"
+    )
+
+
+def _migrate_to_v2(connection: sqlite3.Connection) -> None:
+    """Message attachments."""
+    add_column_if_missing(connection, "messages", "attachments", "TEXT")
+
+
+def _migrate_to_v3(connection: sqlite3.Connection) -> None:
+    """Per-message generation statistics."""
+    add_column_if_missing(connection, "messages", "generation_stats_json", "TEXT")
+
+
+def _migrate_to_v4(connection: sqlite3.Connection) -> None:
+    """Groups (folders/projects) and the column that files a chat under one.
+
+    ``position`` gives the user an explicit order independent of recency, and
+    ``collapsed`` lives here rather than in browser storage so the sidebar looks
+    the same on every launch and on any window.
+    """
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS chat_groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            collapsed INTEGER NOT NULL DEFAULT 0,
+            timestamp TEXT NOT NULL
+        );
+    """)
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_groups_position "
+        "ON chat_groups(position, timestamp)"
+    )
+    # Deliberately no FOREIGN KEY: SQLite cannot add a constrained column via
+    # ALTER TABLE, and existing databases must upgrade in place rather than be
+    # rebuilt. delete_group() clears the column explicitly (the same effect as
+    # ON DELETE SET NULL), and the orphan sweep in DatabaseManager._create_tables
+    # repairs any row that somehow outlives its group.
+    add_column_if_missing(connection, "threads", "group_id", "TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(group_id)")
+
+
+_MIGRATIONS: dict[int, Migration] = {
+    1: _migrate_to_v1,
+    2: _migrate_to_v2,
+    3: _migrate_to_v3,
+    4: _migrate_to_v4,
+}
+
+
+def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
+    """A hash of every row in every table, or None if the file cannot be read that way.
+
+    Two databases of the same schema version hold the same chats exactly when
+    their digests match, regardless of how the bytes are laid out on disk. It
+    reads the whole file, so it is only for the rare check that decides whether
+    an existing pre-upgrade snapshot still describes the database.
+
+    ``at_rest`` is for a snapshot that nothing is writing: it is read through
+    ``open_at_rest``, which leaves no ``-wal`` or ``-shm`` beside it. The live
+    database must not be read that way, because its write-ahead log is part of
+    what it holds.
+    """
+    connection: sqlite3.Connection | None = None
+    try:
+        if at_rest:
+            connection = open_at_rest(path)
+        else:
+            connection = sqlite3.connect(
+                f"{Path(path).resolve().as_uri()}?mode=ro", timeout=10.0, uri=True
+            )
+        digest = hashlib.sha256()
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+        for table in tables:
+            digest.update(f"table:{table}\n".encode())
+            for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
+                digest.update(repr(row).encode("utf-8", "surrogatepass"))
+        return digest.hexdigest()
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 class DatabaseManager:
@@ -158,16 +306,23 @@ class DatabaseManager:
         self.backup_status = BackupStatus("ok")
         self.recovery_report: RecoveryReport | None = None
         self.pre_upgrade_snapshot_path: str | None = None
+        # synchronous = NORMAL is only crash-safe under write-ahead logging, so
+        # connect() applies it once _create_tables has read WAL back as enabled
+        # and not before (SQLite's own default, FULL, is safe in every mode).
+        self._wal_confirmed = False
+        # Set when recovery had to fall back to the older backup generation
+        # because .bak failed its check; see _create_backup.
+        self._newest_backup_unusable = False
         self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
         # diagnostics useful without copying them into process logs.
         logging.info("Database storage configured (private path omitted).")
         self._ensure_parent_directory()
         with self._write_lock:
-            self._prepare_primary()
+            primary_verified = self._prepare_primary()
             self._snapshot_before_upgrade()
             self._create_tables()
-            self._refresh_startup_backup()
+            self._refresh_startup_backup(primary_verified=primary_verified)
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -183,7 +338,8 @@ class DatabaseManager:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 10000")
-            connection.execute("PRAGMA synchronous = NORMAL")
+            if self._wal_confirmed:
+                connection.execute("PRAGMA synchronous = NORMAL")
             yield connection
             connection.commit()
         except sqlite3.Error as exc:
@@ -207,8 +363,15 @@ class DatabaseManager:
         return None
 
     @staticmethod
-    def _database_is_valid(path: str) -> bool:
-        """Return whether an existing SQLite file can be opened and checked."""
+    def _database_is_valid(path: str, *, quick: bool = False) -> bool:
+        """Return whether an existing SQLite file can be opened and checked.
+
+        The default is the full ``integrity_check``, which also verifies every
+        index against its table; the primary and any backup a recovery is about
+        to restore get that. ``quick=True`` runs ``quick_check`` (same page and
+        b-tree checks, no index cross-check) for a copy that was just written
+        page-for-page from a source that already passed the full one.
+        """
         if not os.path.exists(path):
             return False
         connection: sqlite3.Connection | None = None
@@ -217,7 +380,8 @@ class DatabaseManager:
             # before deciding whether it is safe to back up or recover from.
             uri = Path(path).resolve().as_uri()
             connection = sqlite3.connect(f"{uri}?mode=ro", timeout=10.0, uri=True)
-            result = connection.execute("PRAGMA integrity_check").fetchone()
+            check = "quick_check" if quick else "integrity_check"
+            result = connection.execute(f"PRAGMA {check}").fetchone()
             return result is not None and str(result[0]).lower() == "ok"
         except (OSError, sqlite3.Error, ValueError):
             return False
@@ -231,7 +395,9 @@ class DatabaseManager:
         cls._publish_verified_copy(destination, lambda temporary: shutil.copy2(source, temporary))
 
     @classmethod
-    def _atomic_snapshot_database(cls, source: str, destination: str) -> None:
+    def _atomic_snapshot_database(
+        cls, source: str, destination: str, *, displace_existing_to: str | None = None
+    ) -> None:
         """Snapshot a live database, including uncheckpointed commits, into ``destination``.
 
         Same publish rules as _atomic_copy_database, but the bytes come from
@@ -239,18 +405,39 @@ class DatabaseManager:
         pins the write-ahead log cannot make the backup silently stale.
         """
         cls._publish_verified_copy(
-            destination, lambda temporary: snapshot_database(source, temporary)
+            destination,
+            lambda temporary: snapshot_database(source, temporary),
+            displace_existing_to=displace_existing_to,
         )
 
     @classmethod
     def _publish_verified_copy(
-        cls, destination: str, populate: Callable[[str], object]
+        cls,
+        destination: str,
+        populate: Callable[[str], object],
+        *,
+        displace_existing_to: str | None = None,
     ) -> None:
         """Fill a temporary file, verify it, and only then move it into place.
 
         ``destination`` is replaced atomically or not at all, so a failure at
         any step (a full disk, a locked file, a failed integrity check)
         leaves whatever was there before exactly as it was.
+
+        With ``displace_existing_to``, a file already at ``destination`` is
+        renamed there first instead of being overwritten -- a rename, not a
+        copy, and only after the new file has been written and verified, so a
+        snapshot that fails leaves both files where they were. If the new file
+        then cannot take its place, the old one is put back.
+
+        Renaming onto a file that already exists replaces it for good, so when
+        ``displace_existing_to`` is taken the file there is given a second name
+        (a hard link) for the length of the swap. That name is dropped once the
+        swap has succeeded and used to put the older file back if it has not, so
+        both generations end up where they were. A crash in between leaves the
+        second name beside the others rather than losing the file. Where the
+        file system cannot make a hard link the swap goes ahead without that
+        protection.
         """
         temporary_path: str | None = None
         try:
@@ -261,9 +448,33 @@ class DatabaseManager:
             )
             os.close(fd)
             populate(temporary_path)
-            if not cls._database_is_valid(temporary_path):
+            # A copy of something already checked in full: the cheaper
+            # quick_check is enough to prove the copy itself came out whole.
+            if not cls._database_is_valid(temporary_path, quick=True):
                 raise OSError("database copy failed integrity validation")
-            os.replace(temporary_path, destination)
+            displaced_to: str | None = None
+            older_file_kept_as: str | None = None
+            if displace_existing_to is not None and os.path.exists(destination):
+                older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
+                try:
+                    os.replace(destination, displace_existing_to)
+                except OSError:
+                    cls._drop_spare_name(older_file_kept_as)
+                    raise
+                displaced_to = displace_existing_to
+            try:
+                os.replace(temporary_path, destination)
+            except OSError:
+                if displaced_to is not None:
+                    try:
+                        os.replace(displaced_to, destination)
+                    except OSError:
+                        logging.warning("Could not return a displaced database file to its name.")
+                    else:
+                        # Only now is the name free for the older file again.
+                        cls._restore_from_spare_name(older_file_kept_as, displaced_to)
+                raise
+            cls._drop_spare_name(older_file_kept_as)
             # _database_is_valid opened the copy, so SQLite created
             # "<temp>-wal" and "<temp>-shm" beside it. os.replace moves only
             # the file itself, leaving those two behind under a name nothing
@@ -287,7 +498,49 @@ class DatabaseManager:
                         cause=exc,
                     ) from exc
 
-    def _prepare_primary(self) -> None:
+    @staticmethod
+    def _link_to_spare_name(path: str) -> str | None:
+        """Give an existing file a second name beside it and return that name.
+
+        ``os.replace`` onto ``path`` would otherwise destroy the file. Nothing
+        is moved, so ``path`` is where it always was; returns None when there is
+        no file, or when the file system cannot make a hard link.
+        """
+        if not os.path.exists(path):
+            return None
+        spare = os.path.join(
+            os.path.dirname(path) or ".", f".{os.path.basename(path)}.{uuid4().hex}.old"
+        )
+        try:
+            os.link(path, spare)
+        except (OSError, NotImplementedError):
+            logging.warning(
+                "Could not protect the older database backup while rotating; carrying on without."
+            )
+            return None
+        return spare
+
+    @staticmethod
+    def _drop_spare_name(spare: str | None) -> None:
+        """Remove a name made by ``_link_to_spare_name``; the file keeps its other one."""
+        if spare is None:
+            return
+        try:
+            os.unlink(spare)
+        except OSError:
+            logging.warning("Could not remove a temporary database backup link.")
+
+    @staticmethod
+    def _restore_from_spare_name(spare: str | None, path: str) -> None:
+        """Put a file back under ``path`` after its name was taken; a failure leaves it as ``spare``."""
+        if spare is None:
+            return
+        try:
+            os.replace(spare, path)
+        except OSError:
+            logging.warning("Could not return an older database backup to its name.")
+
+    def _prepare_primary(self) -> bool:
         """Validate the primary before backup rotation, recovering if needed.
 
         Runs once at startup rather than on every write: WAL mode already
@@ -299,25 +552,98 @@ class DatabaseManager:
         This stays fail-closed. A corrupt primary with no usable backup, or a
         recovery that cannot preserve what it is replacing, raises rather than
         starting on an empty or half-restored database.
+
+        Returns whether the primary has now been checked in full (or was just
+        restored from a backup that was), which lets the startup backup skip
+        reading it a second time. A primary that does not exist yet returns
+        False.
         """
-        if not os.path.exists(self.db_path) or self._database_is_valid(self.db_path):
-            return
+        if not os.path.exists(self.db_path):
+            return self._resume_interrupted_recovery()
+        if self._database_is_valid(self.db_path):
+            return True
 
-        for candidate in (self.backup_path, self.previous_backup_path):
-            if not self._database_is_valid(candidate):
-                continue
-            self.recovery_report = self._recover_from(candidate)
-            self.last_corrupt_path = self.recovery_report.quarantined_path
-            logging.error(
-                "Chat database was corrupt; recovered from a verified backup. "
-                "The corrupt file and its write-ahead log were preserved for "
-                "inspection (path omitted from logs)."
+        candidate = self._first_valid_backup()
+        if candidate is None:
+            raise PersistenceError(
+                "Chat database is corrupt and no valid backup is available.",
+                operation="recovery",
             )
-            return
+        self._record_recovery(
+            self._recover_from(candidate),
+            "Chat database was corrupt; recovered from a verified backup.",
+        )
+        return True
 
-        raise PersistenceError(
-            "Chat database is corrupt and no valid backup is available.",
-            operation="recovery",
+    def _first_valid_backup(self) -> str | None:
+        """The newest backup generation that passes a full integrity check."""
+        for candidate in (self.backup_path, self.previous_backup_path):
+            if self._database_is_valid(candidate):
+                # If the newer generation was skipped because it failed, the
+                # next rotation must not push it over this one.
+                self._newest_backup_unusable = candidate == self.previous_backup_path
+                return candidate
+        return None
+
+    def _record_recovery(self, report: RecoveryReport, message: str) -> None:
+        self.recovery_report = report
+        self.last_corrupt_path = report.quarantined_path
+        logging.error(
+            "%s The corrupt file and its write-ahead log were preserved for "
+            "inspection (path omitted from logs).",
+            message,
+        )
+
+    def _resume_interrupted_recovery(self) -> bool:
+        """Finish a recovery that died after moving the primary aside.
+
+        Recovery quarantines the corrupt primary and then publishes the
+        restored copy. Dying in between leaves no primary, and carrying on
+        would create an empty database, back that up over the good backup, and
+        push the good one out of the second generation on the launch after.
+        A missing primary beside a quarantined ``.corrupt-<id>`` file and a
+        valid backup is that state, so the backup is restored now. With no
+        valid backup there is nothing to restore from, and a new database is
+        created as it always was.
+        """
+        quarantined = find_interrupted_recovery(self.db_path)
+        if quarantined is None:
+            return False
+        candidate = self._first_valid_backup()
+        if candidate is None:
+            logging.warning(
+                "The chat database is missing beside a quarantined corrupt copy and no valid "
+                "backup exists; starting a new database."
+            )
+            return False
+        self._record_recovery(
+            self._finish_interrupted_recovery(candidate, str(quarantined)),
+            "A previous recovery of the chat database was interrupted; finished it from a "
+            "verified backup.",
+        )
+        return True
+
+    def _finish_interrupted_recovery(self, candidate: str, quarantined: str) -> RecoveryReport:
+        """Publish ``candidate`` as the primary; the corrupt one is already aside."""
+        try:
+            # A log with no database beside it is replayed onto whatever file is
+            # created there next, so it goes to the quarantined file as usual.
+            move_sidecars(self.db_path, quarantined)
+        except OSError as exc:
+            raise PersistenceError(
+                "Could not preserve the write-ahead log of the chat database before finishing "
+                "an interrupted recovery.",
+                operation="recovery",
+                cause=exc,
+            ) from exc
+        # Nothing to roll back if this fails: the primary was already aside, the
+        # next launch finds the same state and tries again.
+        self._atomic_copy_database(candidate, self.db_path)
+        return RecoveryReport(
+            recovered_from=candidate,
+            quarantined_path=quarantined,
+            at=utc_now_iso(),
+            adopted_sidecars=adopt_orphaned_sidecars(self.db_path, quarantined),
         )
 
     def _recover_from(self, candidate: str) -> RecoveryReport:
@@ -390,9 +716,10 @@ class DatabaseManager:
             recovered_from=candidate,
             quarantined_path=corrupt_path,
             at=utc_now_iso(),
+            adopted_sidecars=adopt_orphaned_sidecars(self.db_path, corrupt_path),
         )
 
-    def _create_backup(self) -> None:
+    def _create_backup(self, *, primary_verified: bool = False) -> None:
         """Refresh the validated backup from the current primary.
 
         Called once at startup (after _prepare_primary and schema init), not
@@ -403,29 +730,59 @@ class DatabaseManager:
         as a file after a checkpoint: in WAL mode recent commits can live
         only in the -wal sidecar, and wal_checkpoint(TRUNCATE) does not raise
         when a reader keeps it from finishing.
+
+        Startup does one full read of the primary to validate it
+        (_prepare_primary), one snapshot of it, a quick_check of that
+        snapshot, and a bounded quick_check of the backup it replaces.
+        ``primary_verified`` says the first has already happened this launch.
+        The old backup becomes the older generation by rename, after the new
+        snapshot has been written and verified, not by a second byte copy: a
+        snapshot that fails leaves both generations where they were.
+
+        A backup that has failed its check is overwritten, not rotated over
+        the good generation behind it. Recovery finding one bad is one way to
+        know (``_newest_backup_unusable``); the other is the check just
+        described, which catches a backup that quietly rotted between two
+        launches. A check that cannot finish in time is treated the same way,
+        so the older generation is kept whenever the newer one is not known
+        to be good.
         """
         with self._write_lock:
             if not os.path.exists(self.db_path):
                 return
-            if not self._database_is_valid(self.db_path):
+            if not primary_verified and not self._database_is_valid(self.db_path):
                 raise PersistenceError(
                     "Could not back up a chat database that failed validation.",
                     operation="backup",
                 )
+            older_generation_slot = None if self._newest_backup_unusable else self.previous_backup_path
+            if (
+                older_generation_slot is not None
+                and os.path.exists(self.backup_path)
+                and not quick_check_at_rest(
+                    self.backup_path, time_limit=_OUTGOING_BACKUP_CHECK_SECONDS
+                )
+            ):
+                logging.warning(
+                    "The newest chat database backup did not pass its check; keeping the older "
+                    "generation and replacing the newest one."
+                )
+                older_generation_slot = None
             try:
-                # Preserve the prior verified backup before replacing the
-                # current generation. If the new copy fails, .bak stays intact.
-                if self._database_is_valid(self.backup_path):
-                    self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-                self._atomic_snapshot_database(self.db_path, self.backup_path)
+                self._atomic_snapshot_database(
+                    self.db_path,
+                    self.backup_path,
+                    displace_existing_to=older_generation_slot,
+                )
             except PersistenceError:
                 raise
             except OSError as exc:
                 raise PersistenceError(
                     "Could not create a chat database backup.", operation="backup", cause=exc
                 ) from exc
+            self._newest_backup_unusable = False
 
-    def _refresh_startup_backup(self) -> None:
+    def _refresh_startup_backup(self, *, primary_verified: bool = False) -> None:
         """Take the startup backup without letting its failure stop the launch.
 
         The backup is a safety copy, and at this point the primary has been
@@ -436,7 +793,7 @@ class DatabaseManager:
         exactly as they were, because every write into them is atomic.
         """
         try:
-            self._create_backup()
+            self._create_backup(primary_verified=primary_verified)
         except PersistenceError as exc:
             self._note_backup_failure(str(exc), exc.cause)
 
@@ -480,8 +837,11 @@ class DatabaseManager:
         }
         if readable:
             advice = (
-                f"To go back to this release, close Cortex and restore {readable[max(readable)]}, "
-                "which the newer release kept before it upgraded the database."
+                "To go back to this release, close Cortex, move the current database and any "
+                "-wal and -shm files beside it to a folder of your own (whatever was written "
+                "since the upgrade stays only in those files), then copy "
+                f"{readable[max(readable)]} to the database's name. The newer release kept "
+                "that snapshot before it upgraded the database."
             )
         else:
             advice = "Install the release that wrote it, or restore a backup taken before it was upgraded."
@@ -491,21 +851,41 @@ class DatabaseManager:
             operation="schema_check",
         )
 
+    def _superseded_snapshot_path(self, snapshot_path: str) -> str:
+        """An unused name to keep an older pre-upgrade snapshot under."""
+        number = 1
+        while os.path.exists(f"{snapshot_path}.superseded-{number}"):
+            number += 1
+        return f"{snapshot_path}.superseded-{number}"
+
+    def _snapshot_is_current(self, snapshot_path: str) -> bool:
+        """Whether an existing pre-upgrade snapshot holds exactly what the primary holds now."""
+        digest = _content_digest(snapshot_path, at_rest=True)
+        return digest is not None and digest == _content_digest(self.db_path)
+
     def _snapshot_before_upgrade(self) -> None:
         """Keep the pre-upgrade state of a database this release is about to change.
 
         The ordinary backup is refreshed after the schema upgrade, so it and
         the generation behind it both hold the new schema, and an older
         release refuses all of them. A database on an older schema version is
-        therefore snapshotted first, to ``<db>.pre-v<version>.bak``: a fixed
-        name per version, written once and never rotated or overwritten.
+        therefore snapshotted first, to ``<db>.pre-v<version>.bak``. That name
+        always holds the newest snapshot for the version, and a snapshot is
+        never overwritten: one already there that no longer matches the
+        database (a rollback was followed by more chats on the older release,
+        and now a second upgrade) is renamed to ``<name>.superseded-<n>`` first.
+        One that still matches (an upgrade that was interrupted and is being
+        retried) is kept as it is.
 
         A database from a newer release is refused here, before anything
         touches it, with the name of the snapshot to restore.
 
-        A failed snapshot is reported through ``backup_status`` but does not
-        block the upgrade: the schema steps are additive, and the alternative
-        is a Cortex that cannot start until the disk has room.
+        The upgrade does not run without its snapshot. A snapshot that cannot
+        be written -- a full disk, a file held by another program -- refuses
+        the upgrade with the database untouched, and the next launch tries the
+        snapshot again. Carrying on would complete the upgrade in this same
+        launch, and nothing would ever retry: the rollback point would simply
+        never exist.
         """
         if not os.path.exists(self.db_path):
             return
@@ -517,111 +897,80 @@ class DatabaseManager:
         if version == self.SCHEMA_VERSION or not has_tables:
             return
         snapshot_path = self._pre_upgrade_snapshot_path(version)
-        if os.path.exists(snapshot_path):
-            return
         try:
-            self._atomic_snapshot_database(self.db_path, snapshot_path)
-        except PersistenceError as exc:
-            self._note_backup_failure(
-                f"Could not keep a pre-upgrade snapshot. {exc}", exc.cause
+            if os.path.exists(snapshot_path) and self._snapshot_is_current(snapshot_path):
+                self.pre_upgrade_snapshot_path = snapshot_path
+                return
+            self._atomic_snapshot_database(
+                self.db_path,
+                snapshot_path,
+                displace_existing_to=self._superseded_snapshot_path(snapshot_path),
             )
-            return
+        except PersistenceError as exc:
+            logging.error(
+                "Could not keep a pre-upgrade copy of the chat database; not upgrading (%s).",
+                type(exc.cause).__name__ if exc.cause is not None else "no cause recorded",
+            )
+            raise PersistenceError(
+                "Could not keep a copy of the chat database before upgrading it, so it was not "
+                "upgraded and nothing was changed. Free some disk space and close any program "
+                "that has the database open, then start Cortex again.",
+                operation="backup",
+                cause=exc.cause,
+            ) from exc
         self.pre_upgrade_snapshot_path = snapshot_path
 
-    def _create_tables(self):
-        """Creates the necessary tables in the database if they don't exist."""
+    def _create_tables(self) -> None:
+        """Bring the database to ``SCHEMA_VERSION``, then repair what a migration cannot.
+
+        The order is in sqlite_schema.prepare_database: version gate, then
+        write-ahead logging (read back, not assumed), then one transaction per
+        missing step of ``_MIGRATIONS``. WAL plus ``synchronous = NORMAL`` is
+        SQLite's documented safe-and-fast combination: an application or OS
+        crash can lose at most the last transaction but cannot corrupt the
+        file, which the rollback journal does not guarantee under NORMAL.
+        """
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = open_for_upgrade(self.db_path)
+            prepare_database(connection, _MIGRATIONS, target=self.SCHEMA_VERSION)
+        except SchemaTooNewError as exc:
+            raise self._unsupported_schema_error(exc.version) from exc
+        except WriteAheadLogUnavailableError as exc:
+            raise PersistenceError(
+                "SQLite would not enable write-ahead logging for the chat database (it reported "
+                f"journal mode '{exc.mode}'), which Cortex needs to store chats safely. Some "
+                "network, cloud-synced and removable drives do not support it. Your chats are "
+                "still where they were: nothing was deleted or modified. To keep using them, first "
+                "copy the existing data files (the whole data folder, including the database and "
+                "any -wal and -shm files beside it) into a folder on a local drive, then start "
+                "Cortex with --data-dir pointing at that folder. A --data-dir folder that starts "
+                "out empty holds no chats.",
+                operation="journal_mode",
+                cause=exc,
+            ) from exc
+        except sqlite3.Error as exc:
+            raise PersistenceError(
+                "Could not upgrade the chat database schema; it was left at its previous version.",
+                operation="schema_migration",
+                cause=exc,
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        # From here the file is in WAL mode, which is what makes NORMAL safe.
+        self._wal_confirmed = True
         with self.connect() as conn:
-            # WAL is persisted in the database file itself, so this only needs
-            # to run once to take effect for every later connection. Unlike
-            # the previous rollback-journal mode, WAL + synchronous=NORMAL
-            # (already set in connect()) is SQLite's documented safe-and-fast
-            # combination: an application or OS crash can lose at most the
-            # last transaction, but cannot corrupt the database file, which
-            # rollback-journal mode does not guarantee under the same pragma.
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS threads (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    sources TEXT,
-                    thoughts TEXT,
-                    attachments TEXT,
-                    timestamp TEXT NOT NULL,
-                    FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
-                );
-            """)
-            # Groups (folders/projects). `position` gives the user an explicit
-            # order independent of recency, and `collapsed` lives here rather
-            # than in browser storage so the sidebar looks the same on every
-            # launch and on any window.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_groups (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    position INTEGER NOT NULL DEFAULT 0,
-                    collapsed INTEGER NOT NULL DEFAULT 0,
-                    timestamp TEXT NOT NULL
-                );
-            """)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_thread_timestamp "
-                "ON messages(thread_id, timestamp, id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_threads_timestamp "
-                "ON threads(timestamp)"
-            )
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version > self.SCHEMA_VERSION:
-                raise self._unsupported_schema_error(version)
-            columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(messages)").fetchall()
-            }
-            if "attachments" not in columns:
-                conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
-            if "generation_stats_json" not in columns:
-                conn.execute("ALTER TABLE messages ADD COLUMN generation_stats_json TEXT")
-            thread_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(threads)").fetchall()
-            }
-            if "group_id" not in thread_columns:
-                # Deliberately no FOREIGN KEY: SQLite cannot add a constrained
-                # column via ALTER TABLE, and existing databases must upgrade
-                # in place rather than be rebuilt. delete_group() clears the
-                # column explicitly (the same effect as ON DELETE SET NULL),
-                # and the orphan sweep below repairs any row that somehow
-                # outlives its group.
-                conn.execute("ALTER TABLE threads ADD COLUMN group_id TEXT")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(group_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chat_groups_position "
-                "ON chat_groups(position, timestamp)"
-            )
-            # Self-heal: without a real FK, a chat could in principle point at
-            # a group that no longer exists (an interrupted delete, an
-            # externally edited file). Such a chat would be filed under a
-            # group the sidebar never renders, making it look deleted. Return
-            # any orphan to the ungrouped list on startup.
+            # Self-heal, deliberately not a migration step: without a real FK, a
+            # chat could in principle point at a group that no longer exists (an
+            # interrupted delete, an externally edited file). Such a chat would
+            # be filed under a group the sidebar never renders, making it look
+            # deleted. Return any orphan to the ungrouped list on startup.
             conn.execute(
                 "UPDATE threads SET group_id = NULL WHERE group_id IS NOT NULL "
                 "AND group_id NOT IN (SELECT id FROM chat_groups)"
             )
-            if version < self.SCHEMA_VERSION:
-                conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
-            logging.info("Database tables and indexes verified/created successfully.")
+            logging.info("Database schema is at version %d.", stored_version(conn))
 
     @staticmethod
     def _parse_legacy_attachment(value: object) -> dict | None:
