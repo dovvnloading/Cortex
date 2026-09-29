@@ -218,6 +218,120 @@ def test_cleanup_retains_tombstone_when_database_finalize_fails(tmp_path, monkey
     assert not quarantine.exists()
 
 
+def _tombstone_with_a_rejected_source(repository, tmp_path, *, state, quarantine_root_path=None):
+    """A tombstone whose artifact is already in quarantine but whose source path no longer validates.
+
+    The source path points outside the artifact root, as it does after the data
+    directory is moved or a job directory is swapped for a link. Returns the
+    artifact and the file sitting in quarantine.
+    """
+    job = _terminal_job(repository, f"rejected-{state}")
+    artifact = repository.publish_artifact(
+        job.job_id, name="rejected.txt", content=b"expired bytes", mime_type="text/plain", retention_seconds=1
+    )
+    quarantine = (quarantine_root_path or repository.quarantine_root) / f"{artifact.artifact_id}-held.artifact"
+    quarantine.parent.mkdir(parents=True, exist_ok=True)
+    Path(artifact.path).replace(quarantine)
+    elsewhere = tmp_path / "moved-data" / "rejected.txt"
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_artifacts SET expires_at = ? WHERE artifact_id = ?",
+            ("2000-01-01T00:00:00+00:00", artifact.artifact_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO execution_artifact_cleanup
+                (artifact_id, path, quarantine_path, state, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (artifact.artifact_id, str(elsewhere), str(quarantine), state, repository._now()),
+        )
+    return artifact, quarantine
+
+
+def _tombstone_rows(repository, artifact_id):
+    with repository.connect() as connection:
+        cleanup = connection.execute(
+            "SELECT state FROM execution_artifact_cleanup WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+        artifact = connection.execute(
+            "SELECT 1 FROM execution_artifacts WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+    return cleanup, artifact
+
+
+@pytest.mark.parametrize("state", ["pending", "quarantined", "finalized"])
+def test_a_rejected_tombstone_does_not_orphan_the_file_already_in_quarantine(tmp_path, state):
+    """Dropping a rejected row must not strand the file it had already moved.
+
+    The quarantine file is inside our own quarantine root and was put there by
+    the cleanup itself; only the original location stopped validating. Deleting
+    the row and its tombstone left that file with nothing that would ever look at
+    it again.
+    """
+    repository = _repository(tmp_path)
+    artifact, quarantine = _tombstone_with_a_rejected_source(repository, tmp_path, state=state)
+
+    result = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert not quarantine.exists()
+    assert result.skipped == 1
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
+def test_a_rejected_tombstone_is_kept_while_its_quarantine_file_cannot_be_removed(tmp_path, monkeypatch):
+    repository = _repository(tmp_path)
+    artifact, quarantine = _tombstone_with_a_rejected_source(repository, tmp_path, state="quarantined")
+    original_unlink = Path.unlink
+
+    def locked_unlink(self, *args, **kwargs):
+        if self.name == quarantine.name:
+            raise PermissionError("held open by a scanner")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+    first = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert first.skipped == 1
+    assert quarantine.exists()
+    cleanup_row, artifact_row = _tombstone_rows(repository, artifact.artifact_id)
+    assert cleanup_row is not None and artifact_row is not None  # kept, so a later pass retries
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    second = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert second.skipped == 1
+    assert not quarantine.exists()
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
+def test_a_rejected_tombstone_never_touches_a_file_outside_the_quarantine_root(tmp_path):
+    repository = _repository(tmp_path)
+    outside_root = tmp_path / "somewhere-else"
+    artifact, stray = _tombstone_with_a_rejected_source(
+        repository, tmp_path, state="quarantined", quarantine_root_path=outside_root
+    )
+
+    result = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert result.skipped == 1
+    assert stray.read_bytes() == b"expired bytes"  # not ours to delete
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
+def test_a_rejected_tombstone_leaves_a_directory_in_quarantine_alone(tmp_path):
+    repository = _repository(tmp_path)
+    artifact, quarantine = _tombstone_with_a_rejected_source(repository, tmp_path, state="quarantined")
+    quarantine.unlink()
+    quarantine.mkdir()
+    (quarantine / "inside.txt").write_bytes(b"not a file we quarantined")
+
+    repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert (quarantine / "inside.txt").read_bytes() == b"not a file we quarantined"
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
 def test_cleanup_supervisor_handles_failure_and_releases_lease(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     supervisor = ExecutionCleanupSupervisor(repository)

@@ -1920,6 +1920,12 @@ class ExecutionRepository:
         try:
             return self._advance_artifact_cleanup(artifact_id, path_text, quarantine_text, state), 0
         except ArtifactCleanupRejected as exc:
+            if not self._reclaim_quarantined_file(quarantine_text):
+                # Its quarantine file is still there and could not be removed
+                # this time. The row is the only record that it exists, so it
+                # stays and a later pass tries again.
+                self._requeue_artifact_cleanup(artifact_id)
+                return 0, 1
             self._discard_artifact_rows(artifact_id, exc)
             return 0, 1
         except ArtifactCleanupBlocked as exc:
@@ -1927,10 +1933,40 @@ class ExecutionRepository:
             self._requeue_artifact_cleanup(artifact_id)
             return 0, 1
 
+    def _reclaim_quarantined_file(self, quarantine_text: str) -> bool:
+        """Remove the file a rejected tombstone left in quarantine; False if it must be retried.
+
+        A row can be rejected because its *original* location no longer
+        validates (a moved data directory, a job directory swapped for a link)
+        after the artifact was already moved into quarantine. That file sits in
+        our own quarantine root, put there by this cleanup, and only the row
+        knows about it: discarding the row without removing it leaves it there
+        for good. Nothing outside the validated quarantine root is ever touched,
+        and neither is anything that is not a plain file.
+        """
+
+        try:
+            quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        except ArtifactCleanupRejected:
+            return True  # Not ours to touch; nothing here can be reclaimed.
+        except ArtifactCleanupBlocked:
+            return False
+        try:
+            if not stat.S_ISREG(quarantine.lstat().st_mode):
+                return True
+            quarantine.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+
     def _discard_artifact_rows(self, artifact_id: str, reason: ExecutionRepositoryError) -> None:
         """Drop an expired artifact's rows whose file this repository must not touch.
 
-        The file is left exactly where it is. The artifact was already expired
+        The artifact's own file is left exactly where it is (a file the cleanup
+        already moved into quarantine is reclaimed first, by
+        :meth:`_reclaim_quarantined_file`). The artifact was already expired
         and unreadable -- ``read_artifact`` applies the same containment rule --
         so the row protected nothing, and keeping it only blocked retention.
         Logs the kind of failure, never a path.
