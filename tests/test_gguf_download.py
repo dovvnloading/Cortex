@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import struct
 import threading
 import time
@@ -59,8 +60,12 @@ def _no_ambient_huggingface_token(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def _valid_gguf_content(tmp_path: Path) -> bytes:
-    """Build a small real GGUF fixture instead of testing magic-only bytes."""
+def _valid_gguf_content(tmp_path: Path, *, tensor_shape: tuple[int, int] = (2, 2)) -> bytes:
+    """Build a small real GGUF fixture instead of testing magic-only bytes.
+
+    ``tensor_shape`` grows the fixture (a float32 tensor of that shape) for
+    tests that need a body spanning many chunks.
+    """
     import numpy as np
     import gguf
 
@@ -68,7 +73,7 @@ def _valid_gguf_content(tmp_path: Path) -> bytes:
     writer = gguf.GGUFWriter(str(source), "llama")
     writer.add_context_length(2048)
     writer.add_name("fixture")
-    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.add_tensor("dummy.weight", np.zeros(tensor_shape, dtype=np.float32))
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
@@ -959,3 +964,130 @@ def test_a_rejected_token_is_reported_without_being_echoed(tmp_path: Path, monke
         download_gguf(_HF_RESOLVE_URL, "model.gguf", tmp_path, http_client=_status_client(401))
     assert _SYNTHETIC_TOKEN not in str(raised.value)
     assert _SYNTHETIC_TOKEN not in str(raised.value.__cause__)
+
+
+# -- progress throttling ------------------------------------------------------
+
+
+def _big_gguf(tmp_path: Path) -> bytes:
+    """A valid GGUF a little over 2 MiB, so a small read size gives many chunks."""
+    return _valid_gguf_content(tmp_path, tensor_shape=(512, 1024))
+
+
+def _download_events(content: bytes, tmp_path: Path) -> list[GGUFDownloadProgress]:
+    events: list[GGUFDownloadProgress] = []
+    download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        progress_callback=events.append,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=content, headers={"Content-Length": str(len(content))})
+            )
+        ),
+    )
+    return events
+
+
+def test_download_progress_is_throttled(tmp_path: Path, monkeypatch) -> None:
+    """A fast link must not publish one event per chunk.
+
+    The clock is frozen, so only a change in the whole-number percentage can
+    justify an event: about a hundred, however many thousand chunks arrive.
+    """
+    content = _big_gguf(tmp_path)
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 1024)
+    monkeypatch.setattr(download_module, "_monotonic", lambda: 100.0)
+
+    events = _download_events(content, tmp_path)
+
+    chunk_count = len(content) // 1024
+    downloading = [event for event in events if event.status == "downloading"]
+    assert chunk_count > 2000
+    assert len(downloading) <= 103
+    assert events[0].status == "starting"
+    assert downloading[0].completed == 1024  # the first chunk is always reported
+    assert downloading[-1].completed == len(content)  # ...and so is the last
+    assert events[-1].status == "success"
+    assert [event.completed for event in downloading] == sorted(event.completed or 0 for event in downloading)
+
+
+def test_download_progress_keeps_flowing_on_a_slow_link(tmp_path: Path, monkeypatch) -> None:
+    """Time, not just percentage, bounds the silence.
+
+    Each read advances the clock a tenth of a second, so on this link the
+    percentage moves once every ~20 reads while half a second passes every 5.
+    """
+    content = _big_gguf(tmp_path)
+    ticks = itertools.count()
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 1024)
+    monkeypatch.setattr(download_module, "_monotonic", lambda: next(ticks) * 0.1)
+
+    events = _download_events(content, tmp_path)
+
+    downloading = [event for event in events if event.status == "downloading"]
+    chunk_count = len(content) // 1024
+    assert len(downloading) > chunk_count // 8  # the percentage rule alone would give ~100
+    assert len(downloading) < chunk_count // 2  # and it is still a throttle
+
+
+def test_the_first_progress_arrives_before_a_mebibyte_has_been_read(tmp_path: Path) -> None:
+    """``iter_bytes(n)`` waits for ``n`` bytes, so a large read size meant a
+    slow link published nothing (and could not be cancelled) for minutes."""
+    content = _big_gguf(tmp_path)
+    piece = 16 * 1024
+    delivered = 0
+    delivered_at_first_progress: list[int] = []
+
+    def body():
+        nonlocal delivered
+        for offset in range(0, len(content), piece):
+            delivered += len(content[offset : offset + piece])
+            yield content[offset : offset + piece]
+
+    def on_progress(event: GGUFDownloadProgress) -> None:
+        if event.status == "downloading" and not delivered_at_first_progress:
+            delivered_at_first_progress.append(delivered)
+
+    download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        progress_callback=on_progress,
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body()))),
+    )
+
+    assert delivered_at_first_progress
+    assert delivered_at_first_progress[0] <= 128 * 1024
+
+
+def test_progress_reporter_reports_first_and_final_and_skips_repeats(monkeypatch) -> None:
+    monkeypatch.setattr(download_module, "_monotonic", lambda: 5.0)
+    events: list[GGUFDownloadProgress] = []
+    reporter = download_module._ProgressReporter(events.append, "model.gguf")
+
+    reporter.downloading(0, 1000, final=True)  # nothing stored yet: not a report
+    assert events == []
+    reporter.downloading(10, 1000)  # first: always reported
+    reporter.downloading(11, 1000)  # same percentage, no time passed: skipped
+    reporter.downloading(30, 1000)  # percentage changed: reported
+    reporter.downloading(1000, 1000, final=True)  # final: reported
+    reporter.downloading(1000, 1000, final=True)  # the same state again: not repeated
+
+    assert [event.completed for event in events] == [10, 30, 1000]
+
+
+def test_progress_reporter_uses_time_alone_when_the_total_is_unknown(monkeypatch) -> None:
+    now = [0.0]
+    monkeypatch.setattr(download_module, "_monotonic", lambda: now[0])
+    events: list[GGUFDownloadProgress] = []
+    reporter = download_module._ProgressReporter(events.append, "model.gguf")
+
+    reporter.downloading(1, None)
+    now[0] = 0.4
+    reporter.downloading(2, None)  # no percentage to change, under half a second
+    now[0] = 0.5
+    reporter.downloading(3, None)  # half a second since the last report
+
+    assert [event.completed for event in events] == [1, 3]

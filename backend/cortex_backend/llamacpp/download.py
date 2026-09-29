@@ -14,6 +14,7 @@ import re
 import shutil
 import socket
 import struct
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +27,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+# How much of the body is gathered before the loop below runs once. Small on
+# purpose: ``iter_bytes(n)`` waits for ``n`` bytes, so at one mebibyte a slow
+# link went minutes between progress updates -- and between cancellation checks.
+# 64 KiB is also the most a single socket read returns, so on a fast link this
+# costs nothing over a larger value.
+_DOWNLOAD_READ_BYTES = 64 * 1024
+# Forward progress at most this often (see ``_ProgressReporter``).
+_PROGRESS_INTERVAL_SECONDS = 0.5
 _MAX_DOWNLOAD_REDIRECTS = 5
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 _HF_API_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
@@ -105,6 +113,65 @@ class GGUFDownloadProgress:
         if self.completed is None or not self.total:
             return None
         return min(100, max(0, round(self.completed / self.total * 100)))
+
+
+# Indirection so a test can drive the progress throttle with a fake clock
+# without patching the ``time`` module for everything else in the process.
+_monotonic = time.monotonic
+
+
+class _ProgressReporter:
+    """Forward download progress no faster than anything can use it.
+
+    The body loop runs once per chunk, which on a fast link is many times a
+    second; passing every one on meant a server-sent event and a UI update per
+    chunk, for minutes. An update goes out when at least half a second has
+    passed since the last one, or when the whole-number percentage changed, so
+    a slow link still reports steadily and a fast one reports about twice a
+    second. The first update and the final one always go out.
+    """
+
+    def __init__(
+        self,
+        notify: Callable[[GGUFDownloadProgress], None],
+        filename: str,
+        *,
+        interval: float = _PROGRESS_INTERVAL_SECONDS,
+    ) -> None:
+        self._notify = notify
+        self._filename = filename
+        self._interval = interval
+        self._last_at: float | None = None
+        self._last_percent: int | None = None
+        self._last_completed: int | None = None
+
+    def starting(self) -> None:
+        self._notify(GGUFDownloadProgress(filename=self._filename, status="starting"))
+
+    def downloading(self, completed: int, total: int | None, *, final: bool = False) -> None:
+        """Report bytes stored so far; ``final`` marks the last update of the body."""
+        progress = GGUFDownloadProgress(
+            filename=self._filename, status="downloading", completed=completed, total=total
+        )
+        now = _monotonic()
+        if final:
+            if completed == 0 or completed == self._last_completed:
+                return  # nothing stored, or this exact state was already reported
+        elif not (
+            self._last_at is None
+            or now - self._last_at >= self._interval
+            or progress.percent != self._last_percent
+        ):
+            return
+        self._last_at = now
+        self._last_percent = progress.percent
+        self._last_completed = completed
+        self._notify(progress)
+
+    def success(self, size: int) -> None:
+        self._notify(
+            GGUFDownloadProgress(filename=self._filename, status="success", completed=size, total=size)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,8 +412,8 @@ def download_gguf(
     # Keep staging files out of the model directory's ``*.gguf`` scan.
     temp_path = directory / f".download-{uuid4().hex}.part"
     client = http_client or httpx
-    notify = progress_callback or (lambda progress: None)
-    notify(GGUFDownloadProgress(filename=target_filename, status="starting"))
+    reporter = _ProgressReporter(progress_callback or (lambda progress: None), target_filename)
+    reporter.starting()
     try:
         current_url = _validate_download_url(url)
         for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
@@ -382,7 +449,7 @@ def download_gguf(
                 saw_data = False
                 prefix = bytearray()
                 with temp_path.open("wb") as handle:
-                    for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                    for chunk in response.iter_bytes(_DOWNLOAD_READ_BYTES):
                         if cancellation_event is not None and cancellation_event.is_set():
                             raise GGUFDownloadError("Download cancelled.")
                         if chunk:
@@ -403,16 +470,10 @@ def download_gguf(
                         _require_free_space(directory, len(chunk), reserve)
                         handle.write(chunk)
                         completed += len(chunk)
-                        notify(
-                            GGUFDownloadProgress(
-                                filename=target_filename,
-                                status="downloading",
-                                completed=completed,
-                                total=total,
-                            )
-                        )
+                        reporter.downloading(completed, total)
                     handle.flush()
                     os.fsync(handle.fileno())
+                reporter.downloading(completed, total, final=True)
                 if not saw_data:
                     raise GGUFDownloadError("The download returned no data.")
                 if total is not None and completed != total:
@@ -462,14 +523,7 @@ def download_gguf(
         raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
     finally:
         temp_path.unlink(missing_ok=True)
-    notify(
-        GGUFDownloadProgress(
-            filename=target_filename,
-            status="success",
-            completed=destination.stat().st_size,
-            total=destination.stat().st_size,
-        )
-    )
+    reporter.success(destination.stat().st_size)
     return destination
 
 
