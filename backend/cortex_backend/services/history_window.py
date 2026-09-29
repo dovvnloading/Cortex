@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import re
+import unicodedata
 from typing import Any
 
 # Written for the model, not the user, and phrased so it cannot be mistaken for
@@ -34,11 +34,25 @@ HISTORY_OMISSION_NOTE = (
 # guards a hand-built message.
 _MAX_ATTACHMENT_NOTES = 8
 _MAX_LABEL_CHARS = 120
-# Control characters, line breaks, invisible and direction-changing characters
-# and the brackets the note itself is made of: a filename is user-controlled
-# text, and must not be able to end its own note early, start a line of its
-# own, or make what follows it read in a different order.
-_UNSAFE_LABEL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿\[\]]")
+# A filename is user-controlled text, and must not be able to end its own note
+# early, start a line of its own, make what follows it read in a different
+# order, or carry text nobody can see. What is refused is decided by Unicode
+# category rather than by a list of ranges, because the invisible characters
+# are a family and a list is always one member short:
+#
+# * Cc, control characters, and Zl/Zp, the line and paragraph separators;
+# * Cf, format characters: zero-width and joiner characters, the bidirectional
+#   controls, the word joiner and invisible operators (U+2060-U+2064), the
+#   Arabic letter mark, the soft hyphen, the byte-order mark -- and the tag
+#   characters that can spell out ASCII no reader can see (U+E0020-U+E007F);
+# * the Hangul fillers, which are letters to Unicode and blanks on screen; and
+# * the brackets the note is itself made of.
+#
+# The whole tag block is refused, not only the assigned members of it.
+_UNSAFE_LABEL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_INVISIBLE_LETTERS = frozenset("\u115f\u1160\u3164\uffa0")
+_TAG_BLOCK = range(0xE0000, 0xE0080)
+_NOTE_BRACKETS = frozenset("[]")
 
 
 def answered_exchanges(messages: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
@@ -68,9 +82,18 @@ def answered_exchanges(messages: Sequence[Mapping[str, Any]]) -> list[tuple[str,
     return exchanges
 
 
+def _is_unsafe_label_char(character: str) -> bool:
+    return (
+        character in _NOTE_BRACKETS
+        or character in _INVISIBLE_LETTERS
+        or ord(character) in _TAG_BLOCK
+        or unicodedata.category(character) in _UNSAFE_LABEL_CATEGORIES
+    )
+
+
 def safe_label(value: object) -> str:
     """``value`` as one short, printable line, fit to name a file in a notice."""
-    text = _UNSAFE_LABEL_CHARS.sub(" ", str(value or ""))
+    text = "".join(" " if _is_unsafe_label_char(character) else character for character in str(value or ""))
     return " ".join(text.split())[:_MAX_LABEL_CHARS]
 
 
