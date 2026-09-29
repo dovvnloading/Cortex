@@ -190,6 +190,11 @@ describe("CortexApi", () => {
       JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     ));
+    // The request the old token was refused for is sent again under the new one.
+    fetcher.mockResolvedValueOnce(new Response(
+      JSON.stringify({ status: "ok", preview: true, started_at: "2026-07-20T00:00:00Z" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
     window.sessionStorage.setItem("cortex.session.token", "session-1");
     const api = new CortexApi("/api/v1", fetcher);
     const onSessionExpired = vi.fn();
@@ -202,10 +207,12 @@ describe("CortexApi", () => {
       headers: { "Content-Type": "application/json" },
     }));
 
-    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    await expect(pending).resolves.toMatchObject({ status: "ok" });
     expect(onSessionExpired).not.toHaveBeenCalled();
     expect(api.hasSession).toBe(true);
     expect(window.sessionStorage.getItem("cortex.session.token")).toBe("session-2");
+    const replay = fetcher.mock.calls[2]?.[1] as RequestInit;
+    expect(new Headers(replay.headers).get("Authorization")).toBe("Bearer session-2");
   });
 
   it("does not clear a replacement session when an older SSE request returns 401", async () => {
@@ -216,6 +223,10 @@ describe("CortexApi", () => {
     fetcher.mockResolvedValueOnce(new Response(
       JSON.stringify({ session_token: "session-2", expires_at: "2026-07-20T01:00:00Z" }),
       { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    fetcher.mockResolvedValueOnce(new Response(
+      'id: 1\ndata: {"id":1,"job_id":"job-1","kind":"completed","status":"succeeded"}\n\n',
+      { status: 200 },
     ));
     window.sessionStorage.setItem("cortex.session.token", "session-1");
     const api = new CortexApi("/api/v1", fetcher);
@@ -229,9 +240,11 @@ describe("CortexApi", () => {
       headers: { "Content-Type": "application/json" },
     }));
 
-    await expect(pending).rejects.toEqual(new ApiError(401, "Local session expired."));
+    await expect(pending).resolves.toMatchObject({ status: "succeeded" });
     expect(onSessionExpired).not.toHaveBeenCalled();
     expect(api.hasSession).toBe(true);
+    const replay = fetcher.mock.calls[2]?.[1] as RequestInit;
+    expect(new Headers(replay.headers).get("Authorization")).toBe("Bearer session-2");
   });
 
   it("parses ordered authenticated generation events from an SSE response", async () => {
@@ -404,8 +417,9 @@ describe("session invalidation guards", () => {
     // A 401 answering a request sent under an older token says nothing about
     // the token in hand now. request() already guards this; the artifact
     // download did not, so a slow download could sign the user out of a
-    // session that was working.
+    // session that was working. It is sent again under the current token.
     let releaseDownload: (() => void) | null = null;
+    let downloads = 0;
     let exchanges = 0;
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
@@ -416,6 +430,8 @@ describe("session invalidation guards", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
+      downloads += 1;
+      if (downloads > 1) return new Response("artifact bytes", { status: 200 });
       await new Promise<void>((resolve) => {
         releaseDownload = resolve;
       });
@@ -425,13 +441,232 @@ describe("session invalidation guards", () => {
     await api.exchangeBootstrapToken("bootstrap-1");
     expect(api.hasSession).toBe(true);
 
-    const pending = api.downloadExecutionArtifact("artifact-1").catch(() => undefined);
+    const pending = api.downloadExecutionArtifact("artifact-1");
     await vi.waitFor(() => expect(releaseDownload).not.toBeNull());
     // The user re-exchanges while that download is still open.
     await api.exchangeBootstrapToken("bootstrap-2");
     releaseDownload!();
-    await pending;
+    const response = await pending;
 
+    expect(await response.text()).toBe("artifact bytes");
     expect(api.hasSession).toBe(true);
+    const replay = fetcher.mock.calls.filter(([url]) => String(url).includes("/artifacts/"))[1]?.[1] as RequestInit;
+    expect(new Headers(replay.headers).get("Authorization")).toBe("Bearer token-2");
+  });
+});
+
+describe("session renewal", () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+  const bearer = (init: unknown) => new Headers((init as RequestInit).headers).get("Authorization");
+  const sse = (body: string) => new Response(body, { status: 200 });
+
+  /**
+   * A backend whose session `expired-token` is no longer accepted. The handoff
+   * and exchange routes behave as the real ones do, and every call is recorded.
+   */
+  function expiringBackend(options: { handoffStatus?: number; rejectRenewed?: boolean } = {}) {
+    const rejected = new Set(["Bearer expired-token"]);
+    let exchanges = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/session/handoff")) {
+        if (options.handoffStatus) return json({ detail: "Handoff refused." }, options.handoffStatus);
+        return json({ bootstrap_token: `bootstrap-${exchanges + 1}`, expires_at: "2099-01-01T00:00:00Z" });
+      }
+      if (url.endsWith("/session/exchange")) {
+        exchanges += 1;
+        return json({ session_token: `renewed-${exchanges}`, expires_at: "2099-01-01T00:00:00Z", token_type: "bearer" });
+      }
+      const token = bearer(init);
+      if ((token !== null && rejected.has(token)) || (options.rejectRenewed && token?.startsWith("Bearer renewed-"))) {
+        return json({ detail: "Local session expired." }, 401);
+      }
+      if (url.includes("/artifacts/")) return new Response("artifact bytes", { status: 200 });
+      if (url.endsWith("/events")) {
+        return sse('id: 4\ndata: {"id":4,"job_id":"job-1","kind":"completed","status":"succeeded"}\n\n');
+      }
+      return json({ status: "ok", preview: true, started_at: "2026-07-20T00:00:00Z" });
+    });
+    const calls = (suffix: string) => fetcher.mock.calls.filter(([input]) => String(input).endsWith(suffix));
+    return { fetcher, calls, rejected };
+  }
+
+  function apiWithExpiredSession(fetcher: typeof fetch, handoffSecret: string | null = "desktop-handoff") {
+    window.sessionStorage.setItem("cortex.session.token", "expired-token");
+    const api = new CortexApi("/api/v1", fetcher);
+    if (handoffSecret !== null) api.setHandoffSecret(handoffSecret);
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+    return { api, onSessionExpired };
+  }
+
+  afterEach(() => window.sessionStorage.clear());
+
+  it("renews an expired session once and replays the request under the new token", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    await expect(api.system()).resolves.toMatchObject({ status: "ok" });
+
+    expect(calls("/session/handoff")).toHaveLength(1);
+    expect(new Headers((calls("/session/handoff")[0]?.[1] as RequestInit).headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
+    expect(calls("/session/exchange")).toHaveLength(1);
+    expect(calls("/system")).toHaveLength(2);
+    expect(bearer(calls("/system")[1]?.[1])).toBe("Bearer renewed-1");
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(api.hasSession).toBe(true);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("renewed-1");
+  });
+
+  it("replays a request with its original body", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api } = apiWithExpiredSession(fetcher);
+
+    await api.createChat("Kept body");
+
+    const sent = calls("/chats").map(([, init]) => (init as RequestInit).body);
+    expect(sent).toEqual([JSON.stringify({ title: "Kept body" }), JSON.stringify({ title: "Kept body" })]);
+  });
+
+  it("shares one renewal between requests that expire together", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    const results = await Promise.all([api.system(), api.chats(), api.settings()]);
+
+    expect(results).toHaveLength(3);
+    expect(calls("/session/handoff")).toHaveLength(1);
+    expect(calls("/session/exchange")).toHaveLength(1);
+    for (const path of ["/system", "/chats", "/settings"]) {
+      expect(calls(path)).toHaveLength(2);
+      expect(bearer(calls(path)[1]?.[1])).toBe("Bearer renewed-1");
+    }
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it("can renew again the next time the session expires", async () => {
+    const { fetcher, calls, rejected } = expiringBackend();
+    const { api } = apiWithExpiredSession(fetcher);
+
+    await api.system();
+    // The renewed session lapses too, an hour later.
+    rejected.add("Bearer renewed-1");
+    await api.system();
+
+    expect(calls("/session/handoff")).toHaveLength(2);
+    expect(bearer(calls("/system")[3]?.[1])).toBe("Bearer renewed-2");
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("renewed-2");
+  });
+
+  it("does not replay, and clears the session, when renewal is refused", async () => {
+    const { fetcher, calls } = expiringBackend({ handoffStatus: 403 });
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
+
+    expect(calls("/session/handoff")).toHaveLength(1);
+    expect(calls("/session/exchange")).toHaveLength(0);
+    expect(calls("/system")).toHaveLength(1);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    expect(api.hasSession).toBe(false);
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
+  });
+
+  it("clears the session when renewal cannot reach the backend", async () => {
+    let handoffs = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).endsWith("/session/handoff")) {
+        handoffs += 1;
+        throw new TypeError("Failed to fetch");
+      }
+      return json({ detail: "Local session expired." }, 401);
+    });
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
+
+    expect(handoffs).toBe(1);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    expect(api.hasSession).toBe(false);
+  });
+
+  it("replays only once when the renewed session is rejected as well", async () => {
+    const { fetcher, calls } = expiringBackend({ rejectRenewed: true });
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
+
+    expect(calls("/session/handoff")).toHaveLength(1);
+    expect(calls("/system")).toHaveLength(2);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    expect(api.hasSession).toBe(false);
+  });
+
+  it("does not try to renew without a handoff secret", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher, null);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Local session expired."));
+
+    expect(calls("/session/handoff")).toHaveLength(0);
+    expect(calls("/system")).toHaveLength(1);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+  });
+
+  it("does not renew when the handoff request itself is rejected", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => json({ detail: "Handoff refused." }, 401));
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    await expect(api.rebootstrap("desktop-handoff")).rejects.toEqual(new ApiError(401, "Handoff refused."));
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it("does not renew a request that was sent without a session", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => json({ detail: "Not signed in." }, 401));
+    const api = new CortexApi("/api/v1", fetcher);
+    api.setHandoffSecret("desktop-handoff");
+    const onSessionExpired = vi.fn();
+    api.subscribeSessionExpired(onSessionExpired);
+
+    await expect(api.system()).rejects.toEqual(new ApiError(401, "Not signed in."));
+
+    // Onboarding owns the first exchange; there is no session to renew.
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it("renews and reconnects an event stream, keeping the resume cursor", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+    const kinds: string[] = [];
+
+    const terminal = await api.streamJob("job-1", (event) => kinds.push(event.kind), { afterEventId: 3 });
+
+    expect(terminal).toMatchObject({ status: "succeeded" });
+    expect(kinds).toEqual(["completed"]);
+    const attempts = calls("/jobs/job-1/events");
+    expect(attempts).toHaveLength(2);
+    for (const [, init] of attempts) {
+      expect(new Headers((init as RequestInit).headers).get("Last-Event-ID")).toBe("3");
+    }
+    expect(bearer(attempts[1]?.[1])).toBe("Bearer renewed-1");
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it("renews and replays an artifact download", async () => {
+    const { fetcher, calls } = expiringBackend();
+    const { api, onSessionExpired } = apiWithExpiredSession(fetcher);
+
+    const response = await api.downloadExecutionArtifact("artifact-1");
+
+    expect(await response.text()).toBe("artifact bytes");
+    expect(calls("/session/handoff")).toHaveLength(1);
+    expect(bearer(calls("/artifacts/artifact-1")[1]?.[1])).toBe("Bearer renewed-1");
+    expect(onSessionExpired).not.toHaveBeenCalled();
   });
 });

@@ -39,6 +39,10 @@ describe("useGenerationStream", () => {
   afterEach(() => {
     window.sessionStorage.clear();
     useUiStore.setState({ toasts: [] });
+    // A generation kept across a 401 is deliberately left tracked; do not let
+    // it leak into the next test.
+    const { generation, endGeneration } = useChatStore.getState();
+    if (generation.jobId) endGeneration(generation.jobId);
   });
 
   it("start() persists the job to sessionStorage and moves the store to starting", () => {
@@ -474,7 +478,10 @@ describe("useGenerationStream", () => {
     expect(onFailed).not.toHaveBeenCalled();
   });
 
-  it("clears the tracked generation and expires the session without reconnecting when the stream rejects with a 401", async () => {
+  it("keeps the tracked generation and persisted job when the stream rejects with 401", async () => {
+    // The backend owns a generation by installation, not by session, so an
+    // expired session says nothing about the job. It must stay tracked for the
+    // resume effect to re-attach once the session is renewed.
     const streamGeneration = vi.fn().mockRejectedValue(new ApiError(401, "Local session expired."));
     const api = fakeApi({ streamGeneration });
     const onSessionExpired = vi.fn();
@@ -489,11 +496,70 @@ describe("useGenerationStream", () => {
     expect(streamGeneration).toHaveBeenCalledTimes(1);
     expect(api.generationStatus).not.toHaveBeenCalled();
     expect(onFailed).not.toHaveBeenCalled();
-    expect(readActiveJob()).toBeNull();
-    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+    expect(readActiveJob()).toEqual({ jobId: "job-8", threadId: "thread-8", lastEventId: 0 });
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-8", threadId: "thread-8" });
+    expect(useChatStore.getState().generation.phase).not.toBe("idle");
   });
 
-  it("clears the tracked generation and expires the session when the status fallback rejects with a 401", async () => {
+  it("re-attaches from the preserved cursor after a 401 once the session is back", async () => {
+    const streamGeneration = vi.fn((_jobId, onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) {
+        (onEvent as (event: unknown) => void)({ event_id: 6, event: "generation.persisting", job_id: "job-401-resume", thread_id: "thread-401-resume", data: {} });
+        return Promise.reject(new ApiError(401, "Local session expired."));
+      }
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const api = fakeApi({ streamGeneration });
+    const onSessionExpired = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+
+    act(() => {
+      result.current.start("job-401-resume", "thread-401-resume", onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(useChatStore.getState().generationCursor).toBe(6);
+
+    // What ChatPage's resume effect does after the workspace comes back: the
+    // claim was released, so the same job can be consumed again.
+    const cursor = useChatStore.getState().generationCursor;
+    act(() => {
+      void result.current.consume({ jobId: "job-401-resume", threadId: "thread-401-resume", lastEventId: cursor }, onCompleted, vi.fn());
+    });
+
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2));
+    expect(streamGeneration.mock.calls[1]?.[2]).toMatchObject({ afterEventId: 6 });
+    expect(useChatStore.getState().generation.jobId).toBe("job-401-resume");
+    act(() => result.current.stop());
+  });
+
+  it("still ends the generation when the job finishes on the re-attached stream", async () => {
+    const streamGeneration = vi.fn((_jobId, onEvent) => {
+      if (streamGeneration.mock.calls.length === 1) return Promise.reject(new ApiError(401, "Local session expired."));
+      (onEvent as (event: unknown) => void)({ event_id: 1, event: "generation.completed", job_id: "job-401-done", thread_id: "thread-401-done", data: {} });
+      return Promise.resolve();
+    });
+    const api = fakeApi({ streamGeneration });
+    const onSessionExpired = vi.fn();
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
+
+    act(() => {
+      result.current.start("job-401-done", "thread-401-done", onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    act(() => {
+      void result.current.consume({ jobId: "job-401-done", threadId: "thread-401-done", lastEventId: 0 }, onCompleted, vi.fn());
+    });
+
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-401-done"));
+    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }));
+    expect(readActiveJob()).toBeNull();
+  });
+
+  it("keeps the tracked generation when the status fallback rejects with a 401", async () => {
     const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
     const generationStatus = vi.fn().mockRejectedValue(new ApiError(401, "Local session expired."));
     const api = fakeApi({ streamGeneration, generationStatus });
@@ -509,8 +575,8 @@ describe("useGenerationStream", () => {
     expect(streamGeneration).toHaveBeenCalledTimes(1);
     expect(generationStatus).toHaveBeenCalledTimes(1);
     expect(onFailed).not.toHaveBeenCalled();
-    expect(readActiveJob()).toBeNull();
-    expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
+    expect(readActiveJob()).toEqual({ jobId: "job-status-401", threadId: "thread-status-401", lastEventId: 0 });
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-status-401", threadId: "thread-status-401" });
   });
 
   it("stops retrying and clears the tracked generation when the status fallback says the job is gone", async () => {

@@ -15,6 +15,7 @@ const ChatPage = lazy(loadChatPage);
 import { Onboarding } from "../features/shell/Onboarding";
 const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
+import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
@@ -117,11 +118,14 @@ export function App({ api: providedApi }: Props) {
   const [launcherCredentials] = useState(readLauncherCredentials);
   // The read above is pure; the URL scrub is a side effect and belongs here.
   useEffect(() => {
-    // Both are side effects and both are idempotent, so StrictMode's second
-    // invocation is a no-op.
+    // All of these are side effects and all are idempotent, so StrictMode's
+    // second invocation is a no-op.
     persistHandoffSecret(launcherCredentials.handoffSecret);
+    // The client renews an expired session itself, in place, so it needs the
+    // secret too. Without this a 401 reached the workspace and remounted it.
+    api.setHandoffSecret(launcherCredentials.handoffSecret);
     scrubLauncherCredentials();
-  }, [launcherCredentials.handoffSecret]);
+  }, [api, launcherCredentials.handoffSecret]);
   const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
   const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
@@ -147,10 +151,17 @@ export function App({ api: providedApi }: Props) {
       if (reconnectInFlight.current === operation) reconnectInFlight.current = null;
     });
   }, [api, handoffSecret]);
+  // The client renews an expired session in place and only notifies once that
+  // failed (or was impossible), so this is the fallback: leave the workspace
+  // and try the handoff again from onboarding, which also reports why it
+  // failed. The guard makes a late or duplicate call harmless -- a 401 from a
+  // request sent under an older token, or a second report after the reconnect
+  // already succeeded, must not tear down a session that works.
   const handleSessionExpired = useCallback(() => {
+    if (api.hasSession) return;
     setSessionReady(false);
     void reconnect();
-  }, [reconnect]);
+  }, [api, reconnect]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
 
@@ -223,6 +234,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const saving = useSettingsStore((state) => state.saving);
   const setSaving = useSettingsStore((state) => state.setSaving);
   const [memos, setMemos] = useState<string[]>([]);
+  const [memoryLoad, setMemoryLoad] = useState<MemoryLoadState>({ status: "loading" });
   const models = useModelStore((state) => state.models);
   const setModels = useModelStore((state) => state.setModels);
   const [memoryBusy, setMemoryBusy] = useState(false);
@@ -245,6 +257,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const workspaceLoadGenerationRef = useRef(0);
   const groupLoadGenerationRef = useRef(0);
   const modelGenerationRef = useRef(0);
+  const memoryGenerationRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -253,6 +266,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       workspaceLoadGenerationRef.current += 1;
       groupLoadGenerationRef.current += 1;
       modelGenerationRef.current += 1;
+      memoryGenerationRef.current += 1;
       // The model job itself is durable on the backend, but its UI ownership
       // ends with this authenticated workspace. Do not strand a busy flag in
       // the process-wide store after logout or a remount.
@@ -275,11 +289,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setLoading(true);
     setLoadError(null);
     try {
-      const [systemResponse, chatResponse, settingsResponse, memoryResponse] = await Promise.all([
+      // Memories are not here on purpose: they render only inside Settings, so
+      // an unreadable memory store must not stand between the user and chat.
+      // They load when the settings route opens.
+      const [systemResponse, chatResponse, settingsResponse] = await Promise.all([
         api.system(),
         api.chats(),
         api.settings(),
-        api.memories(),
       ]);
       if (!isCurrentLoad()) return;
       setSystem(systemResponse);
@@ -293,41 +309,63 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         .then((nextGroups) => {
           if (isCurrentGroupLoad()) setGroups(nextGroups);
         })
-        .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) {
-            if (isCurrentLoad()) onSessionExpired();
-          }
-          else if (isCurrentGroupLoad()) setGroups([]);
+        .catch(() => {
+          if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
-      setMemos(memoryResponse.memos);
       if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
       void api.models()
         .then((nextModels) => {
           if (isCurrentModelLoad()) setModels(nextModels);
         })
-        .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) {
-            if (isCurrentLoad()) onSessionExpired();
-          }
-          else if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
+        .catch(() => {
+          if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
         });
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401 && isCurrentLoad()) {
-        onSessionExpired();
-        return;
-      }
+      // No 401 branch anywhere in this file: the client renews an expired
+      // session in place, and only when it cannot does it clear the session
+      // and tell the app's listener, which owns the way back to onboarding.
       if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
-  }, [api, onSessionExpired, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
+  }, [api, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
     return () => window.clearTimeout(timer);
   }, [loadWorkspace]);
+
+  // Memories are read for the Settings screen only, so they load when that
+  // route opens, with their own error state, rather than gating the workspace.
+  // Opening Settings again refreshes them: the assistant can add memories from
+  // a chat, and saving an edited copy of a stale list would erase those.
+  const loadMemories = useCallback(async () => {
+    const generation = ++memoryGenerationRef.current;
+    const isCurrentLoad = () => mountedRef.current && memoryGenerationRef.current === generation;
+    // Keep showing the last list during a refresh; only a first load, or a
+    // retry after a failure, has nothing to show.
+    setMemoryLoad((current) => (current.status === "ready" ? current : { status: "loading" }));
+    try {
+      const response = await api.memories();
+      if (!isCurrentLoad()) return;
+      setMemos(response.memos);
+      setMemoryLoad({ status: "ready" });
+    } catch (error) {
+      if (isCurrentLoad()) {
+        setMemoryLoad({ status: "error", message: apiMessage(error, "Could not load your saved memories.") });
+      }
+    }
+  }, [api]);
+
+  // A mutation's response is the authoritative list. Invalidate any load still
+  // in flight so it cannot overwrite it with an older read.
+  const applyMemories = (nextMemos: string[]) => {
+    ++memoryGenerationRef.current;
+    setMemos(nextMemos);
+    setMemoryLoad({ status: "ready" });
+  };
 
   useEffect(() => {
     const mediaQuery = theme === "system" && typeof window.matchMedia === "function"
@@ -364,8 +402,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       try {
         const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
         setExecutionTasks(response.tasks);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      } catch {
+        // A failed poll keeps the last list and the next tick retries.
       }
     });
     executionTaskRefreshRef.current = refresh;
@@ -378,7 +416,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       },
     );
     return refresh;
-  }, [api, onSessionExpired]);
+  }, [api]);
 
   // A second is the right cadence while something is actually running or
   // waiting on approval. With nothing in flight it was still a SQLite query
@@ -403,10 +441,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       const response = await api.system();
       setLlamacppStatus(response.llamacpp ?? null);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+    } catch {
+      // Keep the last known status; the next tick retries.
     }
-  }, [api, onSessionExpired, setLlamacppStatus]);
+  }, [api, setLlamacppStatus]);
   useVisiblePolling(refreshLlamacppStatus, 2000, selectedModelIsGGUF);
 
   const visibleExecutionTasks = system?.execution_preview_available
@@ -418,8 +456,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       await api.cancelExecution(jobId);
       await refreshExecutionTasks();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not stop the background task."), "error");
+      notify(apiMessage(error, "Could not stop the background task."), "error");
     }
   };
 
@@ -432,19 +469,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       await refreshExecutionTasks();
       notify(decision === "approved" ? "Background task approved once." : "Background task denied.", "success");
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not record the approval decision."), "error");
+      notify(apiMessage(error, "Could not record the approval decision."), "error");
     }
   };
 
-  const loadCodeSource = async (jobId: string) => {
-    try {
-      return await api.executionSource(jobId);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      throw error;
-    }
-  };
+  const loadCodeSource = (jobId: string) => api.executionSource(jobId);
 
   const renameChat = async (id: string, title: string): Promise<boolean> => {
     try {
@@ -467,8 +496,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not download the execution artifact."), "error");
+      notify(apiMessage(error, "Could not download the execution artifact."), "error");
     }
   };
 
@@ -595,7 +623,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response = await api.addMemory(memo);
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Memory saved.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not save memory."), "error");
@@ -608,7 +636,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response: MemoryResponse = await api.clearMemories();
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Permanent memories cleared.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not clear memories."), "error");
@@ -621,7 +649,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     setMemoryBusy(true);
     try {
       const response = await api.replaceMemories(next);
-      setMemos(response.memos);
+      applyMemories(response.memos);
       notify("Memory changes saved.", "success");
     } catch (error) {
       notify(apiMessage(error, "Could not save memory changes."), "error");
@@ -704,10 +732,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        if (isCurrentModelJob()) onSessionExpired();
-      }
-      else if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
+      if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
       return null;
     } finally {
       if (isCurrentModelJob()) setModelBusy(false);
@@ -815,7 +840,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
-            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
+            ? <SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} />
             : <ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy || saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onChatChanged={upsertChatSummary} onForked={upsertChatSummary} onClearMemory={clearMemory} onSessionExpired={onSessionExpired} />}
         </Suspense>
       </AppShell>
@@ -848,9 +873,12 @@ function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, s
   return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onChatChanged={onChatChanged} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} onSessionExpired={onSessionExpired} />;
 }
 
-function SettingsRoute({ activeChatId, ...props }: Omit<SettingsPanelProps, "onClose"> & { activeChatId: string | null }) {
+function SettingsRoute({ activeChatId, onLoadMemories, ...props }: Omit<SettingsPanelProps, "onClose" | "onRetryMemory"> & { activeChatId: string | null; onLoadMemories: () => Promise<void> }) {
   const navigate = useNavigate();
-  return <SettingsPanel {...props} onClose={() => navigate(activeChatId ? chatPath(activeChatId) : "/chat/new")} />;
+  useEffect(() => {
+    void onLoadMemories();
+  }, [onLoadMemories]);
+  return <SettingsPanel {...props} onRetryMemory={() => void onLoadMemories()} onClose={() => navigate(activeChatId ? chatPath(activeChatId) : "/chat/new")} />;
 }
 
 const ACTIVE_EXECUTION_STATUSES = new Set<ExecutionTaskSummary["status"]>([

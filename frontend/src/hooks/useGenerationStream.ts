@@ -371,7 +371,15 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
           // handling.
           await completion.catch(() => undefined);
         }
-        if (terminal || sessionExpired) {
+        // Only a job that is actually over is forgotten. A 401 says nothing
+        // about the job: the backend owns generations by installation, not
+        // by session, so it keeps running and stays reachable once the
+        // session is renewed. Dropping the tracked job here discarded a live
+        // answer -- and on a reload the saved one never appeared either,
+        // since nothing refreshed the chat when the backend finished. The
+        // store and the persisted job are left as they are, so the resume
+        // effect re-attaches from the preserved cursor.
+        if (terminal) {
           const stored = readActiveJob();
           if (stored?.jobId === job.jobId) clearActiveJob();
           useChatStore.getState().endGeneration(job.jobId);
@@ -379,7 +387,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
         // Only release the claim if it is still ours: a consumer that is
         // finishing late (its terminal reload is awaited above) must not
         // clear the marker a newer job has since installed, which would let
-        // a second consumer attach to that newer job in parallel.
+        // a second consumer attach to that newer job in parallel. On a 401
+        // this release is what lets the resume effect attach again.
         if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }

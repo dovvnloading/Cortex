@@ -16,7 +16,7 @@ import {
   SeedField,
   type GenerationPatch,
 } from "../generation/GenerationControls";
-import { MemoryPanel } from "./MemoryPanel";
+import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
 import { ModelsPanel } from "../models/ModelsPanel";
 
 type SettingsSection = "general" | "model" | "memory" | "translation" | "system";
@@ -24,6 +24,9 @@ type SettingsSection = "general" | "model" | "memory" | "translation" | "system"
 export type SettingsPanelProps = {
   settings: CortexSettings;
   memos: string[];
+  /** Absent means the list is already loaded. */
+  memoryLoad?: MemoryLoadState;
+  onRetryMemory?: () => void;
   saving: boolean;
   memoryBusy: boolean;
   onSave: (settings: CortexSettings) => Promise<void>;
@@ -97,6 +100,8 @@ const sections: { id: SettingsSection; label: string; detail: string }[] = [
 export function SettingsPanel({
   settings,
   memos,
+  memoryLoad,
+  onRetryMemory,
   saving,
   memoryBusy,
   onSave,
@@ -325,7 +330,7 @@ export function SettingsPanel({
                 <span><strong>Use permanent memory</strong><small>Allow relevant saved facts in generation context.</small></span>
                 <input id="memory-enabled" type="checkbox" checked={memory.enabled ?? true} onChange={(event) => update({ memory: { ...memory, enabled: event.target.checked } })} />
               </label>
-              <MemoryPanel memos={memos} busy={memoryBusy} onAdd={onAddMemory} onReplace={onReplaceMemory} onClear={onClearMemory} />
+              <MemoryPanel memos={memos} load={memoryLoad} onRetry={onRetryMemory} busy={memoryBusy} onAdd={onAddMemory} onReplace={onReplaceMemory} onClear={onClearMemory} />
             </section>
           )}
 
