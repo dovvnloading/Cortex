@@ -111,3 +111,27 @@ test("pasting a screenshot attaches it and pasting text does not", async ({ page
   });
   expect(staged).toEqual(["image.png"]);
 });
+
+test("settings asks before edits are lost and keeps them when told to keep editing", async ({ page }) => {
+  await stubWorkspace(page);
+  await page.goto("/settings?bootstrap=launcher-token");
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save settings" })).toBeDisabled();
+
+  await page.getByRole("combobox", { name: "Theme" }).click();
+  await page.getByRole("option", { name: "Light" }).click();
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save settings" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "Close settings" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(dialog).toBeHidden();
+  expect(new URL(page.url()).pathname).toBe("/settings");
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Discard" }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/chat/new");
+});

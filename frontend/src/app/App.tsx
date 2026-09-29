@@ -597,13 +597,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     });
   };
 
-  const saveSettings = async (next: CortexSettings) => {
+  /** Resolves to the saved document, or null when nothing was saved. */
+  const saveSettings = async (next: CortexSettings): Promise<CortexSettings | null> => {
     setSaving(true);
     try {
       const response = await api.updateSettings({ settings: next, expected_revision: next.revision });
       setSettings(response.settings);
       setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
+      return response.settings;
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         // The server's compare-and-swap rejected a concurrent settings write.
@@ -621,6 +623,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       } else {
         notify(apiMessage(error, "Could not save settings."), "error");
       }
+      return null;
     }
     finally { setSaving(false); }
   };
