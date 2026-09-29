@@ -30,6 +30,7 @@ from .artifact_boundary import (
     PublishedArtifact,
     sniff_artifact_mime,
 )
+from .finish import UnsuccessfulJobWording, finish_unsuccessful_job
 from .models import ExecutionJob, TerminalExecutionStatus
 from .recipe_provider import MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
 from .recipes import ImageTransformPlan, RecipeValidationError, parse_image_transform
@@ -52,6 +53,12 @@ DEFAULT_CANCEL_GRACE_SECONDS = 5.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MIME_TO_FORMAT = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
+_RECIPE_WORDING = UnsuccessfulJobWording(
+    cancelled_event="cancelled",
+    failed_event="failed",
+    cancelled_message="Image recipe was cancelled.",
+    failed_message="Image recipe failed safely.",
+)
 
 
 class RecipeExecutionError(RuntimeError):
@@ -466,6 +473,17 @@ class RecipeExecutionCoordinator:
             "plan_digest": plan.digest(),
         }
 
+    def _finish_failure(self, job_id: str, cancel_event: Event, failure_code: str) -> None:
+        """Record how an unsuccessful run ended, never overriding a committed Stop."""
+
+        finish_unsuccessful_job(
+            self.repository,
+            job_id,
+            failure_code=failure_code,
+            cancel_requested=cancel_event.is_set,
+            wording=_RECIPE_WORDING,
+        )
+
     def _delete_published(self, published: tuple[PublishedArtifact, ...]) -> None:
         for item in published:
             try:
@@ -560,19 +578,7 @@ class RecipeExecutionCoordinator:
                     self._delete_published(published)
                 except RecipeExecutionError:
                     failure_code = "artifact_cleanup_pending"
-            current = self.repository.get_job(job_id)
-            cancelled = failure_code == "cancelled" or cancel_event.is_set() or (current is not None and current.status == "cancelling")
-            try:
-                self.repository.transition(
-                    job_id,
-                    status="cancelled" if cancelled else "failed",
-                    event="cancelled" if cancelled else "failed",
-                    phase="cancelled" if cancelled else "failed",
-                    data={"message": "Image recipe was cancelled." if cancelled else "Image recipe failed safely."},
-                    error="cancelled" if cancelled else failure_code,
-                )
-            except Exception:
-                pass
+            self._finish_failure(job_id, cancel_event, failure_code)
         except LeaseConflict:
             self._fail_recovery(job_id, "lease_unavailable")
         except ExecutionTransitionConflict:
@@ -580,31 +586,9 @@ class RecipeExecutionCoordinator:
             # store refused the "running" write (see _run_code in
             # local_runtime.py). Nothing is published this early, so finishing
             # as cancelled is all that is required.
-            try:
-                self.repository.transition(
-                    job_id,
-                    status="cancelled",
-                    event="cancelled",
-                    phase="cancelled",
-                    data={"message": "Image recipe was cancelled."},
-                    error="cancelled",
-                )
-            except Exception:
-                pass
+            self._finish_failure(job_id, cancel_event, "cancelled")
         except Exception:
-            current = self.repository.get_job(job_id)
-            cancelled = cancel_event.is_set() or (current is not None and current.status == "cancelling")
-            try:
-                self.repository.transition(
-                    job_id,
-                    status="cancelled" if cancelled else "failed",
-                    event="cancelled" if cancelled else "failed",
-                    phase="cancelled" if cancelled else "failed",
-                    data={"message": "Image recipe was cancelled." if cancelled else "Image recipe failed safely."},
-                    error="cancelled" if cancelled else "coordinator_failed",
-                )
-            except Exception:
-                pass
+            self._finish_failure(job_id, cancel_event, "coordinator_failed")
         finally:
             if attempt is not None:
                 try:

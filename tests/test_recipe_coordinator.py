@@ -256,3 +256,37 @@ def test_recovery_rejects_tampered_payload_and_never_interprets_a_path(tmp_path:
     assert failed is not None
     assert failed.status == "failed"
     assert failed.error == "recovery_invalid_payload"
+
+
+def test_a_stop_landing_before_the_failure_write_is_recorded_as_cancelled(tmp_path: Path, monkeypatch):
+    """The recipe failure path read the job, then wrote with no guard.
+
+    A Stop committing between the two -- a worker failing at the moment the
+    user pressed Stop -- was therefore recorded as ``failed`` where the user
+    asked for ``cancelled``. The code profile always re-decided after a
+    conflict; the recipe profile now shares that guarded write.
+    """
+
+    repository, _source_job_id, source_artifact_id = _repository(tmp_path)
+    real_transition = repository.transition
+    stopped = False
+
+    def transition_after_a_stop(job_id, **kwargs):
+        nonlocal stopped
+        if kwargs.get("status") == "failed" and not stopped:
+            stopped = True
+            repository.request_cancel(job_id)
+        return real_transition(job_id, **kwargs)
+
+    monkeypatch.setattr(repository, "transition", transition_after_a_stop)
+    coordinator = RecipeExecutionCoordinator(
+        repository, lambda _job: _FakeAttempt(error="provider_failed")
+    )
+
+    accepted = coordinator.start_image_transform(_request(source_artifact_id))
+    completed = coordinator.wait(accepted.job_id, timeout=15)
+
+    assert stopped
+    assert completed.status == "cancelled"
+    assert completed.error == "cancelled"
+    assert repository.events(accepted.job_id)[-1].event == "cancelled"

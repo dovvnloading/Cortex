@@ -36,6 +36,7 @@ from .code_execution import (
     CodeExecutionRequest,
     MAX_CODE_TIMEOUT_SECONDS,
 )
+from .finish import UnsuccessfulJobWording, finish_unsuccessful_job
 from .lifecycle import RuntimeHealth
 from .local_code_attempt import (
     DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
@@ -82,6 +83,19 @@ from .scratch_compute import (
 
 
 _LOGGER = logging.getLogger("cortex.execution.local_runtime")
+
+_CODE_WORDING = UnsuccessfulJobWording(
+    cancelled_event="code.cancelled",
+    failed_event="code.failed",
+    cancelled_message="Local code execution was cancelled.",
+    failed_message="Local code execution failed safely.",
+)
+_SCRATCH_WORDING = UnsuccessfulJobWording(
+    cancelled_event="cancelled",
+    failed_event="failed",
+    cancelled_message="Safe computation was cancelled.",
+    failed_message="Safe computation failed safely.",
+)
 
 # How long a code job waiting for approval sleeps before it looks again on its
 # own. Decisions, expiries, cancellation and shutdown all wake it sooner; this
@@ -782,38 +796,15 @@ class LocalExecutionCoordinator:
             raise CodeExecutionError("recovery_invalid_payload") from None
 
     def _finish_code_failure(self, job_id: str, cancel_event: Event, failure_code: str) -> None:
-        # Re-evaluate after a guarded-transition conflict so a cancellation
-        # that commits first cannot be overwritten by a late worker failure.
-        for _ in range(3):
-            current = self.repository.get_job(job_id)
-            if current is None or current.status in TerminalExecutionStatus:
-                return
-            cancelled = (
-                failure_code == "cancelled"
-                or cancel_event.is_set()
-                or current.status == "cancelling"
-            )
-            try:
-                self.repository.transition(
-                    job_id,
-                    status="cancelled" if cancelled else "failed",
-                    event="code.cancelled" if cancelled else "code.failed",
-                    phase="cancelled" if cancelled else "failed",
-                    data={
-                        "message": (
-                            "Local code execution was cancelled."
-                            if cancelled
-                            else "Local code execution failed safely."
-                        )
-                    },
-                    error="cancelled" if cancelled else failure_code,
-                    expected_status=current.status,
-                )
-                return
-            except ExecutionTransitionConflict:
-                continue
-            except Exception:
-                return
+        # Guarded and re-evaluated after a conflict, so a cancellation that
+        # commits first cannot be overwritten by a late worker failure.
+        finish_unsuccessful_job(
+            self.repository,
+            job_id,
+            failure_code=failure_code,
+            cancel_requested=cancel_event.is_set,
+            wording=_CODE_WORDING,
+        )
 
     @staticmethod
     def _scratch_request_from_job(job: ExecutionJob) -> ScratchComputeRequest:
@@ -972,29 +963,16 @@ class LocalExecutionCoordinator:
         cancel_event: Event,
         failure_code: str,
     ) -> None:
-        current = self.repository.get_job(job_id)
-        cancelled = (
-            failure_code == "cancelled"
-            or cancel_event.is_set()
-            or (current is not None and current.status == "cancelling")
+        # The same guarded write as the code profile: this used to read the job
+        # and then write with no guard, so a Stop landing between the two was
+        # recorded as a failure.
+        finish_unsuccessful_job(
+            self.repository,
+            job_id,
+            failure_code=failure_code,
+            cancel_requested=cancel_event.is_set,
+            wording=_SCRATCH_WORDING,
         )
-        try:
-            self.repository.transition(
-                job_id,
-                status="cancelled" if cancelled else "failed",
-                event="cancelled" if cancelled else "failed",
-                phase="cancelled" if cancelled else "failed",
-                data={
-                    "message": (
-                        "Safe computation was cancelled."
-                        if cancelled
-                        else "Safe computation failed safely."
-                    )
-                },
-                error="cancelled" if cancelled else failure_code,
-            )
-        except Exception:
-            pass
 
     def _fail_scratch_recovery(self, job_id: str, code: str) -> None:
         try:
