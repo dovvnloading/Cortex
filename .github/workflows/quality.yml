@@ -26,17 +26,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-dev.lock.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
@@ -81,6 +83,20 @@ jobs:
 
       - name: Lint Python
         run: python -m ruff check backend tests tools main.py app_factory.py
+
+      # Both linters are console scripts pinned in the dev lock, so this runs
+      # the same versions as scripts/check.ps1. actionlint catches workflow
+      # mistakes (bad expressions, unknown keys, wrong runner labels); zizmor
+      # audits them for security (unpinned actions, template injection,
+      # persisted credentials). The token lets zizmor also confirm that every
+      # pinned commit really exists in the action's own repository.
+      - name: Lint workflows
+        run: actionlint -shellcheck= -pyflakes=
+
+      - name: Audit workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor .github/workflows
 
       - name: Type-check Python
         run: python -m mypy
@@ -137,10 +153,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -163,6 +181,22 @@ jobs:
       - name: Compile application modules
         run: python -m compileall -q main.py app_factory.py backend
 
+  dependency-review:
+    # Fails a pull request that adds a dependency with a known vulnerability,
+    # from the diff of the dependency graph (both Python locks and
+    # frontend/package-lock.json). Only a pull request has a base to compare.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+
   heavy:
     # Packaging is slow, but a green PR must prove that launcher and runtime
     # changes still produce a build that starts.
@@ -171,17 +205,19 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.lock.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm

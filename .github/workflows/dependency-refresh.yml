@@ -1,0 +1,97 @@
+name: Dependency refresh
+
+# Low-noise dependency updates. Once a month (or on demand) this regenerates
+# the two hash-pinned Python locks with `uv pip compile --upgrade` -- the same
+# commands CONTRIBUTING.md documents -- and refreshes frontend/package-lock.json
+# within package.json's ranges, then opens ONE grouped pull request. It never
+# edits pyproject.toml or package.json, so declared ranges stay the
+# maintainer's decision.
+#
+# A pull request opened with the workflow token does not start the Quality
+# workflow (GitHub never triggers workflows from GITHUB_TOKEN events). Close
+# and reopen the pull request, or push to its branch, to run the checks.
+
+on:
+  schedule:
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    # windows-latest so the locks resolve on the same platform the Quality
+    # workflow verifies them on.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: chore/dependency-refresh
+    steps:
+      # The push at the end needs the token that checkout stores, so this is
+      # the one checkout that keeps credentials.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Refresh the Python locks
+        shell: pwsh
+        run: |
+          python -m pip install uv
+          python -m uv pip compile pyproject.toml --upgrade --python-version 3.11 --generate-hashes -o requirements.lock.txt
+          python -m uv pip compile pyproject.toml --upgrade --extra dev --python-version 3.11 --generate-hashes -o requirements-dev.lock.txt
+
+      - name: Refresh the frontend lock
+        working-directory: frontend
+        run: npm update --package-lock-only --no-audit --no-fund
+
+      - name: Open one pull request if anything changed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $changed = git --no-pager diff --name-only -- requirements.lock.txt requirements-dev.lock.txt frontend/package-lock.json
+          if (-not $changed) {
+            Write-Host "Every lock is already current."
+            return
+          }
+          $existing = gh pr list --head $env:BRANCH --state open --json number --jq '.[0].number'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B $env:BRANCH
+          git add requirements.lock.txt requirements-dev.lock.txt frontend/package-lock.json
+          git commit -m "chore(deps): refresh the dependency locks"
+          git push --force-with-lease origin $env:BRANCH
+          if ($existing) {
+            Write-Host "Updated the open pull request #$existing."
+            return
+          }
+          # YAML strips this block's indentation, so the here-string
+          # terminator lands in column 0 as PowerShell requires.
+          $body = @'
+          Monthly dependency refresh, opened by the Dependency refresh workflow.
+
+          - `requirements.lock.txt` and `requirements-dev.lock.txt`: `uv pip compile --upgrade` within the ranges in `pyproject.toml`
+          - `frontend/package-lock.json`: `npm update --package-lock-only` within the ranges in `package.json`
+
+          Declared ranges were not changed. This pull request was opened with the workflow token, so the Quality workflow did not start on its own: close and reopen it, or push to the branch, to run the checks before merging.
+          '@
+          gh pr create --base main --head $env:BRANCH --title "chore(deps): refresh the dependency locks" --body $body
