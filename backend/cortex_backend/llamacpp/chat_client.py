@@ -547,12 +547,31 @@ def _strip_unsupported_fields(messages: list[dict]) -> list[dict]:
     return [{key: value for key, value in message.items() if key != "images"} for message in messages]
 
 
+def _as_count(value: object) -> int | None:
+    """``value`` as a token count, or ``None`` when the server sent anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
+    """Reshape a llama-server completion into the mapping every ChatClient returns.
+
+    What the two count fields mean matters, because they differ whenever the
+    server reuses a cached prompt prefix. ``usage.prompt_tokens`` is the length
+    of the whole prompt; ``timings.prompt_n`` is only the tokens the server had
+    to evaluate for this request, a fraction of it after a cache hit.
+    ``prompt_eval_count`` is the whole prompt -- the figure that says whether a
+    prompt filled the window and that is saved with the message -- and falls back
+    to the evaluated count only for a server that sent no usage. Timing follows
+    the other reading: ``prompt_eval_duration`` is ``timings.prompt_ms``, the time
+    spent on the evaluated part alone, so dividing ``prompt_eval_count`` by it
+    overstates the speed of a request that hit the cache.
+    """
     choices = payload.get("choices") or [{}]
     message = choices[0].get("message", {}) or {}
     usage = payload.get("usage") or {}
     timings = payload.get("timings") or {}
-    prompt_n = timings.get("prompt_n", usage.get("prompt_tokens"))
+    prompt_tokens = _as_count(usage.get("prompt_tokens"))
+    prompt_n = prompt_tokens if prompt_tokens is not None else timings.get("prompt_n")
     predicted_n = timings.get("predicted_n", usage.get("completion_tokens"))
     prompt_ms = timings.get("prompt_ms")
     predicted_ms = timings.get("predicted_ms")
@@ -580,11 +599,9 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
     finish_reason = choices[0].get("finish_reason")
     if isinstance(finish_reason, str) and finish_reason:
         adapted["done_reason"] = finish_reason
-    # ``prompt_eval_count`` above prefers the server's timings, which count only
-    # the prompt tokens it had to evaluate -- a prompt whose start was already
-    # cached reports a fraction of its length. ``usage.prompt_tokens`` is the
-    # whole prompt, which is what calibrating the token estimate needs.
-    prompt_tokens = usage.get("prompt_tokens")
-    if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+    # Named for what it is, beside ``prompt_eval_count``, which is only the
+    # whole prompt when the server sent usage: the token-estimate calibration
+    # reads this key first because it is never the evaluated-only fallback.
+    if prompt_tokens is not None:
         adapted["prompt_token_count"] = prompt_tokens
     return adapted

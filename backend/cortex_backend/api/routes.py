@@ -31,6 +31,7 @@ from cortex_backend.services.chat import (
     normalize_title,
     title_from_first_message,
 )
+from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, ollama_keep_alive
 from cortex_backend.services.code_feedback import format_execution_observation
 from cortex_backend.services.code_prompt import should_offer_code_execution
 from cortex_backend.core.settings import (
@@ -109,8 +110,10 @@ from .schemas import (
     InstalledModel,
     SettingsMigrationReport as SettingsMigrationReportResponse,
 )
+from .observability import current_request_id, log_failure
 from .security import SessionPrincipal
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
 # The most memory suggestions one answer can put in front of the user, and the
@@ -534,7 +537,7 @@ async def _start_generation_job(
             except Exception as exc:
                 # Keeping a partial answer is a courtesy; a chat that moved on
                 # underneath it must not turn Stop into a failure.
-                logging.warning(
+                logger.warning(
                     "Cortex could not keep a stopped answer (%s).", type(exc).__name__
                 )
                 return {"cancelled": True}
@@ -588,6 +591,15 @@ async def _start_generation_job(
             if not sink.begin_commit("persisting", "Saving the response."):
                 return keep_stopped_answer(shown)
             stats_payload = asdict(result.stats) if result.stats else None
+            # With translation on, ``response`` is the translation the user
+            # reads. The answer as the model wrote it is kept beside it, for the
+            # next turn's history and for the title; it is passed only when
+            # there is one, so an untranslated turn calls the repository exactly
+            # as it always has.
+            original_answer = getattr(result, "original_response", None)
+            original_kwargs = (
+                {"original_content": original_answer} if original_answer else {}
+            )
             if target_message_id is None or target_is_dangling_user_turn:
                 assistant_message_id = deps.chats.add_message(
                     thread_id,
@@ -596,6 +608,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
             else:
                 deps.chats.replace_message(
@@ -605,6 +618,7 @@ async def _start_generation_job(
                     thoughts=result.thoughts,
                     stats=stats_payload,
                     expected_revision=prepared_revision,
+                    **original_kwargs,
                 )
                 assistant_message_id = target_message_id
 
@@ -622,7 +636,7 @@ async def _start_generation_job(
                     thread_id=thread_id,
                 )
             except Exception as exc:
-                logging.warning(
+                logger.warning(
                     "Cortex code proposal queueing failed (%s).", type(exc).__name__
                 )
             if code_execution_job_id:
@@ -685,13 +699,13 @@ async def _start_generation_job(
                         raw_title = _call_with_timeout(
                             title_generator,
                             generation_snapshot,
-                            result.response,
+                            original_answer or result.response,
                             timeout=CHAT_TITLE_TIMEOUT_SECONDS,
                             cancel=title_cancel,
                             cancellation_event=title_cancel,
                         )
                     except Exception as exc:  # optional title work must not fail a chat
-                        logging.warning(
+                        logger.warning(
                             "Cortex chat title generation failed (%s).",
                             type(exc).__name__,
                         )
@@ -706,7 +720,7 @@ async def _start_generation_job(
                         deps.chats.rename_chat(thread_id, generated_title)
                         title = generated_title
                     except Exception as exc:
-                        logging.warning(
+                        logger.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
                         )
             # rename_chat above may have moved the title, and the assistant
@@ -980,7 +994,7 @@ def _proposed_memories(deps: BackendDependenciesProtocol, command: Any) -> list[
     except Exception as exc:
         # Showing a suggestion the store already holds is harmless: the user
         # decides, and saving a duplicate is a no-op.
-        logging.warning(
+        logger.warning(
             "Cortex could not compare memory suggestions with saved memories (%s).",
             type(exc).__name__,
         )
@@ -1316,6 +1330,16 @@ def _generation_snapshot(
         settings.execution.code_execution_enabled
         and should_offer_code_execution(payload.user_input)
     )
+    model_options: dict[str, float | int | str] = dict(
+        _merged_model_options(settings, payload.options, code_turn=code_execution_eligible)
+    )
+    # A standing setting, not a per-request override: how long Ollama keeps the
+    # model loaded once this turn (and the title and translation calls that
+    # follow it) is done. Carried with the other options; the Ollama client
+    # lifts it out and llama.cpp never reads it.
+    keep_alive = ollama_keep_alive(settings.generation.keep_alive_minutes)
+    if keep_alive is not None:
+        model_options[KEEP_ALIVE_OPTION] = keep_alive
     return GenerationSnapshot(
         job_id=job_id,
         thread_id=payload.thread_id or "",
@@ -1323,9 +1347,7 @@ def _generation_snapshot(
         model=chat_model,
         title_model=title_model,
         translation_model=settings.models.translation,
-        model_options=_merged_model_options(
-            settings, payload.options, code_turn=code_execution_eligible
-        ),
+        model_options=model_options,
         memories_enabled=settings.memory.enabled,
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
@@ -1448,10 +1470,15 @@ def _raise_job_error(exc: Exception) -> NoReturn:
 def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
-    logging.error("Cortex API %s failed (%s).", operation, type(exc).__name__)
+    # The class and the frames it passed through, never its text: a repository
+    # error can quote the very content that failed to save. The request id ties
+    # this line to the caller's response, which carries it too, so a person who
+    # reports "Could not list chats" can be matched to the failure.
+    request_id = current_request_id()
+    log_failure(logger, f"Cortex API {operation} failed", exc, request_id=request_id)
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail=f"Could not {operation}.",
+        detail=f"Could not {operation}." + (f" (Request ID: {request_id})" if request_id else ""),
     ) from exc
 
 

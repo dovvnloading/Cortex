@@ -11,9 +11,10 @@ import pytest
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
-from cortex_backend.api.routes import _merged_model_options
+from cortex_backend.api.routes import _generation_snapshot, _merged_model_options
+from cortex_backend.api.schemas import GenerationRequest
 from cortex_backend.core.generation import GenerationSnapshot
-from cortex_backend.core.settings import CortexSettings, GenerationOptionsOverride
+from cortex_backend.core.settings import CortexSettings, GenerationOptionsOverride, GenerationSettings
 from cortex_backend.llamacpp.chat_client import LlamaCppChatClient, _adapt_to_ollama_shape
 from cortex_backend.llamacpp.server_manager import ServerHandle
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
@@ -129,6 +130,41 @@ class CodeTurnSamplingTests(unittest.TestCase):
         assert merged["repeat_penalty"] == settings.generation.repeat_penalty
         assert merged["temperature"] == settings.generation.temperature
         assert "min_p" not in merged
+
+
+class KeepAliveOptionTests(unittest.TestCase):
+    """The standing keep-alive setting reaches a turn's options, and only when it means something."""
+
+    @staticmethod
+    def _snapshot(minutes: int) -> GenerationSnapshot:
+        settings = CortexSettings(generation=GenerationSettings(keep_alive_minutes=minutes))
+        return _generation_snapshot(
+            "job-1", GenerationRequest(user_input="hello"), settings, ("local-chat:9b",)
+        )
+
+    def test_the_default_sends_no_keep_alive_so_ollamas_own_setting_stands(self):
+        # A keep_alive sent on a request overrides OLLAMA_KEEP_ALIVE, so sending
+        # one by default would shorten a longer value a user had configured.
+        snapshot = _generation_snapshot(
+            "job-1", GenerationRequest(user_input="hello"), CortexSettings(), ("local-chat:9b",)
+        )
+
+        assert "keep_alive" not in snapshot.model_options
+
+    def test_a_longer_setting_is_sent_in_minutes(self):
+        assert self._snapshot(90).model_options["keep_alive"] == "90m"
+
+    def test_minus_one_keeps_the_model_loaded(self):
+        assert self._snapshot(-1).model_options["keep_alive"] == -1
+
+    def test_zero_sends_nothing_and_leaves_ollamas_default_alone(self):
+        assert "keep_alive" not in self._snapshot(0).model_options
+
+    def test_the_sampling_options_are_untouched(self):
+        options = dict(self._snapshot(5).model_options)
+        options.pop("keep_alive")
+
+        assert options == _merged_model_options(CortexSettings(), None)
 
 
 class ExtractStatsTests(unittest.TestCase):
