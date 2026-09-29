@@ -293,7 +293,9 @@ describe("App", () => {
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
     expect(JSON.parse(window.sessionStorage.getItem("cortex.active.generation") ?? "null")).toMatchObject({ jobId: "job-expired" });
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
-  });
+    // Explicit ceiling: this waits on the lazily-loaded chat route and a real
+    // 401 round trip, and the default 15s has been outrun on a busy machine.
+  }, 45_000);
 
   it("resumes the running generation once the session is back after a failed renewal", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
@@ -355,7 +357,8 @@ describe("App", () => {
     expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();
     expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
     expect(handoffs).toBe(2);
-  });
+    // Three bounded waits in sequence (12s each), so the default 15s cannot cover it.
+  }, 45_000);
 
   it("returns to onboarding when a model job stream reports an expired session", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
