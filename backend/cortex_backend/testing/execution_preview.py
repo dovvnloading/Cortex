@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from cortex_backend.execution.models import ExecutionJob, TerminalExecutionStatus
 from cortex_backend.execution.repository import (
+    ExecutionJobNotFound,
     ExecutionRepository,
     ExecutionTransitionConflict,
     LeaseConflict,
@@ -95,7 +96,7 @@ class DurableFakeCoordinator:
     def cancel(self, job_id: str, *, owner: str) -> ExecutionJob:
         job = self.repository.get_job(job_id, owner=owner)
         if job is None:
-            raise ValueError("execution job does not exist or is not owned by caller")
+            raise ExecutionJobNotFound("Execution job does not exist.")
         with self._lock:
             event = self._cancel_events.get(job_id)
             if event is not None:

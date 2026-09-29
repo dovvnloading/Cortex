@@ -551,7 +551,7 @@ def test_generation_sse_is_ordered_replayable_and_redacts_failures(caplog):
     with client:
         headers = _session(client, app)
         accepted = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json={
                 "request_id": "request-1",
                 "thread_id": "thread-1",
@@ -562,7 +562,7 @@ def test_generation_sse_is_ordered_replayable_and_redacts_failures(caplog):
         assert accepted.status_code == 202
         job_id = accepted.json()["job_id"]
         duplicate = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json={
                 "request_id": "request-1",
                 "thread_id": "thread-1",
@@ -599,7 +599,7 @@ def test_generation_sse_is_ordered_replayable_and_redacts_failures(caplog):
         )
 
         failed = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json={"thread_id": "thread-1", "user_input": "!fail"},
             headers=headers,
         )
@@ -623,12 +623,12 @@ def test_generation_conflict_and_cancellation_are_explicit():
     with client:
         headers = _session(client, app)
         first = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json={"thread_id": "thread-1", "user_input": "slow"},
             headers=headers,
         )
         second = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json={"thread_id": "thread-1", "user_input": "blocked"},
             headers=headers,
         )
@@ -642,7 +642,7 @@ def test_generation_conflict_and_cancellation_are_explicit():
         assert cancelled.json()["status"] == "cancelling"
         assert (
             client.post(
-                "/api/v1/jobs/generation",
+                "/api/v1/generations",
                 json={"thread_id": "thread-1", "user_input": "still blocked"},
                 headers=headers,
             ).status_code

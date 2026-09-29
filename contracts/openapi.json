@@ -4907,49 +4907,6 @@
         "summary": "Health Ready"
       }
     },
-    "/api/v1/jobs/generation": {
-      "post": {
-        "operationId": "start_generation_api_v1_jobs_generation_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GenerationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JobAccepted"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "CortexSession": []
-          }
-        ],
-        "summary": "Start Generation"
-      }
-    },
     "/api/v1/jobs/models": {
       "post": {
         "operationId": "check_models_api_v1_jobs_models_post",

@@ -61,7 +61,7 @@ def _trim_non_blank_text(value: object) -> object:
 
 class NonBlankTextModel(APIModel):
     @field_validator(
-        "name", "title", "content", "user_input", mode="before", check_fields=False
+        "name", "title", "content", "user_input", "model", mode="before", check_fields=False
     )
     @classmethod
     def normalize_text(cls, value: object) -> object:
@@ -373,7 +373,7 @@ class ModelResponse(APIModel):
     models: tuple[InstalledModel, ...] = ()
 
 
-class ModelPullRequest(APIModel):
+class ModelPullRequest(NonBlankTextModel):
     model: str = Field(min_length=1, max_length=200)
 
 

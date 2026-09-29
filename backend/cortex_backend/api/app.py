@@ -11,12 +11,15 @@ import tempfile
 from pathlib import Path
 from collections.abc import Callable
 from collections.abc import Iterable
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cortex_backend import __version__
 from cortex_backend.repositories.chats import ChatRepository
@@ -34,6 +37,141 @@ from .routers import build_router
 from .security import SessionManager
 
 logger = logging.getLogger(__name__)
+
+# A rejected request can report where it went wrong and why, never what the
+# caller sent: that would put prompts and attachment bodies into error
+# responses, where devtools, proxies and logs keep them. What is left is
+# bounded as well, so an absurd field name or a huge batch of errors cannot
+# turn the report into an echo of its own.
+_MAX_VALIDATION_ISSUES = 50
+_MAX_VALIDATION_TEXT = 300
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= _MAX_VALIDATION_TEXT else text[:_MAX_VALIDATION_TEXT] + "..."
+
+
+def redact_validation_errors(errors: Iterable[Any]) -> list[dict[str, Any]]:
+    """Keep each issue's location, message and type; drop ``input``, ``ctx`` and ``url``."""
+    return [
+        {
+            "loc": [part if isinstance(part, int) else _clip(str(part)) for part in error.get("loc", ())],
+            "msg": _clip(str(error.get("msg", ""))),
+            "type": str(error.get("type", "")),
+        }
+        for error in list(errors)[:_MAX_VALIDATION_ISSUES]
+    ]
+
+
+# The largest legitimate request body is a base64 attachment: the 10 MiB file
+# limit is a little under 14 MB once encoded (see MAX_CHAT_ATTACHMENT_BYTES and
+# MAX_ATTACHMENT_BASE64_LENGTH in schemas). Everything else is far smaller.
+MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
+
+
+class RequestBodyLimitMiddleware:
+    """Refuse an oversized API request body before anything parses it.
+
+    Field limits such as ``max_length`` only apply after Starlette has buffered
+    and JSON-decoded the whole body, and some fields have no limit at all, so a
+    single request could make the backend hold and decode as much as a client
+    cared to send. This stops that at the door: a declared ``Content-Length``
+    over the ceiling is refused without running the app, and a body that arrives
+    without one (chunked) or that lies about its length is cut off as soon as
+    the bytes received pass the ceiling.
+
+    Only API paths are limited; the static frontend takes no request bodies.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int = MAX_REQUEST_BODY_BYTES,
+        path_prefix: str = "/api/",
+    ) -> None:
+        self.app = app
+        self._max_body_bytes = max_body_bytes
+        self._path_prefix = path_prefix
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not str(scope.get("path", "")).startswith(
+            self._path_prefix
+        ):
+            await self.app(scope, receive, send)
+            return
+        declared = self._declared_length(scope)
+        if declared is not None and declared > self._max_body_bytes:
+            await self._refuse(send)
+            return
+
+        received = 0
+        overflowed = False  # stop feeding the app body bytes
+        refused = False  # our 413 is on the wire; the app's output is dropped
+        app_response_started = False
+
+        async def limited_receive() -> Message:
+            nonlocal received, overflowed, refused
+            if overflowed:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self._max_body_bytes:
+                    overflowed = True
+                    if not app_response_started:
+                        refused = True
+                        await self._refuse(send)
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal app_response_started
+            if refused:
+                # The app noticed the disconnect and answers it (a 400, or
+                # nothing). The caller has already been told why.
+                return
+            if message["type"] == "http.response.start":
+                app_response_started = True
+            await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
+
+    @staticmethod
+    def _declared_length(scope: Scope) -> int | None:
+        for name, value in scope.get("headers", ()):
+            if name == b"content-length":
+                try:
+                    length = int(value)
+                except ValueError:
+                    return None  # not a length; the running total still applies
+                return length if length >= 0 else None
+        return None
+
+    async def _refuse(self, send: Send) -> None:
+        body = b'{"detail":"Request body is too large."}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    # The rest of the upload is not going to be read.
+                    (b"connection", b"close"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+async def _validation_error_response(request: Request, exc: Exception) -> JSONResponse:
+    del request
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else ()
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content={"detail": redact_validation_errors(errors)},
+    )
 
 
 @dataclass(slots=True)
@@ -207,6 +345,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    app.add_exception_handler(RequestValidationError, _validation_error_response)
     app.state.dependencies = dependencies
     app.state.chat_attachment_service = getattr(
         app.state.dependencies, "attachments", None
@@ -259,6 +398,10 @@ def create_app(
         for spelling in ("[", "[::1]"):
             if spelling not in middleware_allowed_hosts:
                 middleware_allowed_hosts.append(spelling)
+    # Added first, so it sits innermost of the three: the host check and CORS
+    # run around it, and a refusal still carries the CORS headers a browser
+    # needs in order to read the status.
+    app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=middleware_allowed_hosts,

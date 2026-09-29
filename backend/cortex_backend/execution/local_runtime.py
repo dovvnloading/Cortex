@@ -62,6 +62,7 @@ from .recipe_provider import RecipeImageProvider
 from .repository import (
     ApprovalExpiredError,
     ApprovalTransitionError,
+    ExecutionJobNotFound,
     ExecutionRepository,
     ExecutionTransitionConflict,
     LeaseConflict,
@@ -346,7 +347,7 @@ class LocalExecutionCoordinator:
     def cancel(self, job_id: str, *, owner: str) -> ExecutionJob:
         job = self.repository.get_job(job_id, owner=owner)
         if job is None:
-            raise ValueError("execution job does not exist or is not owned by caller")
+            raise ExecutionJobNotFound("Execution job does not exist.")
         if job.profile == RECIPE_IMAGE_PROFILE:
             return self._recipe.cancel(job_id, owner=owner)
         if job.profile == SCRATCH_COMPUTE_PROFILE:

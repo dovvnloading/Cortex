@@ -4,11 +4,31 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
+
+ChatErrorCode = Literal[
+    "not_found",
+    "invalid_input",
+    "stale_revision",
+    "model_unavailable",
+]
 
 
 class ChatDomainError(RuntimeError):
-    """Safe domain failure for invalid chat message operations."""
+    """Safe domain failure for invalid chat message operations.
+
+    ``code`` says what actually went wrong, so the API can choose a status
+    from the meaning of the failure instead of from the place it was caught:
+
+    - ``not_found``: the chat or message the request names does not exist.
+    - ``invalid_input``: the request itself is unacceptable as sent.
+    - ``stale_revision``: the chat moved on since the client last read it.
+    - ``model_unavailable``: no usable local model can serve the request.
+    """
+
+    def __init__(self, message: str, *, code: ChatErrorCode) -> None:
+        super().__init__(message)
+        self.code: ChatErrorCode = code
 
 
 def chat_revision(chat: Mapping[str, Any]) -> int:
@@ -51,4 +71,4 @@ def message_position(chat: Mapping[str, Any], message_id: str) -> int:
     for index, message in enumerate(chat.get("messages", ())):
         if str(message.get("id")) == str(message_id):
             return index
-    raise ChatDomainError("Message not found in this chat.")
+    raise ChatDomainError("Message not found in this chat.", code="not_found")
