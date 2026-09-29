@@ -117,6 +117,11 @@ def _rule(code: LaunchFailureCode, *patterns: str) -> tuple[LaunchFailureCode, r
     return code, re.compile("|".join(f"(?:{pattern})" for pattern in patterns), re.IGNORECASE)
 
 
+# Rules that relate two parts of a line allow only a bounded gap between them,
+# and lines are cut before matching, so a hostile file that makes the child
+# print an enormous, repetitive line cannot make the match itself expensive.
+_MAX_CLASSIFIED_LINE_CHARS = 512
+_GAP = r".{0,160}"
 _ERROR_WORDS = r"(?:error|failed|unable|cannot|can't|invalid|no such|not found|missing)"
 # A shard's file name appears in nearly every line about a split model, so a
 # name alone (or any "failed") says nothing about a missing part. Only a failure
@@ -134,8 +139,8 @@ _OUTPUT_RULES: Final[tuple[tuple[LaunchFailureCode, re.Pattern[str]], ...]] = (
     _rule(
         "projector_not_a_model",
         r"unknown model architecture:?\s*['\"]?clip\b",
-        rf"\bmmproj\b.*\b{_ERROR_WORDS}\b",
-        rf"\b{_ERROR_WORDS}\b.*\bmmproj\b",
+        rf"\bmmproj\b{_GAP}\b{_ERROR_WORDS}\b",
+        rf"\b{_ERROR_WORDS}\b{_GAP}\bmmproj\b",
     ),
     _rule(
         "unsupported_architecture",
@@ -160,8 +165,8 @@ _OUTPUT_RULES: Final[tuple[tuple[LaunchFailureCode, re.Pattern[str]], ...]] = (
         r"\b(?:illegal|invalid|missing)\s+split\b",
         r"\bsplit file\b",
         r"\bmissing\s+(?:a\s+)?shard",
-        rf"-\d{{5}}-of-\d{{5}}.*\b{_OPEN_FAILURES}\b",
-        rf"\b{_OPEN_FAILURES}\b.*-\d{{5}}-of-\d{{5}}",
+        rf"-\d{{5}}-of-\d{{5}}{_GAP}\b{_OPEN_FAILURES}\b",
+        rf"\b{_OPEN_FAILURES}\b{_GAP}-\d{{5}}-of-\d{{5}}",
     ),
     _rule(
         "no_gpu",
@@ -169,8 +174,8 @@ _OUTPUT_RULES: Final[tuple[tuple[LaunchFailureCode, re.Pattern[str]], ...]] = (
         r"no vulkan",
         r"vkcreateinstance",
         r"vk::createinstance",
-        r"vulkan.*\b(?:initiali[sz]ation|instance)\b.*\b(?:failed|error)\b",
-        r"failed to (?:create|initiali[sz]e).*vulkan",
+        r"vulkan.{0,60}\b(?:initiali[sz]ation|instance)\b.{0,20}\b(?:failed|error)\b",
+        r"failed to (?:create|initiali[sz]e).{0,60}vulkan",
         r"error(?:incompatibledriver|initializationfailed|devicelost|extensionnotpresent|featurenotpresent|layernotpresent)",
     ),
     _rule(
@@ -222,7 +227,11 @@ def classify_child_exit(lines: Iterable[str], exit_code: int | None) -> LaunchFa
     it is unknown. Returns ``runtime_exited`` when nothing identifies the cause,
     so the caller never has to guess one.
     """
-    candidates = [line for line in lines if not _ECHOED_MODEL_TEXT.search(line)]
+    candidates = [
+        line
+        for line in (raw[:_MAX_CLASSIFIED_LINE_CHARS] for raw in lines)
+        if not _ECHOED_MODEL_TEXT.search(line)
+    ]
     for code, pattern in _OUTPUT_RULES:
         if any(pattern.search(line) for line in candidates):
             return code

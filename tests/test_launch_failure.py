@@ -3,6 +3,7 @@ and the fixed text each cause is reported with."""
 
 from __future__ import annotations
 
+import time
 from typing import get_args
 
 import pytest
@@ -84,6 +85,22 @@ def test_the_more_specific_cause_wins_over_the_generic_load_failure_that_follows
     assert classify_child_exit(
         ["failed to load model", "ggml: failed to allocate buffer"], 1
     ) == "memory"
+
+
+def test_an_enormous_repetitive_line_cannot_make_classification_slow() -> None:
+    """The child's output is untrusted; the match must stay cheap whatever it prints."""
+    hostile = ("vulkan instance mmproj failed to create -00001-of-00002 " * 4000)
+    started = time.monotonic()
+
+    result = classify_child_exit([hostile] * 200, 1)
+
+    assert time.monotonic() - started < 5.0
+    assert result in LAUNCH_FAILURE_CODES
+
+
+def test_only_the_start_of_a_line_is_considered() -> None:
+    assert classify_child_exit(["ggml: out of memory" + " ." * 600], 1) == "memory"
+    assert classify_child_exit(["." * 600 + " out of memory"], 1) == "runtime_exited"
 
 
 def test_the_name_of_a_split_models_part_does_not_by_itself_make_a_part_missing() -> None:
