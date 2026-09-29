@@ -53,12 +53,18 @@ _ESCAPES = {
     "chained power": ("_result = ((9 ** 1000) ** 1000) ** 1000", "integer_too_large"),
     "power of a power": ("_result = (2 ** 1000) ** 1000", "integer_too_large"),
     "format width": ('_result = f"{1:>10000000}"', "format_width_too_large"),
+    "format width just over the cap": ('_result = f"{1:>10001}"', "format_width_too_large"),
     "format precision": ('_result = f"{1.5:.10000000f}"', "format_width_too_large"),
     "format width chosen at run time": (
         'w = 5\n_result = f"{1:>{w}}"',
         "format_width_not_constant",
     ),
     "percent template width": ('_result = "%10000000d" % 1', "format_width_too_large"),
+    "percent template width just over the cap": (
+        '_result = "%10001d" % 1',
+        "format_width_too_large",
+    ),
+    "percent template precision": ('_result = "%.10001f" % 1.5', "format_width_too_large"),
     "percent template width taken from an argument": (
         '_result = "%*d" % (5, 1)',
         "format_width_not_constant",
@@ -115,6 +121,8 @@ _STILL_ALLOWED = {
     "a rule of dashes": '_result = "-" * 80 + "\\n"',
     "the longest literal repeat": "_result = [0] * 100000",
     "the most a loop may build": 'for i in range(100):\n    row = "a" * 100000',
+    "a format width exactly at the cap": '_result = f"{1:>10000}"',
+    "a percent width exactly at the cap": '_result = "%10000d" % 1',
     "a float format": '_result = f"{3.14159:.2f}"',
     "a padded format": "_result = f\"{'x':>10}\"",
     "a zero-padded format": '_result = f"{5:010d}"',
