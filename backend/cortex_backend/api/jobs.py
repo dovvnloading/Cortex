@@ -90,6 +90,10 @@ class JobSnapshot:
     sequence: int
     error: str | None = None
     result: Mapping[str, Any] | None = None
+    # Whether a Stop request would still be honoured. It is false once the
+    # worker has crossed its commit point, so a client that asks late can tell
+    # "refused" from "still running" instead of guessing from the status.
+    can_cancel: bool = False
 
 
 JobRunner = Callable[["JobProgressSink", Event], Any]
@@ -948,6 +952,9 @@ class JobRegistry:
             sequence=record.sequence,
             error=record.error,
             result=dict(record.result) if record.result is not None else None,
+            can_cancel=(
+                record.status in {"queued", "running"} and not record.commit_started
+            ),
         )
 
 

@@ -274,3 +274,41 @@ def test_recipe_route_rejects_mismatched_plan_and_foreign_artifact_without_leaks
         assert foreign_response.status_code == 404
         assert "foreign-source" not in foreign_response.text
         assert "path" not in foreign_response.text.lower()
+
+
+def test_artifact_download_is_a_no_store_attachment_that_a_browser_cannot_sniff(tmp_path):
+    """The type is whatever the artifact was stored as, and the browser must obey it.
+
+    An artifact whose stored type says HTML must reach the browser as an opaque
+    attachment: not cached, not rendered, and with type sniffing switched off so
+    that no reading of its bytes can promote it to something executable.
+    """
+
+    app, source_artifact_id = _app(tmp_path)
+    repository = app.state.execution_lifecycle.repository
+    hostile_job, _ = repository.create_job(
+        job_id="hostile-source",
+        owner=repository.installation_principal_id,
+        request_id="hostile-source-request",
+        profile="artifact.transform.v1",
+        payload={},
+    )
+    hostile = repository.publish_artifact(
+        hostile_job.job_id,
+        name="page.html",
+        content=b"<script>window.name = 'sniffed'</script>",
+        mime_type="text/html",
+    )
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        image = client.get(f"/api/v1/execution/artifacts/{source_artifact_id}", headers=headers)
+        page = client.get(f"/api/v1/execution/artifacts/{hostile.artifact_id}", headers=headers)
+
+    assert image.status_code == page.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+    assert page.headers["content-type"].startswith("text/html")
+    for response, filename in ((image, "cortex-result.png"), (page, "cortex-result.bin")):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["content-disposition"] == f'attachment; filename="{filename}"'

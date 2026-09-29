@@ -740,13 +740,15 @@ def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, he
     assert chat_payload["title"] == "Project"
 
     thread_id = chat_payload["id"]
-    message = client.post(
-        f"/api/v1/chats/{thread_id}/messages",
-        json={"role": "user", "content": " hello "},
+    sent = client.post(
+        "/api/v1/generations",
+        json={"thread_id": thread_id, "user_input": " hello "},
         headers=headers,
     )
-    assert message.status_code == 200
-    assert message.json()["messages"][-1]["content"] == "hello"
+    assert sent.status_code == 202
+    # The user's turn is written before the job is accepted.
+    stored = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+    assert stored["messages"][0]["content"] == "hello"
     assert client.patch(
         f"/api/v1/chats/{thread_id}",
         json={"title": "\t\n"},
@@ -756,7 +758,7 @@ def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, he
         "/api/v1/chat-groups", json={"name": "\u200b"}, headers=headers
     ).status_code == 422
     assert client.post(
-        f"/api/v1/chats/{thread_id}/messages",
-        json={"role": "user", "content": " \n\t "},
+        "/api/v1/generations",
+        json={"thread_id": thread_id, "user_input": " \n\t "},
         headers=headers,
     ).status_code == 422
