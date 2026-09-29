@@ -1,0 +1,111 @@
+name: Bug report
+description: Cortex crashed, failed to start, or behaves differently from what the README describes.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cortex is a Windows desktop app that runs models on your own machine, so the details below are what make a problem reproducible.
+
+        **Do not paste prompts, responses, memories, access tokens, or database files.** Describe them instead. For a security problem, do not open a public issue: use [private vulnerability reporting](https://github.com/dovvnloading/Cortex/security/advisories/new) (see SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what Cortex did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence that shows the problem. Say if it happens every time.
+      placeholder: |
+        1. Open a chat with a GGUF model selected
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: cortex-version
+    attributes:
+      label: Cortex version and commit
+      description: The version is `__version__` in `backend/cortex_backend/__init__.py`. If you run from a clone, `git rev-parse --short HEAD` gives the commit.
+      placeholder: "2.0.0, commit abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: launch
+    attributes:
+      label: How you started Cortex
+      options:
+        - "python main.py (native window, from source)"
+        - "python main.py --dev"
+        - "python main.py --headless"
+        - "A packaged Cortex.exe"
+        - "Something else"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      description: Run `winver` and copy the version and OS build.
+      placeholder: "Windows 11 24H2, OS build 26100.xxxx"
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Model runtime
+      description: Which runtime was serving the model when the problem happened.
+      options:
+        - "Ollama"
+        - "GGUF file (Cortex's managed llama.cpp runtime)"
+        - "Both, or I am not sure"
+        - "Not related to a model"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model tag or GGUF file
+      description: The tag shown in the model picker, for example an Ollama tag, or the `gguf:` path of a GGUF file. Include the quantization if you know it.
+    validations:
+      required: false
+  - type: dropdown
+    id: gpu-backend
+    attributes:
+      label: GPU backend setting
+      description: The backend chosen for the managed llama.cpp runtime. Ignore this if you only use Ollama.
+      options:
+        - "Not applicable (Ollama only)"
+        - "auto"
+        - "vulkan"
+        - "cpu"
+        - "I am not sure"
+    validations:
+      required: false
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: Your graphics card and driver version, if the problem involves a GPU or running out of memory.
+    validations:
+      required: false
+  - type: textarea
+    id: startup-log
+    attributes:
+      label: Startup log
+      description: |
+        If Cortex failed to start, paste `startup.log` from your data folder (`%APPDATA%\ChatLLM\ChatLLM-Assistant`, or the folder you gave `--data-dir`). Cortex writes it only when startup fails and keeps prompts and credentials out of it, but read it before you paste it.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots are welcome if they show no private conversation content.
+    validations:
+      required: false

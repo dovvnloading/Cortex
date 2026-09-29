@@ -1,8 +1,18 @@
-import { Eraser, Plus, Trash2, Save } from "lucide-react";
+import { Eraser, Plus, RefreshCw, Trash2, Save } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+
+/** Where the list came from. The store is read when Settings opens, and that read can fail. */
+export type MemoryLoadState =
+  | { status: "loading" }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+
+const READY: MemoryLoadState = { status: "ready" };
 
 type Props = {
   memos: string[];
+  load?: MemoryLoadState;
+  onRetry?: () => void;
   busy: boolean;
   onAdd: (memo: string) => Promise<void>;
   onReplace: (memos: string[]) => Promise<void>;
@@ -17,7 +27,7 @@ type DraftRow = {
   origin: string;
 };
 
-export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
+export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onReplace, onClear }: Props) {
   const [memo, setMemo] = useState("");
   const [draft, setDraft] = useState<DraftRow[]>(
     () => memos.map((value, id) => ({ id, value, origin: value })),
@@ -78,14 +88,44 @@ export function MemoryPanel({ memos, busy, onAdd, onReplace, onClear }: Props) {
     }
   };
 
+  const heading = (
+    <div className="panel-heading">
+      <div>
+        <p className="eyebrow">PERMANENT MEMORY</p>
+        <h2 id="memory-title">Remembered facts</h2>
+      </div>
+    </div>
+  );
+
+  // With nothing loaded there is no list to edit, and an empty one would read
+  // as "no memories" -- and invite a save that replaces the real ones.
+  if (load.status === "loading") {
+    return (
+      <section className="panel" aria-labelledby="memory-title">
+        {heading}
+        <p className="empty-state" role="status">Loading saved memories...</p>
+      </section>
+    );
+  }
+  if (load.status === "error") {
+    return (
+      <section className="panel" aria-labelledby="memory-title">
+        {heading}
+        <div className="stack-lg">
+          <p className="field-error" role="alert">{load.message}</p>
+          {onRetry && (
+            <button className="button button-secondary" type="button" onClick={onRetry}>
+              <RefreshCw aria-hidden="true" size={16} /> Retry
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="panel" aria-labelledby="memory-title">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">PERMANENT MEMORY</p>
-          <h2 id="memory-title">Remembered facts</h2>
-        </div>
-      </div>
+      {heading}
       <form className="inline-form" onSubmit={handleSubmit}>
         <label className="sr-only" htmlFor="new-memory">New memory</label>
         <input id="new-memory" value={memo} onChange={(event) => setMemo(event.target.value)} placeholder="Add a fact" maxLength={500} />

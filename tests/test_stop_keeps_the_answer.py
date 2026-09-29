@@ -8,7 +8,6 @@ Stop, synchronised with events rather than sleeps.
 
 from __future__ import annotations
 
-import json
 from threading import Event
 
 from fastapi.testclient import TestClient
@@ -16,6 +15,7 @@ from fastapi.testclient import TestClient
 from cortex_backend.api import create_app
 from cortex_backend.core.generation import ModelOperationError
 from cortex_backend.testing import build_demo_dependencies
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 # 80 characters or more flushes a delta immediately (services/generation.py),
@@ -25,13 +25,6 @@ REASONING = "Weighing the options before answering, at enough length to be flush
 NEVER_SHOWN = "Written after Stop, so no client ever received it."
 WAIT_SECONDS = 10
 
-
-def _events(body: str) -> list[dict]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 class _StoppableEngine:

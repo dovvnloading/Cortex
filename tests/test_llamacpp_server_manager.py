@@ -24,7 +24,7 @@ from cortex_backend.llamacpp.errors import (
     ServerLaunchError,
     ServerStartTimeoutError,
 )
-from cortex_backend.llamacpp.server_manager import LlamaServerManager
+from cortex_backend.llamacpp.server_manager import _LISTENING_PORT_RE, LlamaServerManager
 
 
 class _FakePopen:
@@ -38,8 +38,14 @@ class _FakePopen:
         # llama-server chooses the ephemeral port itself and reports it once
         # its listening socket is bound. The manager must wait for this line
         # before probing, rather than selecting and closing a port first.
+        # This is the current (pinned build) shape: timestamp, level, the
+        # "srv" logger tag, then a right-aligned function-name column and the
+        # message. The function name is illustrative -- only the message text
+        # matters to the manager. The previous "server is listening on ... -
+        # starting the main loop" wording is covered separately by
+        # test_listening_port_pattern_reads_both_log_line_formats.
         self.stdout = io.BytesIO(
-            b"main: server is listening on http://127.0.0.1:43125 - starting the main loop\n"
+            b"0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
         )
 
     def poll(self):
@@ -195,6 +201,23 @@ class _BlockingCacheFetcher(_FakeFetcher):
         self.started.set()
         cancellation_event.wait(5.0)
         return False
+
+
+class _ContentionSignallingLock:
+    """A lock that announces when another thread first fails to take it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.contended = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        acquired = self._lock.acquire(blocking, timeout)
+        if not acquired:
+            self.contended.set()
+        return acquired
+
+    def release(self) -> None:
+        self._lock.release()
 
 
 class _HealthWaitClient:
@@ -372,6 +395,272 @@ def test_start_never_puts_the_api_key_on_the_command_line(tmp_path: Path) -> Non
     # The child must still inherit the parent's environment (PATH, etc.),
     # not just the injected key.
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+@pytest.mark.parametrize(
+    ("backend", "gpu_layers"),
+    [("cpu", "0"), ("vulkan", "auto")],
+)
+def test_launch_argv_contract(tmp_path: Path, backend: str, gpu_layers: str) -> None:
+    """Pin the exact command line handed to llama-server.
+
+    Every flag here is load-bearing: dropping ``--host`` would widen the bind
+    address, ``--port 0`` is what lets the child pick its own free port, and
+    flipping the GPU-layer value between the builds would either starve the GPU
+    build or make the CPU build try to offload. A refactor that changes any of
+    them must change this test on purpose.
+    """
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=backend,
+    )
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=6144)
+
+    assert launcher.launch_args == [
+        [
+            str(Path(f"/fake/{backend}/llama-server.exe")),
+            "-m", str(model_path),
+            "-c", "6144",
+            "--host", "127.0.0.1",
+            "--port", "0",
+            "--reasoning-format", "deepseek",
+            "-ngl", gpu_layers,
+            # One slot: Cortex serialises generations, so "auto" could only
+            # ever split the requested context between slots nobody uses.
+            "-np", "1",
+            # The llama.cpp web UI is surface Cortex never uses, and it is
+            # served without the API key. (--no-webui is the deprecated
+            # spelling of the same switch in the pinned build.)
+            "--no-ui",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("line", "port"),
+    [
+        # Current format: "srv <function>: listening on <address>".
+        ("0.01.234.567 I srv         start: listening on http://127.0.0.1:43125", 43125),
+        ("srv          main: listening on http://127.0.0.1:8080", 8080),
+        # Previous format, still emitted by older builds.
+        (
+            "main: server is listening on http://127.0.0.1:43125 - starting the main loop",
+            43125,
+        ),
+        ("LISTENING ON http://127.0.0.1:5", 5),
+    ],
+)
+def test_listening_port_pattern_reads_both_log_line_formats(line: str, port: int) -> None:
+    match = _LISTENING_PORT_RE.search(line)
+
+    assert match is not None
+    assert int(match.group(1)) == port
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "srv          main: listening on http://0.0.0.0:8080",
+        "srv          main: listening on http://localhost:8080",
+        "srv          main: listening on http://127.0.0.1:",
+        "srv    load_model: loading model 'C:/models/model.gguf'",
+        "0.00.385.497 I srv          init: The UI is disabled",
+        "",
+    ],
+)
+def test_listening_port_pattern_ignores_other_lines(line: str) -> None:
+    assert _LISTENING_PORT_RE.search(line) is None
+
+
+def test_start_strips_llama_arg_environment(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """llama-server gives every option an environment alias, and an explicit
+    argument only beats the alias for options Cortex actually passes. Whatever
+    it does not pass (slot count, KV cache type, a Hugging Face repo, extra
+    files) would otherwise be steered by the user's shell environment."""
+    monkeypatch.setenv("LLAMA_ARG_N_PARALLEL", "4")
+    monkeypatch.setenv("LLAMA_ARG_HF_REPO", "synthetic/repo-name")
+    monkeypatch.setenv("LLAMA_ARG_MMPROJ", "C:/synthetic/projector.gguf")
+    monkeypatch.setenv("LLAMA_LOG_FILE", "C:/synthetic/child.log")
+    monkeypatch.setenv("LLAMA_API_KEY", "inherited-synthetic-key")
+    monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("VK_ICD_FILENAMES", "C:/synthetic/icd.json")
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient()
+    )
+
+    with caplog.at_level("INFO", logger="cortex_backend.llamacpp.server_manager"):
+        handle = manager.ensure_ready(tmp_path / "a.gguf", num_ctx=4096)
+        # A second launch (different model) must not repeat the notice.
+        manager.ensure_ready(tmp_path / "b.gguf", num_ctx=4096)
+
+    assert len(launcher.launch_envs) == 2
+    for env in launcher.launch_envs:
+        assert env is not None
+        assert not [name for name in env if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_"))]
+        # Tuning knobs users legitimately set for the GPU stack survive, as
+        # does everything the child needs to run at all.
+        assert env["GGML_VK_VISIBLE_DEVICES"] == "0"
+        assert env["VK_ICD_FILENAMES"] == "C:/synthetic/icd.json"
+        assert env.get("PATH") == os.environ.get("PATH")
+    first_env = launcher.launch_envs[0]
+    assert first_env is not None
+    # The inherited key is replaced by the per-launch secret.
+    assert first_env["LLAMA_API_KEY"] == handle.api_key
+    assert first_env["LLAMA_API_KEY"] != "inherited-synthetic-key"
+
+    notices = [r for r in caplog.records if "environment variables" in r.getMessage()]
+    assert len(notices) == 1
+    message = notices[0].getMessage()
+    for name in ("LLAMA_ARG_HF_REPO", "LLAMA_ARG_MMPROJ", "LLAMA_ARG_N_PARALLEL", "LLAMA_LOG_FILE"):
+        assert name in message
+    # Names only: never the values, and never the key that stays.
+    for value in ("synthetic/repo-name", "projector.gguf", "child.log", "inherited-synthetic-key"):
+        assert value not in caplog.text
+    assert "LLAMA_API_KEY" not in message
+
+
+def test_child_environment_matches_prefixes_case_insensitively_and_keeps_the_rest() -> None:
+    from cortex_backend.llamacpp.server_manager import _child_environment
+
+    parent = {
+        "llama_arg_ctx_size": "1",
+        "Llama_Log_Prefix": "1",
+        "LLAMA_ARG": "not-a-prefix-match",
+        "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_CACHE": "C:/synthetic/cache",
+        "GGML_THREADS": "2",
+        "PATH": "C:/synthetic/bin",
+    }
+
+    env, stripped = _child_environment(parent, "fresh-key")
+
+    assert stripped == ("Llama_Log_Prefix", "llama_arg_ctx_size")
+    assert env == {
+        "LLAMA_ARG": "not-a-prefix-match",
+        "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_CACHE": "C:/synthetic/cache",
+        "GGML_THREADS": "2",
+        "PATH": "C:/synthetic/bin",
+        "LLAMA_API_KEY": "fresh-key",
+    }
+    # The input mapping is never mutated.
+    assert "llama_arg_ctx_size" in parent
+
+
+def test_start_without_inherited_llama_variables_logs_no_notice(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    for name in list(os.environ):
+        if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_")):
+            monkeypatch.delenv(name)
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+    )
+
+    with caplog.at_level("INFO", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert not [r for r in caplog.records if "environment variables" in r.getMessage()]
+
+
+def _props_with_context(model_path: Path, settings: object) -> dict:
+    props: dict = {"model_path": str(model_path), "build_info": "b10311-test"}
+    if settings is not None:
+        props["default_generation_settings"] = settings
+    return props
+
+
+def test_loaded_context_comes_from_props(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """The context the slot really has is read back from /props, not assumed
+    from the request, so a shortfall is visible instead of surfacing later as
+    an "exceeds the available context" error at half the configured size."""
+    model_path = tmp_path / "model.gguf"
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_RecordingAttestationClient(
+            _props_with_context(model_path, {"n_ctx": 4096})
+        ),
+    )
+    assert manager.status.loaded_context is None
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=8192)
+        # Asking again for the same context must reuse the server. The reuse
+        # decision stays keyed on what was requested: relaunching with the same
+        # arguments cannot produce a larger context, so treating the read-back
+        # value as the bar would reload the model on every message.
+        manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert manager.status.loaded_context == 4096
+    assert len(launcher.launch_args) == 1
+    warnings = [r.getMessage() for r in caplog.records if "context" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "4096" in warnings[0] and "8192" in warnings[0]
+
+    manager.stop()
+    assert manager.status.loaded_context is None
+
+
+def test_loaded_context_matching_the_request_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    model_path = tmp_path / "model.gguf"
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_RecordingAttestationClient(
+            _props_with_context(model_path, {"n_ctx": 4096})
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.loaded_context == 4096
+    assert not [r for r in caplog.records if "context" in r.getMessage()]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [None, {}, {"n_ctx": 0}, {"n_ctx": -4096}, {"n_ctx": "4096"}, {"n_ctx": 4096.0}, {"n_ctx": True}, "text"],
+)
+def test_an_unreadable_loaded_context_is_reported_as_unknown(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path, settings: object
+) -> None:
+    """A /props answer without a usable n_ctx must not be papered over with
+    the requested value: the runtime still starts, and status says unknown."""
+    model_path = tmp_path / "model.gguf"
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_RecordingAttestationClient(_props_with_context(model_path, settings)),
+    )
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert manager.status.loaded_context is None
+    assert not [r for r in caplog.records if "context" in r.getMessage()]
 
 
 def test_start_rejects_a_generic_200_service_as_not_llamacpp(tmp_path: Path) -> None:
@@ -795,10 +1084,7 @@ def test_stop_interrupts_the_cancellable_cache_check(tmp_path: Path) -> None:
 
     startup.join(1.0)
     assert not startup.is_alive()
-    deadline = time.monotonic() + 1.0
-    while manager._stop_event.is_set() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not manager._stop_event.is_set()
+    assert manager.wait_until_stopped(1.0)
     assert manager.status.state == "idle"
     assert outcome and isinstance(outcome[0], LlamaCppError)
 
@@ -812,7 +1098,9 @@ def test_request_cancellation_interrupts_waiting_for_ensure_lock(tmp_path: Path)
     )
     cancellation = threading.Event()
     outcome: list[BaseException] = []
-    manager._ensure_lock.acquire()
+    lock = _ContentionSignallingLock()
+    manager._ensure_lock = lock
+    lock.acquire()
 
     def startup_call() -> None:
         try:
@@ -826,10 +1114,11 @@ def test_request_cancellation_interrupts_waiting_for_ensure_lock(tmp_path: Path)
 
     startup = threading.Thread(target=startup_call, daemon=True)
     startup.start()
-    time.sleep(0.08)
+    # Cancel only once the startup is provably queued behind the lock.
+    assert lock.contended.wait(1.0), "startup never reached the ensure lock"
     cancellation.set()
     startup.join(timeout=1.0)
-    manager._ensure_lock.release()
+    lock.release()
 
     assert not startup.is_alive()
     assert outcome and isinstance(outcome[0], LlamaCppError)
@@ -848,12 +1137,44 @@ def test_stop_is_bounded_when_startup_holds_ensure_lock(tmp_path: Path) -> None:
     elapsed = time.monotonic() - started
 
     assert elapsed < 1.5
-    assert manager._stop_event.is_set()
-    # A later stop completes the deferred reset once the startup owner has
-    # released the lock; the first timeout must not clear the event early.
+    # The first timeout must not clear the cancellation early: the deferred
+    # cleanup is still queued behind the lock the startup owner holds.
+    assert not manager.wait_until_stopped(0.05)
+    # Once the startup owner releases the lock, teardown completes.
     manager._ensure_lock.release()
     manager.stop()
-    assert not manager._stop_event.is_set()
+    assert manager.wait_until_stopped(1.0)
+
+
+def test_wait_until_stopped_is_true_when_no_stop_is_pending(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    assert manager.wait_until_stopped(0.0)
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    manager.stop()
+
+    assert manager.wait_until_stopped(0.0)
+
+
+def test_wait_until_stopped_joins_the_deferred_cleanup_worker(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    manager._ensure_lock.acquire()
+    manager.stop()  # times out on the held lock and hands teardown to a worker
+
+    assert not manager.wait_until_stopped(0.05)
+    manager._ensure_lock.release()
+    assert manager.wait_until_stopped(1.0)
+    assert manager.status.state == "idle"
 
 
 def test_stop_fails_closed_when_process_exit_cannot_be_confirmed(tmp_path: Path) -> None:
@@ -872,7 +1193,8 @@ def test_stop_fails_closed_when_process_exit_cannot_be_confirmed(tmp_path: Path)
 
     assert manager.status.state == "stopping"
     assert manager._process is process
-    assert manager._stop_event.is_set()
+    # A stop that cannot confirm the child exited is never reported as done.
+    assert not manager.wait_until_stopped(1.0)
     with pytest.raises(LlamaCppError, match="cancelled"):
         manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
 
@@ -1171,12 +1493,18 @@ def test_vulkan_launch_failure_is_not_blamed_when_cpu_fails_the_same_way(tmp_pat
 
 
 class _SlowTerminatePopen:
-    """Takes real wall-clock time to exit after terminate(), so a test can
-    observe whether something else was blocked meanwhile."""
+    """Does not exit after terminate() until the test says so.
 
-    def __init__(self, *, delay_seconds: float) -> None:
-        self._delay_seconds = delay_seconds
+    ``waiting`` is set once the manager is blocked waiting for the exit, so a
+    test can observe whether something else was blocked meanwhile without
+    guessing how long that takes. ``allow_exit`` lets the wait return; the wait
+    is bounded so a test that forgets to release it fails instead of hanging.
+    """
+
+    def __init__(self) -> None:
         self.terminated = False
+        self.waiting = threading.Event()
+        self.allow_exit = threading.Event()
 
     def poll(self):
         return None
@@ -1188,7 +1516,8 @@ class _SlowTerminatePopen:
         pass
 
     def wait(self, timeout=None):
-        time.sleep(self._delay_seconds)
+        self.waiting.set()
+        assert self.allow_exit.wait(5.0), "test deadlock: the process was never released"
         return 0
 
 
@@ -1203,11 +1532,11 @@ def test_crash_loop_guard_termination_does_not_block_status_polls(tmp_path: Path
     manager = _manager(tmp_path, fetcher=fetcher, launcher=_QueueLauncher([]), http_client=_AlwaysHealthyClient())
     model_path = tmp_path / "model.gguf"
 
-    # Arm the guard directly with a process that takes real time to exit,
+    # Arm the guard directly with a process that does not exit until released,
     # rather than driving three full crash/relaunch cycles just to get one
     # in place -- what's under test is the guard's own teardown, not the
     # counting that leads up to it (covered above).
-    slow_process = _SlowTerminatePopen(delay_seconds=0.3)
+    slow_process = _SlowTerminatePopen()
     with manager._state_lock:
         manager._process = slow_process
         manager._loaded_model_path = model_path
@@ -1216,32 +1545,44 @@ def test_crash_loop_guard_termination_does_not_block_status_polls(tmp_path: Path
         manager._failure_times = [time.monotonic()] * 3
         manager._last_restart_reason = "simulated crash"
 
-    max_poll_latency = 0.0
-    stop_polling = threading.Event()
+    guard_outcome: list[BaseException] = []
+
+    def run_guard() -> None:
+        try:
+            manager._guard_against_crash_loop(model_path, 6144)
+        except BaseException as exc:  # noqa: BLE001 - assert the guard's verdict below
+            guard_outcome.append(exc)
+
+    guard = threading.Thread(target=run_guard, daemon=True)
+    guard.start()
+    # The guard is now blocked waiting for the child to exit. Poll status from
+    # another thread at exactly that point: it must answer without waiting for
+    # the exit, which only happens once the state lock is not being held.
+    assert slow_process.waiting.wait(2.0), "the guard never reached process termination"
+    polled = threading.Event()
+    seen_states: list[str] = []
 
     def poll_status() -> None:
-        nonlocal max_poll_latency
-        while not stop_polling.is_set():
-            started = time.monotonic()
-            _ = manager.status.state
-            max_poll_latency = max(max_poll_latency, time.monotonic() - started)
-            time.sleep(0.01)
+        seen_states.append(manager.status.state)
+        polled.set()
 
     poller = threading.Thread(target=poll_status, daemon=True)
     poller.start()
-    time.sleep(0.03)  # let the poller get going before the guard fires
-
-    with pytest.raises(LlamaCppError):
-        manager._guard_against_crash_loop(model_path, 6144)
-
-    stop_polling.set()
+    answered_while_terminating = polled.wait(1.0)
+    # Always release the child, even when the poll hung, so nothing outlives the test.
+    slow_process.allow_exit.set()
+    guard.join(timeout=2.0)
     poller.join(timeout=2.0)
-    assert not poller.is_alive()
 
-    assert slow_process.terminated
-    assert max_poll_latency < 0.15, (
-        f"a status poll took {max_poll_latency:.3f}s -- the state lock was held during termination"
+    assert answered_while_terminating, (
+        "a status poll was blocked while the guard terminated the process -- "
+        "the state lock was held during termination"
     )
+    assert seen_states == ["stopping"]
+    assert not guard.is_alive()
+    assert not poller.is_alive()
+    assert slow_process.terminated
+    assert guard_outcome and isinstance(guard_outcome[0], LlamaCppError)
 
 
 def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
@@ -1249,6 +1590,7 @@ def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
     behind a model load, which can legitimately take minutes."""
     fetcher = _FakeFetcher()
     release_launch = threading.Event()
+    launch_entered = threading.Event()
 
     class _BlockingLauncher:
         def __init__(self) -> None:
@@ -1256,6 +1598,7 @@ def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
 
         def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
             self.launch_args.append(argv)
+            launch_entered.set()
             assert release_launch.wait(timeout=5.0), "test deadlock: launch never released"
             return _FakePopen()
 
@@ -1268,19 +1611,26 @@ def test_status_stays_responsive_while_a_model_loads(tmp_path: Path) -> None:
     )
     worker.start()
 
-    observed_starting = False
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        state = manager.status.state  # must return promptly mid-load, not block
-        if state in ("downloading_binary", "starting"):
-            observed_starting = True
-            break
-        time.sleep(0.01)
+    # The load is now provably in flight: the launcher is blocked mid-start.
+    # A status read from another thread must still answer promptly.
+    assert launch_entered.wait(5.0), "the launch never started"
+    polled = threading.Event()
+    seen_states: list[str] = []
+
+    def poll_status() -> None:
+        seen_states.append(manager.status.state)
+        polled.set()
+
+    poller = threading.Thread(target=poll_status, daemon=True)
+    poller.start()
+    answered_mid_load = polled.wait(2.0)
 
     release_launch.set()
     worker.join(timeout=5.0)
+    poller.join(timeout=2.0)
     assert not worker.is_alive()
-    assert observed_starting is True
+    assert answered_mid_load, "a status poll queued behind the model load"
+    assert seen_states == ["starting"]
     assert manager.status.state == "ready"
 
 

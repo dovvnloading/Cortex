@@ -1,3 +1,159 @@
+# Changelog
+
+All notable changes to Cortex are recorded here, newest first, in the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) layout. The number of
+the pull request behind a change is given in parentheses.
+
+The declared version is 2.0.0 (`backend/cortex_backend/__init__.py`). **It is
+not published:** there is no download, so run Cortex from source. The newest
+published release is v1.0.0, from the Qt-era application that the web rewrite
+replaced. Nothing after v1.0.0 (2026-01-20) has been published, so both the
+summary below and the dated entries under it are unreleased. When a release is
+cut, `[Unreleased]` becomes `## [<version>] - <date>`.
+
+## [Unreleased]
+
+Everything merged since 2026-09-04 (pull requests #212 to #284), which this
+file had no summary of. Test-only pull requests (#228, #269, #273) and a README
+edit that was later undone (#278) are left out. Some changes are also told at
+length in the dated entries under [Earlier entries](#earlier-entries), which
+are named where they apply.
+
+### Added
+
+- Answers stream into the transcript as the model writes them, reasoning
+  included, instead of appearing all at once after generation (#268; see "Real
+  Token Streaming" below).
+- A redesigned model picker and generation-parameter controls (#271).
+- Models kept in subfolders of the GGUF folder are found, and a model's id
+  carries its path (#270; see "GGUF Model Discovery" below).
+
+### Changed
+
+- The declared version is 2.0.0, marking the rewrite as a different
+  application from the Qt-era v1.0.0. It is not published (#277).
+- The release workflow builds the tag it was asked to build, and only its
+  upload step can write to the repository (#277).
+- Startup is faster: Cortex builds one TLS context and shares it between its
+  three HTTP clients instead of parsing the certificate bundle three times
+  (#284).
+- The README describes the app as it ships: both runtimes, screenshots of the
+  current build, and what code execution can reach today (#276).
+- Internal restructuring with no change in behaviour: the chat store is named
+  for what it is (#212), the composition root is `app_factory` (#214), each
+  local worker attempt has its own module (#221), execution capability gates
+  are typed (#223), the services call the generation engine instead of
+  interrogating it (#226), and the llama.cpp chat stream is stopped by closing
+  it rather than through a queue (#227).
+- For contributors: a Python type checker (`mypy`) is part of the checks and
+  the package's `py.typed` marker now holds (#225); tests are named for what
+  they cover (#220), a browser spec runs against the real API (#213, #216),
+  tests that never touch a DOM no longer build one (#229), every wait in the
+  suite is bounded (#282), and the GitHub Actions are pinned to commits, the
+  workflows are linted and audited, and pull requests get a dependency review
+  (#283).
+
+### Fixed
+
+Chat and streaming
+
+- Stop keeps the part of the answer already on screen instead of erasing it
+  (#279; see "Stop Keeps the Answer" below).
+- Stop is honoured during translation (#252), and a turn that was already
+  cancelled no longer waits for the model (#242).
+- A failed translation no longer breaks the live answer stream (#274; see
+  "Translation Failures" below).
+- Nine defects in cancellation, consent, time and startup (#266; see
+  "Correctness Pass" below).
+- A prompt such as "start the process of writing" is no longer treated as a
+  request for code (#281).
+- The transcript settles when the reload after a generation fails (#235), and a
+  turn's status callback is detached when the turn ends (#264).
+- An image is refused for a GGUF model that cannot see it, instead of being
+  dropped (#234).
+- A document in an unknown text encoding is refused rather than guessed at
+  (#250), and the image capability probe no longer breaks GIF attachments
+  (#248).
+- An ordinary chat message can no longer freeze the backend (#247).
+
+Interface
+
+- Retry is offered only for failures that resending the prompt can fix (#263),
+  and the composer clears when a retry succeeds (#265).
+- A local generation keeps streaming while the machine is offline (#258).
+- A cleared number field is no longer read as zero (#262).
+- Unsaved memory edits survive when a memory is added (#261).
+- Attachments that uploaded are kept when another one in the same batch fails
+  (#260).
+- Three state bugs that threw away visible work: a stale 401 no longer signs
+  the user out of a working session, a failed chat move no longer undoes a
+  later one that succeeded, and memories the server normalized away no longer
+  stay on screen (#241).
+
+Code execution
+
+- A cancelled job no longer reports success (#239), cancelling twice stays
+  idempotent (#267), and a cancelled code task can no longer run to completion
+  (#266).
+- Two lifecycle races that cost work: a duplicate submission no longer kills
+  the job it duplicated, and reopening Cortex soon after a crash no longer
+  leaves code execution disabled for the whole session (#233).
+- A damaged execution store is rebuilt instead of refusing to start (#240).
+- The execution event stream is never closed before its terminal event (#231),
+  and events are no longer evicted from under a reader that is still attached
+  (#238).
+- The network address pin now takes effect (#255), the quarantine root the
+  next artifact needs is kept (#246), and an attachment job fails cleanly when
+  the disk does (#259).
+- The user is told when a code result lost data (#256), a clamped code
+  duration stays an integer (#224), and shipped code raises real errors where
+  it relied on `assert` (#222).
+- Engine hooks that receive host observations now declare them (#245).
+
+API and storage
+
+- Untrusted input gets a real status code instead of a 500 or a broken stream:
+  a malformed `Host` header, an oversized image resize, a `Last-Event-ID`
+  beyond SQLite's range, and ordinary states on the memory routes (#236).
+- Backup rotation and artifact retention no longer leave files behind on every
+  startup and every artifact (#237).
+- Recovery discards the crashed database's write-ahead log instead of
+  replaying it onto the restored backup (#230).
+- A corrupt memory file can be repaired from the app (#253).
+- The API accepts an IPv6 loopback host under Starlette 1.7's host parser
+  (#272).
+
+Local models and the llama.cpp runtime
+
+- One corrupt GGUF file no longer hides every other model (#275; see "Corrupt
+  Model Files" below).
+- Companion files are no longer offered as models, and the model list appears
+  promptly (#270).
+- A GPU backend that cannot be fetched no longer blocks the CPU one (#232).
+- A startup timeout is reported instead of "starting" forever (#243).
+- A GGUF download cut short inside its tensor data is rejected (#244).
+- A one-second network hiccup no longer aborts the runtime download (#254).
+- The crash-loop warning no longer turns into its own opposite (#257).
+- The context window reported by Ollama is the one that is read (#249).
+
+Launcher
+
+- A second Ctrl+C force-quits (#251).
+
+### Removed
+
+- The signed native worker that was never built (#215), the broker transport
+  the coordinator never used (#217), the fake execution preview that shipped in
+  the production app (#218), the `cryptography` dependency nothing imported
+  (#219), and the consumed `findings.json` working file (#280).
+
+## Earlier entries
+
+Long-form entries from before this layout, newest first. Their `Version` lines
+are pass names, not release numbers, unless a number is given. Entries dated
+after v1.0.0 (2026-01-20) have not been part of a published release; the 0.95.x
+entries describe Qt-era releases.
+
 ### **Stop Keeps the Answer**
 
 **Date:** 2026-09-25
@@ -200,6 +356,29 @@
   and verifies the installed environment against the declared pins.
 * The 53 API routes moved from a single 1,592-line function into one module per
   resource, with no change to the generated contract.
+
+---
+
+### **Local GGUF Models via a Managed llama.cpp Runtime**
+
+**Date:** 2026-08-07
+**Version:** Local runtime pass
+
+* Cortex can serve a local `.gguf` file itself, through its own managed
+  llama.cpp runtime, so a model no longer needs Ollama. GGUF models appear in
+  the same picker as Ollama models, as `gguf:<path>`.
+* The runtime's `llama-server` is fetched once from ggml-org's llama.cpp
+  releases and cached. Upstream publishes no checksums, so Cortex pins its own
+  SHA-256 values in the source and verifies both the downloaded archive and
+  every extracted file before launching it. Only the MIT-licensed Windows CPU
+  and Vulkan builds are offered; the GPU backend setting is `auto` (try Vulkan,
+  fall back to CPU), `vulkan`, or `cpu`.
+* A GGUF can be downloaded into the models folder by direct URL or Hugging Face
+  repository, and each model's parameter size, quantization, and context length
+  are read from the file itself.
+* The runtime's live status is shown beside the model picker.
+* The pinned llama.cpp build is moved forward by hand with
+  `tools/pin_llamacpp_release.py`; `CONTRIBUTING.md` documents the procedure.
 
 ---
 

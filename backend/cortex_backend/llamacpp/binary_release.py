@@ -31,7 +31,7 @@ class AssetSpec:
     ``ggml-*.dll`` backend libraries -- hashing only the stub exe would leave
     the actual executable code (the impl/backend DLLs) unverified. So the
     trust anchor is a whole-directory manifest hash (``directory_sha256``,
-    see ``binary_fetcher._hash_directory``) over every extracted file, not
+    see ``binary_fetcher.hash_directory``) over every extracted file, not
     just the entry-point stub.
     """
 

@@ -229,4 +229,43 @@ describe("MemoryPanel server reconciliation", () => {
     });
     expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("kept and edited");
   });
+
+  describe("when the list has not loaded", () => {
+    const noop = {
+      busy: false,
+      onAdd: vi.fn<(memo: string) => Promise<void>>().mockResolvedValue(),
+      onReplace: vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue(),
+      onClear: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    };
+
+    it("says it is loading instead of claiming there are no memories", () => {
+      render(<MemoryPanel memos={[]} load={{ status: "loading" }} {...noop} />);
+
+      expect(screen.getByRole("status")).toHaveTextContent("Loading saved memories...");
+      expect(screen.queryByText("No permanent memories stored.")).not.toBeInTheDocument();
+      expect(screen.queryByRole("textbox", { name: "New memory" })).not.toBeInTheDocument();
+    });
+
+    it("reports the failure with a retry and offers no editor over an unknown list", async () => {
+      const user = userEvent.setup();
+      const onRetry = vi.fn();
+      render(<MemoryPanel memos={[]} load={{ status: "error", message: "Cortex could not load memories." }} onRetry={onRetry} {...noop} />);
+
+      expect(screen.getByRole("alert")).toHaveTextContent("Cortex could not load memories.");
+      expect(screen.queryByText("No permanent memories stored.")).not.toBeInTheDocument();
+      expect(screen.queryByRole("textbox", { name: "New memory" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Clear all|Save changes/ })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+      expect(onRetry).toHaveBeenCalledOnce();
+    });
+
+    it("shows the list once it has loaded, seeded from what arrived", () => {
+      const { rerender } = render(<MemoryPanel memos={[]} load={{ status: "loading" }} {...noop} />);
+
+      rerender(<MemoryPanel memos={["Likes tea"]} load={{ status: "ready" }} {...noop} />);
+
+      expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Likes tea");
+    });
+  });
 });
