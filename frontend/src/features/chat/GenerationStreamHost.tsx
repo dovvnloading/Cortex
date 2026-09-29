@@ -27,15 +27,13 @@ type Props = {
  */
 export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
   const { consume, stop } = useGenerationStream(api, onSessionExpired);
-  const trackedJobId = useChatStore((state) => state.generation.jobId);
   // Only the first look may adopt a job left in session storage. Adopting one
   // whenever the store goes idle would resurrect a finished job if clearing
   // the stored copy had failed.
   const coldStartCheckedRef = useRef(false);
-  // The job this host has already attached to. Adopting a stored job moves the
-  // store, which re-runs the effect below; without this a consumer that
-  // stopped on a refused session in the meantime would be attached a second
-  // time, behind the very refusal the app is about to act on.
+  // The job this host has already attached to. Without it a consumer that
+  // stopped on a refused session would be attached a second time, behind the
+  // very refusal the app is about to act on.
   const attachedJobIdRef = useRef<string | null>(null);
 
   const onCompleted = useCallback(
@@ -60,35 +58,53 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
 
   useEffect(() => stop, [stop]);
 
-  // Attach to whatever job the store tracks: one a page just started, one kept
-  // across a workspace remount, or -- once, on a cold start -- one left in
-  // session storage by a reload. Deferred a tick so React StrictMode's
-  // simulated unmount cancels the first attempt instead of racing a second
-  // consumer against it; consume() ignores a job it is already following.
+  // Attach to whatever job the store tracks: one kept across a workspace
+  // remount, or -- once, on a cold start -- one left in session storage by a
+  // reload, both looked for a tick after mounting; and any job a page starts
+  // later, the moment the store moves to it, so the stream opens exactly as
+  // early as it did when the page owned it.
+  //
+  // The mount-time look is deferred so React StrictMode's simulated unmount
+  // cancels the first attempt instead of racing a second consumer against it.
   useEffect(() => {
+    const follow = (job: PersistedJob): void => {
+      if (attachedJobIdRef.current === job.jobId) return;
+      attachedJobIdRef.current = job.jobId;
+      void consume(job, onCompleted, onFailed);
+    };
+    const followTrackedJob = (): void => {
+      const { generation, generationCursor } = useChatStore.getState();
+      if (!generation.jobId || !generation.threadId) return;
+      follow({ jobId: generation.jobId, threadId: generation.threadId, lastEventId: generationCursor });
+    };
+
     const timer = window.setTimeout(() => {
-      const { generation, generationCursor, beginGeneration } = useChatStore.getState();
-      let job: PersistedJob | null = null;
-      if (generation.jobId && generation.threadId) {
-        job = { jobId: generation.jobId, threadId: generation.threadId, lastEventId: generationCursor };
+      const { generation, beginGeneration } = useChatStore.getState();
+      if (generation.jobId) {
+        followTrackedJob();
       } else if (!coldStartCheckedRef.current) {
-        // A cold start replays the job from its first event: the store holds
-        // no text yet, and a stored cursor would leave the start of the
-        // answer missing.
         const stored = readActiveJob();
         if (stored) {
-          job = { ...stored, lastEventId: 0 };
+          // A cold start replays the job from its first event: the store holds
+          // no text yet, and a stored cursor would leave the start of the
+          // answer missing. Claim it before the store moves, so the
+          // subscription below does not attach a second time.
+          const job: PersistedJob = { ...stored, lastEventId: 0 };
+          attachedJobIdRef.current = job.jobId;
           beginGeneration(job.jobId, job.threadId);
+          void consume(job, onCompleted, onFailed);
         }
       }
       coldStartCheckedRef.current = true;
-      if (job && attachedJobIdRef.current !== job.jobId) {
-        attachedJobIdRef.current = job.jobId;
-        void consume(job, onCompleted, onFailed);
-      }
     }, 0);
-    return () => window.clearTimeout(timer);
-  }, [trackedJobId, consume, onCompleted, onFailed]);
+    const unsubscribe = useChatStore.subscribe((state, previous) => {
+      if (state.generation.jobId && state.generation.jobId !== previous.generation.jobId) followTrackedJob();
+    });
+    return () => {
+      window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [consume, onCompleted, onFailed]);
 
   return null;
 }

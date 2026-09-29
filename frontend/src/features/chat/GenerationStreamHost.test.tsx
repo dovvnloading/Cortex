@@ -62,7 +62,9 @@ describe("GenerationStreamHost", () => {
 
     act(() => trackGeneration("job-1", "thread-a"));
 
-    await waitFor(() => expect(attachments).toHaveLength(1));
+    // In the same turn, not a tick later: the stream opens as early as it did
+    // when the page owned it, so a fast job cannot finish before it is followed.
+    expect(attachments).toHaveLength(1);
     expect(attachments[0]).toMatchObject({ jobId: "job-1", afterEventId: 0 });
   });
 
