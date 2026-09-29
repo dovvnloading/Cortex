@@ -5,6 +5,9 @@ import type { ComponentProps } from "react";
 import type { ChatResponse } from "../../../../contracts/cortex-api";
 import { CortexApi } from "../../api/client";
 import { useChatStore } from "../../stores/useChatStore";
+import { useUiStore } from "../../stores/useUiStore";
+import { CommandPalette } from "../command-palette/CommandPalette";
+import { ShortcutsHelpDialog } from "../command-palette/ShortcutsHelpDialog";
 import { ChatPage } from "./ChatPage";
 import { GenerationStreamHost } from "./GenerationStreamHost";
 
@@ -180,6 +183,61 @@ describe("ChatPage Escape", () => {
     await user.keyboard("{Escape}");
 
     expect(cancelGeneration).not.toHaveBeenCalled();
+  });
+
+  it("leaves Escape to the real shortcuts dialog and the real command palette", async () => {
+    // The synthetic roles above pin the rule; this pins that the app's own
+    // Base UI dialog and its cmdk palette actually carry one of those roles.
+    const user = userEvent.setup();
+    const { api, cancelGeneration } = harness();
+    render(
+      <>
+        <ChatWithHost
+          api={api}
+          threadId="thread-a"
+          runtimeReady
+          runtimeMessage={null}
+          localModels={["local-chat:7b"]}
+          selectedModel="local-chat:7b"
+          modelBusy={false}
+          onSelectModel={async () => true}
+          onRescanModels={async () => undefined}
+          onThreadCreated={vi.fn()}
+          onForked={vi.fn()}
+        />
+        <ShortcutsHelpDialog />
+        <CommandPalette
+          chats={[]}
+          localModels={[]}
+          selectedModel={null}
+          theme="dark"
+          onNewChat={vi.fn()}
+          onOpenSettings={vi.fn()}
+          onToggleTheme={vi.fn()}
+          onSelectModel={vi.fn()}
+          onSelectChat={vi.fn()}
+        />
+      </>,
+    );
+    await sendPrompt(user);
+    await focusThePage();
+
+    act(() => useUiStore.getState().setShortcutsDialogOpen(true));
+    expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).toBeVisible();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument());
+    expect(cancelGeneration).not.toHaveBeenCalled();
+
+    act(() => useUiStore.getState().setCommandPaletteOpen(true));
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeVisible();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
+    expect(cancelGeneration).not.toHaveBeenCalled();
+
+    // With both closed, the same key now stops the response.
+    (document.activeElement as HTMLElement | null)?.blur();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledTimes(1));
   });
 
   it("stops again once the overlay has closed", async () => {
