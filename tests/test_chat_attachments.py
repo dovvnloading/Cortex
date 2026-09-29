@@ -546,6 +546,91 @@ def test_a_retry_never_changes_an_existing_success(tmp_path: Path, frozen_clock)
     assert job.status == "succeeded"
 
 
+def _retire_between_publish_and_completion(
+    repository: ExecutionRepository,
+    service: ChatAttachmentService,
+    frozen_clock,
+    monkeypatch: pytest.MonkeyPatch,
+    request_id: str,
+) -> None:
+    """After the bytes are published, let the lease lapse and a retry retire the job.
+
+    This is the suspend/resume (or clock jump) window: the stager holds its
+    bytes, its 60 s lease is gone and nothing has written for longer than the
+    abandonment threshold, so the matching retry fails the job as interrupted.
+    """
+
+    real_publish = repository.publish_artifact
+
+    def publish_then_get_retired(job_id, **kwargs):
+        artifact = real_publish(job_id, **kwargs)
+        frozen_clock.advance(ABANDONED_STAGE_SECONDS + STAGING_LEASE_SECONDS)
+        with pytest.raises(ChatAttachmentError) as retry:
+            _stage(service, request_id)
+        assert retry.value.code == "attachment_request_conflict"
+        return artifact
+
+    monkeypatch.setattr(repository, "publish_artifact", publish_then_get_retired)
+
+
+def _artifact_rows_and_files(repository: ExecutionRepository) -> tuple[int, list[Path]]:
+    with repository.connect() as connection:
+        rows = connection.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0]
+    files = [path for path in repository.artifact_root.rglob("*") if path.is_file()]
+    return rows, files
+
+
+def test_a_stager_retired_between_publish_and_completion_fails_and_leaves_no_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen_clock
+):
+    """The call that lost its job must not report success for it.
+
+    Finishing a job the store already failed writes nothing and returns the
+    failed job. Ignoring that returned a descriptor whose artifact no job result
+    named, and ``resolve`` then refused it at send time.
+    """
+
+    repository, service = _durable(tmp_path)
+    _retire_between_publish_and_completion(
+        repository, service, frozen_clock, monkeypatch, "retired-mid-stage"
+    )
+
+    with pytest.raises(ChatAttachmentError) as lost:
+        _stage(service, "retired-mid-stage")
+
+    assert lost.value.code == "attachment_persist_failed"
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert (job.status, job.error, job.result) == ("failed", ATTACHMENT_INTERRUPTED, None)
+    assert [event.event for event in repository.events(job.job_id)].count("completed") == 0
+    assert repository.lease_holder(job.job_id) is None
+    rows, files = _artifact_rows_and_files(repository)
+    assert rows == 0, "the published artifact row was left behind"
+    assert files == [], "the published artifact file was left behind"
+
+
+def test_a_failed_removal_of_the_orphaned_artifact_never_replaces_the_staging_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen_clock
+):
+    repository, service = _durable(tmp_path)
+    _retire_between_publish_and_completion(repository, service, frozen_clock, monkeypatch, "retired-stuck")
+    secret_location = str(tmp_path / "artifacts")
+
+    def refuses(*_args, **_kwargs):
+        raise ExecutionRepositoryError(f"Artifact cleanup failed at {secret_location}.")
+
+    monkeypatch.setattr(repository, "delete_artifact", refuses)
+    with pytest.raises(ChatAttachmentError) as lost:
+        _stage(service, "retired-stuck")
+
+    assert lost.value.code == "attachment_persist_failed"
+    assert secret_location not in str(lost.value)
+    assert lost.value.__cause__ is None, "the failure text would carry the store's location"
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert (job.status, job.error) == ("failed", ATTACHMENT_INTERRUPTED)
+    # Nothing removed it, so it waits for retention; no job result names it either.
+    assert _artifact_rows_and_files(repository)[0] == 1
+
+
 def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
     state = FakeOllamaState(
         installed_models={"local-chat:7b"},

@@ -422,7 +422,7 @@ class ChatAttachmentService:
                 kind=kind,
                 expires_at=artifact.expires_at,
             )
-            repository.transition(
+            completed = repository.transition(
                 job.job_id,
                 status="succeeded",
                 event="completed",
@@ -430,10 +430,30 @@ class ChatAttachmentService:
                 data={"message": "Chat attachment staged."},
                 result=descriptor.as_dict(),
             )
-            return descriptor
         except (ExecutionRepositoryError, OSError) as exc:
             self._fail(job.job_id)
             raise ChatAttachmentError("attachment_persist_failed") from exc
+        if completed.status != "succeeded":
+            # A finished job is immutable: the write above changed nothing and
+            # only reported the job as it stands. That is what a retry that
+            # retired this job as abandoned leaves behind when the lease ran
+            # out while this call was still staging. Handing out a descriptor
+            # for a job the store says failed would leave the artifact behind
+            # with no result that names it, and resolve() would then refuse it
+            # at send time.
+            self._discard_artifact(artifact.artifact_id)
+            raise ChatAttachmentError("attachment_persist_failed")
+        return descriptor
+
+    def _discard_artifact(self, artifact_id: str) -> None:
+        """Remove an artifact no job result names; best effort, because the caller is already raising."""
+
+        if self.repository is None:
+            return
+        try:
+            self.repository.delete_artifact(artifact_id)
+        except Exception:
+            pass  # Retention reclaims the row and the file.
 
     def _fail(self, job_id: str) -> None:
         """Record a failed staging job; best effort, because the caller is already raising."""
