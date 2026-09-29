@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import socket
 import struct
 import threading
 import time
@@ -39,15 +40,10 @@ def _mock_download_dns(monkeypatch) -> None:
     )
 
 
-_HF_TOKEN_VARIABLES = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
-_SYNTHETIC_TOKEN = "hf_synthetic0test0token0value"
-
-
 @pytest.fixture(autouse=True)
-def _no_ambient_huggingface_token(monkeypatch) -> None:
-    """A token in the developer's own environment must not leak into a test."""
-    for name in _HF_TOKEN_VARIABLES:
-        monkeypatch.delenv(name, raising=False)
+def _no_retry_delay(monkeypatch) -> None:
+    """Retries are immediate; tests that check the backoff schedule set their own."""
+    monkeypatch.setattr(download_module, "_RETRY_BASE_DELAY_SECONDS", 0.0)
 
 
 _SYNTHETIC_TOKEN = "hf_synthetic0test0token0value"
@@ -1091,3 +1087,608 @@ def test_progress_reporter_uses_time_alone_when_the_total_is_unknown(monkeypatch
     reporter.downloading(3, None)  # half a second since the last report
 
     assert [event.completed for event in events] == [1, 3]
+
+
+# -- retry and resume ---------------------------------------------------------
+
+
+def _body_then_error(body: bytes, drop_after: int | None, piece: int = 16):
+    """Yield ``body`` in small pieces, dropping the connection after ``drop_after`` bytes."""
+    end = len(body) if drop_after is None else min(drop_after, len(body))
+    for offset in range(0, end, piece):
+        yield body[offset : min(offset + piece, end)]
+    if drop_after is not None:
+        raise httpx.ReadError("connection reset")
+
+
+class _FlakyServer:
+    """A file server that can honour ``Range``/``If-Range`` and fail on cue.
+
+    ``plans`` has one entry per request, in order: how many body bytes to send
+    before the connection drops, or ``None`` to finish the body. Requests past
+    the end of the plan succeed. ``honour_range=False`` answers every request
+    with the whole file, as a server that does not support ranges would.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        content: bytes,
+        *,
+        plans: list[int | None] | None = None,
+        etag: str | None = '"v1"',
+        honour_range: bool = True,
+    ) -> None:
+        self.directory = directory
+        self.content = content
+        self.plans = list(plans or [])
+        self.etag = etag
+        self.honour_range = honour_range
+        self.requests: list[httpx.Request] = []
+        self.staged_sizes: list[int | None] = []
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self._handle))
+
+    def range_starts(self) -> list[int | None]:
+        starts: list[int | None] = []
+        for request in self.requests:
+            header = request.headers.get("range")
+            starts.append(int(header.removeprefix("bytes=").removesuffix("-")) if header else None)
+        return starts
+
+    def respond(self, request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        headers = {"ETag": self.etag} if self.etag else {}
+        start, status = 0, 200
+        range_header = request.headers.get("range")
+        if range_header and self.honour_range and request.headers.get("if-range", self.etag) == self.etag:
+            start, status = int(range_header.removeprefix("bytes=").removesuffix("-")), 206
+            headers["Content-Range"] = f"bytes {start}-{len(self.content) - 1}/{len(self.content)}"
+        body = self.content[start:]
+        headers["Content-Length"] = str(len(body))
+        return httpx.Response(status, headers=headers, content=_body_then_error(body, drop_after))
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        staged = list(self.directory.glob(".download-*.part"))
+        self.staged_sizes.append(staged[0].stat().st_size if staged else None)
+        return self.respond(request, self.plans.pop(0) if self.plans else None)
+
+
+@pytest.fixture
+def small_reads(monkeypatch) -> None:
+    """Read 16 bytes at a time so a 256-byte fixture makes many chunks."""
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 16)
+
+
+def _leftovers(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir() if path.name.startswith(".download-"))
+
+
+def _fetch(directory: Path, server: _FlakyServer, **kwargs) -> Path:
+    return download_gguf(
+        "https://example.com/model.gguf", "model.gguf", directory, http_client=server.client(), **kwargs
+    )
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_download_resumes_after_a_mid_body_transport_error(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    events: list[GGUFDownloadProgress] = []
+
+    destination = _fetch(tmp_path, server, progress_callback=events.append)
+
+    assert destination.read_bytes() == content
+    # The second request continued from the 96 bytes actually stored (the
+    # sixth 16-byte chunk), not from zero and not from where the wire dropped.
+    assert server.range_starts() == [None, 96]
+    assert server.staged_sizes[1] == 96
+    assert server.requests[1].headers["if-range"] == '"v1"'
+    assert all(request.headers["accept-encoding"] == "identity" for request in server.requests)
+    statuses = [event.status for event in events]
+    assert statuses[0] == "starting" and statuses[-1] == "success"
+    assert "retrying" in statuses
+    completed = [event.completed for event in events if event.completed is not None]
+    assert completed == sorted(completed)  # progress never moves backwards across the retry
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_restarts_when_the_server_ignores_range(tmp_path: Path) -> None:
+    """A 200 to a ranged request carries the whole file: appending it would
+    corrupt the model, so it must replace what was stored."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100], honour_range=False)
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == content
+    assert server.range_starts() == [None, 96]  # it did ask; the server just ignored it
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_changed_file_is_not_spliced_onto_the_old_bytes(tmp_path: Path) -> None:
+    """If the file changed between attempts the If-Range no longer matches and
+    the server sends the new version whole; the result is that version alone."""
+    original = _valid_gguf_content(tmp_path)
+    changed = bytearray(original)
+    changed[-20] = 0x7F
+    server = _FlakyServer(tmp_path, original, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            server.content, server.etag = bytes(changed), '"v2"'
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == bytes(changed)
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_download_is_not_resumed_without_a_validator(tmp_path: Path) -> None:
+    """With no ETag or Last-Modified there is nothing to pin the stored bytes
+    to the file being served, so continuing would be a guess."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100], etag=None)
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == content
+    assert server.range_starts() == [None, None]
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_weak_etag_is_not_used_to_resume(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100], etag='W/"weak"')
+
+    assert _fetch(tmp_path, server).read_bytes() == content
+    assert server.range_starts() == [None, None]
+
+
+@pytest.mark.usefixtures("small_reads")
+@pytest.mark.parametrize(
+    "content_range",
+    [
+        "bytes 0-255/256",  # starts at the beginning, not where the file ends
+        "bytes 32-255/256",  # starts inside the stored bytes
+        "bytes 96-255/999",  # a different total than the first response gave
+        "bytes 96-95/256",  # inverted
+        "garbage",
+        None,
+    ],
+)
+def test_a_partial_answer_that_does_not_continue_the_file_is_refused(
+    tmp_path: Path, content_range: str | None
+) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            headers = {"ETag": '"v1"', "Content-Length": str(len(content) - 96)}
+            if content_range is not None:
+                headers["Content-Range"] = content_range
+            return httpx.Response(206, headers=headers, content=content[96:])
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    destination = _fetch(tmp_path, server)
+
+    # Rejected, then re-requested from scratch: the ranged 206 was not used.
+    assert destination.read_bytes() == content
+    assert server.range_starts() == [None, 96, None]
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_206_the_client_did_not_ask_for_is_rejected(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(206, headers={"Content-Range": "bytes 16-255/256"}, content=content[16:])
+
+    with pytest.raises(GGUFDownloadError, match="only part of the file"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_416_for_bytes_already_stored_completes_the_download(tmp_path: Path, monkeypatch) -> None:
+    """The connection can drop after the last byte but before the body ends;
+    asking for the rest then answers 416, and everything is already on disk."""
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 1)
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[len(content)])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": f"bytes */{len(content)}"})
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == content
+    assert server.range_starts() == [None, len(content)]
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_416_for_a_file_that_is_not_complete_restarts(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": "bytes */12"})
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    assert _fetch(tmp_path, server).read_bytes() == content
+    assert server.range_starts() == [None, 96, None]
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_partial_file_changed_on_disk_is_not_trusted(tmp_path: Path, monkeypatch) -> None:
+    """The stored bytes are checked before they are built on: a staging file
+    that no longer is what this transfer wrote is thrown away."""
+    content = _valid_gguf_content(tmp_path)
+
+    def tamper_size(self, seconds: float) -> None:
+        with self._staging_path.open("ab") as handle:
+            handle.write(b"junk")
+
+    def tamper_header(self, seconds: float) -> None:
+        with self._staging_path.open("r+b") as handle:
+            handle.write(b"NOPE")
+
+    for tamper in (tamper_size, tamper_header):
+        directory = tmp_path / tamper.__name__
+        directory.mkdir()
+        monkeypatch.setattr(download_module._GGUFTransfer, "_wait", tamper)
+        server = _FlakyServer(directory, content, plans=[100])
+
+        assert _fetch(directory, server).read_bytes() == content
+        assert server.range_starts() == [None, None], tamper.__name__  # restarted, did not resume
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_download_gives_up_after_repeated_failures_without_progress(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("refused", request=request)
+
+    with pytest.raises(GGUFDownloadError) as raised:
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    assert calls == 5
+    assert "Could not connect" in str(raised.value)
+    assert "Gave up after 5 attempts" in str(raised.value)
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_a_transient_status_is_retried_and_then_reported(tmp_path: Path, status: int) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status)
+
+    with pytest.raises(GGUFDownloadError, match="Gave up after 5 attempts"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 5
+
+
+@pytest.mark.usefixtures("small_reads")
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410])
+def test_a_permanent_status_is_not_retried(tmp_path: Path, status: int) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status)
+
+    with pytest.raises(GGUFDownloadError):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 1
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_permanent_error_during_a_resume_discards_the_partial_file(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(404)
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="no such repository or file|no file at this link"):
+        _fetch(tmp_path, server)
+    assert _leftovers(tmp_path) == []
+    assert not (tmp_path / "model.gguf").exists()
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_progress_resets_the_attempt_budget(tmp_path: Path) -> None:
+    """Each response delivers 32 more bytes before dropping. That takes eight
+    attempts -- more than the five that a link making no progress is allowed --
+    and must still finish, because every attempt moved forward."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[32 + 1] * 7)
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == content
+    assert len(server.requests) > 5
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_the_attempt_budget_has_a_hard_ceiling(tmp_path: Path, monkeypatch) -> None:
+    """A server that dribbles one chunk per attempt cannot keep the job alive forever."""
+    monkeypatch.setattr(download_module, "_MAX_TOTAL_ATTEMPTS", 4)
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[16 + 1] * 20)
+
+    with pytest.raises(GGUFDownloadError, match="Gave up after 4 attempts"):
+        _fetch(tmp_path, server)
+    assert len(server.requests) == 4
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_retry_waits_double_up_to_a_cap_and_honour_retry_after(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(download_module, "_RETRY_BASE_DELAY_SECONDS", 2.0)
+    waits: list[float] = []
+    monkeypatch.setattr(download_module._GGUFTransfer, "_wait", lambda self, seconds: waits.append(seconds))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(GGUFDownloadError, match="timed out"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert waits == [2.0, 4.0, 8.0, 16.0]
+
+    waits.clear()
+    monkeypatch.setattr(download_module, "_MAX_STALLED_ATTEMPTS", 3)
+    retry_after = {"value": "7"}
+
+    def rate_limited(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": retry_after["value"]})
+
+    with pytest.raises(GGUFDownloadError, match="rate-limiting"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(rate_limited)),
+        )
+    assert waits == [7.0, 7.0]  # the server's ask beats the 2 s and 4 s schedule, not the 8 s one below
+
+    waits.clear()
+    retry_after["value"] = "9999"  # capped, never trusted to park the job for hours
+    with pytest.raises(GGUFDownloadError):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(rate_limited)),
+        )
+    assert waits == [download_module._RETRY_MAX_DELAY_SECONDS] * 2
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_cancelling_during_the_wait_before_a_retry_stops_at_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(download_module, "_RETRY_BASE_DELAY_SECONDS", 30.0)
+    cancel = threading.Event()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        cancel.set()  # the user presses Stop just as the connection fails
+        raise httpx.ConnectError("refused", request=request)
+
+    started = time.monotonic()
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            cancellation_event=cancel,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 1
+    assert time.monotonic() - started < 10  # it did not sit out the 30 s wait
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_cancelling_mid_body_stops_the_retry_loop(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    cancel = threading.Event()
+    server = _FlakyServer(tmp_path, content, plans=[None])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        response = real_respond(request, drop_after)
+        cancel.set()
+        return response
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        _fetch(tmp_path, server, cancellation_event=cancel)
+    assert len(server.requests) == 1
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_the_public_host_policy_is_rechecked_on_every_attempt(tmp_path: Path, monkeypatch) -> None:
+    """A retry must not be a way around the SSRF policy: if the name now
+    resolves to a private address the resumed request is never sent."""
+    lookups = 0
+
+    def getaddrinfo(host, port, **kwargs):
+        nonlocal lookups
+        lookups += 1
+        address = "93.184.216.34" if lookups <= 2 else "10.0.0.7"  # attempt one: two lookups
+        return [(0, 0, 0, "", (address, port))]
+
+    monkeypatch.setattr(download_module.socket, "getaddrinfo", getaddrinfo)
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+
+    with pytest.raises(GGUFDownloadError, match="private or loopback"):
+        _fetch(tmp_path, server)
+    assert len(server.requests) == 1
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_host_that_stops_resolving_mid_download_is_retried(tmp_path: Path, monkeypatch) -> None:
+    """When the network drops, the name lookup is the first thing to fail; a
+    transfer that already holds data must ride that out instead of discarding it."""
+    lookups = 0
+
+    def getaddrinfo(host, port, **kwargs):
+        nonlocal lookups
+        lookups += 1
+        if lookups in (3, 4):  # the first lookups of the second and third attempts
+            raise socket.gaierror("no network")
+        return [(0, 0, 0, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(download_module.socket, "getaddrinfo", getaddrinfo)
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+
+    destination = _fetch(tmp_path, server)
+
+    assert destination.read_bytes() == content
+    assert server.range_starts() == [None, 96]
+
+
+def test_a_mistyped_host_fails_at_once_instead_of_retrying(tmp_path: Path, monkeypatch) -> None:
+    lookups = 0
+
+    def getaddrinfo(host, port, **kwargs):
+        nonlocal lookups
+        lookups += 1
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr(download_module.socket, "getaddrinfo", getaddrinfo)
+
+    with pytest.raises(GGUFDownloadError, match="Could not resolve"):
+        download_gguf("https://exmaple.invalid/model.gguf", "model.gguf", tmp_path)
+    assert lookups == 1
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_download_still_honours_the_size_ceiling(tmp_path: Path) -> None:
+    """The ceiling applies to the whole file, however many attempts it took."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
+        _fetch(tmp_path, server, max_download_bytes=200)
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_download_still_requires_the_gguf_structure(tmp_path: Path) -> None:
+    """The stitched file goes through the same validation as any other."""
+    content = _valid_gguf_content(tmp_path)
+    truncated = content[:-24]  # ends inside the tensor data
+    server = _FlakyServer(tmp_path, truncated, plans=[100])
+
+    with pytest.raises(GGUFDownloadError, match="truncated inside its GGUF tensor data"):
+        _fetch(tmp_path, server)
+    assert not (tmp_path / "model.gguf").exists()
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_download_still_checks_free_space(tmp_path: Path, monkeypatch) -> None:
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    free = {"bytes": 10**9}
+    monkeypatch.setattr(
+        download_module.shutil, "disk_usage", lambda directory: SimpleNamespace(free=free["bytes"])
+    )
+    monkeypatch.setattr(
+        download_module._GGUFTransfer,
+        "_wait",
+        lambda self, seconds: free.update(bytes=8),  # the disk fills up while waiting
+    )
+
+    with pytest.raises(GGUFDownloadError, match="free disk space"):
+        _fetch(tmp_path, server, min_free_space_bytes=1)
+    assert _leftovers(tmp_path) == []
+
+
+def test_transport_failures_mid_body_name_the_cause_when_retries_run_out(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=_body_then_error(b"GGUF" + bytes(60), drop_after=20))
+
+    with pytest.raises(GGUFDownloadError, match="interrupted") as raised:
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 5  # no validator, so each attempt restarts and none makes net progress
+    assert isinstance(raised.value.__cause__, httpx.ReadError)
+    assert _leftovers(tmp_path) == []

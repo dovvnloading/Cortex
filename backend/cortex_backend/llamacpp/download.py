@@ -15,11 +15,12 @@ import shutil
 import socket
 import struct
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 from urllib.parse import urljoin, urlsplit
 
@@ -36,6 +37,18 @@ _DOWNLOAD_READ_BYTES = 64 * 1024
 # Forward progress at most this often (see ``_ProgressReporter``).
 _PROGRESS_INTERVAL_SECONDS = 0.5
 _MAX_DOWNLOAD_REDIRECTS = 5
+# Retry policy (see ``_GGUFTransfer``). What is bounded is the number of
+# attempts in a row that stored nothing new: a flaky link that keeps making
+# progress finishes a 20 GB model, a dead server gives up in about half a
+# minute (2 + 4 + 8 + 16 seconds of waiting). The total is a hard backstop.
+_MAX_STALLED_ATTEMPTS = 5
+_MAX_TOTAL_ATTEMPTS = 100
+_RETRY_BASE_DELAY_SECONDS = 2.0
+_RETRY_MAX_DELAY_SECONDS = 30.0
+# Responses that mean "not right now": worth another attempt, unlike a 404.
+_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_CONTENT_RANGE_PATTERN = re.compile(r"^bytes (\d+)-(\d+)/(\d+|\*)$")
+_UNSATISFIED_RANGE_PATTERN = re.compile(r"^bytes \*/(\d+)$")
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 _HF_API_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 _HF_REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+$")
@@ -99,6 +112,15 @@ class GGUFDownloadError(ValueError):
     @property
     def user_message(self) -> str:
         return str(self)
+
+
+class _HostResolutionError(GGUFDownloadError):
+    """The download host's name did not resolve: a network problem, not a policy refusal.
+
+    Kept distinct so that a transfer which already holds gigabytes retries
+    through a dropped connection (DNS is usually the first thing to fail) while
+    a mistyped host on the first request still fails immediately.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +189,15 @@ class _ProgressReporter:
         self._last_percent = progress.percent
         self._last_completed = completed
         self._notify(progress)
+
+    def retrying(self, completed: int, total: int | None) -> None:
+        """Say the transfer is waiting to try again; the next update is always reported."""
+        self._last_at = None
+        self._notify(
+            GGUFDownloadProgress(
+                filename=self._filename, status="retrying", completed=completed, total=total
+            )
+        )
 
     def success(self, size: int) -> None:
         self._notify(
@@ -411,16 +442,204 @@ def download_gguf(
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
     # Keep staging files out of the model directory's ``*.gguf`` scan.
     temp_path = directory / f".download-{uuid4().hex}.part"
-    client = http_client or httpx
     reporter = _ProgressReporter(progress_callback or (lambda progress: None), target_filename)
     reporter.starting()
     try:
-        current_url = _validate_download_url(url)
+        _GGUFTransfer(
+            url=url,
+            directory=directory,
+            staging_path=temp_path,
+            client=http_client or httpx,
+            limit=maximum,
+            reserve=reserve,
+            cancellation_event=cancellation_event,
+            reporter=reporter,
+        ).run()
+        _validate_gguf_file(temp_path)
+        _publish(temp_path, destination, allow_overwrite=allow_overwrite)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    reporter.success(destination.stat().st_size)
+    return destination
+
+
+def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
+    """Move a validated staging file into place without clobbering a model."""
+    if allow_overwrite:
+        os.replace(staged, destination)
+        return
+    # ``os.replace`` would silently destroy a model created after the
+    # initial existence check. Linking is an atomic create-if-absent
+    # operation on the same filesystem.
+    try:
+        os.link(staged, destination)
+    except FileExistsError as exc:
+        raise GGUFDownloadError(
+            "A model with this filename already exists; refusing to overwrite it."
+        ) from exc
+    except OSError as exc:
+        # Hard links aren't supported on every destination filesystem
+        # (exFAT, FAT32, and many SMB/network shares raise a plain
+        # ``OSError`` here, not ``FileExistsError``). Fall back to a
+        # plain move, which works for same-volume moves everywhere.
+        # Re-check for a racing writer first -- this narrows, but
+        # cannot fully close, the race window ``os.link`` closed on
+        # filesystems that support it.
+        if destination.exists():
+            raise GGUFDownloadError(
+                "A model with this filename already exists; refusing to overwrite it."
+            ) from exc
+        try:
+            os.replace(staged, destination)
+        except OSError as replace_exc:
+            raise GGUFDownloadError(
+                "Could not save the downloaded model to its destination folder."
+            ) from replace_exc
+    staged.unlink(missing_ok=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumePoint:
+    """Where a continued request picks up, and the validator that pins the bytes before it."""
+
+    offset: int
+    validator: str
+
+
+class _GGUFTransfer:
+    """Fetch one GGUF into a staging file, continuing across transient failures.
+
+    A model is gigabytes, so one dropped connection must not cost the whole
+    transfer. After a network error, a rate limit or a server error the bytes
+    already stored are kept and the next request asks for the rest (``Range``,
+    pinned to the file that was being served with ``If-Range``). Nothing that
+    is already on disk is trusted blindly: it must still be exactly the size
+    this transfer wrote, still begin with the GGUF magic, and the server must
+    answer with a ``206`` whose ``Content-Range`` begins exactly where the file
+    ends and describes the same total. Any doubt -- no validator to pin the
+    file, a server that ignores the range, a mismatched answer -- discards the
+    partial data and starts again from the first byte.
+
+    The number of *consecutive* attempts that stored nothing new is bounded
+    (``_MAX_STALLED_ATTEMPTS``), so a dead server fails in well under a minute
+    while a flaky link that keeps making progress can finish; ``_MAX_TOTAL_ATTEMPTS``
+    is a hard backstop. Every attempt re-validates the URL and every redirect
+    hop, so the public-host policy in ``_validate_download_url`` holds on a
+    retry exactly as on the first request. Cancellation is checked before each
+    attempt, between chunks, and during the wait before a retry.
+    """
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        directory: Path,
+        staging_path: Path,
+        client: Any,
+        limit: int,
+        reserve: int,
+        cancellation_event: Event | None,
+        reporter: _ProgressReporter,
+    ) -> None:
+        self._url = url
+        self._directory = directory
+        self._staging_path = staging_path
+        self._client = client
+        self._limit = limit
+        self._reserve = reserve
+        self._cancellation_event = cancellation_event
+        self._reporter = reporter
+        # Bytes stored in the staging file, the size of the whole file when the
+        # server said, and the validator of the file those bytes came from.
+        self.completed = 0
+        self.total: int | None = None
+        self._validator: str | None = None
+
+    def run(self) -> None:
+        stalled = 0
+        for attempt in range(1, _MAX_TOTAL_ATTEMPTS + 1):
+            stored_before = self.completed
+            retry_after = 0.0
+            failure: Exception
+            try:
+                self._attempt()
+                return
+            except _HostResolutionError as exc:
+                if self.completed == 0:
+                    raise  # nothing to protect yet: a mistyped host should fail at once
+                failure, reason = exc, str(exc)
+            except GGUFDownloadError:
+                raise
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                reason = _explain_http_status(status_code, url=exc.request.url)
+                if status_code not in _RETRYABLE_STATUSES:
+                    raise GGUFDownloadError(reason) from exc
+                failure, retry_after = exc, _retry_after_seconds(exc.response)
+            except httpx.TransportError as exc:
+                failure, reason = exc, _explain_transport_error(exc)
+            except httpx.HTTPError as exc:
+                raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
+
+            stalled = 0 if self.completed > stored_before else stalled + 1
+            if stalled >= _MAX_STALLED_ATTEMPTS or attempt >= _MAX_TOTAL_ATTEMPTS:
+                raise GGUFDownloadError(f"{reason} Gave up after {attempt} attempts.") from failure
+            logger.info("GGUF download attempt %d failed; retrying (%d bytes stored).", attempt, self.completed)
+            self._reporter.retrying(self.completed, self.total)
+            delay = _RETRY_BASE_DELAY_SECONDS * 2 ** max(stalled - 1, 0)
+            self._wait(min(_RETRY_MAX_DELAY_SECONDS, max(delay, retry_after)))
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancellation_event is not None and self._cancellation_event.is_set():
+            raise GGUFDownloadError("Download cancelled.")
+
+    def _wait(self, seconds: float) -> None:
+        """Sleep before a retry, waking at once if the user cancels."""
+        if (self._cancellation_event or Event()).wait(seconds):
+            raise GGUFDownloadError("Download cancelled.")
+
+    def _attempt(self) -> None:
+        self._raise_if_cancelled()
+        resume = self._resume_point()
+        if resume is not None:
+            if self._request(resume):
+                return
+            self._discard()
+        self._request(None)  # without a Range there is nothing the server can refuse to continue
+
+    def _discard(self) -> None:
+        """Forget the stored bytes; the next body overwrites the staging file."""
+        self.completed = 0
+        self.total = None
+        self._validator = None
+
+    def _resume_point(self) -> _ResumePoint | None:
+        if self.completed == 0:
+            return None
+        if self._validator is not None and self._staged_bytes_are_intact():
+            return _ResumePoint(self.completed, self._validator)
+        self._discard()
+        return None
+
+    def _staged_bytes_are_intact(self) -> bool:
+        """The staging file is exactly what this transfer wrote and still starts like a GGUF."""
+        try:
+            if self._staging_path.stat().st_size != self.completed:
+                return False
+            with self._staging_path.open("rb") as handle:
+                return handle.read(len(GGUF_MAGIC)) == GGUF_MAGIC
+        except OSError:
+            return False
+
+    @contextmanager
+    def _open(self, resume: _ResumePoint | None) -> Iterator[httpx.Response]:
+        """Follow redirects by hand, validating every hop, and yield the final response."""
+        current_url = _validate_download_url(self._url)
         for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
-            with client.stream(
+            with self._client.stream(
                 "GET",
                 current_url,
-                headers=_authorization_headers(current_url),
+                headers=_request_headers(current_url, resume),
                 follow_redirects=False,
                 timeout=_DOWNLOAD_TIMEOUT,
             ) as response:
@@ -432,99 +651,140 @@ def download_gguf(
                         raise GGUFDownloadError("The download redirect did not include a target URL.")
                     current_url = _validate_download_url(urljoin(current_url, location))
                     continue
-
                 _validate_download_url(str(response.url))
-                response.raise_for_status()
-                total = _content_length(response)
-                if total is not None:
-                    if total <= 0:
-                        raise GGUFDownloadError("The download advertised an invalid size.")
-                    if total > maximum:
-                        raise GGUFDownloadError(
-                            "This file is larger than the "
-                            f"{_format_byte_limit(maximum)} download limit."
-                        )
-                    _require_free_space(directory, total, reserve)
-                completed = 0
-                saw_data = False
-                prefix = bytearray()
-                with temp_path.open("wb") as handle:
-                    for chunk in response.iter_bytes(_DOWNLOAD_READ_BYTES):
-                        if cancellation_event is not None and cancellation_event.is_set():
-                            raise GGUFDownloadError("Download cancelled.")
-                        if chunk:
-                            saw_data = True
-                            if len(prefix) < len(GGUF_MAGIC):
-                                prefix.extend(chunk[: len(GGUF_MAGIC) - len(prefix)])
-                            if len(prefix) == len(GGUF_MAGIC) and bytes(prefix) != GGUF_MAGIC:
-                                raise GGUFDownloadError(
-                                    "This link did not return a GGUF model file (got something else, such as a "
-                                    "web page, instead). Use the file's direct download link, not the page you "
-                                    "view it on."
-                                )
-                        if completed + len(chunk) > maximum:
-                            raise GGUFDownloadError(
-                            "This file is larger than the "
-                            f"{_format_byte_limit(maximum)} download limit."
-                        )
-                        _require_free_space(directory, len(chunk), reserve)
-                        handle.write(chunk)
-                        completed += len(chunk)
-                        reporter.downloading(completed, total)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                reporter.downloading(completed, total, final=True)
-                if not saw_data:
-                    raise GGUFDownloadError("The download returned no data.")
-                if total is not None and completed != total:
-                    raise GGUFDownloadError("The download size did not match the advertised Content-Length.")
-                _validate_gguf_file(temp_path)
-                break
-        else:  # pragma: no cover - the loop always returns or breaks
-            raise GGUFDownloadError("The download exceeded the redirect limit.")
-        if allow_overwrite:
-            os.replace(temp_path, destination)
-        else:
-            # ``os.replace`` would silently destroy a model created after the
-            # initial existence check. Linking is an atomic create-if-absent
-            # operation on the same filesystem.
-            try:
-                os.link(temp_path, destination)
-            except FileExistsError as exc:
+                yield response
+                return
+        raise GGUFDownloadError("The download exceeded the redirect limit.")  # pragma: no cover
+
+    def _request(self, resume: _ResumePoint | None) -> bool:
+        """Make one request and store its body; False if the server would not continue ``resume``."""
+        with self._open(resume) as response:
+            if resume is not None and response.status_code == 416:
+                # "Range not satisfiable": either every byte is already stored
+                # (the connection dropped after the last one), or the file changed.
+                return _unsatisfied_range_length(response) == resume.offset
+            response.raise_for_status()
+            if response.status_code == 206:
+                if resume is None:
+                    raise GGUFDownloadError(
+                        "The server sent only part of the file although the whole file was requested."
+                    )
+                span = _content_range(response.headers.get("Content-Range"))
+                if (
+                    span is None
+                    or span.start != resume.offset
+                    or (span.total is not None and self.total is not None and span.total != self.total)
+                    or _validator_of(response.headers) not in (None, resume.validator)
+                ):
+                    return False
+                total = span.total
+                if total is None:
+                    length = _content_length(response)
+                    total = self.total if length is None else resume.offset + length
+                self._store(response, base=resume.offset, total=total)
+                return True
+            # 200: the whole body, from byte zero. That is a first request, or a
+            # server that ignored the Range or judged the If-Range stale.
+            self._discard()
+            self._validator = _validator_of(response.headers)
+            self._store(response, base=0, total=_content_length(response))
+            return True
+
+    def _store(self, response: httpx.Response, *, base: int, total: int | None) -> None:
+        """Write the body after byte ``base`` of the staging file and check it is whole."""
+        if total is not None:
+            if total <= 0:
+                raise GGUFDownloadError("The download advertised an invalid size.")
+            if total > self._limit:
                 raise GGUFDownloadError(
-                    "A model with this filename already exists; refusing to overwrite it."
-                ) from exc
-            except OSError as exc:
-                # Hard links aren't supported on every destination filesystem
-                # (exFAT, FAT32, and many SMB/network shares raise a plain
-                # ``OSError`` here, not ``FileExistsError``). Fall back to a
-                # plain move, which works for same-volume moves everywhere.
-                # Re-check for a racing writer first -- this narrows, but
-                # cannot fully close, the race window ``os.link`` closed on
-                # filesystems that support it.
-                if destination.exists():
+                    "This file is larger than the "
+                    f"{_format_byte_limit(self._limit)} download limit."
+                )
+            _require_free_space(self._directory, total - base, self._reserve)
+        self.total = total
+        self.completed = base
+        # A resumed file's first bytes were re-read from disk before asking.
+        prefix = bytearray(GGUF_MAGIC if base else b"")
+        with self._staging_path.open("ab" if base else "wb") as handle:
+            for chunk in response.iter_bytes(_DOWNLOAD_READ_BYTES):
+                self._raise_if_cancelled()
+                if chunk:
+                    if len(prefix) < len(GGUF_MAGIC):
+                        prefix.extend(chunk[: len(GGUF_MAGIC) - len(prefix)])
+                    if len(prefix) == len(GGUF_MAGIC) and bytes(prefix) != GGUF_MAGIC:
+                        raise GGUFDownloadError(
+                            "This link did not return a GGUF model file (got something else, such as a "
+                            "web page, instead). Use the file's direct download link, not the page you "
+                            "view it on."
+                        )
+                if self.completed + len(chunk) > self._limit:
                     raise GGUFDownloadError(
-                        "A model with this filename already exists; refusing to overwrite it."
-                    ) from exc
-                try:
-                    os.replace(temp_path, destination)
-                except OSError as replace_exc:
-                    raise GGUFDownloadError(
-                        "Could not save the downloaded model to its destination folder."
-                    ) from replace_exc
-            temp_path.unlink(missing_ok=True)
-    except httpx.HTTPStatusError as exc:
-        raise GGUFDownloadError(
-            _explain_http_status(exc.response.status_code, url=exc.request.url)
-        ) from exc
-    except httpx.TransportError as exc:
-        raise GGUFDownloadError(_explain_transport_error(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise GGUFDownloadError("Could not download this file. Check the URL/repo and try again.") from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
-    reporter.success(destination.stat().st_size)
-    return destination
+                        "This file is larger than the "
+                        f"{_format_byte_limit(self._limit)} download limit."
+                    )
+                _require_free_space(self._directory, len(chunk), self._reserve)
+                handle.write(chunk)
+                self.completed += len(chunk)
+                self._reporter.downloading(self.completed, total)
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._reporter.downloading(self.completed, total, final=True)
+        if self.completed == 0:
+            raise GGUFDownloadError("The download returned no data.")
+        if total is not None and self.completed != total:
+            raise GGUFDownloadError("The download size did not match the advertised Content-Length.")
+
+
+def _request_headers(url: str, resume: _ResumePoint | None) -> dict[str, str]:
+    """Headers for one request: credentials for Hugging Face only, and the range to continue from."""
+    # Identity encoding keeps byte offsets meaningful: a compressed body would
+    # make both Content-Length and Range describe something other than the file.
+    headers = {"Accept-Encoding": "identity", **_authorization_headers(url)}
+    if resume is not None:
+        headers["Range"] = f"bytes={resume.offset}-"
+        headers["If-Range"] = resume.validator
+    return headers
+
+
+def _validator_of(headers: httpx.Headers) -> str | None:
+    """A strong validator naming this version of the file, for ``If-Range``."""
+    etag = headers.get("ETag")
+    if etag and not etag.startswith("W/"):  # a weak ETag may not be used with If-Range
+        return etag
+    return headers.get("Last-Modified") or None
+
+
+@dataclass(frozen=True, slots=True)
+class _ContentRange:
+    start: int
+    end: int
+    total: int | None
+
+
+def _content_range(value: str | None) -> _ContentRange | None:
+    """Parse ``bytes start-end/total`` (``total`` may be ``*``); None if malformed."""
+    match = _CONTENT_RANGE_PATTERN.fullmatch((value or "").strip())
+    if match is None:
+        return None
+    start, end = int(match.group(1)), int(match.group(2))
+    total = None if match.group(3) == "*" else int(match.group(3))
+    if end < start or (total is not None and end >= total):
+        return None
+    return _ContentRange(start, end, total)
+
+
+def _unsatisfied_range_length(response: httpx.Response) -> int | None:
+    """The full length a ``416`` response reports (``Content-Range: bytes */N``)."""
+    match = _UNSATISFIED_RANGE_PATTERN.fullmatch(response.headers.get("Content-Range", "").strip())
+    return int(match.group(1)) if match else None
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    """The delay a server asked for in whole seconds; 0 if absent or given as a date."""
+    try:
+        return max(0.0, float(response.headers.get("Retry-After", "")))
+    except ValueError:
+        return 0.0
 
 
 def _content_length(response: httpx.Response) -> int | None:
@@ -745,8 +1005,10 @@ def _validate_download_url(url: str) -> str:
                 port or 443,
                 type=socket.SOCK_STREAM,
             )
-        except (OSError, UnicodeError):
+        except UnicodeError:
             raise GGUFDownloadError("Could not resolve the download host.") from None
+        except OSError:
+            raise _HostResolutionError("Could not resolve the download host.") from None
         addresses = []
         for answer in resolved:
             try:
