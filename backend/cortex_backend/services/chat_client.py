@@ -17,9 +17,13 @@ unconditionally without having to know which runtime will serve the call.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from threading import Event
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+import logging
+from threading import Event, Thread
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 # Ollama tags are ``name:tag`` and never contain this prefix, so it
 # unambiguously identifies a GGUF model id (see llamacpp/model_directory.py).
@@ -45,6 +49,54 @@ def _without_llamacpp_only_options(options: dict) -> dict:
     if not any(key in options for key in _LLAMACPP_ONLY_OPTION_KEYS):
         return options
     return {key: value for key, value in options.items() if key not in _LLAMACPP_ONLY_OPTION_KEYS}
+
+
+@contextmanager
+def close_when_cancelled(
+    cancellation_event: Event,
+    close: Callable[[], object],
+    *,
+    name: str,
+) -> Iterator[None]:
+    """Run ``close`` on a watcher thread the moment ``cancellation_event`` is set.
+
+    Both runtimes hand back a response the calling thread reads. That thread is
+    blocked in the read whenever the model has nothing to say -- while it
+    evaluates a long prompt, or between slow tokens -- and a blocked read cannot
+    notice an event. Closing the connection from another thread is what
+    unblocks it: the read fails at once, the runtime sees the disconnect and
+    stops generating, and the reader decides whether that failure was the
+    requested stop (it knows whether it asked) or a real error.
+
+    The watcher is retired on every exit path and joined for at most two
+    seconds, so a call that finishes normally leaves nothing behind. ``close``
+    must be safe to call more than once and from another thread, because it can
+    also run after the response ended on its own.
+    """
+    finished = Event()
+
+    def watch() -> None:
+        while not finished.is_set():
+            if cancellation_event.wait(0.05):
+                if not finished.is_set():
+                    try:
+                        close()
+                    except Exception as exc:
+                        # Only the type: a transport error can carry the
+                        # address or body of the request it was serving.
+                        logger.warning(
+                            "Cortex could not close a cancelled model connection (%s).",
+                            type(exc).__name__,
+                        )
+                return
+
+    watcher = Thread(target=watch, name=name, daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        watcher.join(timeout=2.0)
 
 
 class ChatClient(Protocol):
@@ -91,10 +143,30 @@ class ChatClient(Protocol):
 
 
 class OllamaChatClient:
-    """Thin pass-through wrapping a real ``ollama.Client`` instance."""
+    """Thin pass-through wrapping a real ``ollama.Client`` instance.
 
-    def __init__(self, client: Any) -> None:
+    ``stream_client_factory`` is what makes Stop prompt. The ollama package
+    hands a streamed reply back as a generator that keeps its httpx response
+    in a local variable, so nothing outside that generator can reach the
+    connection -- and a generator that is blocked reading (the whole time the
+    model evaluates a long prompt) cannot be closed from another thread. A
+    cancellable call therefore streams through a client of its own, built by
+    the factory, and Stop closes *that* client: the read fails at once, and
+    Ollama, seeing the disconnect, stops. The shared client is never touched,
+    so a cancelled turn cannot break a model listing or a pull running beside
+    it. Without a factory (the tests that hand in a stub) a cancellable call
+    streams through the shared client and can only notice Stop between
+    chunks.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        stream_client_factory: Callable[[], Any] | None = None,
+    ) -> None:
         self._client = client
+        self._stream_client_factory = stream_client_factory
 
     def chat(
         self,
@@ -127,40 +199,95 @@ class OllamaChatClient:
                 "done": True,
                 "done_reason": "cancelled",
             }
+        # A call Stop can reach streams through a client of its own so that
+        # Stop can close it (see the class docstring). A call with nothing to
+        # cancel has no need of one and keeps using the shared client.
+        stream_client = (
+            self._stream_client_factory()
+            if cancellation_event is not None and self._stream_client_factory is not None
+            else None
+        )
+        try:
+            return self._stream(
+                self._client if stream_client is None else stream_client,
+                model=model,
+                messages=messages,
+                options=options,
+                extra=extra,
+                cancellation_event=cancellation_event,
+                on_delta=on_delta,
+                abort=None if stream_client is None else stream_client.close,
+            )
+        finally:
+            if stream_client is not None:
+                stream_client.close()
+
+    @staticmethod
+    def _stream(
+        client: Any,
+        *,
+        model: str,
+        messages: list[dict],
+        options: dict,
+        extra: dict[str, Any],
+        cancellation_event: Event | None,
+        on_delta: Callable[[str, str], None] | None,
+        abort: Callable[[], object] | None,
+    ) -> dict:
+        """Consume one streamed reply, stopping as soon as Stop is pressed.
+
+        ``abort``, when given, is called from a watcher thread the moment the
+        event is set and must make a read in flight fail; without it Stop is
+        only noticed between chunks.
+        """
         # ollama.Client(stream=True) returns a generator that owns an httpx
         # streaming response internally (see the installed ``ollama`` package's
         # Client._request: ``with self._client.stream(...) as r: ... yield``).
         # Breaking out of the loop early and closing the generator sends it a
         # GeneratorExit at its suspended yield point, which unwinds that
         # ``with`` block and releases the connection -- the same mechanism
-        # LlamaCppChatClient uses for the local runtime.
-        chunks = self._client.chat(
-            model=model, messages=messages, options=options, stream=True, **extra
-        )
+        # LlamaCppChatClient uses for the local runtime. Nothing runs until the
+        # first chunk is asked for, so the request itself opens inside the loop.
+        chunks = client.chat(model=model, messages=messages, options=options, stream=True, **extra)
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         final: dict = {}
-        try:
-            for chunk in chunks:
-                if cancellation_event is not None and cancellation_event.is_set():
-                    break
-                message = chunk.get("message") or {}
-                content_piece = message.get("content")
-                if content_piece:
-                    content_parts.append(content_piece)
-                    if on_delta is not None:
-                        on_delta("content", content_piece)
-                thinking_piece = message.get("thinking")
-                if thinking_piece:
-                    thinking_parts.append(thinking_piece)
-                    if on_delta is not None:
-                        on_delta("thinking", thinking_piece)
-                if chunk.get("done"):
-                    final = dict(chunk)
-        finally:
-            close = getattr(chunks, "close", None)
-            if callable(close):
-                close()
+        watch: AbstractContextManager[None] = (
+            close_when_cancelled(cancellation_event, abort, name="ollama-chat-cancel-watch")
+            if cancellation_event is not None and abort is not None
+            else nullcontext()
+        )
+        with watch:
+            try:
+                for chunk in chunks:
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        break
+                    message = chunk.get("message") or {}
+                    content_piece = message.get("content")
+                    if content_piece:
+                        content_parts.append(content_piece)
+                        if on_delta is not None:
+                            on_delta("content", content_piece)
+                    thinking_piece = message.get("thinking")
+                    if thinking_piece:
+                        thinking_parts.append(thinking_piece)
+                        if on_delta is not None:
+                            on_delta("thinking", thinking_piece)
+                    if chunk.get("done"):
+                        final = dict(chunk)
+            except Exception:
+                # Closing the client under a blocked read is how Stop reaches
+                # it, and the transport reports that however it chooses (a read
+                # error, or a closed-client error if Stop landed before the
+                # request opened). Anything raised after the caller asked to
+                # stop is that, not a failure worth surfacing; what already
+                # streamed is kept.
+                if cancellation_event is None or not cancellation_event.is_set():
+                    raise
+            finally:
+                close = getattr(chunks, "close", None)
+                if callable(close):
+                    close()
         final["message"] = {
             "content": "".join(content_parts),
             "thinking": "".join(thinking_parts) or None,

@@ -1193,3 +1193,390 @@ def test_the_ollama_request_carries_think_only_when_asked() -> None:
         {"stream": False},
         {"stream": True},
     ]
+
+
+class _BlockedStreamClient:
+    """Stands in for the per-call ``ollama.Client`` a cancellable turn streams through.
+
+    Its stream produces nothing -- the model is still evaluating the prompt --
+    and the only thing that ends the wait is closing the client, exactly as
+    with a real connection. ``first_chunk`` optionally arrives before the stall.
+    """
+
+    def __init__(self, first_chunk: str | None = None) -> None:
+        self._first_chunk = first_chunk
+        self.reading = Event()
+        self.closed = Event()
+
+    def chat(self, *, model, messages, options, stream=False, **extra):
+        del model, messages, options, extra
+        assert stream is True
+
+        def chunks():
+            if self._first_chunk is not None:
+                yield {"message": {"content": self._first_chunk}, "done": False}
+            self.reading.set()
+            # A read in flight. Bounded, so a client that never gets closed
+            # fails the test on its timing instead of hanging the run.
+            if not self.closed.wait(10):
+                yield {"message": {"content": "too late"}, "done": True}
+            raise httpx.ReadError("the connection was closed")
+
+        return chunks()
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+class _UnusedSharedClient:
+    """The shared client a cancellable turn must leave alone."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, **_kwargs):
+        self.calls += 1
+        raise AssertionError("a cancellable turn must stream through its own client")
+
+
+def _chat_in_background(client: OllamaChatClient, cancelled: Event, **extra) -> tuple[Thread, dict]:
+    outcome: dict = {}
+
+    def run() -> None:
+        try:
+            outcome["response"] = client.chat(
+                model="m", messages=[], options={}, cancellation_event=cancelled, **extra
+            )
+        except BaseException as exc:  # reported by the test's own assertions
+            outcome["error"] = exc
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    return worker, outcome
+
+
+def test_ollama_cancellation_does_not_wait_for_the_first_chunk() -> None:
+    """Stop must reach a turn that has not produced a single chunk yet.
+
+    Evaluating a long prompt on a CPU takes tens of seconds with no output, and
+    the stream can only be checked between chunks -- so Stop looked dead for
+    that whole time. The stream is now read through a client of its own that
+    the cancelling side closes, which fails the blocked read at once and lets
+    Ollama see the disconnect and stop.
+    """
+    from support import wait_until
+
+    stream_clients: list[_BlockedStreamClient] = []
+
+    def factory() -> _BlockedStreamClient:
+        stream_clients.append(_BlockedStreamClient())
+        return stream_clients[-1]
+
+    shared = _UnusedSharedClient()
+    cancelled = Event()
+    worker, outcome = _chat_in_background(
+        OllamaChatClient(shared, stream_client_factory=factory), cancelled
+    )
+    wait_until(lambda: stream_clients and stream_clients[0].reading.is_set(), timeout=5, describe="the read to start")
+
+    started = time.monotonic()
+    cancelled.set()
+    worker.join(timeout=5)
+    elapsed = time.monotonic() - started
+
+    assert not worker.is_alive(), "chat() was still waiting for the model after Stop"
+    assert elapsed < 2.0, f"Stop took {elapsed:.2f}s to reach a turn with no chunks yet"
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["response"]["message"]["content"] == ""
+    assert stream_clients[0].closed.is_set(), "the connection was never closed"
+    assert shared.calls == 0
+
+
+def test_ollama_cancellation_keeps_what_had_already_streamed() -> None:
+    """Aborting the connection must not discard the answer the user watched."""
+    from support import wait_until
+
+    stream_clients: list[_BlockedStreamClient] = []
+
+    def factory() -> _BlockedStreamClient:
+        stream_clients.append(_BlockedStreamClient(first_chunk="Hel"))
+        return stream_clients[-1]
+
+    seen: list[tuple[str, str]] = []
+    cancelled = Event()
+    worker, outcome = _chat_in_background(
+        OllamaChatClient(_UnusedSharedClient(), stream_client_factory=factory),
+        cancelled,
+        on_delta=lambda kind, text: seen.append((kind, text)),
+    )
+    wait_until(lambda: stream_clients and stream_clients[0].reading.is_set(), timeout=5, describe="the read to start")
+
+    cancelled.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["response"]["message"]["content"] == "Hel"
+    assert seen == [("content", "Hel")]
+
+
+def test_a_failure_that_is_not_a_stop_still_reaches_the_caller() -> None:
+    """Only a read that failed *because* Stop closed it is swallowed. A runtime
+    that fails on its own must still be reported, and the client built for the
+    call must not be leaked on that path."""
+    stream_clients: list[_BlockedStreamClient] = []
+
+    class _FailingStreamClient(_BlockedStreamClient):
+        def chat(self, *, model, messages, options, stream=False, **extra):
+            del model, messages, options, stream, extra
+
+            def chunks():
+                raise httpx.ConnectError("the runtime is not running")
+                yield  # pragma: no cover - keep this a generator function
+
+            return chunks()
+
+    def factory() -> _BlockedStreamClient:
+        stream_clients.append(_FailingStreamClient())
+        return stream_clients[-1]
+
+    client = OllamaChatClient(_UnusedSharedClient(), stream_client_factory=factory)
+
+    with pytest.raises(httpx.ConnectError):
+        client.chat(model="m", messages=[], options={}, cancellation_event=Event())
+
+    assert stream_clients[0].closed.is_set(), "the per-call client was leaked"
+
+
+def test_a_completed_stream_closes_the_client_built_for_it() -> None:
+    """One client per cancellable call: it must be released when the call ends,
+    and the ordinary reply must come through unchanged."""
+    stream_clients: list[_BlockedStreamClient] = []
+
+    class _CompletingStreamClient(_BlockedStreamClient):
+        def chat(self, *, model, messages, options, stream=False, **extra):
+            del model, messages, options, stream, extra
+            return iter(
+                [
+                    {"message": {"content": "Hel"}, "done": False},
+                    {"message": {"content": "lo"}, "done": False},
+                    {"message": {}, "done": True, "done_reason": "stop", "eval_count": 3},
+                ]
+            )
+
+    def factory() -> _BlockedStreamClient:
+        stream_clients.append(_CompletingStreamClient())
+        return stream_clients[-1]
+
+    shared = _UnusedSharedClient()
+    result = OllamaChatClient(shared, stream_client_factory=factory).chat(
+        model="m", messages=[], options={}, cancellation_event=Event()
+    )
+
+    assert result["message"]["content"] == "Hello"
+    assert result["eval_count"] == 3
+    assert len(stream_clients) == 1 and stream_clients[0].closed.is_set()
+    assert shared.calls == 0
+
+
+def test_a_call_with_nothing_to_cancel_keeps_using_the_shared_client() -> None:
+    """Only a turn Stop can reach needs a connection of its own; a title or a
+    live-delta-only call must not pay for building one."""
+    built: list[object] = []
+
+    class _Shared:
+        def chat(self, *, model, messages, options, stream=False, **extra):
+            del model, messages, options, extra
+            return iter([{"message": {"content": "ok"}, "done": True}]) if stream else {"message": {"content": "ok"}}
+
+    client = OllamaChatClient(_Shared(), stream_client_factory=lambda: built.append(object()) or object())
+    client.chat(model="m", messages=[], options={})
+    client.chat(model="m", messages=[], options={}, on_delta=lambda *_: None)
+
+    assert built == []
+
+
+class _StallingOllamaServer:
+    """A one-connection HTTP server that reads a request and then goes quiet.
+
+    Stands in for an Ollama that is still evaluating a prompt, so the test can
+    use the real ``ollama`` package and a real socket: what matters is that
+    closing the client from another thread ends a read the operating system is
+    blocked in, and that the server sees the connection go away.
+    """
+
+    def __init__(self, *, first_chunk: bytes | None = None) -> None:
+        import socket
+
+        self._first_chunk = first_chunk
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self.request_received = Event()
+        self.chunk_sent = Event()
+        self.disconnected = Event()
+        self._stop = Event()
+        self._thread = Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        self._listener.settimeout(10)
+        try:
+            connection, _ = self._listener.accept()
+        except OSError:
+            return
+        with connection:
+            connection.settimeout(0.1)
+            try:
+                connection.recv(65536)
+            except OSError:
+                return
+            self.request_received.set()
+            if self._first_chunk is not None:
+                line = self._first_chunk + b"\n"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                    + f"{len(line):x}\r\n".encode() + line + b"\r\n"
+                )
+                self.chunk_sent.set()
+            deadline = time.monotonic() + 10
+            while not self._stop.is_set() and time.monotonic() < deadline:
+                try:
+                    if connection.recv(1) == b"":
+                        self.disconnected.set()
+                        return
+                except TimeoutError:
+                    continue
+                except OSError:
+                    self.disconnected.set()
+                    return
+
+    def close(self) -> None:
+        self._stop.set()
+        self._listener.close()
+        self._thread.join(timeout=2)
+
+
+def test_stop_aborts_a_real_ollama_client_that_is_waiting_for_the_model() -> None:
+    """The mechanism itself, against the real ``ollama`` package and a socket.
+
+    Cancellation closes a client that is blocked reading the reply's headers --
+    the state an Ollama is in for the whole time it evaluates a long prompt --
+    and the server sees the connection drop, which is what makes Ollama stop.
+    """
+    import ollama
+    from support import wait_until
+
+    server = _StallingOllamaServer()
+    try:
+        client = OllamaChatClient(
+            _UnusedSharedClient(),
+            stream_client_factory=lambda: ollama.Client(host=f"http://127.0.0.1:{server.port}"),
+        )
+        cancelled = Event()
+        worker, outcome = _chat_in_background(client, cancelled)
+        wait_until(server.request_received.is_set, timeout=5, describe="the request to arrive")
+
+        started = time.monotonic()
+        cancelled.set()
+        worker.join(timeout=5)
+        elapsed = time.monotonic() - started
+
+        assert not worker.is_alive(), "chat() kept waiting for a model that had not answered"
+        assert elapsed < 2.0, f"Stop took {elapsed:.2f}s"
+        assert "error" not in outcome, outcome.get("error")
+        assert outcome["response"]["message"]["content"] == ""
+        wait_until(server.disconnected.is_set, timeout=5, describe="the server to see the disconnect")
+    finally:
+        server.close()
+
+
+def test_stop_aborts_a_real_ollama_client_mid_stream_and_keeps_the_partial_answer() -> None:
+    import ollama
+    from support import wait_until
+
+    chunk = json.dumps(
+        {"model": "m", "message": {"role": "assistant", "content": "Hel"}, "done": False}
+    ).encode()
+    server = _StallingOllamaServer(first_chunk=chunk)
+    try:
+        client = OllamaChatClient(
+            _UnusedSharedClient(),
+            stream_client_factory=lambda: ollama.Client(host=f"http://127.0.0.1:{server.port}"),
+        )
+        seen: list[str] = []
+        cancelled = Event()
+        worker, outcome = _chat_in_background(
+            client, cancelled, on_delta=lambda kind, text: seen.append(text)
+        )
+        wait_until(lambda: seen, timeout=5, describe="the first chunk to arrive")
+
+        cancelled.set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert "error" not in outcome, outcome.get("error")
+        assert outcome["response"]["message"]["content"] == "Hel"
+        wait_until(server.disconnected.is_set, timeout=5, describe="the server to see the disconnect")
+    finally:
+        server.close()
+
+
+def test_close_when_cancelled_runs_close_once_on_cancel_and_leaves_no_thread() -> None:
+    from support import wait_until
+
+    from cortex_backend.services.chat_client import close_when_cancelled
+
+    def watchers() -> list[Thread]:
+        import threading
+
+        return [t for t in threading.enumerate() if t.name == "test-cancel-watch" and t.is_alive()]
+
+    # Cancelled while the block is still running: close runs, exactly once.
+    closes: list[int] = []
+    cancelled = Event()
+    with close_when_cancelled(cancelled, lambda: closes.append(1), name="test-cancel-watch"):
+        cancelled.set()
+        wait_until(lambda: closes, timeout=5, describe="close to run")
+    assert closes == [1]
+    wait_until(lambda: not watchers(), timeout=5, describe="the watcher to retire")
+
+    # Finished on its own first: a later cancellation must not close anything.
+    late_closes: list[int] = []
+    late = Event()
+    with close_when_cancelled(late, lambda: late_closes.append(1), name="test-cancel-watch"):
+        pass
+    late.set()
+    wait_until(lambda: not watchers(), timeout=5, describe="the watcher to retire")
+    assert late_closes == []
+
+
+def test_close_when_cancelled_does_not_leak_or_raise_when_close_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A transport error can carry an address or a request body: the watcher
+    logs its type only, and a failing close must not take the reader down."""
+    from support import wait_until
+
+    from cortex_backend.services.chat_client import close_when_cancelled
+
+    attempted = Event()
+
+    def failing_close() -> None:
+        attempted.set()
+        raise RuntimeError("synthetic-secret-detail")
+
+    cancelled = Event()
+    with caplog.at_level("WARNING"):
+        with close_when_cancelled(cancelled, failing_close, name="test-cancel-watch"):
+            cancelled.set()
+            wait_until(attempted.is_set, timeout=5, describe="close to be attempted")
+        wait_until(
+            lambda: any("RuntimeError" in record.getMessage() for record in caplog.records),
+            timeout=5,
+            describe="the failure to be logged",
+        )
+
+    assert "synthetic-secret-detail" not in caplog.text

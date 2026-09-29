@@ -95,11 +95,12 @@ def build_app(
     # bundle: about a quarter of a second, paid three times before the window
     # could open and in every test that builds the app.
     ssl_context = httpx.create_ssl_context()
-    client = ollama.Client(
-        host=ollama_host,
-        timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
-        verify=ssl_context,
-    )
+    ollama_timeout = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
+
+    def new_ollama_client() -> ollama.Client:
+        return ollama.Client(host=ollama_host, timeout=ollama_timeout, verify=ssl_context)
+
+    client = new_ollama_client()
 
     def gguf_directory() -> Path:
         # Re-read settings each call (cheap SQLite read, same pattern the API
@@ -124,7 +125,9 @@ def build_app(
         llamacpp_manager, models_directory=gguf_directory, verify=ssl_context
     )
     routing_chat_client = RoutingChatClient(
-        OllamaChatClient(client),
+        # A turn Stop can reach streams through a client of its own, which Stop
+        # closes to abort a read in flight; the shared one stays untouched.
+        OllamaChatClient(client, stream_client_factory=new_ollama_client),
         llamacpp_chat_client,
     )
     generation_service = GenerationService(
