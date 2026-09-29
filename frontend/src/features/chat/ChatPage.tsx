@@ -872,7 +872,8 @@ export function ChatPage({
   };
 
   const jumpToLatest = () => {
-    messageListRef.current?.scrollToBottom();
+    // The one scroll the reader asked for, so the one that may animate.
+    messageListRef.current?.scrollToBottom("smooth");
     isNearTranscriptEnd.current = true;
     setShowJumpToLatest(false);
   };

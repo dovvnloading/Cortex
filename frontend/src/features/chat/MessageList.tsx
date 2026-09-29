@@ -1,12 +1,27 @@
 import { forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
+import { usePrefersReducedMotion } from "../../hooks/useMediaQuery";
 import { MessageCard } from "./MessageCard";
 
 const VIRTUALIZE_THRESHOLD = 40;
 
+/**
+ * How close to the end (in pixels) still counts as "at the bottom". Both the
+ * plain transcript and Virtuoso use it, so a reader is followed -- or not --
+ * the same way on either side of the virtualization threshold.
+ */
+const NEAR_END_PX = 80;
+
 export type MessageListHandle = {
-  scrollToBottom: () => void;
+  /**
+   * Scroll to the end. `"instant"` (the default) is for following streamed
+   * output, which asks on every frame: a smooth scroll restarts its animation
+   * each time, so the view lags behind the text and never settles. `"smooth"`
+   * is for the reader's own "Jump to latest", and becomes instant when the
+   * person has asked for reduced motion.
+   */
+  scrollToBottom: (behavior?: "instant" | "smooth") => void;
 };
 
 type Props = {
@@ -40,6 +55,9 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const plainRef = useRef<HTMLDivElement>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const virtualized = messages.length >= VIRTUALIZE_THRESHOLD;
+  // Scrolling started from script is not covered by the stylesheet's
+  // reduced-motion rule, so it is decided here.
+  const reducedMotion = usePrefersReducedMotion();
   const wasVirtualizedRef = useRef(virtualized);
   const lastPlainScrollTopRef = useRef(0);
   const lastPlainNearEndRef = useRef(true);
@@ -84,19 +102,25 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const Footer = useCallback(() => <>{trailingRef.current}</>, []);
 
   useImperativeHandle(ref, () => ({
-    scrollToBottom: () => {
+    scrollToBottom: (requested = "instant") => {
+      const behavior = reducedMotion ? "instant" : requested;
       if (virtualized) {
         // Not scrollToIndex(last message): the in-flight streaming bubble
         // lives in the Footer slot, *below* the final item, so targeting the
         // last item leaves the answer being typed out of view for the whole
         // response. Scroll the virtualized scroller to its true bottom, which
-        // is what the plain path's scrollTop = scrollHeight already does.
-        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: "auto" });
+        // is what the plain path does with the scroll height.
+        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior });
       } else if (plainRef.current) {
-        plainRef.current.scrollTop = plainRef.current.scrollHeight;
+        const node = plainRef.current;
+        // An explicit behavior wins over the stylesheet's `scroll-behavior:
+        // smooth` on .transcript; assigning scrollTop would not, and would
+        // start a fresh animation on every streamed frame.
+        if (typeof node.scrollTo === "function") node.scrollTo({ top: node.scrollHeight, behavior });
+        else node.scrollTop = node.scrollHeight;
       }
     },
-  }), [virtualized]);
+  }), [virtualized, reducedMotion]);
 
   const renderCard = (message: ChatMessage, index: number) => (
     <MessageCard
@@ -124,7 +148,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
           const node = plainRef.current;
           if (!node) return;
           lastPlainScrollTopRef.current = node.scrollTop;
-          lastPlainNearEndRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+          lastPlainNearEndRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_END_PX;
           onNearEndChange(lastPlainNearEndRef.current);
         }}
       >
@@ -140,9 +164,12 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       className="transcript transcript-virtual"
       data={messages}
       computeItemKey={(index, message) => message.id ?? `${message.role}-${index}`}
-      followOutput={isStreaming ? "smooth" : false}
+      // Virtuoso animates this itself, in script, so the stylesheet's
+      // reduced-motion rule does not reach it.
+      followOutput={isStreaming ? (reducedMotion ? "auto" : "smooth") : false}
       initialTopMostItemIndex={lastPlainNearEndRef.current ? messages.length - 1 : 0}
       alignToBottom
+      atBottomThreshold={NEAR_END_PX}
       atBottomStateChange={onNearEndChange}
       itemContent={(index, message) => renderCard(message, index)}
       components={{ Footer }}

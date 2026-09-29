@@ -173,6 +173,30 @@ describe("ChatPage while a reply streams", () => {
     expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
   });
 
+  it("follows streamed output instantly, and animates only the jump the reader asks for", async () => {
+    // `.transcript` has `scroll-behavior: smooth`, so a follow that does not say
+    // "instant" restarts an animation on every streamed frame.
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollTo });
+    try {
+      await openChatAndStartStreaming();
+      stream("tok ");
+      await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+      for (const [options] of scrollTo.mock.calls) expect(options).toEqual({ top: 1000, behavior: "instant" });
+
+      // Scrolled away: the next frame offers the jump instead of following.
+      fireEvent.scroll(document.querySelector(".transcript")!);
+      stream("more ");
+      scrollTo.mockClear();
+      fireEvent.click(await screen.findByRole("button", { name: "Jump to latest" }));
+
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" });
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
+    }
+  });
+
   it("does not react to another thread's generation", async () => {
     renderChat();
     await waitFor(() => expect(parsesOf(PERSISTED[0])).toBeGreaterThan(0));
