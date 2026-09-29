@@ -1038,6 +1038,58 @@ describe("App", () => {
     expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
   });
 
+  it("reports an approval that went through even when the refresh after it fails", async () => {
+    // The poll now sees a failed task refresh (so it can back off); a decision
+    // that was recorded must still be reported as such, not as a failure.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const pendingTask = {
+      job_id: "approval-job",
+      profile: "artifact.extended.v1",
+      status: "queued",
+      sequence: 2,
+      phase: "approval",
+      message: "Approval required.",
+      approval_state: "pending",
+      approval_reason: "Create a larger staged image preview.",
+      approval_expires_at: "2026-07-21T18:30:00Z",
+      can_cancel: false,
+      created_at: "2026-07-21T18:00:00Z",
+      updated_at: "2026-07-21T18:00:01Z",
+    };
+    let taskListAnswered = false;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) {
+        // Answers once so the approval card appears, then the backend goes away.
+        if (taskListAnswered) return json({ detail: "Backend restarting." }, 503);
+        taskListAnswered = true;
+        return json({ tasks: [pendingTask] });
+      }
+      if (url.endsWith("/execution/approval-job/approval") && init?.method === "POST") {
+        return json({ job_id: "approval-job", status: "queued", sequence: 3 });
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Allow background task approval-job once" }));
+
+    expect(await screen.findByText("Background task approved once.")).toBeVisible();
+    expect(screen.queryByText("Could not record the approval decision.")).toBeNull();
+    expect(screen.queryByText("Backend restarting.")).toBeNull();
+  });
+
   it("does not start a second execution-task poll while the first is pending", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {

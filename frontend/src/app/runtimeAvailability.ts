@@ -59,3 +59,33 @@ export function resolveRuntimeAvailability({
   }
   return { ready: true, reason: null, message: null };
 }
+
+/** How often the runtime is asked for its state while it is changing, or while a reply depends on it. */
+export const LLAMACPP_ACTIVE_POLL_MS = 2000;
+/** How often it is asked otherwise: a ready or idle runtime rarely changes on its own. */
+export const LLAMACPP_IDLE_POLL_MS = 15_000;
+
+/**
+ * How often to poll the local GGUF runtime. A download, a start, and a stop
+ * each move through states the user is waiting on, and a running generation is
+ * what makes the runtime start, so those are watched closely. A runtime that
+ * is ready, idle, or failed changes only when the user acts, which is far less
+ * often than every two seconds for as long as a GGUF model stays selected.
+ * "Stopping" with an error is the parked, needs-a-restart state: it does not
+ * resolve by itself, so it is not watched closely either.
+ */
+export function llamacppPollInterval(
+  status: LlamaCppRuntimeStatus | null | undefined,
+  generationActive: boolean,
+): number {
+  if (generationActive) return LLAMACPP_ACTIVE_POLL_MS;
+  switch (status?.state) {
+    case "downloading_binary":
+    case "starting":
+      return LLAMACPP_ACTIVE_POLL_MS;
+    case "stopping":
+      return status.last_error ? LLAMACPP_IDLE_POLL_MS : LLAMACPP_ACTIVE_POLL_MS;
+    default:
+      return LLAMACPP_IDLE_POLL_MS;
+  }
+}

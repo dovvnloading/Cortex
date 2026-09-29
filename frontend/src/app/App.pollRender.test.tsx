@@ -126,4 +126,66 @@ describe("App polling", () => {
     await pollOnce(fetcher);
     expect(shell.renders).toBeGreaterThan(afterStatus);
   });
+
+  describe("cadence", () => {
+    /** Record every period the app asks the browser to poll at, while still running the real timers. */
+    function recordIntervalPeriods() {
+      const periods: number[] = [];
+      const realSetInterval = window.setInterval.bind(window);
+      const spy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout !== undefined) periods.push(timeout);
+        return realSetInterval(handler, timeout, ...args);
+      }) as typeof window.setInterval);
+      return { periods, restore: () => spy.mockRestore() };
+    }
+
+    it("polls llama.cpp status slowly once the runtime is ready", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "ready", binary_present: true, loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state);
+      const { periods, restore } = recordIntervalPeriods();
+      try {
+        render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+        expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+        await pollOnce(fetcher);
+
+        // Ready: every fifteen seconds. Two seconds is for a runtime that is changing.
+        expect(periods).toContain(15_000);
+        expect(periods).not.toContain(2000);
+      } finally {
+        restore();
+      }
+    });
+
+    it("watches the runtime closely while it starts, without an extra request for the switch", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "ready", binary_present: true, loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state);
+      const { periods, restore } = recordIntervalPeriods();
+      try {
+        render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+        expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+        await pollOnce(fetcher);
+        expect(periods).not.toContain(2000);
+
+        // The next poll brings news: the runtime is starting. The interval now
+        // changes on the very result that arrived; that must not cost a request.
+        state.llamacpp = { state: "starting", binary_present: true, models_directory: "C:\\models" };
+        const systemBefore = callsTo(fetcher, "/system");
+        await pollOnce(fetcher);
+
+        expect(useModelStore.getState().llamacppStatus?.state).toBe("starting");
+        expect(periods).toContain(2000);
+        expect(callsTo(fetcher, "/system")).toBe(systemBefore + 1);
+      } finally {
+        restore();
+      }
+    });
+  });
 });

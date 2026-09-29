@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { LlamaCppRuntimeStatus } from "../../../contracts/cortex-api";
-import { resolveRuntimeAvailability } from "./runtimeAvailability";
+import {
+  LLAMACPP_ACTIVE_POLL_MS,
+  LLAMACPP_IDLE_POLL_MS,
+  llamacppPollInterval,
+  resolveRuntimeAvailability,
+} from "./runtimeAvailability";
 
 const RESTART_MESSAGE = "The local model runtime did not exit cleanly; restart Cortex before trying again.";
 
@@ -61,5 +66,33 @@ describe("resolveRuntimeAvailability for a GGUF model", () => {
         llamacppStatus: status,
       }),
     ).toEqual({ ready: true, reason: null, message: null });
+  });
+});
+
+describe("llamacppPollInterval", () => {
+  it("watches a runtime that is downloading, starting, or stopping closely", () => {
+    for (const state of ["downloading_binary", "starting", "stopping"] as const) {
+      expect(llamacppPollInterval({ state }, false)).toBe(LLAMACPP_ACTIVE_POLL_MS);
+    }
+    expect(llamacppPollInterval({ state: "stopping", last_error: "" }, false)).toBe(LLAMACPP_ACTIVE_POLL_MS);
+  });
+
+  it("polls a ready, idle, or failed runtime slowly", () => {
+    for (const state of ["ready", "idle", "failed"] as const) {
+      expect(llamacppPollInterval({ state }, false)).toBe(LLAMACPP_IDLE_POLL_MS);
+    }
+    expect(LLAMACPP_IDLE_POLL_MS).toBeGreaterThan(LLAMACPP_ACTIVE_POLL_MS);
+  });
+
+  it("polls slowly before there is a status, and for the parked needs-a-restart state", () => {
+    expect(llamacppPollInterval(null, false)).toBe(LLAMACPP_IDLE_POLL_MS);
+    expect(llamacppPollInterval(undefined, false)).toBe(LLAMACPP_IDLE_POLL_MS);
+    expect(llamacppPollInterval({ state: "stopping", last_error: RESTART_MESSAGE }, false)).toBe(LLAMACPP_IDLE_POLL_MS);
+  });
+
+  it("watches closely while a generation is running, whatever the runtime last said", () => {
+    for (const status of [null, { state: "ready" }, { state: "idle" }] satisfies (LlamaCppRuntimeStatus | null)[]) {
+      expect(llamacppPollInterval(status, true)).toBe(LLAMACPP_ACTIVE_POLL_MS);
+    }
   });
 });
