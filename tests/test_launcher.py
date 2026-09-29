@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import ctypes
 import http.client
+import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ValidationError
 
 import main as launcher_main
 from cortex_backend.api import create_app
@@ -33,6 +36,28 @@ from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowEr
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state() -> Iterator[None]:
+    """Undo what a launch does to the process-wide logging configuration.
+
+    ``_configure_logging`` attaches file handlers to the root logger and
+    ``uvicorn.Config`` rewrites uvicorn's own loggers; left in place they would
+    write into a later test's directory and hold this one's open.
+    """
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {
+        name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate, logging.getLogger(name).level)
+        for name in names
+    }
+    yield
+    launcher_main._close_runtime_logging()
+    for name, (handlers, propagate, level) in saved.items():
+        logger = logging.getLogger(name)
+        logger.handlers[:] = handlers
+        logger.propagate = propagate
+        logger.setLevel(level)
 
 
 def test_normal_launch_selects_an_available_backend_port(
@@ -203,6 +228,335 @@ def test_windowed_launcher_does_not_configure_uvicorn_console_logging_without_st
     server = launcher_main._server_for_app(app, port=43125, log_level="info")
 
     assert server.config.log_config is None
+
+
+def _runtime_log_text(data_dir: Path) -> str:
+    return (data_dir / "logs" / "cortex.log").read_text(encoding="utf-8")
+
+
+def test_windowed_launcher_writes_a_rotating_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A packaged (console=False) build has no stderr; it used to log nowhere.
+
+    Backend warnings, worker leak reports and llama-server crash loops all went
+    to ``logging.lastResort``, which writes to ``sys.stderr`` -- ``None`` here.
+    """
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    monkeypatch.setattr(launcher_main, "MAX_RUNTIME_LOG_BYTES", 4096)
+
+    log_path = launcher_main._configure_logging(tmp_path, "info")
+
+    assert log_path == tmp_path / "logs" / "cortex.log"
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43125, log_level="info")
+    logging.getLogger("cortex_backend.services.generation").warning(
+        "generation stopped after a failure token=windowed-secret-value"
+    )
+    logging.getLogger("uvicorn.error").info("Started server process")
+    text = _runtime_log_text(tmp_path)
+    assert "generation stopped after a failure token=<redacted>" in text
+    assert "windowed-secret-value" not in text
+    assert "Started server process" in text
+
+    noisy = logging.getLogger("cortex_backend.noise")
+    for index in range(300):
+        noisy.warning("filler record %d %s", index, "x" * 80)
+    names = sorted(entry.name for entry in log_path.parent.iterdir())
+    assert names == ["cortex.log", "cortex.log.1", "cortex.log.2", "cortex.log.3"]
+    assert all(entry.stat().st_size <= 4096 for entry in log_path.parent.iterdir())
+    # The newest records are in the live file and the oldest have aged out.
+    assert "filler record 299" in log_path.read_text(encoding="utf-8")
+    everything = "".join(entry.read_text(encoding="utf-8") for entry in log_path.parent.iterdir())
+    assert "windowed-secret-value" not in everything
+    assert "filler record 0 " not in everything
+
+
+def test_console_launcher_keeps_the_console_and_reaches_uvicorns_own_logger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+
+    launcher_main._configure_logging(tmp_path, "info")
+    # A real uvicorn console configuration is applied here, after the file
+    # handler exists, and gives its own logger a private console handler.
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43125, log_level="info")
+    logging.getLogger("cortex_backend.probe").warning("root record")
+    logging.getLogger("uvicorn.error").info("uvicorn record")
+
+    text = _runtime_log_text(tmp_path)
+    assert "root record" in text
+    assert "uvicorn record" in text
+    assert "root record" in console.getvalue()
+    assert "uvicorn record" in console.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("level", "shown", "hidden"),
+    [
+        ("debug", ["debug line", "info line", "warning line"], []),
+        ("info", ["info line", "warning line"], ["debug line"]),
+        ("error", [], ["debug line", "info line", "warning line"]),
+    ],
+)
+def test_the_log_level_option_reaches_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str, shown: list[str], hidden: list[str]
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, level)
+    logger = logging.getLogger("cortex_backend.levels")
+
+    logger.debug("debug line")
+    logger.info("info line")
+    logger.warning("warning line")
+
+    text = _runtime_log_text(tmp_path)
+    assert all(line in text for line in shown)
+    assert not any(line in text for line in hidden)
+
+
+def test_request_logs_that_carry_urls_stay_out_of_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    logging.getLogger("httpx").info('HTTP Request: GET https://example.invalid/model?token=abc "200 OK"')
+    logging.getLogger("httpx").warning("http warning")
+
+    text = _runtime_log_text(tmp_path)
+    assert "HTTP Request" not in text
+    assert "http warning" in text
+
+
+def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Hostile fixtures: every way a private value reaches a log call.
+
+    The values are kept in variables, so a traceback that prints the failing
+    source line cannot put one into the log for a reason unrelated to the code
+    under test.
+    """
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.hostile")
+    bootstrap = "zbootstrap-9f3a1c"
+    handoff = "zhandoff-77b1e0"
+    bearer = "zbearer-aa11bb22cc33"
+    dict_bearer = "zdictbearer-ff00ee11dd22"
+    cookie = "zcookie-12345678"
+    bare_bearer = "zbarebearer-0123456789ab"
+    prompt = "zprompt about my tax return"
+    answer = "zanswer for a stranger"
+    memory = "zmemory the allergy is penicillin"
+    api_key = "zapikey-abcdef123456"
+    password = "zhunter2hunter2"
+    rejected = {"note": "zrejected input from validation"}
+    exception_token = "zexception-5566aa"
+    exception_prompt = "zexception prompt text"
+
+    class Turn(BaseModel):
+        text: str
+
+    logger.warning(
+        "could not open http://127.0.0.1:43125/#bootstrap=%s&handoff=%s", bootstrap, handoff
+    )
+    logger.error("upstream rejected the request: Authorization: Bearer %s", bearer)
+    logger.error("headers %r", {"Authorization": f"Bearer {dict_bearer}", "Cookie": f"session={cookie}"})
+    logger.error("connection with a bare Bearer %s in it", bare_bearer)
+    logger.info("generation started prompt=%s", prompt)
+    logger.info('model produced response: "%s"', answer)
+    logger.info("saved memory=%s", memory)
+    logger.info("settings api_key=%s password=%s", api_key, password)
+    try:
+        Turn(text=rejected)  # type: ignore[arg-type]
+    except ValidationError:
+        logger.exception("could not validate the turn")
+    try:
+        raise RuntimeError(f"upstream said token={exception_token} and prompt={exception_prompt}")
+    except RuntimeError:
+        logger.exception("worker failed")
+    logger.warning("innocent line\n2030-01-01T00:00:00.000Z CRITICAL cortex_backend.forged forged record")
+    logger.warning("x" * 100_000)
+
+    text = _runtime_log_text(tmp_path)
+    for private in (
+        bootstrap,
+        handoff,
+        bearer,
+        dict_bearer,
+        cookie,
+        bare_bearer,
+        prompt,
+        answer,
+        memory,
+        api_key,
+        password,
+        "zrejected",
+        exception_token,
+        exception_prompt,
+        "penicillin",
+        "tax return",
+    ):
+        assert private not in text, private
+    # Redaction keeps the record and says what it removed.
+    assert "could not validate the turn" in text
+    assert "worker failed" in text
+    assert "bootstrap=<redacted>" in text
+    # A message is one line: an embedded newline cannot start a forged record.
+    assert "\n2030-01-01T00:00:00.000Z CRITICAL" not in text
+    # And a record is bounded.
+    assert max(len(line) for line in text.splitlines()) < 5000
+
+
+def test_configuring_the_runtime_log_twice_does_not_stack_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    root = logging.getLogger()
+    before = (list(root.handlers), root.level, logging.getLogger("httpx").level)
+
+    launcher_main._configure_logging(tmp_path, "info")
+    launcher_main._configure_logging(tmp_path, "info")
+    logging.getLogger("cortex_backend.once").warning("written once")
+    added = [handler for handler in root.handlers if handler not in before[0]]
+
+    assert len(added) == 1
+    assert _runtime_log_text(tmp_path).count("written once") == 1
+
+    launcher_main._close_runtime_logging()
+
+    assert (list(root.handlers), root.level, logging.getLogger("httpx").level) == before
+
+
+def test_an_unusable_log_folder_is_reported_and_never_stops_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+    (tmp_path / "logs").write_bytes(b"a file where the log folder should be")
+
+    assert launcher_main._configure_logging(tmp_path, "info") is None
+
+    assert "could not open its runtime log" in console.getvalue()
+    logging.getLogger("cortex_backend.after").warning("still logs to the console")
+    assert "still logs to the console" in console.getvalue()
+
+
+def test_startup_log_rotates_instead_of_truncating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Reaching the size limit used to reopen the file in "w" mode: all history gone."""
+    monkeypatch.setattr(launcher_main, "MAX_STARTUP_LOG_BYTES", 2048)
+    path = tmp_path / launcher_main.STARTUP_LOG_NAME
+    older = tmp_path / f"{launcher_main.STARTUP_LOG_NAME}.1"
+
+    # About 370 bytes an entry: five fit, the sixth would pass the limit.
+    for index in range(6):
+        launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        )
+
+    assert older.is_file()
+    assert all(f"attempt-{index}" in older.read_text(encoding="utf-8") for index in range(5))
+    assert "attempt-5" in path.read_text(encoding="utf-8")
+    assert "attempt-0" not in path.read_text(encoding="utf-8")
+
+    for index in range(6, 40):
+        launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        )
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["startup.log", "startup.log.1"]
+    assert path.stat().st_size <= 2048 and older.stat().st_size <= 2048
+    assert "attempt-39" in path.read_text(encoding="utf-8")
+
+
+def test_startup_log_stays_bounded_when_it_cannot_be_moved_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Another program holding the file open must not make the log grow or raise."""
+    monkeypatch.setattr(launcher_main, "MAX_STARTUP_LOG_BYTES", 2048)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("the file is in use")
+
+    monkeypatch.setattr(launcher_main.os, "replace", refuse)
+    path = tmp_path / launcher_main.STARTUP_LOG_NAME
+
+    for index in range(30):
+        assert launcher_main._write_startup_diagnostic(
+            stage=f"attempt-{index}", error=RuntimeError("y" * 300), data_dir=tmp_path
+        ) == path
+
+    assert path.stat().st_size <= 2048
+    assert "attempt-29" in path.read_text(encoding="utf-8")
+    assert not (tmp_path / "startup.log.1").exists()
+
+
+def test_a_successful_start_leaves_a_timeline_entry_and_runtime_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    startup = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    (entry,) = startup.splitlines()
+    assert "stage=started detail=ok" in entry
+    assert f"version={launcher_main.CORTEX_VERSION}" in entry
+    assert f"pid={os.getpid()}" in entry
+    assert f"port={fakes.record.port}" in entry
+    assert f"started (port {fakes.record.port})" in _runtime_log_text(tmp_path)
+    # The launch is over: nothing keeps writing to (or holding open) the log.
+    assert launcher_main._runtime_handlers == []
+
+
+def test_a_launch_that_hands_off_does_not_touch_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two processes rotating one file fail on Windows; only the owner opens it."""
+    _second_launch(monkeypatch, tmp_path, activations=[WindowActivation.ACTIVATED])
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert not (tmp_path / "logs").exists()
+    assert launcher_main._runtime_handlers == []
+
+
+@pytest.mark.parametrize(
+    ("hostile", "removed"),
+    [
+        ("Authorization: Bearer abcdefgh12345678", "abcdefgh12345678"),
+        ("authorization=Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("{'Authorization': 'Bearer secretsecret1'}", "secretsecret1"),
+        ('{"password": "correct horse battery"}', "correct horse battery"),
+        ("open http://x/#bootstrap=aaa111&handoff=bbb222", "bbb222"),
+        ("cookie: sid=abc123def", "abc123def"),
+        ("prompt=say something private here", "private here"),
+        ("input_value='a private sentence', input_type=str", "a private sentence"),
+        ("memories: [1, 2, 3] more text", "more text"),
+    ],
+)
+def test_credential_and_content_redaction_covers_common_shapes(hostile: str, removed: str):
+    assert removed not in launcher_main._redact_credentials(hostile)
+    assert removed not in launcher_main._redact_startup_detail(hostile)
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    [
+        "Started server process [1234]",
+        "prompt_tokens=12 completion_tokens=40 max_tokens=512",
+        "content-type: application/json",
+        "ResponseError: model not found",
+        "listening on 127.0.0.1:43125 (basic auth is not used)",
+    ],
+)
+def test_redaction_leaves_ordinary_diagnostics_alone(harmless: str):
+    assert launcher_main._redact_credentials(harmless) == harmless
 
 
 def test_default_launch_is_native_and_legacy_no_browser_alias_is_headless():

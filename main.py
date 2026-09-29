@@ -6,6 +6,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import socket
@@ -55,6 +56,15 @@ DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
 STARTUP_LOG_NAME = "startup.log"
 MAX_STARTUP_LOG_BYTES = 64 * 1024
+# The runtime log: what the backend and the launcher say once startup is past.
+# One current file plus RUNTIME_LOG_BACKUPS older ones, each at most
+# MAX_RUNTIME_LOG_BYTES, so it never grows past about four megabytes.
+RUNTIME_LOG_DIR = "logs"
+RUNTIME_LOG_NAME = "cortex.log"
+MAX_RUNTIME_LOG_BYTES = 1024 * 1024
+RUNTIME_LOG_BACKUPS = 3
+MAX_LOG_MESSAGE_CHARS = 4000
+MAX_LOG_TRACEBACK_CHARS = 8000
 # How long uvicorn waits for open connections and background tasks once a
 # shutdown starts. It sits inside the launcher's 15 second wait for the server
 # thread, together with the job registry's own cancellation grace and the
@@ -232,16 +242,65 @@ def _startup_log_path(data_dir: Path | None) -> Path:
         return Path(tempfile.gettempdir()) / "Cortex" / STARTUP_LOG_NAME
 
 
+# Text that follows one of these names, as ``name=value`` or ``name: value``, is
+# credential material and is dropped from anything written to a log.
+_CREDENTIAL_KEYS = (
+    r"bootstrap(?:_token)?|token|secret|authorization|password|passwd|handoff"
+    r"|cookie|api[_-]?key"
+)
+# The same for what the person typed or the model produced. The value runs to
+# the end of the line (or the end of a quoted string, which is how a validation
+# error prints the input it rejected), because prose has no delimiter to stop at.
+_CONTENT_KEYS = r"prompt|response|completion|memory|memories|input_value"
+_CREDENTIAL_PATTERN = re.compile(
+    r"\b(" + _CREDENTIAL_KEYS + r")\b[\"']?\s*[=:]\s*(?:(?:bearer|basic)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\"'}\]]+)",
+    re.IGNORECASE,
+)
+_CONTENT_PATTERN = re.compile(
+    r"\b(" + _CONTENT_KEYS + r")\b[\"']?\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|.*)",
+    re.IGNORECASE,
+)
+_BEARER_PATTERN = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+
+
+def _redact_credentials(text: str) -> str:
+    """Drop credential-like and content-like values from ``text``, line by line."""
+
+    text = _CREDENTIAL_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    text = _CONTENT_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    return _BEARER_PATTERN.sub("<redacted>", text)
+
+
 def _redact_startup_detail(value: object) -> str:
     """Keep startup diagnostics useful without recording credential-like text."""
 
     detail = str(value).replace("\r", " ").replace("\n", " ")
-    detail = re.sub(
-        r"(?i)\b(?:bootstrap(?:_token)?|token|secret|authorization|password|prompt)\b\s*[=:]\s*[^\s,;]+",
-        lambda match: f"{match.group(0).split('=')[0].split(':')[0]}=<redacted>",
-        detail,
-    )
-    return detail[:800]
+    return _redact_credentials(detail)[:800]
+
+
+def _append_startup_log(path: Path, entry: str) -> None:
+    """Append one record; a full log moves aside to ``startup.log.1`` first.
+
+    Only the most recent previous log is kept, so the pair stays bounded while
+    the history that filled the first file is no longer thrown away. A log that
+    cannot be moved (another program holds it open) is truncated instead:
+    staying bounded matters more than keeping history.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        current_size = path.stat().st_size
+    except OSError:
+        current_size = 0
+    mode = "a"
+    if current_size + len(entry.encode("utf-8")) > MAX_STARTUP_LOG_BYTES:
+        try:
+            os.replace(path, path.with_name(path.name + ".1"))
+        except OSError:
+            mode = "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        handle.write(entry)
 
 
 def _write_startup_diagnostic(
@@ -255,25 +314,172 @@ def _write_startup_diagnostic(
     global _last_startup_log_path
     path = _startup_log_path(data_dir)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         entry = (
             f"{datetime.now(timezone.utc).isoformat()} "
             f"stage={_redact_startup_detail(stage)} "
             f"error_type={type(error).__name__} "
             f"detail={_redact_startup_detail(error)}\n"
         )
-        try:
-            current_size = path.stat().st_size if path.exists() else 0
-        except OSError:
-            current_size = 0
-        mode = "w" if current_size + len(entry.encode("utf-8")) > MAX_STARTUP_LOG_BYTES else "a"
-        with path.open(mode, encoding="utf-8") as handle:
-            handle.write(entry)
+        _append_startup_log(path, entry)
         _last_startup_log_path = path
         return path
     except (OSError, UnicodeError):
         _last_startup_log_path = None
         return None
+
+
+def _record_startup_success(*, data_dir: Path | None, port: int) -> None:
+    """Add one line to the startup log saying this launch reached a working backend.
+
+    Failures are the only other thing the startup log holds, so this is what
+    turns it into a timeline: a failure with a "started ok" before it is a
+    crash after startup, not a launch that never worked.
+    """
+
+    entry = (
+        f"{datetime.now(timezone.utc).isoformat()} "
+        f"stage=started detail=ok "
+        f"version={_redact_startup_detail(CORTEX_VERSION)} "
+        f"pid={os.getpid()} port={port}\n"
+    )
+    try:
+        _append_startup_log(_startup_log_path(data_dir), entry)
+    except (OSError, UnicodeError):
+        pass
+
+
+class _RedactingFilter(logging.Filter):
+    """Redact, flatten and bound a record before any handler writes it.
+
+    Nothing in Cortex logs a prompt, a response, a memory or a credential; this
+    is the second line of defence for the day something does, or an exception
+    message carries one. A message is one line so it cannot forge another
+    record, and a traceback keeps its lines but is redacted line by line.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # a format/args mismatch must not lose the record
+            message = str(record.msg)
+        message = message.replace("\r", " ").replace("\n", " ")
+        record.msg = _redact_credentials(message)[:MAX_LOG_MESSAGE_CHARS]
+        record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = _redact_credentials(record.exc_text)[-MAX_LOG_TRACEBACK_CHARS:]
+        if record.stack_info:
+            record.stack_info = _redact_credentials(record.stack_info)[-MAX_LOG_TRACEBACK_CHARS:]
+        return True
+
+
+class _UtcFormatter(logging.Formatter):
+    converter = staticmethod(time.gmtime)
+
+
+# What ``_configure_logging`` attached, so it can be undone and so uvicorn's own
+# loggers can be pointed at the same file.
+_runtime_file_handler: logging.Handler | None = None
+_runtime_handlers: list[logging.Handler] = []
+_runtime_saved_levels: dict[str, int] = {}
+_QUIET_LOGGERS = ("httpx", "httpcore")
+
+
+def _close_runtime_logging() -> None:
+    """Detach and close what ``_configure_logging`` attached, and restore levels."""
+
+    global _runtime_file_handler
+    for name in ("", "uvicorn"):
+        logger = logging.getLogger(name)
+        for handler in _runtime_handlers:
+            logger.removeHandler(handler)
+    for handler in _runtime_handlers:
+        handler.close()
+    _runtime_handlers.clear()
+    _runtime_file_handler = None
+    for name, level in _runtime_saved_levels.items():
+        logging.getLogger(name).setLevel(level)
+    _runtime_saved_levels.clear()
+
+
+def _configure_logging(data_dir: Path, level: str) -> Path | None:
+    """Give the process a bounded, redacted runtime log and return its path.
+
+    A windowed (packaged) build has no console, so without this every backend
+    warning and exception went nowhere. The log rotates at
+    ``MAX_RUNTIME_LOG_BYTES`` and keeps ``RUNTIME_LOG_BACKUPS`` older files, so
+    it can never grow past a few megabytes. The console gets the same records
+    when there is one. A log that cannot be opened is reported and skipped:
+    it must never be the reason Cortex does not start.
+    """
+
+    global _runtime_file_handler
+    _close_runtime_logging()
+    numeric_level = uvicorn.config.LOG_LEVELS.get(level, logging.INFO)
+    formatter = _UtcFormatter(
+        "%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    redactor = _RedactingFilter()
+    log_path: Path | None = None
+    problem: Exception | None = None
+    try:
+        log_directory = AppPaths.from_data_dir(data_dir / RUNTIME_LOG_DIR).data_dir
+        log_directory.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_directory / RUNTIME_LOG_NAME,
+            maxBytes=MAX_RUNTIME_LOG_BYTES,
+            backupCount=RUNTIME_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+    except (AppPathError, OSError) as exc:
+        problem = exc
+    else:
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(redactor)
+        _runtime_handlers.append(file_handler)
+        _runtime_file_handler = file_handler
+        log_path = log_directory / RUNTIME_LOG_NAME
+    # A windowed build's stderr is None; a console build's is a real stream.
+    if getattr(sys.stderr, "write", None) is not None:
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(redactor)
+        _runtime_handlers.append(console_handler)
+    root = logging.getLogger()
+    for handler in _runtime_handlers:
+        root.addHandler(handler)
+    _runtime_saved_levels[""] = root.level
+    root.setLevel(numeric_level)
+    for name in _QUIET_LOGGERS:
+        # Their INFO lines are one per request and carry the full URL.
+        quiet = logging.getLogger(name)
+        _runtime_saved_levels[name] = quiet.level
+        quiet.setLevel(max(numeric_level, logging.WARNING))
+    if problem is not None:
+        LOGGER.warning("Cortex could not open its runtime log (%s).", type(problem).__name__)
+    return log_path
+
+
+def _attach_runtime_log_to_uvicorn() -> None:
+    """Send uvicorn's records to the runtime log as well.
+
+    Uvicorn's stock configuration gives its ``uvicorn`` logger a console
+    handler and stops propagation, so its lines never reach the root logger.
+    That configuration is applied when the ``uvicorn.Config`` is built, after
+    ``_configure_logging``, so this runs after it. Without a console
+    configuration (a windowed build) uvicorn's loggers propagate to the root
+    handler and nothing needs adding.
+    """
+
+    logger = logging.getLogger("uvicorn")
+    if (
+        _runtime_file_handler is not None
+        and not logger.propagate
+        and _runtime_file_handler not in logger.handlers
+    ):
+        logger.addHandler(_runtime_file_handler)
 
 
 def _startup_dialog_message(log_path: Path | None, hint: str | None = None) -> str:
@@ -337,6 +543,7 @@ def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
         # to the lifespan teardown.
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
+    _attach_runtime_log_to_uvicorn()
     server = _CortexServer(config)
     app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)
     return server
@@ -505,7 +712,10 @@ def _run_web(args: argparse.Namespace) -> int:
     global _backend_abandoned_at_exit, _backend_stop_failed
     _backend_abandoned_at_exit = False
     _backend_stop_failed = False
-    result = _launch(args)
+    try:
+        result = _launch(args)
+    finally:
+        _close_runtime_logging()
     if result == 0 and _backend_stop_failed:
         _backend_abandoned_at_exit = True
         return 1
@@ -578,6 +788,12 @@ def _launch(args: argparse.Namespace) -> int:
                     )
                     return 1
 
+            # Only the instance that owns the lock writes the runtime log, so a
+            # second launch that hands off and exits never has the file open
+            # while the first rotates it (Windows cannot rename an open file).
+            _configure_logging(paths.data_dir, args.log_level)
+            paths = _prepare_cache_dir(paths)
+
             try:
                 if args.dev:
                     dist = None
@@ -592,7 +808,6 @@ def _launch(args: argparse.Namespace) -> int:
                 print(f"Frontend preparation failed: {exc}", file=sys.stderr)
                 return 2
 
-            paths = _prepare_cache_dir(paths)
             handoff_secret = instance.read_secret(record)
             if not handoff_secret:
                 print(
@@ -647,6 +862,8 @@ def _launch(args: argparse.Namespace) -> int:
                         raise RuntimeError("Vite did not become ready within 30 seconds.")
                     browser_port = frontend_port
 
+                _record_startup_success(data_dir=args.data_dir, port=backend_port)
+                LOGGER.info("Cortex %s started (port %d).", CORTEX_VERSION, backend_port)
                 if args.headless:
                     return _run_headless(backend=backend, frontend=frontend, server=server)
 
