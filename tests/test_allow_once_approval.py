@@ -546,6 +546,67 @@ def test_an_expired_approval_removes_a_stale_workspace(tmp_path: Path) -> None:
     assert (final.status, final.approval_state) == ("cancelled", "expired")
 
 
+def test_an_approval_that_lapses_while_the_job_waits_removes_a_stale_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    job, _ = _pending_job(repository, job_id="lapses-while-waiting")
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_approvals SET expires_at = ? WHERE job_id = ?",
+            ((datetime.now(timezone.utc) + timedelta(seconds=1.0)).isoformat(), job.job_id),
+        )
+    workspace = _leave_a_crashed_workspace(repository, job.job_id)
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    waits: list[str] = []
+    original_await = coordinator._await_approval
+
+    def counted_await(job_id: str, cancel_event):  # type: ignore[no-untyped-def]
+        waits.append(job_id)
+        return original_await(job_id, cancel_event)
+
+    monkeypatch.setattr(coordinator, "_await_approval", counted_await)
+    try:
+        coordinator._launch_code(job.job_id)
+        final = coordinator.wait(job.job_id, timeout=10.0)
+        wait_until(
+            lambda: not workspace.exists(),
+            timeout=5.0,
+            describe="the stale workspace to be removed",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert waits == [job.job_id], "the approval should have lapsed while the job was waiting"
+    assert (final.status, final.approval_state) == ("cancelled", "expired")
+
+
+def test_an_approval_changed_under_the_claim_removes_a_stale_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    job, _ = _approved_job(repository, job_id="changed-under-claim")
+    workspace = _leave_a_crashed_workspace(repository, job.job_id)
+
+    def refuse(job_id: str, **kwargs: object) -> str:
+        raise ApprovalTransitionError("Execution is not approved.")
+
+    monkeypatch.setattr(repository, "claim_approved_lease", refuse)
+    coordinator = LocalExecutionCoordinator(repository, code_timeout_seconds=3.0)
+    try:
+        coordinator._launch_code(job.job_id)
+        final = coordinator.wait(job.job_id, timeout=10.0)
+        wait_until(
+            lambda: not workspace.exists(),
+            timeout=5.0,
+            describe="the stale workspace to be removed",
+        )
+    finally:
+        coordinator.shutdown()
+
+    assert (final.status, final.error) == ("failed", "approval_required")
+
+
 def test_a_denied_approval_removes_a_stale_workspace(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     job, owner = _pending_job(repository, job_id="denied-workspace")
