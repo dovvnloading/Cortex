@@ -22,6 +22,7 @@ from cortex_backend.api.routes import (
     _generation_event_name,
     _job_response,
     _job_status,
+    _raise_chat_domain_error,
     _raise_job_error,
     _request_fingerprint,
     _start_generation_job,
@@ -87,9 +88,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 status_code=status.HTTP_409_CONFLICT, detail=str(exc)
             ) from exc
         except ChatDomainError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-            ) from exc
+            _raise_chat_domain_error(exc)
         return _accepted(snapshot, user_message_id=user_message_id)
 
 

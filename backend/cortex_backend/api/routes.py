@@ -7,7 +7,7 @@ error mapping, coordinator lookup, and the generation job runner.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,7 @@ from fastapi import HTTPException, Request, status
 from cortex_backend.core.generation import ConnectionResult, GenerationAttachment, GenerationSnapshot
 from cortex_backend.services.chat import (
     ChatDomainError,
+    ChatErrorCode,
     chat_revision,
     message_position,
     normalize_title,
@@ -260,6 +261,36 @@ def _request_fingerprint(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _regeneration_target(
+    messages: Sequence[Mapping[str, Any]], message_id: str
+) -> tuple[int, str]:
+    """Find the message a regeneration targets and check it may be regenerated.
+
+    Returns the message's position and role, or raises the ChatDomainError that
+    says why it cannot be. One place decides this, so the route that reads the
+    chat and the admission that re-checks it cannot drift apart.
+    """
+    position = message_position({"messages": messages}, message_id)
+    if position != len(messages) - 1:
+        # The client is acting on a transcript that has since grown.
+        raise ChatDomainError(
+            "Only the final message can be regenerated.", code="stale_revision"
+        )
+    role = messages[position].get("role")
+    if role == "assistant":
+        if position == 0 or messages[position - 1].get("role") != "user":
+            raise ChatDomainError(
+                "The selected response has no user turn to regenerate.",
+                code="invalid_input",
+            )
+    elif role != "user":
+        raise ChatDomainError(
+            "Only an assistant response or an unanswered message can be regenerated.",
+            code="invalid_input",
+        )
+    return position, str(role)
+
+
 async def _start_generation_job(
     request: Request,
     deps: BackendDependenciesProtocol,
@@ -308,7 +339,8 @@ async def _start_generation_job(
             and current_revision != payload.base_revision
         ):
             raise ChatDomainError(
-                "This chat changed. Reload it before generating again."
+                "This chat changed. Reload it before generating again.",
+                code="stale_revision",
             )
 
         settings = await asyncio.to_thread(_load_settings, deps)
@@ -393,30 +425,16 @@ async def _start_generation_job(
             )
             if current_revision != admission_revision:
                 raise ChatDomainError(
-                    "This chat changed. Reload it before generating again."
+                    "This chat changed. Reload it before generating again.",
+                    code="stale_revision",
                 )
             if target_message_id is not None:
                 if current_chat is None:
-                    raise ChatDomainError("Chat not found.")
+                    raise ChatDomainError("Chat not found.", code="not_found")
                 current_messages = list(current_chat.get("messages", ()))
-                target_position = message_position(current_chat, target_message_id)
-                if target_position != len(current_messages) - 1:
-                    raise ChatDomainError(
-                        "Only the final message can be regenerated."
-                    )
-                current_target_role = current_messages[target_position].get("role")
-                if current_target_role == "assistant":
-                    if (
-                        target_position == 0
-                        or current_messages[target_position - 1].get("role") != "user"
-                    ):
-                        raise ChatDomainError(
-                            "The selected response has no user turn to regenerate."
-                        )
-                elif current_target_role != "user":
-                    raise ChatDomainError(
-                        "Only an assistant response or an unanswered message can be regenerated."
-                    )
+                target_position, current_target_role = _regeneration_target(
+                    current_messages, target_message_id
+                )
                 target_is_dangling_user_turn = current_target_role == "user"
                 prepared_history = current_messages[:target_position]
                 prepared_revision = current_revision
@@ -1224,7 +1242,8 @@ def _generation_snapshot(
     chat_model = _selected_local_model(settings.models.chat, installed_models)
     if chat_model is None:
         raise ChatDomainError(
-            "No local model is available. Install one in Ollama, or add a GGUF file, then rescan Models in Settings."
+            "No local model is available. Install one in Ollama, or add a GGUF file, then rescan Models in Settings.",
+            code="model_unavailable",
         )
     # Titles intentionally share the selected chat model. This keeps model
     # selection to one local, user-visible choice and avoids hidden defaults.
@@ -1234,7 +1253,8 @@ def _generation_snapshot(
         and settings.models.translation not in installed_models
     ):
         raise ChatDomainError(
-            "Choose or install a local translation model before enabling translation."
+            "Choose or install a local translation model before enabling translation.",
+            code="model_unavailable",
         )
     instructions = settings.generation.system_instructions or None
     # Resolved before the options are merged: an admitted code turn samples
@@ -1329,6 +1349,23 @@ def _job_status(
         return request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
+
+
+# What each ChatDomainError code means to an HTTP client. A client decides from
+# the status whether to retry, reload the chat, or tell the user to install a
+# model, so the status has to follow the cause and not the place it was caught.
+_CHAT_ERROR_STATUS: dict[ChatErrorCode, int] = {
+    "not_found": status.HTTP_404_NOT_FOUND,
+    "invalid_input": status.HTTP_422_UNPROCESSABLE_CONTENT,
+    "stale_revision": status.HTTP_409_CONFLICT,
+    "model_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
+}
+
+
+def _raise_chat_domain_error(exc: ChatDomainError) -> NoReturn:
+    raise HTTPException(
+        status_code=_CHAT_ERROR_STATUS[exc.code], detail=str(exc)
+    ) from exc
 
 
 def _raise_job_error(exc: Exception) -> NoReturn:
@@ -1540,9 +1577,14 @@ def _resolve_generation_attachments(
     if not references:
         return ()
     if len(references) > MAX_CHAT_ATTACHMENTS:
-        raise ChatDomainError("A message can include at most eight attachments.")
+        raise ChatDomainError(
+            "A message can include at most eight attachments.", code="invalid_input"
+        )
     if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
-        raise ChatDomainError("The combined attachment size is too large for one message.")
+        raise ChatDomainError(
+            "The combined attachment size is too large for one message.",
+            code="invalid_input",
+        )
     installed = deps.models.list_installed()
     model = _selected_local_model(settings.models.chat, installed)
     contains_image = any(item.kind == "image" for item in references)
@@ -1554,7 +1596,8 @@ def _resolve_generation_attachments(
         # confidently about something it never received.
         if vision is False or (vision is not True and model.startswith(GGUF_PREFIX)):
             raise ChatDomainError(
-                f"Selected model '{model}' does not support image input. Choose a vision model or remove the image."
+                f"Selected model '{model}' does not support image input. Choose a vision model or remove the image.",
+                code="invalid_input",
             )
     service = _chat_attachment_service(request, deps)
     owner = _attachment_owner(request, principal)
@@ -1562,7 +1605,9 @@ def _resolve_generation_attachments(
     seen: set[str] = set()
     for reference in references:
         if reference.attachment_id in seen:
-            raise ChatDomainError("The same attachment cannot be added twice.")
+            raise ChatDomainError(
+                "The same attachment cannot be added twice.", code="invalid_input"
+            )
         seen.add(reference.attachment_id)
         try:
             item = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
@@ -1592,16 +1637,23 @@ def _validate_chat_attachment_refs(
     if not references:
         return []
     if len(references) > MAX_CHAT_ATTACHMENTS:
-        raise ChatDomainError("A message can include at most eight attachments.")
+        raise ChatDomainError(
+            "A message can include at most eight attachments.", code="invalid_input"
+        )
     if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
-        raise ChatDomainError("The combined attachment size is too large for one message.")
+        raise ChatDomainError(
+            "The combined attachment size is too large for one message.",
+            code="invalid_input",
+        )
     service = _chat_attachment_service(request, deps)
     owner = _attachment_owner(request, principal)
     normalized: list[ChatAttachment] = []
     seen: set[str] = set()
     for reference in references:
         if reference.attachment_id in seen:
-            raise ChatDomainError("The same attachment cannot be added twice.")
+            raise ChatDomainError(
+                "The same attachment cannot be added twice.", code="invalid_input"
+            )
         seen.add(reference.attachment_id)
         try:
             resolved = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))

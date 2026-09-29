@@ -31,6 +31,7 @@ from cortex_backend.api.routes import (
     _raise_attachment_staging_error,
     _raise_chat_attachment_error,
     _raise_recipe_request_error,
+    _raise_repository_error,
     _raise_scratch_request_error,
     _recipe_coordinator,
     _scratch_coordinator,
@@ -72,6 +73,7 @@ from cortex_backend.execution.recipe_coordinator import (
 from cortex_backend.execution.repository import (
     ApprovalPolicyError,
     ApprovalTransitionError,
+    ExecutionJobNotFound,
     ExecutionRepositoryError,
 )
 from cortex_backend.execution.scratch_compute import (
@@ -455,11 +457,14 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(exc),
             ) from exc
-        except ExecutionRepositoryError as exc:
+        except ExecutionJobNotFound as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Execution job not found.",
             ) from exc
+        except Exception as exc:
+            # A disk or database failure is not a missing job.
+            _raise_repository_error("decide execution approval", exc)
         job = repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
@@ -477,8 +482,10 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         coordinator = _execution_runtime(request)
         try:
             coordinator.cancel(job_id, owner=_durable_owner(principal))
-        except ValueError as exc:
+        except ExecutionJobNotFound as exc:
             raise HTTPException(status_code=404, detail="Execution job not found.") from exc
+        except Exception as exc:
+            _raise_repository_error("cancel execution job", exc)
         job = coordinator.repository.get_job(job_id, owner=_durable_owner(principal))
         if job is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")

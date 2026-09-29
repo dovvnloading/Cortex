@@ -7,13 +7,31 @@ gigabytes before failing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+import httpx
 import pytest
 
+from cortex_backend.api import create_app
 from cortex_backend.execution.recipes import (
     MAX_PIXELS,
     RecipeValidationError,
     parse_image_transform,
 )
+from cortex_backend.execution.repository import (
+    ExecutionRepository,
+    ExecutionRepositoryError,
+)
+from cortex_backend.testing import (
+    DurableFakeCoordinator,
+    build_demo_dependencies,
+    install_execution_preview,
+)
+from cortex_backend.testing.fake_ollama import FakeOllamaState
+from support import session_headers
 
 
 def _plan(steps: list[dict]) -> dict:
@@ -126,3 +144,178 @@ def test_a_full_memory_store_is_a_conflict_not_a_server_fault(app_factory_client
     assert response is not None
     assert response.status_code == 409
     assert "100" in response.json()["detail"]
+
+
+@dataclass(frozen=True)
+class _Seeded:
+    """A chat holding one exchange, and what a scenario needs to act on it."""
+
+    client: TestClient
+    headers: dict[str, str]
+    ollama_state: FakeOllamaState
+    thread_id: str
+    user_message_id: str
+    assistant_message_id: str
+
+
+def _seed_chat(
+    client: TestClient, headers: dict[str, str], ollama_state: FakeOllamaState
+) -> _Seeded:
+    chat = client.post("/api/v1/chats", json={"title": "Status codes"}, headers=headers).json()
+    for role, content in (("user", "hello"), ("assistant", "hi there")):
+        chat = client.post(
+            f"/api/v1/chats/{chat['id']}/messages",
+            json={"role": role, "content": content},
+            headers=headers,
+        ).json()
+    user, assistant = chat["messages"]
+    return _Seeded(client, headers, ollama_state, chat["id"], user["id"], assistant["id"])
+
+
+def _regenerate(seeded: _Seeded, message_id: str, **extra: object) -> httpx.Response:
+    return seeded.client.post(
+        f"/api/v1/chats/{seeded.thread_id}/regenerations",
+        json={"request_id": "status-regenerate", "message_id": message_id, **extra},
+        headers=seeded.headers,
+    )
+
+
+def _fork_an_unknown_message(seeded: _Seeded) -> httpx.Response:
+    return seeded.client.post(
+        f"/api/v1/chats/{seeded.thread_id}/forks",
+        json={"message_id": "no-such-message"},
+        headers=seeded.headers,
+    )
+
+
+def _regenerate_an_unknown_message(seeded: _Seeded) -> httpx.Response:
+    return _regenerate(seeded, "no-such-message")
+
+
+def _regenerate_a_message_that_is_no_longer_last(seeded: _Seeded) -> httpx.Response:
+    return _regenerate(seeded, seeded.user_message_id)
+
+
+def _regenerate_a_message_that_is_not_a_reply(seeded: _Seeded) -> httpx.Response:
+    note = seeded.client.post(
+        f"/api/v1/chats/{seeded.thread_id}/messages",
+        json={"role": "system", "content": "a note, not a reply"},
+        headers=seeded.headers,
+    ).json()
+    return _regenerate(seeded, note["messages"][-1]["id"])
+
+
+def _regenerate_from_a_stale_revision(seeded: _Seeded) -> httpx.Response:
+    return _regenerate(seeded, seeded.assistant_message_id, base_revision=0)
+
+
+def _generate_from_a_stale_revision(seeded: _Seeded) -> httpx.Response:
+    return seeded.client.post(
+        "/api/v1/generations",
+        json={"thread_id": seeded.thread_id, "user_input": "again", "base_revision": 0},
+        headers=seeded.headers,
+    )
+
+
+def _generate_with_no_model_installed(seeded: _Seeded) -> httpx.Response:
+    # The inventory is read for every turn, so emptying the fake Ollama between
+    # requests is exactly what "nothing installed" looks like to the route.
+    seeded.ollama_state.installed_models.clear()
+    return seeded.client.post(
+        "/api/v1/generations",
+        json={"user_input": "anyone there?"},
+        headers=seeded.headers,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_status"),
+    [
+        pytest.param(_fork_an_unknown_message, 404, id="fork-unknown-message-is-not-found"),
+        pytest.param(_regenerate_an_unknown_message, 404, id="regenerate-unknown-message-is-not-found"),
+        pytest.param(_regenerate_a_message_that_is_no_longer_last, 409, id="regenerate-an-older-message-is-a-conflict"),
+        pytest.param(_regenerate_a_message_that_is_not_a_reply, 422, id="regenerate-a-system-message-is-invalid-input"),
+        pytest.param(_regenerate_from_a_stale_revision, 409, id="regenerate-from-a-stale-revision-is-a-conflict"),
+        pytest.param(_generate_from_a_stale_revision, 409, id="generate-from-a-stale-revision-is-a-conflict"),
+        pytest.param(_generate_with_no_model_installed, 503, id="no-installed-model-is-unavailable"),
+    ],
+)
+def test_status_codes_follow_error_meaning(
+    client: TestClient,
+    headers: dict[str, str],
+    ollama_state: FakeOllamaState,
+    scenario: Callable[[_Seeded], httpx.Response],
+    expected_status: int,
+) -> None:
+    """A client retries, reloads, or tells the user to install a model from the
+    status alone. Each of these was a 409 because it was caught beside a real
+    conflict, whatever had actually gone wrong."""
+    seeded = _seed_chat(client, headers, ollama_state)
+
+    response = scenario(seeded)
+
+    assert response.status_code == expected_status, response.text
+    assert isinstance(response.json()["detail"], str)
+
+
+def _execution_app(tmp_path: Path):
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    app = create_app(
+        build_demo_dependencies(),
+        allowed_hosts=("testserver",),
+        preview=True,
+        execution_coordinator=DurableFakeCoordinator(repository),
+    )
+    return install_execution_preview(app)
+
+
+def _fail_with_a_disk_error(*_args: object, **_kwargs: object) -> object:
+    raise ExecutionRepositoryError("disk")
+
+
+def test_a_repository_failure_is_a_500_not_a_missing_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole ExecutionRepositoryError family answered 404 "job not found",
+    a disk failure or a lost lease included -- sending the user hunting for a
+    job that exists."""
+    app = _execution_app(tmp_path)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        accepted = client.post(
+            "/api/v1/execution/preview/fake",
+            json={"request_id": "status-disk-failure"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+        coordinator = app.state.execution_coordinator
+        monkeypatch.setattr(coordinator.repository, "decide_approval", _fail_with_a_disk_error)
+        monkeypatch.setattr(coordinator, "cancel", _fail_with_a_disk_error)
+
+        decision = client.post(
+            f"/api/v1/execution/{job_id}/approval",
+            json={"decision": "approved"},
+            headers=headers,
+        )
+        cancel = client.post(f"/api/v1/execution/{job_id}/cancel", headers=headers)
+
+    assert decision.status_code == 500, decision.text
+    assert cancel.status_code == 500, cancel.text
+    assert "disk" not in decision.text + cancel.text
+
+
+def test_a_job_that_does_not_exist_is_still_a_404_for_approval_and_cancel(tmp_path: Path) -> None:
+    app = _execution_app(tmp_path)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        decision = client.post(
+            "/api/v1/execution/no-such-job/approval",
+            json={"decision": "approved"},
+            headers=headers,
+        )
+        cancel = client.post("/api/v1/execution/no-such-job/cancel", headers=headers)
+
+    assert decision.status_code == 404
+    assert cancel.status_code == 404
