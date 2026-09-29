@@ -414,6 +414,13 @@ def test_launch_argv_contract(tmp_path: Path, backend: str, gpu_layers: str) -> 
             "--port", "0",
             "--reasoning-format", "deepseek",
             "-ngl", gpu_layers,
+            # One slot: Cortex serialises generations, so "auto" could only
+            # ever split the requested context between slots nobody uses.
+            "-np", "1",
+            # The llama.cpp web UI is surface Cortex never uses, and it is
+            # served without the API key. (--no-webui is the deprecated
+            # spelling of the same switch in the pinned build.)
+            "--no-ui",
         ]
     ]
 
@@ -549,6 +556,94 @@ def test_start_without_inherited_llama_variables_logs_no_notice(
         manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
 
     assert not [r for r in caplog.records if "environment variables" in r.getMessage()]
+
+
+def _props_with_context(model_path: Path, settings: object) -> dict:
+    props: dict = {"model_path": str(model_path), "build_info": "b10311-test"}
+    if settings is not None:
+        props["default_generation_settings"] = settings
+    return props
+
+
+def test_loaded_context_comes_from_props(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """The context the slot really has is read back from /props, not assumed
+    from the request, so a shortfall is visible instead of surfacing later as
+    an "exceeds the available context" error at half the configured size."""
+    model_path = tmp_path / "model.gguf"
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_RecordingAttestationClient(
+            _props_with_context(model_path, {"n_ctx": 4096})
+        ),
+    )
+    assert manager.status.loaded_context is None
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=8192)
+        # Asking again for the same context must reuse the server. The reuse
+        # decision stays keyed on what was requested: relaunching with the same
+        # arguments cannot produce a larger context, so treating the read-back
+        # value as the bar would reload the model on every message.
+        manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert manager.status.loaded_context == 4096
+    assert len(launcher.launch_args) == 1
+    warnings = [r.getMessage() for r in caplog.records if "context" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "4096" in warnings[0] and "8192" in warnings[0]
+
+    manager.stop()
+    assert manager.status.loaded_context is None
+
+
+def test_loaded_context_matching_the_request_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    model_path = tmp_path / "model.gguf"
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_RecordingAttestationClient(
+            _props_with_context(model_path, {"n_ctx": 4096})
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.loaded_context == 4096
+    assert not [r for r in caplog.records if "context" in r.getMessage()]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [None, {}, {"n_ctx": 0}, {"n_ctx": -4096}, {"n_ctx": "4096"}, {"n_ctx": 4096.0}, {"n_ctx": True}, "text"],
+)
+def test_an_unreadable_loaded_context_is_reported_as_unknown(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path, settings: object
+) -> None:
+    """A /props answer without a usable n_ctx must not be papered over with
+    the requested value: the runtime still starts, and status says unknown."""
+    model_path = tmp_path / "model.gguf"
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_RecordingAttestationClient(_props_with_context(model_path, settings)),
+    )
+
+    with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert manager.status.loaded_context is None
+    assert not [r for r in caplog.records if "context" in r.getMessage()]
 
 
 def test_start_rejects_a_generic_200_service_as_not_llamacpp(tmp_path: Path) -> None:

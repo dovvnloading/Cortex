@@ -182,6 +182,10 @@ class LlamaCppRuntimeStatus:
     # N)..."). A model reload costs minutes of disk and GPU work; it must
     # never be anonymous.
     last_restart_reason: str | None = None
+    # The context window the running server actually reports (read back from
+    # ``/props`` at readiness), as opposed to the size that was requested.
+    # None while nothing is ready, or when the server did not report one.
+    loaded_context: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +461,17 @@ def _child_environment(
     return env, tuple(sorted(stripped))
 
 
+def _context_from_props(props: Mapping[str, Any]) -> int | None:
+    """The slot's context size from a ``/props`` document, or None if absent or malformed."""
+    settings = props.get("default_generation_settings")
+    if not isinstance(settings, dict):
+        return None
+    n_ctx = settings.get("n_ctx")
+    if isinstance(n_ctx, bool) or not isinstance(n_ctx, int) or n_ctx <= 0:
+        return None
+    return n_ctx
+
+
 def _drain_output(stream, sink: list[str], on_line: Callable[[str], None] | None = None) -> None:
     try:
         for raw_line in iter(stream.readline, b""):
@@ -527,7 +542,13 @@ class LlamaServerManager:
         self._process: subprocess.Popen | None = None
         self._starting_process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
+        # What was requested with ``-c`` for the running server. Reuse
+        # decisions key off this, not the read-back value below: relaunching
+        # with the same arguments cannot yield a larger window, so treating a
+        # smaller read-back as the bar would reload the model on every message.
         self._loaded_num_ctx: int | None = None
+        # What the running server reports for itself (see _context_from_props).
+        self._loaded_context: int | None = None
         self._base_url: str | None = None
         self._last_error: str | None = None
         self._last_restart_reason: str | None = None
@@ -679,6 +700,7 @@ class LlamaServerManager:
             last_error = self._last_error
             last_restart_reason = self._last_restart_reason
             active_backend = self._active_backend
+            loaded_context = self._loaded_context if state == "ready" else None
         # The expensive parts -- hashing the cached binary directory and a
         # settings read for the models folder -- run outside every lock, so
         # a status poll never stalls behind (or holds up) a model load.
@@ -692,6 +714,7 @@ class LlamaServerManager:
             models_directory_exists=models_directory.is_dir(),
             active_backend=active_backend,
             last_restart_reason=last_restart_reason,
+            loaded_context=loaded_context,
         )
 
     def stop(self) -> None:
@@ -1045,6 +1068,7 @@ class LlamaServerManager:
         self._starting_process = None
         self._loaded_model_path = None
         self._loaded_num_ctx = None
+        self._loaded_context = None
         self._base_url = None
         self._api_key = None
         self._state = "idle"
@@ -1258,6 +1282,16 @@ class LlamaServerManager:
             "--port", "0",
             "--reasoning-format", "deepseek",
             "-ngl", "auto" if backend == "vulkan" else "0",
+            # One slot. Cortex serialises generations, and llama-server's "auto"
+            # slot count leaves the total ``-c`` budget to be shared between
+            # slots nobody uses.
+            "-np", "1",
+            # Do not serve the bundled web UI: it is surface Cortex never uses
+            # and is exempt from API-key validation. Only /health stays public,
+            # which the readiness probe needs. ``--no-ui`` is the current
+            # spelling; ``--no-webui`` is the deprecated alias of the same
+            # switch in the pinned build.
+            "--no-ui",
         ]
         env, scrubbed = _child_environment(os.environ, api_key)
         self._note_scrubbed_environment(scrubbed)
@@ -1322,7 +1356,9 @@ class LlamaServerManager:
                     continue
                 base_url = f"http://127.0.0.1:{listening_port[0]}"
                 self._raise_if_stopping(cancellation_event)
-                if self._probe_health(base_url, api_key=api_key, model_path=model_path):
+                props = self._probe_props(base_url, api_key=api_key, model_path=model_path)
+                if props is not None:
+                    loaded_context = _context_from_props(props)
                     with self._state_lock:
                         if cancellation_event.is_set():
                             raise LlamaCppError("The local model runtime startup was cancelled.")
@@ -1330,6 +1366,7 @@ class LlamaServerManager:
                         self._starting_process = None
                         self._loaded_model_path = model_path
                         self._loaded_num_ctx = num_ctx
+                        self._loaded_context = loaded_context
                         self._base_url = base_url
                         self._api_key = api_key
                         self._state = "ready"
@@ -1338,6 +1375,13 @@ class LlamaServerManager:
                         self._last_health_check = time.monotonic()
                         self._stderr_tail = stderr_tail
                     ready = True
+                    if loaded_context is not None and loaded_context != num_ctx:
+                        logger.warning(
+                            "The local model runtime reports a %d-token context "
+                            "window, not the %d tokens requested.",
+                            loaded_context,
+                            num_ctx,
+                        )
                     return ServerHandle(base_url=base_url, model_path=model_path, api_key=api_key)
                 now = time.monotonic()
                 if on_status is not None and now - last_status_at >= _STATUS_REPEAT_SECONDS:
@@ -1394,13 +1438,27 @@ class LlamaServerManager:
         model_path: Path,
         timeout: float = 1.0,
     ) -> bool:
+        return (
+            self._probe_props(base_url, api_key=api_key, model_path=model_path, timeout=timeout)
+            is not None
+        )
+
+    def _probe_props(
+        self,
+        base_url: str,
+        *,
+        api_key: str,
+        model_path: Path,
+        timeout: float = 1.0,
+    ) -> dict[str, Any] | None:
+        """Return the authenticated ``/props`` document of a healthy child, else None."""
         try:
             response = self._http.get(f"{base_url}/health", timeout=timeout)
             if response.status_code != 200:
-                return False
+                return None
             health = response.json()
             if not isinstance(health, dict) or health.get("status") != "ok":
-                return False
+                return None
 
             # /health is intentionally public in llama.cpp. Authenticate a
             # second endpoint and require its documented response shape so a
@@ -1412,10 +1470,10 @@ class LlamaServerManager:
                 timeout=timeout,
             )
             if response.status_code != 200:
-                return False
+                return None
             props = response.json()
         except (httpx.TransportError, ValueError):
-            return False
+            return None
         if not (
             isinstance(props, dict)
             and isinstance(props.get("model_path"), str)
@@ -1423,7 +1481,7 @@ class LlamaServerManager:
             and isinstance(props.get("build_info"), str)
             and bool(props["build_info"])
         ):
-            return False
+            return None
         # Production model paths are real, canonical files. Test doubles may
         # intentionally use synthetic paths, so retain their lightweight
         # protocol checks while enforcing exact child/model identity whenever
@@ -1431,10 +1489,10 @@ class LlamaServerManager:
         if model_path.is_file():
             try:
                 if Path(props["model_path"]).resolve() != model_path.resolve():
-                    return False
+                    return None
             except OSError:
-                return False
-        return True
+                return None
+        return props
 
     def _any_backend_cached(self) -> bool:
         if self._release is None:
