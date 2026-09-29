@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-import json
 from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 from typing import Any
@@ -17,19 +16,13 @@ from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.jobs import JobConflict, JobRegistry
 from cortex_backend.testing.fake_ollama import FakeOllamaState
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 
 THREAD_ID = "generation-admission-race"
 
 
-
-def _events(body: str) -> list[dict[str, Any]]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 @dataclass(frozen=True, slots=True)

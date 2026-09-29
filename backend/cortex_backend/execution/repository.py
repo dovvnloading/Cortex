@@ -1091,6 +1091,18 @@ class ExecutionRepository:
                 (job_id, lease_owner),
             )
 
+    def lease_holder(self, job_id: str) -> str | None:
+        """Return the owner recorded on the job's lease, or None when it has none.
+
+        This reports the row, not its liveness: an expired lease still names
+        its last owner until it is released or recovered.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT lease_owner FROM execution_leases WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return None if row is None else str(row["lease_owner"])
+
     def recover_expired_leases(self) -> list[str]:
         now = datetime.now(timezone.utc)
         now_text = now.isoformat()
