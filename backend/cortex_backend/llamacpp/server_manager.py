@@ -82,6 +82,14 @@ _LOCK_POLL_SECONDS = 0.05
 _STOP_LOCK_TIMEOUT_SECONDS = 0.5
 _STATUS_REPEAT_SECONDS = 5.0
 _STDERR_TAIL_LINES = 200
+_OUTPUT_CHUNK_BYTES = 4096
+# A line the child never terminates is cut at this length, so a child that
+# writes without ever ending a line cannot make the reader hold it forever.
+_MAX_UNTERMINATED_LINE_BYTES = 64 * 1024
+# The most a start-up may take in total, however steadily the child keeps
+# writing. Only a silent child is timed out earlier (see health_timeout_seconds
+# on the manager); this bounds one that never finishes but never goes quiet.
+_STARTUP_CAP_SECONDS = 30.0 * 60.0
 # After the child exits, how long to let the output reader consume what is
 # still in the pipe before the tail is read to work out why it exited. Normally
 # instant; the bound is for a pipe some other process still holds open.
@@ -506,16 +514,46 @@ def _context_from_props(props: Mapping[str, Any]) -> int | None:
     return n_ctx
 
 
-def _drain_output(stream, sink: list[str], on_line: Callable[[str], None] | None = None) -> None:
+def _drain_output(
+    stream,
+    sink: list[str],
+    on_line: Callable[[str], None] | None = None,
+    on_activity: Callable[[], None] | None = None,
+) -> None:
+    """Read the child's output until it closes, keeping a bounded tail of lines.
+
+    ``on_activity`` is called for every chunk that arrives, before it is cut
+    into lines. A child that is busy but has not finished a line -- llama.cpp
+    writes model-loading progress as dots with no newline -- is alive and
+    making progress, and start-up waits on exactly that, so activity cannot
+    depend on a line ending.
+    """
+    chunked = hasattr(stream, "read1")
+    pending = b""
+
+    def accept(raw: bytes) -> None:
+        line = raw.decode("utf-8", errors="replace").rstrip()
+        if line:
+            sink.append(line)
+            if len(sink) > _STDERR_TAIL_LINES:
+                del sink[0]
+            if on_line is not None:
+                on_line(line)
+
     try:
-        for raw_line in iter(stream.readline, b""):
-            line = raw_line.decode("utf-8", errors="replace").rstrip()
-            if line:
-                sink.append(line)
-                if len(sink) > _STDERR_TAIL_LINES:
-                    del sink[0]
-                if on_line is not None:
-                    on_line(line)
+        while True:
+            chunk = stream.read1(_OUTPUT_CHUNK_BYTES) if chunked else stream.readline()
+            if not chunk:
+                break
+            if on_activity is not None:
+                on_activity()
+            *complete, pending = (pending + chunk).split(b"\n")
+            for raw in complete:
+                accept(raw)
+            if len(pending) > _MAX_UNTERMINATED_LINE_BYTES:
+                accept(pending)
+                pending = b""
+        accept(pending)
     except (OSError, ValueError):
         pass
 
@@ -541,6 +579,7 @@ class LlamaServerManager:
         gpu_backend_setting: Callable[[], GpuBackendSetting],
         models_directory: Callable[[], Path],
         health_timeout_seconds: float = 180.0,
+        startup_cap_seconds: float = _STARTUP_CAP_SECONDS,
         launcher: ProcessLauncher = default_launcher,
         http_client: httpx.Client | None = None,
         verify: ssl.SSLContext | bool = True,
@@ -550,7 +589,15 @@ class LlamaServerManager:
         self._release = release
         self._gpu_backend_setting = gpu_backend_setting
         self._models_directory = models_directory
+        # How long a starting child may stay silent -- no output at all --
+        # before the start is abandoned, and, once it reports it is listening,
+        # how long it has to pass the readiness probe. Loading a large model
+        # from a slow disk legitimately takes longer than any fixed wall clock
+        # a small model could share, but a child that is still writing is still
+        # working: every byte it writes restarts the silence clock, up to
+        # ``startup_cap_seconds`` in total (never less than the silence span).
         self._health_timeout_seconds = health_timeout_seconds
+        self._startup_cap_seconds = max(startup_cap_seconds, health_timeout_seconds)
         self._launcher = launcher
         # ``verify`` only shapes the client this manager owns; the app passes
         # one shared TLS context so each client does not parse the
@@ -1422,6 +1469,8 @@ class LlamaServerManager:
         stderr_tail: list[str] = []
         listening_port: list[int] = []
         listening_event = threading.Event()
+        # When the child last wrote anything at all (see _drain_output).
+        last_output = [time.monotonic()]
         ready = False
 
         def on_output(line: str) -> None:
@@ -1430,18 +1479,38 @@ class LlamaServerManager:
                 listening_port.append(int(match.group(1)))
                 listening_event.set()
 
+        def on_activity() -> None:
+            last_output[0] = time.monotonic()
+
         reader: threading.Thread | None = None
         try:
             if process.stdout is not None:
                 reader = threading.Thread(
                     target=_drain_output,
-                    args=(process.stdout, stderr_tail, on_output),
+                    args=(process.stdout, stderr_tail, on_output, on_activity),
                     daemon=True,
                 )
                 reader.start()
-            deadline = time.monotonic() + self._health_timeout_seconds
-            last_status_at = time.monotonic()
-            while time.monotonic() < deadline:
+            started_at = time.monotonic()
+            last_output[0] = started_at
+            hard_deadline = started_at + self._startup_cap_seconds
+            listening_at: float | None = None
+            last_status_at = started_at
+            while True:
+                if listening_at is None and listening_port:
+                    listening_at = time.monotonic()
+                if listening_at is None:
+                    # Still loading. llama-server writes steadily while it
+                    # reads the model in, so a load is only abandoned once it
+                    # has gone quiet for the whole span (or hit the cap).
+                    deadline = min(last_output[0] + self._health_timeout_seconds, hard_deadline)
+                else:
+                    # Listening but not yet verified. The child's own output
+                    # no longer counts: it logs every request, including the
+                    # probes made here, so it would never go quiet.
+                    deadline = min(listening_at + self._health_timeout_seconds, hard_deadline)
+                if time.monotonic() >= deadline:
+                    break
                 self._raise_if_stopping(cancellation_event)
                 exit_code = process.poll()
                 if exit_code is not None:

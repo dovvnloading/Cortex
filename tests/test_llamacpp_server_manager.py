@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ from cortex_backend.llamacpp.launch_failure import launch_failure_message
 from cortex_backend.llamacpp.server_manager import (
     _LISTENING_PORT_RE,
     LlamaServerManager,
+    _drain_output,
     _ReuseVerdict,
 )
 
@@ -249,8 +251,10 @@ def _manager(
     http_client,
     gpu_backend: str = "cpu",
     health_timeout_seconds: float = 5.0,
+    startup_cap_seconds: float | None = None,
     release=_ANY_RELEASE,
 ) -> LlamaServerManager:
+    extra = {} if startup_cap_seconds is None else {"startup_cap_seconds": startup_cap_seconds}
     return LlamaServerManager(
         runtime_dir=tmp_path,
         fetcher=fetcher,
@@ -260,6 +264,7 @@ def _manager(
         health_timeout_seconds=health_timeout_seconds,
         launcher=launcher,
         http_client=http_client,
+        **extra,
     )
 
 
@@ -1005,6 +1010,308 @@ def test_slow_but_alive_process_times_out_without_gpu_fallback(tmp_path: Path) -
     # A timeout (process alive, just slow) must NOT be recorded as a known-bad
     # backend -- only an early process exit means "this backend can't launch here".
     assert not (tmp_path / "preferred_gpu_backend.json").exists()
+
+
+class _ScriptedOutput:
+    """A child's stdout that the test feeds while the manager is waiting on it.
+
+    Reads block like a pipe does, but are bounded so a test that forgets to
+    close it cannot hang.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: queue.Queue[bytes] = queue.Queue()
+
+    def feed(self, data: bytes) -> None:
+        self._chunks.put(data)
+
+    def close(self) -> None:
+        self._chunks.put(b"")
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        try:
+            return self._chunks.get(timeout=10.0)
+        except queue.Empty:
+            return b""
+
+    def readline(self) -> bytes:
+        return self.read1()
+
+
+class _Trickle:
+    """Feeds a scripted child a chunk every ``interval`` seconds from a thread.
+
+    ``chunks`` is consumed in order; ``forever`` (if given) is then repeated
+    until the context ends. Waiting on the stop event, never a bare sleep,
+    keeps every wait bounded and lets the test end the feed early.
+    """
+
+    def __init__(
+        self,
+        output: _ScriptedOutput,
+        chunks: list[bytes],
+        *,
+        interval: float,
+        forever: bytes | None = None,
+    ) -> None:
+        self._output = output
+        self._chunks = chunks
+        self._interval = interval
+        self._forever = forever
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        for chunk in self._chunks:
+            if self._stopped.wait(self._interval):
+                return
+            self._output.feed(chunk)
+        while self._forever is not None and not self._stopped.wait(self._interval):
+            self._output.feed(self._forever)
+
+    def __enter__(self) -> _Trickle:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stopped.set()
+        self._output.close()
+        self._thread.join(5.0)
+
+
+_PROGRESS_LINE = b"load_tensors: loaded tensor batch\n"
+
+
+def _scripted_child() -> tuple[_FakePopen, _ScriptedOutput]:
+    process = _FakePopen()
+    output = _ScriptedOutput()
+    process.stdout = output  # type: ignore[assignment]
+    return process, output
+
+
+def test_startup_deadline_extends_while_the_child_is_still_logging(tmp_path: Path) -> None:
+    """A large model on a slow disk keeps loading long after a fixed wall clock
+    would have given up on it. The silence span is 0.5s; the child writes for
+    0.9s before it is listening."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+    script = [_PROGRESS_LINE] * 30 + [_LISTENING_LINE.encode()]
+
+    started = time.monotonic()
+    with _Trickle(output, script, interval=0.03):
+        handle = manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert handle is not None
+    assert manager.status.state == "ready"
+    assert elapsed > 0.5, "the start outlived the silence span, which is the point"
+
+
+def test_output_without_a_line_ending_still_counts_as_the_child_being_alive(tmp_path: Path) -> None:
+    """llama.cpp writes loading progress as dots with no newline; waiting for a
+    completed line would call a busy child silent."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+    script = [b"."] * 30 + [b"\n" + _LISTENING_LINE.encode()]
+
+    started = time.monotonic()
+    with _Trickle(output, script, interval=0.03):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert time.monotonic() - started > 0.5
+
+
+def test_a_silent_child_still_times_out_after_the_silence_span(tmp_path: Path) -> None:
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+
+    started = time.monotonic()
+    with _Trickle(output, [], interval=1.0), pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "startup_timeout"
+    assert 0.4 < elapsed < 5.0
+    assert process.terminated is True
+
+
+def test_a_child_that_never_goes_quiet_is_still_stopped_at_the_absolute_cap(tmp_path: Path) -> None:
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.3,
+        startup_cap_seconds=0.8,
+    )
+
+    started = time.monotonic()
+    feed = _Trickle(output, [], interval=0.02, forever=_PROGRESS_LINE)
+    with feed, pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "startup_timeout"
+    assert 0.7 < elapsed < 8.0
+    assert process.terminated is True
+    assert manager.status.state == "failed"
+
+
+def test_a_listening_server_that_never_answers_is_not_kept_waiting_by_its_own_logging(
+    tmp_path: Path,
+) -> None:
+    """Once it is listening, llama-server logs every request -- including the
+    health probes made while waiting for it -- so counting its output would
+    never let a server that cannot answer time out before the cap."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.3,
+        startup_cap_seconds=6.0,
+    )
+
+    started = time.monotonic()
+    feed = _Trickle(
+        output,
+        [_LISTENING_LINE.encode()],
+        interval=0.01,
+        forever=b"srv log_server_r: request: GET /health\n",
+    )
+    with feed, pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "health_check_failed"
+    assert elapsed < 4.0, "waited for the cap instead of the span after the listening line"
+
+
+def test_the_absolute_cap_is_never_shorter_than_the_silence_span(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.4,
+        startup_cap_seconds=0.05,
+    )
+
+    assert manager._startup_cap_seconds == 0.4
+
+
+def test_the_default_deadline_is_three_minutes_of_silence_under_a_half_hour_cap(tmp_path: Path) -> None:
+    manager = LlamaServerManager(
+        runtime_dir=tmp_path,
+        fetcher=_FakeFetcher(),  # type: ignore[arg-type]
+        release=None,
+        gpu_backend_setting=lambda: "cpu",
+        models_directory=lambda: tmp_path,
+        http_client=_AlwaysHealthyClient(),  # type: ignore[arg-type]
+    )
+
+    assert manager._health_timeout_seconds == 180.0
+    assert manager._startup_cap_seconds == 1800.0
+
+
+class _ChunkedStream:
+    """Hands out prepared chunks one read at a time, like a pipe delivering as it goes."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = list(chunks)
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_drain_output_reports_activity_for_every_chunk_even_without_a_line_ending() -> None:
+    sink: list[str] = []
+    lines_seen_at_each_activity: list[int] = []
+
+    _drain_output(
+        _ChunkedStream(b"...", b"..", b" done\nnext"),
+        sink,
+        None,
+        lambda: lines_seen_at_each_activity.append(len(sink)),
+    )
+
+    # Activity fired for each chunk, and for the first two before any line existed.
+    assert lines_seen_at_each_activity == [0, 0, 0]
+    assert sink == ["..... done", "next"]
+
+
+def test_drain_output_reassembles_lines_split_across_chunks_and_keeps_a_final_unterminated_one() -> None:
+    sink: list[str] = []
+    passed_on: list[str] = []
+
+    _drain_output(_ChunkedStream(b"first li", b"ne\r\nsecond\n\n", b"third"), sink, passed_on.append)
+
+    assert sink == ["first line", "second", "third"]
+    assert passed_on == sink
+
+
+def test_drain_output_cuts_a_line_that_never_ends_and_keeps_only_a_bounded_tail() -> None:
+    from cortex_backend.llamacpp import server_manager
+
+    endless = b"." * (server_manager._MAX_UNTERMINATED_LINE_BYTES + 10)
+    sink: list[str] = []
+    _drain_output(_ChunkedStream(endless), sink)
+    assert len(sink) == 1
+    assert len(sink[0]) == len(endless)
+
+    lines = [f"line {index}\n".encode() for index in range(server_manager._STDERR_TAIL_LINES + 50)]
+    sink = []
+    _drain_output(_ChunkedStream(b"".join(lines)), sink)
+    assert len(sink) == server_manager._STDERR_TAIL_LINES
+    assert sink[-1] == f"line {server_manager._STDERR_TAIL_LINES + 49}"
+
+
+def test_drain_output_still_reads_streams_that_only_offer_readline() -> None:
+    class LineOnly:
+        def __init__(self) -> None:
+            self.lines = [b"x\n", b"y\n"]
+
+        def readline(self) -> bytes:
+            return self.lines.pop(0) if self.lines else b""
+
+    sink: list[str] = []
+    activity: list[int] = []
+
+    _drain_output(LineOnly(), sink, None, lambda: activity.append(1))
+
+    assert sink == ["x", "y"]
+    assert activity == [1, 1]
+
+
+def test_drain_output_reads_a_real_buffered_pipe_stream() -> None:
+    sink: list[str] = []
+
+    _drain_output(io.BufferedReader(io.BytesIO(b"a\nb\n")), sink)
+
+    assert sink == ["a", "b"]
 
 
 def test_start_timeout_reports_a_terminal_state_instead_of_starting(tmp_path: Path) -> None:
