@@ -1315,6 +1315,12 @@ class DatabaseManager:
                         (thread_id, thread_title, _utc_now_iso()),
                     )
                 self._check_chat_revision(conn, thread_id, expected_revision)
+                if thread_title is None and conn.execute(
+                    "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone() is None:
+                    # Without a title there is nothing to create the chat from.
+                    # Say so, rather than let the foreign key report it.
+                    raise PersistenceError("Chat does not exist.", operation="chat_not_found")
                 conn.execute("""
                     INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1335,7 +1341,7 @@ class DatabaseManager:
                 )
                 return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         except PersistenceError as exc:
-            if exc.operation == "chat_revision_conflict":
+            if exc.operation in ("chat_revision_conflict", "chat_not_found"):
                 raise
             raise PersistenceError(
                 f"Failed to add message to thread {thread_id}.",
@@ -1533,14 +1539,14 @@ class DatabaseManager:
                 if cursor.rowcount != 1:
                     raise PersistenceError(
                         f"Assistant message {message_id} was not found.",
-                        operation="replace_message",
+                        operation="message_not_found",
                     )
                 conn.execute(
                     "UPDATE threads SET timestamp = ? WHERE id = ?",
                     (_utc_now_iso(), thread_id),
                 )
         except PersistenceError as exc:
-            if exc.operation == "chat_revision_conflict":
+            if exc.operation in ("chat_revision_conflict", "message_not_found"):
                 raise
             raise PersistenceError(
                 f"Failed to replace message {message_id}.",
@@ -1552,9 +1558,17 @@ class DatabaseManager:
         """Updates the title of a specific chat thread."""
         try:
             with self.connect() as conn:
-                conn.execute("UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id))
+                # Only the title changes: a rename is not activity, so the chat
+                # keeps its place in the recency-ordered sidebar.
+                cursor = conn.execute(
+                    "UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id)
+                )
+                if cursor.rowcount == 0:
+                    raise PersistenceError("Chat does not exist.", operation="chat_not_found")
                 logging.info("Renamed chat thread (private title omitted).")
         except PersistenceError as exc:
+            if exc.operation == "chat_not_found":
+                raise
             raise PersistenceError(
                 f"Failed to rename chat {thread_id}.",
                 operation="update_chat_title",

@@ -29,6 +29,7 @@ class PersistenceTests(unittest.TestCase):
             private_title = "Alice's confidential launch plan"
             with self.assertLogs(level="INFO") as captured:
                 manager = DatabaseManager(db_path=str(private_db_path))
+                manager.create_chat("private-thread-id", "Untitled")
                 manager.update_chat_title("private-thread-id", private_title)
 
             rendered_logs = "\n".join(captured.output)
