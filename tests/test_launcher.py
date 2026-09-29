@@ -427,6 +427,203 @@ def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
     assert max(len(line) for line in text.splitlines()) < 5000
 
 
+def _failing_with_a_newline_in_the_message() -> None:
+    raise RuntimeError("bad prompt=a\nzprivate-second-line")
+
+
+def _failing_with_a_bare_prompt_in_the_message() -> None:
+    raise ValueError("zplain sentence the person typed about their divorce")
+
+
+def _failing_with_a_cause() -> None:
+    try:
+        _failing_with_a_newline_in_the_message()
+    except RuntimeError as inner:
+        raise KeyError("zouter message zchained-secret") from inner
+
+
+def test_runtime_log_tracebacks_keep_their_structure_and_drop_every_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only the frames and the exception class are kept: a message can hold anything."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.tracebacks")
+
+    for failing in (
+        _failing_with_a_newline_in_the_message,
+        _failing_with_a_bare_prompt_in_the_message,
+        _failing_with_a_cause,
+    ):
+        try:
+            failing()
+        except Exception:
+            logger.exception("worker failed in %s", failing.__name__)
+
+    text = _runtime_log_text(tmp_path)
+    for private in (
+        "zprivate-second-line",
+        "bad prompt",
+        "zplain sentence",
+        "divorce",
+        "zouter message",
+        "zchained-secret",
+    ):
+        assert private not in text, private
+    # No source line either: it is code the maintainer already has.
+    for source in ("raise RuntimeError", "raise ValueError", "raise KeyError"):
+        assert source not in text, source
+    # What a developer needs is still there.
+    assert text.count("Traceback (most recent call last):") == 4
+    assert "in _failing_with_a_newline_in_the_message" in text
+    assert "in _failing_with_a_bare_prompt_in_the_message" in text
+    assert "in _failing_with_a_cause" in text
+    for name in ("RuntimeError", "ValueError", "KeyError"):
+        assert f"\n{name}: " in text, name
+    assert "The above exception was the direct cause of the following exception:" in text
+    assert "worker failed in _failing_with_a_bare_prompt_in_the_message" in text
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="exception groups need Python 3.11")
+def test_runtime_log_keeps_the_classes_inside_an_exception_group_and_no_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+    logger = logging.getLogger("cortex_backend.groups")
+
+    try:
+        raise ExceptionGroup(  # noqa: F821 -- builtin from Python 3.11
+            "zgroup message", [ValueError("zfirst child"), KeyError("zsecond child")]
+        )
+    except Exception:
+        logger.exception("task group failed")
+
+    text = _runtime_log_text(tmp_path)
+    for private in ("zgroup message", "zfirst child", "zsecond child"):
+        assert private not in text, private
+    for name in ("ExceptionGroup", "ValueError", "KeyError"):
+        assert name in text, name
+
+
+class _MisbehavingError(Exception):
+    """An exception whose own attributes fail when they are read."""
+
+    @property
+    def exceptions(self) -> tuple[BaseException, ...]:
+        raise RuntimeError("zproperty message")
+
+
+def test_an_exception_that_misbehaves_still_reaches_the_log_without_its_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    try:
+        raise _MisbehavingError("zmisbehaving message")
+    except _MisbehavingError:
+        logging.getLogger("cortex_backend.misbehaving").exception("worker failed")
+
+    text = _runtime_log_text(tmp_path)
+    assert "worker failed" in text
+    assert "_MisbehavingError" in text
+    assert "zmisbehaving message" not in text
+    assert "zproperty message" not in text
+
+
+@pytest.mark.parametrize(
+    "exc_info",
+    [("not", "an", "exception"), (None, None, None), (RuntimeError,)],
+    ids=["not-an-exception", "no-exception", "wrong-length"],
+)
+def test_an_exc_info_that_cannot_be_summarised_is_dropped_not_formatted(
+    exc_info: tuple[object, ...],
+):
+    record = logging.LogRecord(
+        "cortex_backend.odd", logging.ERROR, __file__, 1, "worker failed", None, exc_info
+    )
+    record.exc_text = "RuntimeError: zcached message"
+
+    assert launcher_main._RedactingFilter().filter(record) is True
+
+    formatted = logging.Formatter("%(message)s").format(record)
+    assert formatted == "worker failed"
+
+
+def test_a_traceback_another_handler_already_formatted_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A formatter caches the full text on the record; the log must not copy it."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    root = logging.getLogger()
+    earlier_output = io.StringIO()
+    earlier = logging.StreamHandler(earlier_output)  # no redaction: it formats first
+    root.addHandler(earlier)
+    try:
+        launcher_main._configure_logging(tmp_path, "info")
+        try:
+            raise RuntimeError("zearly message about a private matter")
+        except RuntimeError:
+            logging.getLogger("cortex_backend.cached").exception("worker failed")
+    finally:
+        root.removeHandler(earlier)
+
+    assert "zearly message" in earlier_output.getvalue(), "the fixture must cache the full text"
+    text = _runtime_log_text(tmp_path)
+    assert "zearly" not in text
+    assert "worker failed" in text
+    assert "RuntimeError" in text
+
+
+def test_a_record_that_only_carries_traceback_text_keeps_the_frames_and_nothing_else():
+    """No exception object to read the class from: keep what has a fixed shape."""
+    record = logging.LogRecord(
+        "cortex_backend.text_only", logging.ERROR, __file__, 1, "failed", None, None
+    )
+    record.exc_text = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            '  File "worker.py", line 12, in run',
+            '    raise RuntimeError("zsource-literal")',
+            "RuntimeError: zmessage first line",
+            "zmessage second line",
+            "",
+            "zmessage after a blank line",
+        ]
+    )
+    record.stack_info = "\n".join(
+        [
+            "Stack (most recent call last):",
+            '  File "caller.py", line 3, in start',
+            '    logger.info("zstack-source", stack_info=True)',
+        ]
+    )
+
+    assert launcher_main._RedactingFilter().filter(record) is True
+
+    assert record.exc_text == (
+        'Traceback (most recent call last):\n  File "worker.py", line 12, in run'
+    )
+    assert record.stack_info == (
+        'Stack (most recent call last):\n  File "caller.py", line 3, in start'
+    )
+
+
+def test_stack_info_in_the_runtime_log_drops_the_source_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "info")
+
+    logging.getLogger("cortex_backend.stack").warning("where am I", stack_info=True)
+
+    text = _runtime_log_text(tmp_path)
+    assert "Stack (most recent call last):" in text
+    assert "test_stack_info_in_the_runtime_log_drops_the_source_lines" in text
+    assert 'stack_info=True' not in text
+
+
 def test_configuring_the_runtime_log_twice_does_not_stack_handlers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

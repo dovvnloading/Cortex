@@ -18,8 +18,10 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import re
 import secrets
+from types import TracebackType
 from typing import Any, Protocol
 
 
@@ -390,13 +392,104 @@ def _record_startup_success(*, data_dir: Path | None, port: int) -> None:
     )
 
 
+# What a traceback keeps in the runtime log: its header, one line per frame, and
+# the class of each exception. The message of an exception is arbitrary text (a
+# library puts whatever it was handed into one, newlines included), and a source
+# line is code the maintainer already has; neither is worth the chance of a
+# private value in a file that is attached to bug reports.
+_TRACEBACK_HEADER = re.compile(r"(?:Traceback|Stack) \(most recent call last\):")
+_TRACEBACK_FRAME = re.compile(r'  File "[^"\n]*", line \d+(?:, in \S+)?')
+_OUTLINE_DEPTH = 8
+_OUTLINE_CHILDREN = 8
+
+
+def _exception_class_name(kind: type[BaseException]) -> str:
+    module = kind.__module__
+    return kind.__qualname__ if module in ("builtins", "__main__") else f"{module}.{kind.__qualname__}"
+
+
+def _outline_exception(
+    kind: type[BaseException],
+    exc: BaseException | None,
+    tb: TracebackType | None,
+    lines: list[str],
+    seen: set[int],
+    depth: int,
+) -> None:
+    """Append one exception's structure (and the chain behind it) to ``lines``."""
+
+    if exc is not None:
+        if id(exc) in seen or depth > _OUTLINE_DEPTH:
+            return
+        seen.add(id(exc))
+        if exc.__cause__ is not None:
+            _outline_exception(
+                type(exc.__cause__), exc.__cause__, exc.__cause__.__traceback__, lines, seen, depth + 1
+            )
+            lines += ["", "The above exception was the direct cause of the following exception:", ""]
+        elif exc.__context__ is not None and not exc.__suppress_context__:
+            _outline_exception(
+                type(exc.__context__), exc.__context__, exc.__context__.__traceback__, lines, seen, depth + 1
+            )
+            lines += ["", "During handling of the above exception, another exception occurred:", ""]
+    lines.append("Traceback (most recent call last):")
+    # Without a source lookup: the lines are not wanted, and it reads files.
+    for frame in traceback.StackSummary.extract(traceback.walk_tb(tb), lookup_lines=False):
+        lines.append(f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}')
+    lines.append(f"{_exception_class_name(kind)}: <message withheld>")
+    children = getattr(exc, "exceptions", ())  # an exception group's members
+    if isinstance(children, tuple):
+        members = [child for child in children if isinstance(child, BaseException)]
+        for number, child in enumerate(members[:_OUTLINE_CHILDREN], start=1):
+            lines.append(f"--- exception {number} of {len(members)} in the group ---")
+            _outline_exception(type(child), child, child.__traceback__, lines, seen, depth + 1)
+
+
+def _exception_outline(exc_info: object) -> str | None:
+    """A traceback with every message removed, read from the exception itself.
+
+    Built from the exception object rather than by trimming formatted text, so
+    a message that looks like a frame (or holds newlines) cannot get through.
+    """
+
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3:
+        return None
+    kind, exc, tb = exc_info
+    if not isinstance(kind, type) or not issubclass(kind, BaseException):
+        return None
+    lines: list[str] = []
+    try:
+        _outline_exception(kind, exc if isinstance(exc, BaseException) else None, tb, lines, set(), 0)
+    except Exception:  # an exception object that misbehaves must not lose the record
+        lines.append(f"{_exception_class_name(kind)}: <traceback could not be summarised>")
+    return "\n".join(lines)[-MAX_LOG_TRACEBACK_CHARS:]
+
+
+def _traceback_frames(text: str) -> str:
+    """Keep the header and frame lines of already formatted traceback text.
+
+    Used where there is no exception object to read (a stack, or a record that
+    only carries text). Everything else is dropped, so it is the lines whose
+    whole shape is known that survive. A message forged in exactly that shape
+    would still get through; no message the code or a library writes is.
+    """
+
+    kept = [
+        line
+        for line in text.splitlines()
+        if _TRACEBACK_HEADER.fullmatch(line) or _TRACEBACK_FRAME.fullmatch(line)
+    ]
+    return "\n".join(kept)[-MAX_LOG_TRACEBACK_CHARS:]
+
+
 class _RedactingFilter(logging.Filter):
     """Redact, flatten and bound a record before any handler writes it.
 
     Nothing in Cortex logs a prompt, a response, a memory or a credential; this
     is the second line of defence for the day something does, or an exception
     message carries one. A message is one line so it cannot forge another
-    record, and a traceback keeps its lines but is redacted line by line.
+    record, and its credential-like values are removed. A traceback loses every
+    exception message and source line instead: see ``_exception_outline``.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -407,12 +500,18 @@ class _RedactingFilter(logging.Filter):
         message = message.replace("\r", " ").replace("\n", " ")
         record.msg = _redact_credentials(message)[:MAX_LOG_MESSAGE_CHARS]
         record.args = None
-        if record.exc_info and not record.exc_text:
-            record.exc_text = logging.Formatter().formatException(record.exc_info)
-        if record.exc_text:
-            record.exc_text = _redact_credentials(record.exc_text)[-MAX_LOG_TRACEBACK_CHARS:]
+        # Whatever an earlier handler's formatter cached on the record holds the
+        # full messages, so it is replaced rather than trusted.
+        if record.exc_info:
+            record.exc_text = _exception_outline(record.exc_info)
+            if record.exc_text is None:
+                # Nothing that can be summarised safely: do not let a formatter
+                # guess from an exc_info of a shape nobody checked.
+                record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = _traceback_frames(record.exc_text)
         if record.stack_info:
-            record.stack_info = _redact_credentials(record.stack_info)[-MAX_LOG_TRACEBACK_CHARS:]
+            record.stack_info = _traceback_frames(record.stack_info)
         return True
 
 
