@@ -748,6 +748,22 @@ class LlamaServerManager:
         finally:
             self._ensure_lock.release()
 
+    def wait_until_stopped(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for a requested stop to finish.
+
+        Returns True once no stop is pending: either none was requested, or the
+        teardown (which :meth:`stop` may hand to a background worker when a
+        startup still holds the ensure lock) has confirmed that no child
+        remains. False means it is still pending, or could not be completed
+        safely. Callers -- tests in particular -- use this instead of sleeping
+        or reading the private cancellation event.
+        """
+        with self._stop_cleanup_lock:
+            worker = self._stop_cleanup_thread
+        if worker is not None:
+            worker.join(timeout)
+        return not self._stop_event.is_set()
+
     def _schedule_stop_cleanup(self) -> None:
         """Finish a timed-out stop once the in-flight startup releases its lock.
 
