@@ -691,6 +691,44 @@ describe("CortexApi failure kinds", () => {
     await expect(api.health()).rejects.toMatchObject({ status: 404, kind: "http" });
   });
 
+  it("carries the failure class a route names beside its sentence, and none otherwise", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ detail: { message: "Hugging Face wants a token.", code: "gated" } }, 400))
+      .mockResolvedValueOnce(jsonResponse({ detail: { message: "No code here." } }, 400))
+      .mockResolvedValueOnce(jsonResponse({ detail: { message: "Not text.", code: 7 } }, 400))
+      .mockResolvedValueOnce(jsonResponse({ detail: "A plain sentence." }, 400));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toMatchObject({ status: 400, detail: "Hugging Face wants a token.", code: "gated" });
+    await expect(api.health()).rejects.toMatchObject({ detail: "No code here.", code: null });
+    await expect(api.health()).rejects.toMatchObject({ detail: "Not text.", code: null });
+    await expect(api.health()).rejects.toMatchObject({ detail: "A plain sentence.", code: null });
+  });
+
+  it("lists a repository's files with their sizes, and can abandon the request", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const fetcher = vi.fn<typeof fetch>((_input, init) => new Promise<Response>((resolve, reject) => {
+      if (String(_input).includes("owner%2Fslow")) {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        return;
+      }
+      resolve(jsonResponse({ repo_id: "owner/name", files: ["a.gguf"], entries: [{ path: "a.gguf", size: 12 }] }, 200));
+    }));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.listHuggingFaceGGUFFiles("owner/name")).resolves.toEqual({
+      repo_id: "owner/name",
+      files: ["a.gguf"],
+      entries: [{ path: "a.gguf", size: 12 }],
+    });
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe("/api/v1/models/gguf/huggingface-files?repo_id=owner%2Fname");
+
+    const controller = new AbortController();
+    const pending = api.listHuggingFaceGGUFFiles("owner/slow", { signal: controller.signal }).catch((error: unknown) => error);
+    controller.abort();
+    expect(isAbortedError(await pending)).toBe(true);
+  });
+
   it("wraps a fetch network failure as a network ApiError instead of leaking the TypeError", async () => {
     const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Failed to fetch"));
     const api = new CortexApi("/api/v1", fetcher);
