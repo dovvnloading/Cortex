@@ -1,0 +1,59 @@
+name: Python compatibility
+
+# The supported-interpreter matrix, kept out of the pull request path. The
+# Quality workflow already runs the whole suite on Python 3.11 against the
+# hash-pinned locks, so repeating it there on every pull request only spent
+# Windows minutes. Here it runs against the other supported interpreters, and
+# against the loose, unlocked requirements, where it can catch a dependency
+# that breaks on one Python version only.
+#
+# It runs on every push to main, once a week (upstream releases can break an
+# unlocked install with no change to this repository), and on demand from the
+# Actions tab. Ruff is not repeated: lint results do not depend on the
+# interpreter that runs the tests.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-compatibility:
+    name: Python ${{ matrix.python-version }} compatibility
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13", "3.14"]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Deliberately loose, unlocked pins here: this job's purpose is to
+      # catch a dependency that only breaks on one specific Python version,
+      # which a lock resolved for a single interpreter (see the `backend` and
+      # `heavy` jobs in quality.yml) cannot exercise. Do not switch this to
+      # requirements-dev.lock.txt.
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Compile application modules
+        run: python -m compileall -q main.py app_factory.py backend

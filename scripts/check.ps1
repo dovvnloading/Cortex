@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Run Cortex's quality gates locally, including the fast gates in
+    Run Cortex's quality gates locally, including the gates in
     .github/workflows/quality.yml.
 
 .DESCRIPTION
@@ -118,8 +118,8 @@ if (-not $SkipBackend) {
         python scripts/check_dev_environment.py
     }
 
-    # quality.yml's `fast` job fails on a stale lock. This script claims to run
-    # the fast gates, so it has to run this one too -- otherwise editing
+    # quality.yml's `lint` job fails on a stale lock. This script claims to run
+    # the same gates, so it has to run this one too -- otherwise editing
     # pyproject.toml is green locally and red in CI.
     # `return`, never `exit`: Invoke-Step runs this with the call operator, and
     # `exit` inside a script block terminates the whole script rather than the

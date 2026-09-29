@@ -33,7 +33,7 @@ versions. CI installs from `requirements.lock.txt` /
 for the same Python 3.11 target CI actually runs -- so a change is verified
 against the same dependency versions every time. If you edit
 `pyproject.toml`'s `dependencies` or `dev` extra, regenerate both locks and
-commit the result, or CI's `fast` job will fail on a staleness check:
+commit the result, or CI's `lint` job will fail on a staleness check:
 
 ```powershell
 python -m pip install uv
@@ -90,8 +90,8 @@ lets it through without running anything. Bypass it in an emergency with
 `git push --no-verify` or `CORTEX_SKIP_HOOK=1 git push`.
 
 The individual commands, if you prefer to run them by hand. These are the steps
-`check.ps1` runs and CI's `fast` job runs; the quick tier skips the ones marked
-`full tier`:
+`check.ps1` runs and CI's `lint`, `backend`, `frontend` and `e2e` jobs run; the
+quick tier skips the ones marked `full tier`:
 
 ```powershell
 python scripts/check_dev_environment.py
@@ -122,6 +122,26 @@ When API models change, regenerate and review both contract artifacts:
 python tools/generate_contracts.py --write
 ```
 
+### Coverage floors and the CI layout
+
+The Quality workflow runs its gates as parallel jobs -- `lint` (locks, Ruff,
+workflow linters, mypy, contract drift), `backend`, `frontend` and `e2e` -- and
+packaging (`heavy`) starts only after all four pass. A new push to a pull
+request cancels the run it supersedes; a pull request that changes nothing but
+`README.md`, `SECURITY.md`, `LICENSE` or `docs/` skips the gates and still ends
+green.
+
+Backend coverage is measured with branches over `backend/cortex_backend`
+(`[tool.coverage]` in `pyproject.toml`) and the frontend's with Vitest's V8
+provider (`frontend/vitest.config.ts`). Both fail when total coverage falls
+under a floor, and CI uploads the reports as workflow artifacts. The floors
+only go up: raise one in the pull request that adds the tests, and never lower
+one to make a change pass.
+
+The other Python versions the project supports are covered by the separate
+`Python compatibility` workflow, which runs on every push to `main`, weekly,
+and on demand rather than on every pull request.
+
 ### Workflow and dependency checks
 
 The GitHub Actions workflows are part of the code and get the same treatment:
@@ -129,7 +149,7 @@ The GitHub Actions workflows are part of the code and get the same treatment:
 - `actionlint` checks them for mistakes (bad expressions, unknown keys, wrong
   runner labels) and `zizmor` audits them for security (unpinned actions,
   template injection, persisted credentials). Both are pinned in the dev lock
-  and run in `check.ps1` and in CI's `fast` job. Every `uses:` is pinned to a
+  and run in `check.ps1` and in CI's `lint` job. Every `uses:` is pinned to a
   commit with the version as a trailing comment; to bump one, look up the
   commit for the new tag and change both.
 - A `dependency-review` job fails a pull request that adds a dependency with
