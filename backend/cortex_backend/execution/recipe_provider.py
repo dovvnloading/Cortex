@@ -25,7 +25,7 @@ import warnings
 
 from .artifact_boundary import ArtifactBoundaryError, sniff_artifact_mime
 from .lifecycle import RuntimeHealth
-from .recipes import ImageTransformPlan
+from .recipes import MAX_IMAGE_DIMENSION, MAX_IMAGE_STEPS, ImageTransformPlan
 
 try:  # Keep the application importable when the optional imaging wheel is absent.
     import PIL
@@ -42,7 +42,8 @@ except ImportError:  # pragma: no cover - exercised by packaging/health probes.
 MAX_INPUT_BYTES = 100 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_PIXELS = 64 * 1024 * 1024
-MAX_DIMENSION = 16_384
+# One limit, owned by the plan parser: a plan the parser accepts must fit here.
+MAX_DIMENSION = MAX_IMAGE_DIMENSION
 MAX_DECODED_BYTES = 256 * 1024 * 1024
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FORMAT_BY_PLAN = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
@@ -73,7 +74,7 @@ class RecipeProviderLimits:
     max_pixels: int = MAX_PIXELS
     max_dimension: int = MAX_DIMENSION
     max_decoded_bytes: int = MAX_DECODED_BYTES
-    max_steps: int = 8
+    max_steps: int = MAX_IMAGE_STEPS
 
     def __post_init__(self) -> None:
         values = (
@@ -88,7 +89,7 @@ class RecipeProviderLimits:
             raise ValueError("recipe provider limits must be positive integers")
         if self.max_dimension > MAX_DIMENSION:
             raise ValueError("recipe provider dimension ceiling is too high")
-        if self.max_steps > 8:
+        if self.max_steps > MAX_IMAGE_STEPS:
             raise ValueError("recipe provider step ceiling is too high")
         if (
             self.max_input_bytes > MAX_INPUT_BYTES

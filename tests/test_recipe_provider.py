@@ -20,6 +20,7 @@ from cortex_backend.execution.recipe_provider import (
     RecipeProviderError,
     RecipeProviderLimits,
 )
+import cortex_backend.execution.recipes as recipes_module
 from cortex_backend.execution.recipes import parse_image_transform
 
 
@@ -265,3 +266,23 @@ def test_provider_rejects_input_before_decoder_when_encoded_limit_is_exceeded():
     with pytest.raises(RecipeProviderError) as error:
         provider.transform(_plan({"op": "grayscale"}), _image_bytes())
     assert error.value.code == "input_too_large"
+
+
+def test_the_image_limits_have_one_owner_the_plan_parser():
+    """The dimension and step ceilings were typed again in the provider.
+
+    A ceiling the parser accepts must fit the provider, so the provider reads
+    the parser's constants instead of keeping copies that could drift apart.
+    """
+
+    assert MAX_DIMENSION == recipes_module.MAX_IMAGE_DIMENSION
+    assert RecipeProviderLimits().max_steps == recipes_module.MAX_IMAGE_STEPS
+    RecipeProviderLimits(max_steps=recipes_module.MAX_IMAGE_STEPS)
+    with pytest.raises(ValueError):
+        RecipeProviderLimits(max_steps=recipes_module.MAX_IMAGE_STEPS + 1)
+
+    # ...and the check is made against the constant, not a re-typed number.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(provider_module, "MAX_IMAGE_STEPS", 3)
+        with pytest.raises(ValueError):
+            RecipeProviderLimits(max_steps=4)

@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 from PIL import Image
 
+import cortex_backend.execution.local_process as local_process_module
+import cortex_backend.execution.recipe_coordinator as coordinator_module
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionCoordinator,
     RecipeExecutionError,
@@ -290,3 +292,36 @@ def test_a_stop_landing_before_the_failure_write_is_recorded_as_cancelled(tmp_pa
     assert completed.status == "cancelled"
     assert completed.error == "cancelled"
     assert repository.events(accepted.job_id)[-1].event == "cancelled"
+
+
+def test_the_coordinator_exports_no_constant_it_never_uses(monkeypatch):
+    """Two exported timeouts were referenced nowhere.
+
+    One shared its name with the value the local runtime really uses and
+    differed from it by a factor of fourteen, which is exactly the wrong thing
+    to leave lying around for the next reader to import.
+    """
+
+    for name in ("DEFAULT_WORKER_TIMEOUT_SECONDS", "DEFAULT_CANCEL_GRACE_SECONDS"):
+        assert not hasattr(coordinator_module, name)
+        assert name not in coordinator_module.__all__
+    assert local_process_module.DEFAULT_CANCEL_GRACE_SECONDS == 0.35  # the one that is used
+
+
+def test_the_worker_output_dimension_limit_is_the_providers_not_a_copy(monkeypatch):
+    content = _image_bytes()
+    kwargs = dict(
+        content=content,
+        mime_type="image/png",
+        format="PNG",
+        width=4,
+        height=3,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+    RecipeWorkerOutput(**kwargs)  # inside the shared limit
+
+    monkeypatch.setattr(coordinator_module, "MAX_DIMENSION", 3)
+
+    with pytest.raises(RecipeExecutionError) as error:
+        RecipeWorkerOutput(**kwargs)
+    assert error.value.code == "worker_output_invalid"

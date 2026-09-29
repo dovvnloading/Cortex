@@ -32,7 +32,7 @@ from .artifact_boundary import (
 )
 from .finish import UnsuccessfulJobWording, finish_unsuccessful_job
 from .models import ExecutionJob, TerminalExecutionStatus
-from .recipe_provider import MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
+from .recipe_provider import MAX_DIMENSION, MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
 from .recipes import ImageTransformPlan, RecipeValidationError, parse_image_transform
 from .repository import (
     ExecutionJobNotFound,
@@ -48,8 +48,6 @@ RECIPE_PAYLOAD_SCHEMA = "recipe.execution.v1"
 RECIPE_RESULT_SCHEMA = "recipe.result.v1"
 DEFAULT_RECIPE_RETENTION_SECONDS = 86_400
 MAX_RECIPE_RETENTION_SECONDS = 30 * 86_400
-DEFAULT_WORKER_TIMEOUT_SECONDS = 120.0
-DEFAULT_CANCEL_GRACE_SECONDS = 5.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MIME_TO_FORMAT = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
@@ -123,7 +121,7 @@ class RecipeWorkerOutput:
             raise RecipeExecutionError("worker_output_invalid")
         if type(self.width) is not int or type(self.height) is not int:
             raise RecipeExecutionError("worker_output_invalid")
-        if not 1 <= self.width <= 16_384 or not 1 <= self.height <= 16_384:
+        if not 1 <= self.width <= MAX_DIMENSION or not 1 <= self.height <= MAX_DIMENSION:
             raise RecipeExecutionError("worker_output_invalid")
         if not isinstance(self.sha256, str) or re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
             raise RecipeExecutionError("worker_output_invalid")
@@ -606,9 +604,7 @@ class RecipeExecutionCoordinator:
 
 
 __all__ = [
-    "DEFAULT_CANCEL_GRACE_SECONDS",
     "DEFAULT_RECIPE_RETENTION_SECONDS",
-    "DEFAULT_WORKER_TIMEOUT_SECONDS",
     "MAX_RECIPE_RETENTION_SECONDS",
     "RecipeExecutionCoordinator",
     "RecipeExecutionError",
