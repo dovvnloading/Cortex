@@ -473,7 +473,10 @@ class _CodeValidator(ast.NodeVisitor):
                 raise CodeExecutionError("bounded_range_required")
             self._header_ranges.add(generator.iter)
             product *= bound
-            if product > MAX_CODE_TOTAL_ITERATIONS:
+            # Times the loops around the comprehension too, at every generator: a
+            # later, empty generator would otherwise hide the work of the ones
+            # before it, which the total alone (0) cannot show.
+            if self.loop_product * product > MAX_CODE_TOTAL_ITERATIONS:
                 raise CodeExecutionError("loop_work_too_large")
         return product
 

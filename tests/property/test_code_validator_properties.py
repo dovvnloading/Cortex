@@ -516,6 +516,15 @@ def _loop_nests(draw) -> str:
 @example(source="for i in range(11):\n    t = [p for p in range(10000)]\n")
 @example(source="for i in range(10):\n    for j in range(10):\n        t = [p for p in range(1001)]\n")
 @example(source="t = [[q for q in range(1000)] for p in range(101)]\n")
+# The edges of the two budgets: one range of exactly MAX_RANGE steps, and loops whose
+# product is exactly MAX_TOTAL_WORK, for a statement loop and for a comprehension.
+@example(source="for i in range(10000):\n    pass\n")
+@example(source="t = [p for p in range(10000)]\n")
+@example(source="for i in range(10):\n    for j in range(10000):\n        pass\n")
+@example(source="for i in range(10):\n    t = [p for p in range(10000)]\n")
+# The work is counted at every generator, not just the last: 110,000 first-generator
+# steps happen even though the second generator is empty.
+@example(source="for i in range(11):\n    t = [p for p in range(10000) for q in range(0)]\n")
 def test_the_loop_limits_are_exact_in_both_directions(source: str) -> None:
     bounded, peak = _static_loop_work(ast.parse(source))
     within_limits = bounded and peak <= MAX_TOTAL_WORK
@@ -612,6 +621,7 @@ _FORBIDDEN = (
     ("name_not_allowed", "z = open"),
     ("name_not_allowed", "z = eval"),
     ("name_not_allowed", "z = type"),
+    ("name_not_allowed", "z = __name__"),
     ("bounded_range_required", "for c in 'abc':\n    pass"),
     ("bounded_range_required", "for i in range(a):\n    pass"),
     ("bounded_range_required", "for i in range(-1):\n    pass"),

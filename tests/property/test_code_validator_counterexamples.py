@@ -62,6 +62,9 @@ def test_text_that_cannot_be_encoded_is_a_malformed_program_not_a_crash(source: 
         "for i in range(2):\n    for j in range(6):\n        t = {p for p in range(10000)}\n",
         "t = [[q for q in range(1000)] for p in range(101)]\n",
         "t = [[q for q in range(10000) for r in range(2)] for p in range(6)]\n",
+        # Counted at every generator: the empty second one does not undo the work
+        # the first one has already done 110,000 times.
+        "for i in range(11):\n    t = [p for p in range(10000) for q in range(0)]\n",
     ],
 )
 def test_a_comprehension_counts_toward_the_work_of_every_loop_around_it(source: str) -> None:
