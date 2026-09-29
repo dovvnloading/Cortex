@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 import socket
@@ -65,7 +66,16 @@ GRACEFUL_SHUTDOWN_SECONDS = 5
 SECOND_LAUNCH_WAIT_SECONDS = 90.0
 SECOND_LAUNCH_POLL_SECONDS = 1.0
 SECOND_LAUNCH_RETRY_SECONDS = 0.25
+LOGGER = logging.getLogger("cortex.launcher")
+# What to tell the person, beyond the log path, when the launch fails for a
+# reason they can fix themselves; set where that reason is known.
+DATA_PATH_REMEDY = (
+    "Cortex could not use its data folder. Start Cortex with --data-dir "
+    "followed by a folder on a local drive (for example --data-dir C:\\Cortex\\data), "
+    "or make %APPDATA% point at a local folder."
+)
 _last_startup_log_path: Path | None = None
+_startup_dialog_hint: str | None = None
 # _launch records that stopping the backend failed; _run_web turns that into a
 # failing exit only when nothing else failed, and main() reads the result to
 # skip the startup dialog for it.
@@ -126,6 +136,29 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
 def _resolve_paths(data_dir: Path | None) -> AppPaths:
     paths = AppPaths.from_data_dir(data_dir) if data_dir else AppPaths.for_current_user()
     paths.ensure_data_dir()
+    return paths
+
+
+def _prepare_cache_dir(paths: AppPaths) -> AppPaths:
+    """Create the local cache root, or keep the caches with the data if it cannot be.
+
+    Caches are an optimisation over where the data lives, so failing to prepare
+    their folder must never stop a launch that worked before it existed.
+    """
+    if paths.local_fallback:
+        LOGGER.warning(
+            "APPDATA is a network path, so Cortex keeps its data in the local "
+            "application data folder instead."
+        )
+    try:
+        paths.ensure_cache_dir()
+    except AppPathError as exc:
+        LOGGER.warning(
+            "Cortex could not prepare its local cache folder (%s); "
+            "caches stay in the data folder.",
+            exc,
+        )
+        return paths.without_cache_root()
     return paths
 
 
@@ -243,15 +276,17 @@ def _write_startup_diagnostic(
         return None
 
 
-def _startup_dialog_message(log_path: Path | None) -> str:
+def _startup_dialog_message(log_path: Path | None, hint: str | None = None) -> str:
+    """The startup-error dialog text: the cause the person can act on, then the log."""
+    paragraphs = ["Cortex could not start."]
+    if hint:
+        paragraphs.append(hint)
     if log_path is None:
-        return "Cortex could not start.\n\nCortex could not write its diagnostic log."
-    return (
-        "Cortex could not start.\n\n"
-        "A privacy-safe diagnostic log was written to:\n"
-        f"{log_path}\n\n"
-        "Press Ctrl+C in this dialog to copy this message."
-    )
+        paragraphs.append("Cortex could not write its diagnostic log.")
+    else:
+        paragraphs.append(f"A privacy-safe diagnostic log was written to:\n{log_path}")
+        paragraphs.append("Press Ctrl+C in this dialog to copy this message.")
+    return "\n\n".join(paragraphs)
 
 
 class _CortexServer(uvicorn.Server):
@@ -557,6 +592,7 @@ def _launch(args: argparse.Namespace) -> int:
                 print(f"Frontend preparation failed: {exc}", file=sys.stderr)
                 return 2
 
+            paths = _prepare_cache_dir(paths)
             handoff_secret = instance.read_secret(record)
             if not handoff_secret:
                 print(
@@ -566,7 +602,7 @@ def _launch(args: argparse.Namespace) -> int:
                 return 2
 
             app = build_app(
-                data_dir=paths.data_dir,
+                paths=paths,
                 frontend_dist=dist,
                 serve_frontend=not args.dev,
                 handoff_secret=handoff_secret,
@@ -682,9 +718,11 @@ def _launch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _startup_dialog_hint
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_args(args, parser)
+    _startup_dialog_hint = None
     try:
         result = _run_web(args)
     except AppPathError as exc:
@@ -694,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
             data_dir=args.data_dir,
         )
         print(f"Cortex data-path error: {exc}", file=sys.stderr)
+        _startup_dialog_hint = DATA_PATH_REMEDY
         result = 2
     except Exception as exc:
         _write_startup_diagnostic(
@@ -711,7 +750,7 @@ def main(argv: list[str] | None = None) -> int:
 
             ctypes.windll.user32.MessageBoxW(
                 None,
-                _startup_dialog_message(_last_startup_log_path),
+                _startup_dialog_message(_last_startup_log_path, _startup_dialog_hint),
                 "Cortex startup error",
                 0x10,
             )

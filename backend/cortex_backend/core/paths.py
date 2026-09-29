@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import getpass
 import os
 from pathlib import Path
@@ -33,9 +33,21 @@ def _running_on_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _is_unc_path(value: str | os.PathLike[str]) -> bool:
+    return PureWindowsPath(str(value)).anchor.startswith("\\\\")
+
+
+def _exists(path: Path) -> bool:
+    """Whether ``path`` exists; a path that cannot even be inspected does not."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _canonical_data_root(data_dir: str | os.PathLike[str]) -> Path:
     value = Path(data_dir).expanduser()
-    if _running_on_windows() and PureWindowsPath(str(value)).anchor.startswith("\\\\"):
+    if _running_on_windows() and _is_unc_path(value):
         raise AppPathError("Cortex data directories cannot use UNC paths.")
     if not value.is_absolute():
         value = Path.cwd() / value
@@ -103,9 +115,24 @@ def secure_private_path(path: str | os.PathLike[str], *, directory: bool) -> Pat
 
 @dataclass(frozen=True, slots=True)
 class AppPaths:
-    """All durable Cortex paths derived from one explicit data directory."""
+    """All durable Cortex paths derived from one explicit data directory.
+
+    Small, precious state (chats, settings, memories, execution records) lives
+    under ``data_dir``. Large, reproducible caches -- the llama.cpp runtime,
+    downloaded GGUF models and the WebView profile -- live under ``cache_dir``,
+    which for a normal Windows install is in ``%LOCALAPPDATA%`` so that a
+    roaming profile or Folder Redirection never synchronises gigabytes of
+    binaries at logon. Paths built from an explicit directory (``--data-dir``,
+    tests) keep everything together under it.
+    """
 
     data_dir: Path
+    # Local (non-roaming) root for the cache folders, or None to keep them under
+    # ``data_dir`` as every earlier release did.
+    cache_root: Path | None = None
+    # True when %APPDATA% was a network path and ``data_dir`` is under
+    # %LOCALAPPDATA% instead, so the launcher can say so in its log.
+    local_fallback: bool = False
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike[str]) -> AppPaths:
@@ -117,15 +144,40 @@ class AppPaths:
         cls,
         environ: Mapping[str, str] | None = None,
     ) -> AppPaths:
-        """Match Qt's Windows AppDataLocation for the legacy Cortex identity."""
+        """Match Qt's Windows AppDataLocation for the legacy Cortex identity.
+
+        The data directory stays where it always was, under ``%APPDATA%``. Two
+        things come from ``%LOCALAPPDATA%``: the cache root for new caches, and
+        -- only when ``%APPDATA%`` is a network path, which Cortex refuses to
+        keep a database on -- the data directory itself, so a redirected
+        profile no longer stops startup.
+        """
         environment = os.environ if environ is None else environ
         app_data = str(environment.get("APPDATA", "")).strip()
+        local_app_data = str(environment.get("LOCALAPPDATA", "")).strip()
         if not app_data:
             raise AppPathError(
                 "Cortex could not resolve APPDATA for the current Windows user."
             )
-        return cls.from_data_dir(
-            Path(app_data) / ORGANIZATION_NAME / APPLICATION_NAME
+        identity = Path(ORGANIZATION_NAME) / APPLICATION_NAME
+        cache_root: Path | None = None
+        if local_app_data:
+            try:
+                cache_root = _canonical_data_root(Path(local_app_data) / identity)
+            except AppPathError:
+                # An unusable local folder must not stop a launch that worked
+                # before it existed: keep the caches with the data.
+                cache_root = None
+        if _is_unc_path(app_data):
+            if cache_root is None:
+                raise AppPathError(
+                    "APPDATA is a network path and Cortex could not use "
+                    "LOCALAPPDATA instead."
+                )
+            return cls(data_dir=cache_root, cache_root=cache_root, local_fallback=True)
+        return cls(
+            data_dir=_canonical_data_root(Path(app_data) / identity),
+            cache_root=cache_root,
         )
 
     @classmethod
@@ -187,19 +239,45 @@ class AppPaths:
         return self.data_dir / "recipe_bundles"
 
     @property
+    def cache_dir(self) -> Path:
+        """Where new caches go: the local root, else the data directory."""
+        return self.cache_root if self.cache_root is not None else self.data_dir
+
+    def _cache_child(self, name: str) -> Path:
+        """Locate one cache folder without ever moving an existing one.
+
+        Earlier releases kept these folders inside ``data_dir``. A folder that is
+        already there keeps being used where it is -- nothing is moved, copied
+        or deleted -- and only a folder that exists nowhere yet is created under
+        ``cache_dir``. A folder already under ``cache_dir`` always wins, so the
+        answer does not flip once a new install has started filling it.
+        """
+        legacy = self.data_dir / name
+        if self.cache_root is None or self.cache_root == self.data_dir:
+            return legacy
+        local = self.cache_root / name
+        if _exists(local) or not _exists(legacy):
+            return local
+        return legacy
+
+    @property
     def webview_profile(self) -> Path:
         """Keep native webview state isolated from every installed browser profile."""
-        return self.data_dir / "webview"
+        return self._cache_child("webview")
 
     @property
     def llamacpp_runtime_dir(self) -> Path:
         """Cached, app-managed llama-server binaries. Never user-facing."""
-        return self.data_dir / "llamacpp_runtime"
+        return self._cache_child("llamacpp_runtime")
 
     @property
     def default_gguf_models_dir(self) -> Path:
         """Default GGUF drop/download folder when ModelSettings.gguf_directory is unset."""
-        return self.data_dir / "gguf_models"
+        return self._cache_child("gguf_models")
+
+    def without_cache_root(self) -> AppPaths:
+        """The same paths with every cache folder kept under ``data_dir``."""
+        return replace(self, cache_root=None)
 
     def ensure_data_dir(self) -> Path:
         """Create the data root only when a caller explicitly requests it."""
@@ -211,5 +289,22 @@ class AppPaths:
         canonical = _canonical_data_root(self.data_dir)
         if canonical != self.data_dir or not canonical.is_dir():
             raise AppPathError("Cortex data directory changed while it was being prepared.")
+        secure_private_path(canonical, directory=True)
+        return canonical
+
+    def ensure_cache_dir(self) -> Path:
+        """Create the local cache root with the same checks and ACL as the data root.
+
+        A no-op that returns ``data_dir`` when caches share the data directory.
+        """
+        if self.cache_root is None or self.cache_root == self.data_dir:
+            return self.data_dir
+        try:
+            self.cache_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AppPathError("Cortex could not create its local cache directory.") from exc
+        canonical = _canonical_data_root(self.cache_root)
+        if canonical != self.cache_root or not canonical.is_dir():
+            raise AppPathError("Cortex cache directory changed while it was being prepared.")
         secure_private_path(canonical, directory=True)
         return canonical

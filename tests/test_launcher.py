@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 import main as launcher_main
 from cortex_backend.api import create_app
+from cortex_backend.core.paths import AppPathError
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
@@ -2017,6 +2018,46 @@ def test_a_startup_failure_still_shows_the_could_not_start_dialog(
 
     assert len(shown) == 1
     assert "Cortex could not start" in shown[0]
+
+
+def test_a_data_path_failure_tells_the_person_how_to_choose_another_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A path error used to end in the generic dialog, with no way forward.
+
+    A redirected AppData folder stopped Cortex with "cannot use UNC paths" in a
+    log the dialog only pointed at; nothing said that --data-dir exists.
+    """
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+    monkeypatch.setenv("TEMP", str(tmp_path))
+    monkeypatch.setenv("TMP", str(tmp_path))
+
+    def refuse(_data_dir):
+        raise AppPathError("Cortex data directories cannot use UNC paths.")
+
+    monkeypatch.setattr(launcher_main, "_resolve_paths", refuse)
+
+    assert launcher_main.main([]) == 2
+
+    assert len(shown) == 1
+    assert "--data-dir" in shown[0]
+    assert "local drive" in shown[0]
+
+
+def test_an_unrelated_startup_failure_does_not_suggest_a_different_data_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_window(_config, _monitor):
+        raise DesktopWindowError("synthetic window failure")
+
+    fakes.on_window = failing_window
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert "--data-dir" not in shown[0]
 
 
 def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
