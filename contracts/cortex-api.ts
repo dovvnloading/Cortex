@@ -297,6 +297,7 @@ export interface GenerationSettings {
   seed?: number;
   system_instructions?: string;
   bypass_system_prompt?: boolean;
+  keep_alive_minutes?: number;
 }
 
 export interface GenerationStats {

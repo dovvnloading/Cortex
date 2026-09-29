@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-import inspect
 import logging
 from threading import Event
 import time
@@ -22,6 +21,7 @@ from cortex_backend.core.generation import (
     TranslationResult,
     prompt_too_long_message,
 )
+from cortex_backend.core.settings import DEFAULT_NUM_CTX
 
 from .chat import ChatDomainError
 from .history_window import (
@@ -32,44 +32,6 @@ from .history_window import (
 )
 from .progress import NullProgressSink, ProgressEvent, ProgressPhase, ProgressSink
 from .token_budget import NEAR_FULL_CONTEXT
-
-
-def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Call ``func(*args, **kwargs)``, dropping ``kwargs`` if its signature
-    does not accept them.
-
-    This is how the generation use case probes an engine's real interface
-    (e.g. whether ``translate_text`` accepts the newer ``options`` keyword)
-    without depending on a version flag. The naive way to write that probe
-    is ``try: func(*args, **kwargs) except TypeError: func(*args)`` -- but
-    ``TypeError`` is also what Python raises from *inside* a function body
-    for an ordinary bug (a bad response shape, an unpacking mismatch, and
-    so on). If the callable had already done real, possibly non-idempotent
-    work (a real network call to a model) before hitting that bug, the
-    naive version would silently call it a *second* time, masking the bug
-    as a benign "wrong overload" and duplicating a call that was never
-    meant to run twice.
-
-    To tell the two apart, the candidate call is validated ahead of time
-    with :meth:`inspect.Signature.bind`, which raises ``TypeError`` only
-    for the argument-binding failure itself -- before ``func`` has run at
-    all. Once binding is known to succeed, ``func`` is invoked unguarded,
-    so any ``TypeError`` it raises while doing real work propagates
-    normally instead of being mistaken for a signature mismatch and
-    retried.
-    """
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
-        # func can't be introspected (e.g. some C-implemented callables).
-        # There is no safe way to probe its signature ahead of the call, so
-        # make the call directly rather than risk swallowing a real error.
-        return func(*args, **kwargs)
-    try:
-        signature.bind(*args, **kwargs)
-    except TypeError:
-        return func(*args)
-    return func(*args, **kwargs)
 
 
 # Live deltas are coalesced to this size, or this age, whichever comes first.
@@ -190,23 +152,6 @@ class GenerationEngine(Protocol):
         that model's own token counts can be used instead of a fixed ratio.
         """
 
-    def fit_history_to_context(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        query: str,
-        permanent_memories: list[str],
-        memories_enabled: bool,
-        user_system_instructions: str | None,
-        num_ctx: int,
-        code_execution_eligible: bool | None = None,
-        bypass_system_prompt: bool = False,
-        host_observations: str | None = None,
-        attachments: Sequence[GenerationAttachment] = (),
-        model: str | None = None,
-    ) -> str:
-        """Format the retained history for the model prompt."""
-
     def fit_history(
         self,
         messages: list[dict[str, Any]],
@@ -324,10 +269,34 @@ class GenerationServiceResult:
     # The answer in ``response`` is then the untranslated one: the turn still
     # succeeded, and the API reports the post-process failure beside it.
     translation_error: str | None = None
+    # The answer as the model wrote it, set only when ``response`` is a
+    # translation of it. It is what the model is shown as its own earlier turn
+    # and what a title is made from; ``response`` is what the user reads.
+    original_response: str | None = None
     # True when the engine published this answer token by token as it arrived.
     # The API replays the finished text as deltas only when it did not, so a
     # non-streaming engine still drives the same client-side rendering.
     streamed: bool = False
+
+
+def _history_turn(message: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored message as the model should see it in its own history.
+
+    With translation on, an answer is stored translated, for the user to read,
+    beside the answer as the model wrote it. The model is shown its own words:
+    fed its answers back in the target language, a small model starts answering
+    in it, and the translation model is then asked to translate a language into
+    itself.
+
+    An answer with no original is shown as stored. That covers every untranslated
+    answer, and also one translated before originals were kept: that one is still
+    shown in the target language, and only newer turns are fed back untranslated.
+    """
+    turn = dict(message)
+    original = turn.get("original_content")
+    if isinstance(original, str) and original.strip():
+        turn["content"] = original
+    return turn
 
 
 class GenerationService:
@@ -371,7 +340,7 @@ class GenerationService:
         shrink to fit -- so this fails only for a message that could never be
         sent.
         """
-        num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
+        num_ctx = int(snapshot.model_options.get("num_ctx", DEFAULT_NUM_CTX))
         plan = self._plan_fixed_prompt(self._engine_factory(snapshot), snapshot, num_ctx)
         if not plan.fits:
             raise ChatDomainError(prompt_too_long_message(num_ctx), code="invalid_input")
@@ -391,9 +360,8 @@ class GenerationService:
 
         # A real snapshot always carries num_ctx (GENERATION_OVERRIDE_FIELDS
         # guarantees it); this fallback only matters for callers that build
-        # model_options by hand, so it stays in step with GenerationSettings'
-        # own default rather than reintroducing the old, too-small one.
-        num_ctx = int(snapshot.model_options.get("num_ctx", 8192))
+        # model_options by hand.
+        num_ctx = int(snapshot.model_options.get("num_ctx", DEFAULT_NUM_CTX))
         self._publish(sink, snapshot, "thoughts", "Gathering thoughts...")
         engine = self._engine_factory(snapshot)
         # Before anything else is sized: memories, history and attachments are
@@ -465,7 +433,7 @@ class GenerationService:
                 if history_messages is not None
                 else self._history_loader(snapshot.thread_id)
             )
-            working_history = [dict(message) for message in loaded_history]
+            working_history = [_history_turn(message) for message in loaded_history]
             if working_history and working_history[-1].get("role") == "user":
                 working_history.pop()
 
@@ -636,6 +604,7 @@ class GenerationService:
                 rejection = None
 
             translation_error: str | None = None
+            original_response: str | None = None
             if snapshot.translation_enabled:
                 self._check_cancelled(cancellation_event)
                 self._publish(
@@ -653,8 +622,7 @@ class GenerationService:
                 # fail. Keep the untranslated answer and report the failure
                 # beside it.
                 try:
-                    translation_result = _call_with_optional_kwargs(
-                        engine.translate_text,
+                    translation_result = engine.translate_text(
                         response,
                         snapshot.target_language,
                         options=dict(snapshot.model_options),
@@ -674,6 +642,7 @@ class GenerationService:
                 elif not (translation_result.text or "").strip():
                     translation_error = "Translation returned an empty result."
                 else:
+                    original_response = response
                     response = translation_result.text or ""
                     if streamed:
                         # The untranslated answer is already on the user's
@@ -714,6 +683,7 @@ class GenerationService:
                 code_execution_rejection=rejection,
                 stats=stats,
                 translation_error=translation_error,
+                original_response=original_response,
                 streamed=streamed,
             )
         finally:

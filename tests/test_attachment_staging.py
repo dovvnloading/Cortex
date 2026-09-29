@@ -324,6 +324,40 @@ def test_a_retry_never_changes_the_payload_check_or_an_existing_success(executio
     assert conflict.value.code == "request_conflict"
 
 
+def test_a_repeated_request_looks_up_and_reads_the_staged_artifact_as_its_owner_never_unscoped(
+    execution_repository, monkeypatch
+):
+    """Both repository calls that follow a repeated request are owner-scoped.
+
+    The lookup and the read are separate queries, so either one left unscoped
+    would trust whatever an artifact id happens to name.
+    """
+
+    repository, _boundary, service = _service_over(execution_repository)
+    content = _image_bytes()
+    service.stage(owner=OWNER, request_id="attach-owner", content=content)
+    real_get = repository.get_artifact
+    real_read = repository.read_artifact
+    looked_up_as: list[str | None] = []
+    read_as: list[str | None] = []
+
+    def recording_get(artifact_id, *, owner=None):
+        looked_up_as.append(owner)
+        return real_get(artifact_id, owner=owner)
+
+    def recording_read(artifact_id, *, owner=None):
+        read_as.append(owner)
+        return real_read(artifact_id, owner=owner)
+
+    monkeypatch.setattr(repository, "get_artifact", recording_get)
+    monkeypatch.setattr(repository, "read_artifact", recording_read)
+
+    service.stage(owner=OWNER, request_id="attach-owner", content=content)
+
+    assert looked_up_as == [OWNER]
+    assert read_as == [OWNER]
+
+
 def test_a_stager_finishing_after_its_job_was_retired_reports_failure_and_drops_the_artifact(
     execution_repository, monkeypatch
 ):

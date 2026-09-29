@@ -32,6 +32,7 @@ from cortex_backend.execution.lifecycle import ExecutionLifecycle, LifecycleCoor
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from .jobs import JobRegistry
+from .observability import RequestIdMiddleware
 from .routers import OPENAPI_TAGS, build_router
 from .security import SessionManager
 
@@ -450,6 +451,10 @@ def create_app(
         ],
         max_age=600,
     )
+    # Added last, so it is outermost: every response, a refusal by the host check
+    # or the size limit included, carries the request id, and everything the
+    # request runs -- routes, the worker threads they start -- can read it.
+    app.add_middleware(RequestIdMiddleware)
     app.include_router(build_router(), prefix="/api/v1")
     if serve_frontend:
         _mount_frontend(

@@ -151,7 +151,7 @@ def test_bypass_system_prompt_leaves_jit_fragments_untouched() -> None:
     assert messages[0]["role"] == "system"
     assert "Core System Instruction" not in system
     assert "LOCAL CODE EXECUTION" in system
-    assert "STRUCTURED MEMORY COMMANDS" in system
+    assert PromptTemplate._load_memory_prompt().strip() in system
 
 
 def test_generation_snapshot_binds_bypass_system_prompt_to_settings() -> None:

@@ -1,11 +1,11 @@
 """The incremental history renderer must agree with the authoritative one.
 
-``_select_history`` used to call ``_format_history_messages`` on every
+``SynthesisAgent._select`` used to call ``_format_history_messages`` on every
 candidate, which re-rendered the entire retained transcript once per stored
 message -- quadratic in the thread's character count, and the dominant cost of
 preparing a turn. It now renders incrementally.
 
-That optimisation rests on an invariant about how ``_select_history`` builds
+That optimisation rests on an invariant about how ``_select`` builds
 its list (see ``_prepend_history_chunks``). These tests exercise the invariant
 against the original renderer on randomised input, so a future change to either
 the pairing rules or the selection walk fails here rather than silently
@@ -20,6 +20,11 @@ import pytest
 
 from cortex_backend.services import token_budget
 from cortex_backend.services.llm import SynthesisAgent
+
+
+def _selected(messages: list[dict], **kwargs) -> list[dict]:
+    """The messages the walk keeps, before either rendering is made from them."""
+    return SynthesisAgent._select(messages, model=None, **kwargs)
 
 
 def _messages(rng: random.Random, count: int) -> list[dict]:
@@ -127,7 +132,7 @@ def test_incremental_selection_matches_the_original_walk(seed: int, num_ctx: int
     }
 
     expected = _reference_select_history(messages, **kwargs)
-    actual = SynthesisAgent._select_history(messages, **kwargs)
+    actual = _selected(messages, **kwargs)
 
     assert actual == expected
     # The rendered transcript is what actually reaches the model, so compare
@@ -166,7 +171,7 @@ def test_selection_counts_wide_text_the_way_the_whole_prompt_would(seed: int, nu
     """
     messages, kwargs = _mixed_case(seed, num_ctx)
 
-    assert SynthesisAgent._select_history(messages, **kwargs) == _reference_select_history(messages, **kwargs)
+    assert _selected(messages, **kwargs) == _reference_select_history(messages, **kwargs)
 
 
 def test_the_mixed_text_cases_include_boundaries_where_the_budget_bites() -> None:
@@ -175,7 +180,7 @@ def test_the_mixed_text_cases_include_boundaries_where_the_budget_bites() -> Non
     for seed in range(60):
         for num_ctx in (1024, 2048, 4096):
             messages, kwargs = _mixed_case(seed, num_ctx)
-            kept = SynthesisAgent._select_history(messages, **kwargs)
+            kept = _selected(messages, **kwargs)
             partial += 0 < len(kept) < len(messages)
 
     assert partial >= 20
@@ -252,7 +257,7 @@ def test_a_long_history_of_non_ascii_exchanges_is_scanned_once_not_once_per_cand
     counter = _ScanCounter(token_budget._WIDE_CHAR)
     monkeypatch.setattr(token_budget, "_WIDE_CHAR", counter)
 
-    kept = SynthesisAgent._select_history(
+    kept = _selected(
         messages,
         query="next",
         permanent_memories=[],
@@ -275,7 +280,7 @@ def test_a_long_history_of_non_ascii_exchanges_is_scanned_once_not_once_per_cand
 def test_prepending_chunks_matches_rendering_from_scratch(seed: int) -> None:
     """The invariant on its own, independent of the budget.
 
-    Walks a randomised thread the way _select_history does -- prepending, and
+    Walks a randomised thread the way _select does -- prepending, and
     only sometimes accepting -- and checks the incrementally built chunks
     against a full re-render at every step.
     """

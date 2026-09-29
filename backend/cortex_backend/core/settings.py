@@ -19,6 +19,12 @@ LanguageName = Annotated[
 ]
 
 
+# The context window a turn is sized for when nothing says otherwise. One name
+# for the value the settings model defaults to and every fallback for options
+# built without a ``num_ctx`` uses, so they cannot drift apart.
+DEFAULT_NUM_CTX = 8192
+
+
 class _SettingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
@@ -37,6 +43,10 @@ class ModelSettings(_SettingsModel):
     # cortex_backend.llamacpp.model_directory). Keeping them unset until a
     # scan happens avoids shipping a hidden, hard-coded model preference.
     chat: ModelTag | None = None
+    # Not read by anything: titles use the chat model (see
+    # ``_generation_snapshot``). Kept because a settings file saved by an
+    # earlier build carries the key and this model rejects unknown ones, so
+    # removing it would make those files read as invalid.
     title: ModelTag | None = None
     translation: ModelTag = "translategemma:4b"
     # Folder scanned for .gguf files and used as the download destination for
@@ -85,7 +95,7 @@ class GenerationSettings(_SettingsModel):
     # use it; the default stays conservative because published long-context
     # evaluations show quality falling off well before a model's advertised
     # limit, so more context is a deliberate choice rather than free.
-    num_ctx: int = Field(default=8192, ge=2048, le=65536)
+    num_ctx: int = Field(default=DEFAULT_NUM_CTX, ge=2048, le=65536)
     seed: int = Field(default=-1, ge=-1, le=2147483647)
     # No length cap: whatever doesn't fit in the configured context window is
     # already handled gracefully by the history/memory/attachment budget
@@ -98,6 +108,17 @@ class GenerationSettings(_SettingsModel):
     # (code execution contract, memory instructions) are unaffected: they
     # stay conditional on their own settings, not on this one.
     bypass_system_prompt: bool = False
+    # How long Ollama keeps a model in memory after it answers, in minutes. 0, the
+    # default, sends nothing and leaves Ollama's own setting (OLLAMA_KEEP_ALIVE,
+    # or its five-minute default) in charge, so a build that adds this setting
+    # changes nothing for anyone who has not chosen a value: a value sent on a
+    # request overrides that variable, so a non-zero default would have shortened
+    # a longer one. 1 to 1440 sends that many minutes on every call, so each one
+    # refreshes the timer; -1 keeps the model loaded until Ollama is stopped.
+    # (Ollama's API reads 0 as "unload now", which is not something this setting
+    # offers.) It does not apply to GGUF models, whose server Cortex starts and
+    # stops itself.
+    keep_alive_minutes: int = Field(default=0, ge=-1, le=1440)
 
 
 # The subset of GenerationSettings that a single request may override for
