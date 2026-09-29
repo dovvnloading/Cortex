@@ -70,8 +70,13 @@ _STRAY_FILE_GRACE_SECONDS = 600.0
 _SWEEP_ENTRY_BUDGET = 2_000
 _SWEEP_CHILD_LIMIT = 64
 # A path-component-safe job id, and a printable owner. The job id becomes a
-# directory name under the artifact root, so it is held to the same shape as an
-# artifact name; the owner never reaches the filesystem.
+# directory name under the artifact root, so it is held to a stricter shape
+# than an artifact name: it may not end in a dot (Windows drops trailing dots
+# and spaces, so ``a.`` would share a directory with ``a``) and it may not be a
+# Windows device name, with or without an extension (``nul`` and ``nul.txt`` name
+# the NUL device, not a directory). The owner never reaches the filesystem.
+_SAFE_JOB_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9_-])?")
+_WINDOWS_DEVICE_NAME = re.compile(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", re.IGNORECASE)
 _SAFE_OWNER = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
@@ -92,6 +97,16 @@ def _is_reparse_point(path: Path) -> bool:
         return True
     is_junction = getattr(path, "is_junction", None)
     return bool(is_junction is not None and is_junction())
+
+
+def _is_safe_job_id(value: object) -> bool:
+    """Whether ``value`` can name a job directory on every platform Cortex runs on."""
+
+    return (
+        isinstance(value, str)
+        and _SAFE_JOB_ID.fullmatch(value) is not None
+        and _WINDOWS_DEVICE_NAME.fullmatch(value) is None
+    )
 
 
 def _has_reparse_parent(path: Path) -> bool:
@@ -673,7 +688,7 @@ class ExecutionRepository:
         # The job id names the job's artifact directory, so an id that could
         # lead out of the artifact root is refused when the job is created, not
         # only when its first artifact is published.
-        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+        if not _is_safe_job_id(job_id):
             raise ValueError("job_id must be a bounded path-safe identifier")
         if not isinstance(owner, str) or _SAFE_OWNER.fullmatch(owner) is None:
             raise ValueError("owner must be a bounded printable identifier")
@@ -1667,7 +1682,7 @@ class ExecutionRepository:
             raise ArtifactLimitError("Artifact exceeds the configured size limit.")
         if retention_seconds <= 0:
             raise ValueError("retention_seconds must be positive")
-        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+        if not _is_safe_job_id(job_id):
             raise ExecutionRepositoryError("Execution job does not exist.")
         if self.get_job(job_id) is None:
             raise ExecutionRepositoryError("Execution job does not exist.")
@@ -1691,13 +1706,21 @@ class ExecutionRepository:
         stream: Any = None
         try:
             with self._directory_lock:
-                job_root.mkdir(parents=True, exist_ok=True)
-                resolved_job_root = job_root.resolve(strict=True)
+                # An OSError from either of these carries the absolute path,
+                # so it is reported as this repository's own error instead.
+                try:
+                    job_root.mkdir(parents=True, exist_ok=True)
+                    resolved_job_root = job_root.resolve(strict=True)
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact directory is unavailable.") from None
                 if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
                     raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
                 # The temporary file exists before the lock is released, so the
                 # directory is never empty for a sweep to remove.
-                stream = temporary.open("xb")
+                try:
+                    stream = temporary.open("xb")
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact file could not be created.") from None
             with stream:
                 stream.write(content)
                 stream.flush()
@@ -1736,8 +1759,13 @@ class ExecutionRepository:
         except Exception:
             if stream is not None:
                 stream.close()
-            target.unlink(missing_ok=True)
-            temporary.unlink(missing_ok=True)
+            for leftover in (target, temporary):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    # Never replaces the error being raised. What stays is a
+                    # file no row names, which the artifact-root sweep reclaims.
+                    pass
             # The directory this call created (or found empty) is not left behind.
             self._remove_empty_artifact_directory(job_root)
             raise
