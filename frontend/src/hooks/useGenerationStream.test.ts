@@ -743,9 +743,17 @@ describe("useGenerationStream", () => {
       emitEvent({ event_id: 301, event: "generation.content_delta", job_id: "job-known-gap", thread_id: "thread-known-gap", data: { delta: " after it" } });
     });
 
-    expect(useChatStore.getState().generation.partialContent).toBe("Before the hole");
+    // Streamed text is batched to the next animation frame, so checking the
+    // store right after the event says nothing: text that was wrongly accepted
+    // is still sitting in the buffer. Stopping flushes the buffer before the
+    // consumer finishes, so once its promises have settled, whatever it
+    // accepted is in the store.
     expect(useChatStore.getState().generationCursor).toBe(301);
     act(() => result.current.stop());
+    await settlePromises();
+
+    expect(useChatStore.getState().generation.partialContent).toBe("Before the hole");
+    expect(useChatStore.getState().generation.gap).toBe(true);
   });
 
   it("treats an unreachable backend as retryable on both the stream and the status check", async () => {
