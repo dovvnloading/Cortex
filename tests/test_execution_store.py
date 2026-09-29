@@ -14,6 +14,7 @@ import pytest
 
 from cortex_backend.execution.models import ExecutionJob
 from cortex_backend.execution.repository import (
+    SCHEMA_VERSION,
     ArtifactLimitError,
     ExecutionIntegrityError,
     ExecutionRepository,
@@ -37,7 +38,10 @@ def _repository(tmp_path):
 def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     with repository.connect() as connection:
-        assert connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0] == 3
+        assert (
+            connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0]
+            == SCHEMA_VERSION
+        )
         tables = {
             row[0]
             for row in connection.execute(

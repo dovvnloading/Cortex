@@ -33,7 +33,14 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 3
+# The schema ladder. 1-2: earlier builds. 3: every job is owned by the
+# installation principal. 4: an artifact's path, and the paths of its cleanup
+# tombstone, may be stored relative to the artifact root so a moved data
+# directory keeps working; rows written before that keep their absolute paths
+# and both forms are read (see ``ExecutionRepository._stored_path``). A build
+# that only knows an earlier version sets a newer store aside instead of
+# misreading it.
+SCHEMA_VERSION = 4
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
 # How long after the user's decision an approval can still be spent. The click
@@ -614,7 +621,7 @@ class ExecutionRepository:
                 # the file between that check and now. Refuse rather than
                 # migrate it backwards.
                 raise ExecutionRepositoryError("Execution schema is newer than this build.")
-            if current_version < SCHEMA_VERSION:
+            if current_version < 3:
                 principal = self._ensure_installation_principal_connection(connection)
                 ambiguous = connection.execute(
                     """
@@ -633,6 +640,10 @@ class ExecutionRepository:
                     "UPDATE execution_jobs SET owner = ? WHERE owner <> ?",
                     (principal, principal),
                 )
+            # Version 4 changes what new rows may hold, not the tables and not
+            # the rows already there: nothing is rewritten, and a row that
+            # names its file by absolute path keeps working exactly as before.
+            if current_version < SCHEMA_VERSION:
                 connection.execute(
                     "UPDATE execution_schema SET version = ? WHERE id = 1",
                     (SCHEMA_VERSION,),
@@ -1751,7 +1762,7 @@ class ExecutionRepository:
                         mime_type,
                         len(content),
                         digest,
-                        str(target),
+                        self._stored_text(target),
                         now.isoformat(),
                         expires.isoformat(),
                     ),
@@ -1814,7 +1825,7 @@ class ExecutionRepository:
             mime_type=row["mime_type"],
             size=int(row["size"]),
             sha256=row["sha256"],
-            path=row["path"],
+            path=str(self._stored_path(row["path"])),
             created_at=row["created_at"],
             expires_at=row["expires_at"],
         )
@@ -1844,7 +1855,7 @@ class ExecutionRepository:
             ).fetchone()
             if row is None:
                 return
-            path = self._validated_cleanup_path(Path(row["path"]))
+            path = self._validated_cleanup_path(self._stored_path(row["path"]))
             connection.execute(
                 "DELETE FROM execution_artifacts WHERE artifact_id = ?",
                 (artifact_id,),
@@ -1879,7 +1890,7 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Artifact integrity check failed.") from None
         if not 0 <= expected_size <= self.max_artifact_bytes:
             raise ExecutionRepositoryError("Artifact integrity check failed.")
-        original_path = Path(row["path"])
+        original_path = self._stored_path(row["path"])
         if _is_reparse_point(original_path):
             raise ExecutionRepositoryError("Artifact path is unavailable.")
         try:
@@ -1959,7 +1970,7 @@ class ExecutionRepository:
                 artifact_id = str(artifact_row["artifact_id"])
                 quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
                 try:
-                    path = self._validated_cleanup_path(Path(artifact_row["path"]))
+                    path = self._validated_cleanup_path(self._stored_path(artifact_row["path"]))
                     self._validated_quarantine_path(quarantine)
                     self._record_artifact_cleanup(artifact_id, path, quarantine)
                 except ArtifactCleanupRejected as exc:
@@ -2021,6 +2032,31 @@ class ExecutionRepository:
             skipped=skipped,
         )
 
+    def _stored_path(self, text: str) -> Path:
+        """The location a row's path column names, under this build's artifact root.
+
+        New rows record a path relative to the artifact root, so moving the
+        data directory does not orphan them; rows from before schema version 4
+        hold an absolute path, and that is returned as written. Nothing here
+        decides whether the location is acceptable: an absolute path, a
+        relative one that climbs out with ``..`` and a drive-relative one all
+        come back as they resolve, and the validators that follow
+        (:meth:`_validated_cleanup_path`, :meth:`_validated_quarantine_path`
+        and the containment check in :meth:`read_artifact`) refuse any that
+        does not end up inside the root.
+        """
+
+        path = Path(text)
+        return path if path.is_absolute() else self.artifact_root / path
+
+    def _stored_text(self, path: Path) -> str:
+        """How a row records ``path``: relative to the artifact root when it lies under it."""
+
+        try:
+            return path.relative_to(self.artifact_root).as_posix()
+        except ValueError:
+            return str(path)
+
     def _validated_cleanup_path(self, path: Path) -> Path:
         """Validate a source path without following an untrusted reparse hop.
 
@@ -2077,7 +2113,7 @@ class ExecutionRepository:
                 VALUES (?, ?, ?, 'pending', ?)
                 ON CONFLICT(artifact_id) DO NOTHING
                 """,
-                (artifact_id, str(path), str(quarantine), self._now()),
+                (artifact_id, self._stored_text(path), self._stored_text(quarantine), self._now()),
             )
 
     def _resume_artifact_cleanup(self, *, limit: int) -> tuple[int, int]:
@@ -2156,7 +2192,7 @@ class ExecutionRepository:
         """
 
         try:
-            quarantine = self._validated_quarantine_path(Path(quarantine_text))
+            quarantine = self._validated_quarantine_path(self._stored_path(quarantine_text))
         except ArtifactCleanupBlocked:
             return False
         except ArtifactCleanupRejected:
@@ -2221,8 +2257,8 @@ class ExecutionRepository:
     def _advance_artifact_cleanup(
         self, artifact_id: str, path_text: str, quarantine_text: str, state: str
     ) -> int:
-        path = self._validated_cleanup_path(Path(path_text))
-        quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        path = self._validated_cleanup_path(self._stored_path(path_text))
+        quarantine = self._validated_quarantine_path(self._stored_path(quarantine_text))
         if state not in {"pending", "quarantined", "finalized"}:
             raise ArtifactCleanupRejected("Artifact cleanup state is invalid.")
         removed = 0

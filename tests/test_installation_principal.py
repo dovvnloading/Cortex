@@ -11,7 +11,11 @@ from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.security import SessionManager
 from cortex_backend.testing import DurableFakeCoordinator
-from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
+from cortex_backend.execution.repository import (
+    SCHEMA_VERSION,
+    ExecutionRepository,
+    ExecutionRepositoryError,
+)
 from support import session_headers as _session
 
 
@@ -37,7 +41,7 @@ def test_installation_principal_is_atomic_persistent_and_migrates_additively(tmp
     with first.connect() as connection:
         assert connection.execute(
             "SELECT version FROM execution_schema WHERE id = 1"
-        ).fetchone()[0] == 3
+        ).fetchone()[0] == SCHEMA_VERSION
         assert connection.execute(
             "SELECT principal_id FROM execution_installation_principal WHERE id = 1"
         ).fetchone()[0] == principal
@@ -53,7 +57,7 @@ def test_installation_principal_is_atomic_persistent_and_migrates_additively(tmp
     with migrated.connect() as connection:
         assert connection.execute(
             "SELECT version FROM execution_schema WHERE id = 1"
-        ).fetchone()[0] == 3
+        ).fetchone()[0] == SCHEMA_VERSION
 
 
 def test_installation_principal_creation_is_singleton_across_repository_instances(tmp_path):
