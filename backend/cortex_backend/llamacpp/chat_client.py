@@ -31,6 +31,9 @@ from .server_manager import LlamaServerProvider
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
+# Counting tokens is a single short request; a server that does not answer it
+# quickly is not worth waiting for before the real one.
+_TOKENIZE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=10.0, pool=2.0)
 
 
 class LlamaCppChatClient:
@@ -187,6 +190,57 @@ class LlamaCppChatClient:
             on_delta=on_delta,
             think=think,
         )
+
+    def tokenize(
+        self,
+        *,
+        model: str,
+        text: str,
+        options: dict,
+        cancellation_event: Event | None = None,
+    ) -> int | None:
+        """How many tokens the running model makes of ``text``, or ``None`` if it cannot say.
+
+        Asks llama-server's own ``/tokenize``, so the answer is the real count
+        rather than an estimate. It only talks to a server that is already up
+        (see ``ready_handle`` on the manager): starting one here would launch
+        the model a step before the chat call that needs it, and a launch that
+        fails would then be attempted -- and counted against the crash-loop
+        guard -- twice for one message. Best effort by contract: a runtime that
+        is not up yet, a build without the endpoint, or any failure at all is
+        ``None``, and the chat call that follows reports whatever is really
+        wrong.
+        """
+        del cancellation_event  # one short request to a server that is already answering
+        ready_handle = getattr(self._provider, "ready_handle", None)
+        if not callable(ready_handle):
+            return None
+        try:
+            self._ensure_open()
+            raw_num_ctx = options.get("num_ctx")
+            handle = ready_handle(
+                resolve_gguf_path(self._models_directory(), model),
+                num_ctx=int(raw_num_ctx) if raw_num_ctx is not None else None,
+            )
+            if handle is None:
+                return None
+            self._begin_http_request()
+        except Exception:
+            return None
+        try:
+            response = self._http.post(
+                f"{handle.base_url}/tokenize",
+                json={"content": text},
+                headers=_auth_headers(handle.api_key),
+                timeout=_TOKENIZE_TIMEOUT,
+            )
+            response.raise_for_status()
+            tokens = response.json().get("tokens")
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
+            return None
+        finally:
+            self._end_http_request()
+        return len(tokens) if isinstance(tokens, list) else None
 
     def _chat_blocking(
         self,
@@ -507,4 +561,11 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
     finish_reason = choices[0].get("finish_reason")
     if isinstance(finish_reason, str) and finish_reason:
         adapted["done_reason"] = finish_reason
+    # ``prompt_eval_count`` above prefers the server's timings, which count only
+    # the prompt tokens it had to evaluate -- a prompt whose start was already
+    # cached reports a fraction of its length. ``usage.prompt_tokens`` is the
+    # whole prompt, which is what calibrating the token estimate needs.
+    prompt_tokens = usage.get("prompt_tokens")
+    if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+        adapted["prompt_token_count"] = prompt_tokens
     return adapted
