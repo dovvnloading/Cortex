@@ -14,6 +14,7 @@ from cortex_backend.execution.code_execution import (
     CodeExecutionRequest,
     CodeExecutionResult,
     code_worker_main,
+    execute_validated_source,
     run_code_in_worker,
 )
 from cortex_backend.execution import code_execution
@@ -142,9 +143,10 @@ def test_code_worker_announces_readiness_before_running_source(monkeypatch, tmp_
 
     connection = _Connection()
     monkeypatch.setattr(code_execution, "_scrub_worker_environment", lambda: None)
+    monkeypatch.setattr(code_execution, "_apply_resource_limits", lambda: None)
     monkeypatch.setattr(
         code_execution,
-        "run_code_in_worker",
+        "execute_validated_source",
         lambda *_args: CodeExecutionResult(stdout="ok\n", stderr=""),
     )
 
@@ -183,7 +185,8 @@ def test_code_worker_waits_for_the_go_ahead_before_running_source(monkeypatch, t
         return CodeExecutionResult(stdout="ok\n", stderr="")
 
     monkeypatch.setattr(code_execution, "_scrub_worker_environment", lambda: None)
-    monkeypatch.setattr(code_execution, "run_code_in_worker", fake_run)
+    monkeypatch.setattr(code_execution, "_apply_resource_limits", lambda: None)
+    monkeypatch.setattr(code_execution, "execute_validated_source", fake_run)
 
     for denied_go in ({"go": False}, {}, None):
         ran = False
@@ -198,6 +201,58 @@ def test_code_worker_waits_for_the_go_ahead_before_running_source(monkeypatch, t
     code_worker_main(connection, "print('ok')", {}, str(tmp_path))
     assert ran is True
     assert connection.messages[1]["ok"] is True
+
+
+def test_the_worker_applies_its_limits_after_the_scrub_and_before_it_says_ready(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The process-wide limits belong to the worker entry point, in a fixed order."""
+
+    events: list[object] = []
+
+    class _Connection:
+        def send(self, message: dict[str, object]) -> None:
+            events.append(("send", message.get("event") or ("result" if message.get("ok") else "error")))
+
+        def recv(self) -> dict[str, object]:
+            events.append("recv")
+            return {"go": True}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(code_execution, "_scrub_worker_environment", lambda: events.append("scrub"))
+    monkeypatch.setattr(code_execution, "_apply_resource_limits", lambda: events.append("limits"))
+
+    code_worker_main(_Connection(), "_result = 1", {}, str(tmp_path))
+
+    assert events == ["scrub", "limits", ("send", "ready"), "recv", ("send", "result")]
+
+
+def test_the_in_process_runner_says_it_runs_in_the_calling_process() -> None:
+    documentation = " ".join((execute_validated_source.__doc__ or "").split())
+
+    assert "not a process boundary" in documentation
+    assert "calling process" in documentation
+    assert "relies on the caller for isolation" in documentation
+    assert "child process boundary" not in documentation
+
+
+def test_the_old_runner_name_is_kept_as_an_alias_for_existing_callers() -> None:
+    assert code_execution.run_code_in_worker is execute_validated_source
+    assert {"execute_validated_source", "run_code_in_worker"} <= set(code_execution.__all__)
+
+
+def test_running_source_in_process_applies_no_process_wide_limits(monkeypatch) -> None:
+    """A function any test can call must not cap the memory of the process that called it."""
+
+    monkeypatch.setattr(
+        code_execution,
+        "_apply_resource_limits",
+        lambda: pytest.fail("the in-process runner applied process-wide limits"),
+    )
+
+    assert execute_validated_source("_result = 1 + 1").value == 2
 
 
 def test_brokered_filesystem_is_scoped_and_budgeted(tmp_path: Path) -> None:

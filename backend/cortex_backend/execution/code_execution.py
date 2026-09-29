@@ -1667,8 +1667,27 @@ class _LineGuard:
         return self.trace
 
 
-def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = None, workspace: str | None = None) -> CodeExecutionResult:
-    """Execute validated source inside a child process boundary."""
+def execute_validated_source(
+    source: str,
+    capabilities: Mapping[str, Any] | None = None,
+    workspace: str | None = None,
+) -> CodeExecutionResult:
+    """Validate ``source`` and run it in *the calling process*.
+
+    This is not a process boundary. It starts no process and sets no memory or
+    CPU limit; what confines the program is the validator's allow-list, the
+    restricted builtins, the brokered ``cortex`` object and a cooperative line
+    and clock guard, none of which stops a single long-running operation. It
+    replaces ``sys.stdout``, ``sys.stderr`` and the trace function for the
+    duration of the call, so it is not safe to call from a process that
+    depends on those, and it relies on the caller for isolation.
+
+    The boundary is the worker child: ``LocalCodeAttempt`` starts one, and its
+    entry point, :func:`code_worker_main`, clears the environment, applies the
+    POSIX limits, and only calls this once the parent has attached the job
+    object that carries the Windows memory, CPU and process-count limits. Call
+    this directly only from that entry point or from a test.
+    """
 
     required = capabilities_required_by_source(source)
     grants = CodeCapabilities.from_mapping(capabilities)
@@ -1678,7 +1697,6 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     stdout = _BoundedTextWriter()
     stderr = _BoundedTextWriter()
     runtime = _CapabilityRuntime(grants, workspace or os.getcwd())
-    _apply_resource_limits()
     # One namespace, used as both globals and locals. Passing two distinct
     # mappings makes top-level names locals, which a comprehension or generator
     # expression cannot see: its implicit function scope resolves free names
@@ -1724,8 +1742,21 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     )
 
 
+# The name this function had while its docstring called it a child-process
+# boundary. It is the same in-process function; new code should use the honest
+# name. Kept so existing callers and tests keep working.
+run_code_in_worker = execute_validated_source
+
+
 def _apply_resource_limits() -> None:
-    """Apply portable best-effort worker limits before evaluating source."""
+    """Apply portable best-effort worker limits before evaluating source.
+
+    Called by the worker's entry point, not by ``execute_validated_source``:
+    these are process-wide limits and belong to the process that is the
+    boundary. ``execution/local_process.py`` has the same function for the
+    scratch and image workers; this module keeps its own copy so it imports
+    nothing from its siblings.
+    """
 
     try:
         import resource  # Unix only; unavailable on the Windows desktop build.
@@ -1740,9 +1771,9 @@ def _apply_resource_limits() -> None:
             (int(MAX_CODE_TIMEOUT_SECONDS) + 1, int(MAX_CODE_TIMEOUT_SECONDS) + 2),
         )
     except (ImportError, OSError, ValueError):
-        # Windows is bounded by the parent wall-clock watchdog and process
-        # termination. The platform-specific job object can be added without
-        # changing the worker protocol.
+        # Windows has no in-process equivalent: its memory, process-count and
+        # CPU limits are the job object the parent attaches while this worker
+        # is held at its "ready" checkpoint (LocalCodeAttempt.evaluate).
         return
 
 
@@ -1758,6 +1789,7 @@ def _scrub_worker_environment() -> None:
 def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, Any], workspace: str) -> None:
     try:
         _scrub_worker_environment()
+        _apply_resource_limits()
         # Let the parent distinguish a slow process bootstrap from a program
         # that exceeded its execution budget. This is especially important for
         # frozen desktop launches, where importing the worker can be slower
@@ -1776,7 +1808,7 @@ def code_worker_main(connection: Any, source: str, capabilities: Mapping[str, An
             return
         if not isinstance(go, Mapping) or go.get("go") is not True:
             return
-        result = run_code_in_worker(source, capabilities, workspace)
+        result = execute_validated_source(source, capabilities, workspace)
         connection.send({"ok": True, "result": result.as_payload()})
     except CodeExecutionError as exc:
         connection.send({"ok": False, "code": exc.code})
@@ -1802,6 +1834,7 @@ __all__ = [
     "MAX_CODE_SOURCE_BYTES",
     "MAX_CODE_TIMEOUT_SECONDS",
     "code_worker_main",
+    "execute_validated_source",
     "run_code_in_worker",
     "validate_code_source",
 ]
