@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-import tempfile
 
 import pytest
 
@@ -70,7 +69,7 @@ def test_contract_worked_example_survives_the_real_parser_and_validator() -> Non
     }
 
 
-def test_contract_worked_example_actually_runs_and_returns_its_value() -> None:
+def test_contract_worked_example_actually_runs_and_returns_its_value(tmp_path) -> None:
     """A contract example that validates but crashes is still a bad example."""
 
     agent = SynthesisAgent("model", "model", "model", object(), code_execution_eligible=True)
@@ -78,9 +77,7 @@ def test_contract_worked_example_actually_runs_and_returns_its_value() -> None:
     proposal = agent.last_code_proposal
     assert proposal is not None
 
-    result = run_code_in_worker(
-        proposal.source, proposal.capabilities, tempfile.mkdtemp()
-    )
+    result = run_code_in_worker(proposal.source, proposal.capabilities, str(tmp_path))
     assert result.value == 5050
     assert "5050" in result.stdout
 
@@ -151,7 +148,7 @@ def test_contract_forbidden_list_matches_the_validator() -> None:
             raise AssertionError(f"{source!r} was accepted but the contract calls it rejected")
 
 
-def test_comprehensions_and_generators_can_see_top_level_names() -> None:
+def test_comprehensions_and_generators_can_see_top_level_names(tmp_path_factory) -> None:
     """The worker runs programs in one namespace, on every Python version.
 
     Passing distinct globals and locals mappings to ``exec`` makes top-level
@@ -168,7 +165,7 @@ def test_comprehensions_and_generators_can_see_top_level_names() -> None:
         "names = ['a', 'b']\n_result = {names[i]: i for i in range(2)}",
     ):
         validate_code_source(source)
-        result = run_code_in_worker(source, {}, tempfile.mkdtemp())
+        result = run_code_in_worker(source, {}, str(tmp_path_factory.mktemp("worker")))
         assert result.value, f"{source!r} produced no value"
 
 
@@ -232,7 +229,7 @@ def test_contract_stays_small_enough_for_a_local_model() -> None:
     )
 
 
-def test_an_empty_bounded_range_is_a_legal_program() -> None:
+def test_an_empty_bounded_range_is_a_legal_program(tmp_path_factory) -> None:
     """range(0) is empty, not unbounded.
 
     The bound the validator computes is the range's *length*, so an empty
@@ -251,7 +248,7 @@ def test_an_empty_bounded_range_is_a_legal_program() -> None:
         "_result = sum(i for i in range(0))",
     ):
         validate_code_source(source)
-        result = run_code_in_worker(source, {}, tempfile.mkdtemp())
+        result = run_code_in_worker(source, {}, str(tmp_path_factory.mktemp("worker")))
         assert result.value == 0, f"{source!r} should produce 0"
 
 

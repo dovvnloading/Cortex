@@ -11,18 +11,13 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from cortex_backend.api import create_app
-from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.repositories.chats import (
     ChatGroupNotFound,
     InMemoryChatRepository,
     LegacyDatabaseChatRepository,
 )
 from cortex_backend.repositories.storage import DatabaseManager
-from support import session_headers as _session
-
 
 
 def _repositories(tmp_path: Path):
@@ -169,131 +164,116 @@ def test_a_chat_pointing_at_a_vanished_group_is_returned_to_ungrouped(tmp_path: 
 # -- HTTP surface ----------------------------------------------------------
 
 
-def test_group_routes_round_trip_over_http() -> None:
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    with TestClient(app) as client:
-        headers = _session(client, app)
+def test_group_routes_round_trip_over_http(client, headers) -> None:
+    assert client.get("/api/v1/chat-groups", headers=headers).json() == []
 
-        assert client.get("/api/v1/chat-groups", headers=headers).json() == []
+    created = client.post(
+        "/api/v1/chat-groups", json={"name": "Research"}, headers=headers
+    )
+    assert created.status_code == 201
+    group = created.json()
+    assert group["name"] == "Research"
+    assert group["collapsed"] is False
+    assert group["position"] == 0
 
-        created = client.post(
-            "/api/v1/chat-groups", json={"name": "Research"}, headers=headers
-        )
-        assert created.status_code == 201
-        group = created.json()
-        assert group["name"] == "Research"
-        assert group["collapsed"] is False
-        assert group["position"] == 0
+    chat = client.post(
+        "/api/v1/chats", json={"title": "Alpha"}, headers=headers
+    ).json()
 
-        chat = client.post(
-            "/api/v1/chats", json={"title": "Alpha"}, headers=headers
-        ).json()
+    moved = client.patch(
+        f"/api/v1/chats/{chat['id']}/group",
+        json={"group_id": group["id"]},
+        headers=headers,
+    )
+    assert moved.status_code == 200
+    assert moved.json()["group_id"] == group["id"]
 
-        moved = client.patch(
-            f"/api/v1/chats/{chat['id']}/group",
-            json={"group_id": group["id"]},
-            headers=headers,
-        )
-        assert moved.status_code == 200
-        assert moved.json()["group_id"] == group["id"]
+    collapsed = client.patch(
+        f"/api/v1/chat-groups/{group['id']}",
+        json={"collapsed": True},
+        headers=headers,
+    )
+    assert collapsed.status_code == 200
+    assert collapsed.json()["collapsed"] is True
+    assert collapsed.json()["name"] == "Research"
 
-        collapsed = client.patch(
-            f"/api/v1/chat-groups/{group['id']}",
-            json={"collapsed": True},
-            headers=headers,
-        )
-        assert collapsed.status_code == 200
-        assert collapsed.json()["collapsed"] is True
-        assert collapsed.json()["name"] == "Research"
-
-        # Deleting the group must leave the chat, now ungrouped.
-        assert client.delete(
-            f"/api/v1/chat-groups/{group['id']}", headers=headers
-        ).status_code == 204
-        assert client.get("/api/v1/chat-groups", headers=headers).json() == []
-        summaries = client.get("/api/v1/chats", headers=headers).json()
-        assert [item["id"] for item in summaries] == [chat["id"]]
-        assert summaries[0]["group_id"] is None
+    # Deleting the group must leave the chat, now ungrouped.
+    assert client.delete(
+        f"/api/v1/chat-groups/{group['id']}", headers=headers
+    ).status_code == 204
+    assert client.get("/api/v1/chat-groups", headers=headers).json() == []
+    summaries = client.get("/api/v1/chats", headers=headers).json()
+    assert [item["id"] for item in summaries] == [chat["id"]]
+    assert summaries[0]["group_id"] is None
 
 
-def test_group_routes_report_missing_targets_as_404() -> None:
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        chat = client.post(
-            "/api/v1/chats", json={"title": "Alpha"}, headers=headers
-        ).json()
+def test_group_routes_report_missing_targets_as_404(client, headers) -> None:
+    chat = client.post(
+        "/api/v1/chats", json={"title": "Alpha"}, headers=headers
+    ).json()
 
-        assert client.patch(
-            "/api/v1/chat-groups/ghost", json={"name": "x"}, headers=headers
-        ).status_code == 404
-        assert client.patch(
-            f"/api/v1/chats/{chat['id']}/group",
-            json={"group_id": "ghost"},
-            headers=headers,
-        ).status_code == 404
+    assert client.patch(
+        "/api/v1/chat-groups/ghost", json={"name": "x"}, headers=headers
+    ).status_code == 404
+    assert client.patch(
+        f"/api/v1/chats/{chat['id']}/group",
+        json={"group_id": "ghost"},
+        headers=headers,
+    ).status_code == 404
 
-        group = client.post(
-            "/api/v1/chat-groups", json={"name": "Research"}, headers=headers
-        ).json()
-        assert client.patch(
-            "/api/v1/chats/ghost-thread/group",
-            json={"group_id": group["id"]},
-            headers=headers,
-        ).status_code == 404
+    group = client.post(
+        "/api/v1/chat-groups", json={"name": "Research"}, headers=headers
+    ).json()
+    assert client.patch(
+        "/api/v1/chats/ghost-thread/group",
+        json={"group_id": group["id"]},
+        headers=headers,
+    ).status_code == 404
 
 
-def test_group_routes_require_a_session() -> None:
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    with TestClient(app) as client:
-        assert client.get("/api/v1/chat-groups").status_code == 401
-        assert client.post("/api/v1/chat-groups", json={"name": "x"}).status_code == 401
+def test_group_routes_require_a_session(client) -> None:
+    assert client.get("/api/v1/chat-groups").status_code == 401
+    assert client.post("/api/v1/chat-groups", json={"name": "x"}).status_code == 401
 
 
-def test_group_names_are_bounded_and_non_empty() -> None:
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        assert client.post(
-            "/api/v1/chat-groups", json={"name": "   "}, headers=headers
-        ).status_code == 422
-        assert client.post(
-            "/api/v1/chat-groups", json={"name": ""}, headers=headers
-        ).status_code == 422
-        assert client.post(
-            "/api/v1/chat-groups", json={"name": "x" * 121}, headers=headers
-        ).status_code == 422
+def test_group_names_are_bounded_and_non_empty(client, headers) -> None:
+    assert client.post(
+        "/api/v1/chat-groups", json={"name": "   "}, headers=headers
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/chat-groups", json={"name": ""}, headers=headers
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/chat-groups", json={"name": "x" * 121}, headers=headers
+    ).status_code == 422
 
 
-def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input() -> None:
-    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        chat = client.post(
-            "/api/v1/chats", json={"title": "  Project  "}, headers=headers
-        )
-        assert chat.status_code == 201
-        chat_payload = chat.json()
-        assert chat_payload["title"] == "Project"
+def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, headers) -> None:
+    chat = client.post(
+        "/api/v1/chats", json={"title": "  Project  "}, headers=headers
+    )
+    assert chat.status_code == 201
+    chat_payload = chat.json()
+    assert chat_payload["title"] == "Project"
 
-        thread_id = chat_payload["id"]
-        message = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": " hello "},
-            headers=headers,
-        )
-        assert message.status_code == 200
-        assert message.json()["messages"][-1]["content"] == "hello"
-        assert client.patch(
-            f"/api/v1/chats/{thread_id}",
-            json={"title": "\t\n"},
-            headers=headers,
-        ).status_code == 422
-        assert client.post(
-            "/api/v1/chat-groups", json={"name": "\u200b"}, headers=headers
-        ).status_code == 422
-        assert client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": " \n\t "},
-            headers=headers,
-        ).status_code == 422
+    thread_id = chat_payload["id"]
+    message = client.post(
+        f"/api/v1/chats/{thread_id}/messages",
+        json={"role": "user", "content": " hello "},
+        headers=headers,
+    )
+    assert message.status_code == 200
+    assert message.json()["messages"][-1]["content"] == "hello"
+    assert client.patch(
+        f"/api/v1/chats/{thread_id}",
+        json={"title": "\t\n"},
+        headers=headers,
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/chat-groups", json={"name": "\u200b"}, headers=headers
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/chats/{thread_id}/messages",
+        json={"role": "user", "content": " \n\t "},
+        headers=headers,
+    ).status_code == 422
