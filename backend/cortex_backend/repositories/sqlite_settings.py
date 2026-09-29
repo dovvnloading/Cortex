@@ -301,7 +301,11 @@ class SQLiteSettingsRepository:
                 "SQLite would not enable write-ahead logging for the settings database (it "
                 f"reported journal mode '{exc.mode}'), which Cortex needs to store settings "
                 "safely. Some network, cloud-synced and removable drives do not support it. "
-                "Start Cortex with --data-dir pointing at a folder on a local drive."
+                "Your settings are still where they were: the settings database was not deleted "
+                "or modified. To keep using them, first copy the existing data files (the whole "
+                "data folder, including the database and any -wal and -shm files beside it) into "
+                "a folder on a local drive, then start Cortex with --data-dir pointing at that "
+                "folder. A --data-dir folder that starts out empty holds no settings."
             ) from exc
         except Exception as exc:
             raise SettingsRepositoryError("Could not initialize settings schema.") from exc

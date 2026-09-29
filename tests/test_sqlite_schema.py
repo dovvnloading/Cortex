@@ -338,6 +338,28 @@ def test_a_settings_volume_without_write_ahead_logging_is_refused(
     assert _tables(path) == set()
 
 
+def test_an_existing_settings_install_on_a_volume_without_wal_is_told_to_copy_its_data_before_moving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _settings_with_backups(tmp_path)
+    database_before = repository.db_path.read_bytes()
+    volume_without_write_ahead_logging(monkeypatch)
+
+    with pytest.raises(SettingsRepositoryError, match="write-ahead logging") as refused:
+        SQLiteSettingsRepository(repository.db_path)
+    monkeypatch.undo()
+
+    message = " ".join(str(refused.value).split())
+    assert "settings database was not deleted or modified" in message
+    assert "copy the existing data files" in message
+    assert "-wal" in message and "-shm" in message
+    assert message.index("copy the existing data files") < message.index("--data-dir")
+    assert "empty" in message
+    assert str(tmp_path) not in message
+    assert repository.db_path.read_bytes() == database_before
+    assert _version(repository.db_path) == sqlite_settings.SETTINGS_DATABASE_VERSION
+
+
 def test_settings_synchronous_normal_is_only_applied_once_write_ahead_logging_is_confirmed(
     tmp_path: Path,
 ) -> None:

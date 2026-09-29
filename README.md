@@ -362,9 +362,15 @@ What is kept, all beside the database files in that folder:
 
 Cortex needs write-ahead logging, so the data directory has to be on a local
 drive SQLite can use it on; some network, cloud-synced and removable drives
-cannot. If SQLite reports that it could not enable it, Cortex stops at startup
-with a message saying so rather than running with weaker durability. Point
-`--data-dir` at a folder on a local drive.
+cannot (a roaming `%APPDATA%` redirected to a network share is one). If SQLite
+reports that it could not enable it, Cortex stops at startup with a message
+saying so rather than running with weaker durability. Your existing databases
+are not deleted or modified when it does, and your chats and settings are still
+in the data folder. To keep using them, first copy the existing data files (the
+whole folder, including the databases and any `-wal` and `-shm` files beside
+them) into a folder on a local drive, then start Cortex with `--data-dir`
+pointing at that folder. A `--data-dir` folder that starts out empty holds no
+chats.
 
 To go back to an older release after a newer one upgraded the chat database:
 close Cortex, move `cortex_db.sqlite` and any `-wal` and `-shm` files beside it

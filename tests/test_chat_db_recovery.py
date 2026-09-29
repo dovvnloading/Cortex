@@ -587,6 +587,34 @@ def test_an_existing_database_on_a_volume_without_wal_is_left_at_its_version(
     assert _chat_ids(manager.db_path) == {"thread-1"}
 
 
+def test_an_existing_install_on_a_volume_without_wal_is_told_to_copy_its_data_before_moving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing --data-dir at an empty folder starts with no chats, which reads as
+    data loss. The refusal has to say the chats are still where they were and how
+    to bring them along."""
+    manager, _ = _manager_with_data(tmp_path)
+    database_before = Path(manager.db_path).read_bytes()
+    files_before = sorted(entry.name for entry in tmp_path.iterdir())
+    volume_without_write_ahead_logging(monkeypatch)
+
+    with pytest.raises(PersistenceError, match="write-ahead logging") as refused:
+        _reopen(manager)
+    monkeypatch.undo()
+
+    message = " ".join(str(refused.value).split())
+    assert "nothing was deleted or modified" in message.lower()
+    assert "copy the existing data files" in message
+    assert "-wal" in message and "-shm" in message
+    assert message.index("copy the existing data files") < message.index("--data-dir")
+    assert "empty" in message
+    assert str(tmp_path) not in message
+    # ... and that is true: the refusal changed nothing.
+    assert Path(manager.db_path).read_bytes() == database_before
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == files_before
+    assert _chat_ids(manager.db_path) == {"thread-1"}
+
+
 def test_synchronous_normal_is_only_applied_once_write_ahead_logging_is_confirmed(
     tmp_path: Path,
 ) -> None:

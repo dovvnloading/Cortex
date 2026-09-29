@@ -940,8 +940,12 @@ class DatabaseManager:
             raise PersistenceError(
                 "SQLite would not enable write-ahead logging for the chat database (it reported "
                 f"journal mode '{exc.mode}'), which Cortex needs to store chats safely. Some "
-                "network, cloud-synced and removable drives do not support it. Start Cortex with "
-                "--data-dir pointing at a folder on a local drive.",
+                "network, cloud-synced and removable drives do not support it. Your chats are "
+                "still where they were: nothing was deleted or modified. To keep using them, first "
+                "copy the existing data files (the whole data folder, including the database and "
+                "any -wal and -shm files beside it) into a folder on a local drive, then start "
+                "Cortex with --data-dir pointing at that folder. A --data-dir folder that starts "
+                "out empty holds no chats.",
                 operation="journal_mode",
                 cause=exc,
             ) from exc
