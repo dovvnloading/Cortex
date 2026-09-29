@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -11,6 +12,7 @@ import time
 
 import pytest
 
+from cortex_backend.execution.models import ExecutionJob
 from cortex_backend.execution.repository import (
     ArtifactLimitError,
     ExecutionIntegrityError,
@@ -971,3 +973,30 @@ def test_a_job_id_collision_is_an_integrity_error_not_a_duplicate_request(tmp_pa
             profile="fake.v1",
             payload={},
         )
+
+
+def test_a_job_record_declares_no_lease_fields_it_never_fills(tmp_path):
+    """``ExecutionJob`` declared ``lease_owner`` and ``lease_expires_at`` and nothing filled them in.
+
+    They read as "this job holds no lease" when they meant "this was never
+    populated", which is how a snapshot was once misread as evidence about
+    lease state. The lease table is read through ``lease_holder``.
+    """
+
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-lease-fields",
+        owner="session-a",
+        request_id="request-lease-fields",
+        profile="fake.v1",
+        payload={},
+    )
+    repository.claim_lease(job.job_id, lease_owner="coordinator-a", ttl_seconds=30)
+
+    held = repository.get_job(job.job_id)
+
+    assert held is not None
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+    names = {field.name for field in dataclasses.fields(ExecutionJob)}
+    assert names.isdisjoint({"lease_owner", "lease_expires_at"})
+    assert not hasattr(held, "lease_owner")
