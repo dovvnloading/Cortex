@@ -1591,6 +1591,202 @@ def test_cancelling_mid_body_stops_the_retry_loop(tmp_path: Path) -> None:
     assert _leftovers(tmp_path) == []
 
 
+# -- cancellation and stalls while waiting on the server ------------------------
+#
+# The fake "network" below never sleeps for real beyond a few milliseconds: a
+# silent server is a generator blocked on an Event with a short bound, released
+# in ``finally`` so that no test can leave a reader thread behind.
+
+
+def _streaming_client(body_factory) -> httpx.Client:
+    """A client whose every response streams ``body_factory()``."""
+    return httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body_factory()))
+    )
+
+
+@pytest.fixture
+def fast_stall_guard(monkeypatch) -> None:
+    """Shrink the wait tuning so a stall is declared in milliseconds, not half a minute."""
+    monkeypatch.setattr(download_module, "_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(download_module, "_STALL_WINDOW_SECONDS", 0.05)
+
+
+def test_cancelling_stops_reading_the_body_within_a_piece_or_two(tmp_path: Path) -> None:
+    """The body used to be gathered in 64 KiB chunks before anything looked at
+    the cancel flag: Stop pressed at 3 KiB still read 64 KiB. Pieces are now
+    taken as the network delivers them."""
+    cancel = threading.Event()
+    delivered = 0
+
+    def body():
+        nonlocal delivered
+        for index in range(200):
+            piece = (b"GGUF" if index == 0 else b"") + bytes(1024 - (4 if index == 0 else 0))
+            delivered += len(piece)
+            if delivered >= 3 * 1024:
+                cancel.set()  # Stop is pressed while the third KiB arrives
+            yield piece
+
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            cancellation_event=cancel,
+            http_client=_streaming_client(body),
+        )
+
+    assert delivered <= 8 * 1024  # a few pieces at most, not the 64 KiB a chunk used to hold
+    assert _leftovers(tmp_path) == []
+
+
+def test_cancelling_works_while_the_server_is_silent(tmp_path: Path) -> None:
+    """A server that stops sending must not be able to hold the job: cancelling
+    is noticed while waiting for the next bytes, not only when they arrive."""
+    cancel = threading.Event()
+    release = threading.Event()  # the fake network: nothing more arrives until this is set
+
+    def body():
+        yield b"GGUF" + bytes(60)
+        cancel.set()  # Stop is pressed while the client waits for bytes that never come
+        release.wait(3)  # bounded, so a regression fails the assertion below instead of hanging
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(GGUFDownloadError, match="cancelled"):
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                cancellation_event=cancel,
+                http_client=_streaming_client(body),
+            )
+        elapsed = time.monotonic() - started
+        assert not release.is_set()  # it stopped while the server was still silent
+    finally:
+        release.set()
+
+    assert elapsed < 2.0
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fast_stall_guard")
+def test_a_server_that_goes_silent_is_a_failed_attempt_not_a_hang(tmp_path: Path) -> None:
+    release = threading.Event()
+    requests = 0
+
+    def body():
+        yield b"GGUF" + bytes(60)
+        release.wait(3)
+
+    def counted_body():
+        nonlocal requests
+        requests += 1
+        return body()
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(GGUFDownloadError, match="stopped sending data") as raised:
+            download_gguf(
+                "https://example.com/model.gguf",
+                "model.gguf",
+                tmp_path,
+                http_client=_streaming_client(counted_body),
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert "Gave up after 5 attempts" in str(raised.value)  # the usual retry budget, then a clear failure
+    assert requests == 5
+    assert elapsed < 2.0
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fast_stall_guard")
+def test_a_trickling_server_is_a_stall_even_though_bytes_keep_arriving(tmp_path: Path) -> None:
+    """One byte now and then never trips a "no data for N seconds" timeout, so
+    the guard is a minimum rate over a window instead."""
+
+    def body():
+        yield b"GGUF" + bytes(20)
+        for _ in range(1000):
+            time.sleep(0.002)
+            yield b"x"
+
+    started = time.monotonic()
+    with pytest.raises(GGUFDownloadError, match="stopped sending data"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=_streaming_client(body),
+        )
+
+    assert time.monotonic() - started < 2.0  # the trickle would take two seconds per attempt
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_slow_but_steady_link_is_not_a_stall(tmp_path: Path, monkeypatch) -> None:
+    """The guard is about a dead link, not a slow one: data keeps arriving here
+    for several windows, so the download must finish."""
+    monkeypatch.setattr(download_module, "_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(download_module, "_STALL_WINDOW_SECONDS", 0.25)
+    content = _big_gguf(tmp_path)
+    piece = 128 * 1024
+
+    def body():
+        for offset in range(0, len(content), piece):
+            time.sleep(0.02)
+            yield content[offset : offset + piece]
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=_streaming_client(body),
+    )
+
+    assert destination.read_bytes() == content
+
+
+def test_a_failed_download_does_not_leave_its_body_reader_running(tmp_path: Path) -> None:
+    """The reader is a helper thread; it must end when the transfer does, even
+    while it is holding a piece the consumer will never take."""
+    before = set(threading.enumerate())
+
+    def body():
+        yield b"GGUF" + bytes(1020)
+        for _ in range(100_000):
+            yield bytes(1024)
+
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            max_download_bytes=64 * 1024,
+            http_client=_streaming_client(body),
+        )
+
+    wait_until(
+        lambda: not [
+            thread for thread in threading.enumerate() if thread not in before and thread.is_alive()
+        ],
+        timeout=5.0,
+        describe="the body reader thread to end",
+    )
+
+
+def test_the_wait_tuning_stays_bounded() -> None:
+    """Cancellation must be noticed within about a second, and a dead link
+    must be declared before the 60 s read timeout it exists to beat."""
+    assert 0 < download_module._CANCEL_POLL_SECONDS <= 0.5
+    assert 0 < download_module._STALL_WINDOW_SECONDS < download_module._DOWNLOAD_TIMEOUT.read
+    assert download_module._STALL_MIN_BYTES >= 1
+
+
 @pytest.mark.usefixtures("small_reads")
 def test_the_public_host_policy_is_rechecked_on_every_attempt(tmp_path: Path, monkeypatch) -> None:
     """A retry must not be a way around the SSRF policy: if the name now
