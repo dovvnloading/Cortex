@@ -563,7 +563,9 @@ def test_default_runtime_starts_backend_then_native_window(
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            session_manager=SimpleNamespace(bootstrap_token="bootstrap-token")
+            session_manager=SimpleNamespace(
+                issue_bootstrap_token=lambda: ("bootstrap-token", None)
+            )
         )
     )
     server = SimpleNamespace(should_exit=False)
@@ -1340,15 +1342,15 @@ class _LaunchFakes:
         session_manager: object | None = None,
         backend_stop_error: BaseException | None = None,
         instance_class: type | None = None,
+        calls: list[str] | None = None,
     ) -> None:
-        self.calls: list[str] = []
+        self.calls: list[str] = [] if calls is None else calls
         self.window_configs: list[DesktopWindowConfig] = []
         self.server = SimpleNamespace(should_exit=False, force_exit=False)
         self.record = SimpleNamespace(pid=1234, port=0)
         self.on_window: Callable[[DesktopWindowConfig, object], None] = lambda config, monitor: None
         fakes = self
         manager = session_manager or SimpleNamespace(
-            bootstrap_token="bootstrap-token",
             issue_bootstrap_token=lambda: ("bootstrap-token", None),
         )
         app = SimpleNamespace(state=SimpleNamespace(session_manager=manager))
@@ -1642,3 +1644,32 @@ def test_a_startup_failure_still_shows_the_could_not_start_dialog(
 
     assert len(shown) == 1
     assert "Cortex could not start" in shown[0]
+
+
+def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The token lives five minutes; it must start after the slow steps.
+
+    It used to be read from the session manager that ``build_app`` created,
+    before the readiness gate, the Vite gate and a WebView2 install that can
+    run for ten minutes, so a slow launch opened the window on a token that had
+    already expired.
+    """
+    calls: list[str] = []
+
+    def issue() -> tuple[str, None]:
+        calls.append("issue")
+        return "fresh-token", None
+
+    manager = SimpleNamespace(bootstrap_token="stale-token", issue_bootstrap_token=issue)
+    fakes = _LaunchFakes(monkeypatch, tmp_path, session_manager=manager, calls=calls)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert calls == ["runtime", "issue", "window"]
+    (config,) = fakes.window_configs
+    assert config.url == (
+        f"http://127.0.0.1:{fakes.record.port}/#bootstrap=fresh-token&handoff=handoff-secret"
+    )
+    assert "stale-token" not in config.url

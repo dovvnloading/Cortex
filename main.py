@@ -558,7 +558,12 @@ def _launch(args: argparse.Namespace) -> int:
                     return _run_headless(backend=backend, frontend=frontend, server=server)
 
                 ensure_webview2_runtime(_resource_root())
-                token = app.state.session_manager.bootstrap_token
+                # The token is good for five minutes from the moment it is
+                # issued, and everything above -- the readiness gate, the Vite
+                # gate, a WebView2 install that can run for ten minutes -- may
+                # have used that up if it had been issued when the app was
+                # built. Issue it here, immediately before the window needs it.
+                token, _expires_at = app.state.session_manager.issue_bootstrap_token()
                 print("Cortex is ready in its native desktop window.")
                 run_desktop_window(
                     DesktopWindowConfig(
