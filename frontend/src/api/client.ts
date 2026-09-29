@@ -179,6 +179,8 @@ export class CortexApi {
   private readonly baseUrl: string;
   private readonly fetcher: FetchLike;
   private sessionToken: string | null;
+  private handoffSecret: string | null = null;
+  private renewal: Promise<boolean> | null = null;
   private readonly sessionExpiredListeners = new Set<SessionExpiredListener>();
 
   constructor(
@@ -197,6 +199,15 @@ export class CortexApi {
   subscribeSessionExpired(listener: SessionExpiredListener): () => void {
     this.sessionExpiredListeners.add(listener);
     return () => this.sessionExpiredListeners.delete(listener);
+  }
+
+  /**
+   * Give the client the launcher's handoff secret so an expired session can be
+   * renewed in place. Without one a 401 cannot be recovered here and the
+   * session is cleared for the subscribers to deal with.
+   */
+  setHandoffSecret(secret: string): void {
+    this.handoffSecret = secret || null;
   }
 
   clearSession(): void {
@@ -345,18 +356,14 @@ export class CortexApi {
     onEvent: (event: T) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<T | null> {
-    const headers = this.authHeaders();
-    const sessionAtRequest = this.sessionToken;
+    const headers = new Headers();
     if (options.afterEventId !== undefined) {
       headers.set("Last-Event-ID", String(options.afterEventId));
     }
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+    const response = await this.fetchWithSession(`${this.baseUrl}${path}`, {
       headers,
       signal: options.signal,
     });
-    if (response.status === 401 && this.sessionToken === sessionAtRequest) {
-      this.clearSession();
-    }
     if (!response.ok || !response.body) {
       throw new ApiError(response.status, await this.errorDetail(response));
     }
@@ -519,16 +526,10 @@ export class CortexApi {
   }
 
   async downloadExecutionArtifact(artifactId: string): Promise<Response> {
-    // Same guard request() uses: a 401 answering a request sent under an
-    // older token says nothing about the token in hand now. Without it a
-    // slow download could arrive after a re-exchange and sign the user out
-    // of a session that was working.
-    const sessionAtRequest = this.sessionToken;
-    const response = await this.fetcher(
+    const response = await this.fetchWithSession(
       `${this.baseUrl}/execution/artifacts/${encodeURIComponent(artifactId)}`,
-      { headers: this.authHeaders() },
+      {},
     );
-    if (response.status === 401 && this.sessionToken === sessionAtRequest) this.clearSession();
     if (!response.ok) throw new ApiError(response.status, await this.errorDetail(response));
     return response;
   }
@@ -604,21 +605,16 @@ export class CortexApi {
     options: RequestInit & { authenticated?: boolean } = {},
   ): Promise<T> {
     const { authenticated = true, ...requestInit } = options;
-    const headers = authenticated
-      ? this.authHeaders(requestInit.headers)
-      : new Headers(requestInit.headers);
+    const headers = new Headers(requestInit.headers);
     if (requestInit.body && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
 
-    const sessionAtRequest = authenticated ? this.sessionToken : null;
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
-      ...requestInit,
-      headers,
-    });
-    if (response.status === 401 && authenticated && this.sessionToken === sessionAtRequest) {
-      this.clearSession();
-    }
+    const url = `${this.baseUrl}${path}`;
+    const init = { ...requestInit, headers };
+    const response = authenticated
+      ? await this.fetchWithSession(url, init)
+      : await this.fetcher(url, init);
     if (!response.ok) {
       const detail = await this.errorDetail(response);
       throw new ApiError(
@@ -630,6 +626,64 @@ export class CortexApi {
       return undefined as T;
     }
     return (await response.json()) as T;
+  }
+
+  /**
+   * Fetch with the session bearer, recovering from an expired session once.
+   *
+   * A 401 comes from the session check, before any handler runs, so replaying
+   * the request cannot apply it twice. On a 401:
+   * - if the client already holds a newer session than the one the request was
+   *   sent under (another request renewed it first), replay under that one;
+   * - if the request's own session is still current, renew it through the
+   *   launcher handoff -- one renewal shared by every request that fails
+   *   meanwhile -- and replay;
+   * - if renewal is unavailable or fails, or the replay is rejected as well,
+   *   clear the session, which notifies the subscribers, and return the 401.
+   *
+   * A 401 answering a request sent under an older token never clears a newer
+   * session, which is what keeps a slow request from signing the user out of a
+   * session that was working.
+   */
+  private async fetchWithSession(url: string, init: RequestInit): Promise<Response> {
+    let replayed = false;
+    while (true) {
+      const tokenSent = this.sessionToken;
+      const response = await this.fetcher(url, { ...init, headers: this.authHeaders(init.headers) });
+      if (response.status !== 401) return response;
+      if (!replayed && tokenSent !== null && (await this.sessionAfterRejection(tokenSent))) {
+        replayed = true;
+        continue;
+      }
+      if (this.sessionToken === tokenSent) this.clearSession();
+      return response;
+    }
+  }
+
+  /** True when the client now holds a usable session other than `rejectedToken`. */
+  private async sessionAfterRejection(rejectedToken: string): Promise<boolean> {
+    if (this.sessionToken !== rejectedToken) return this.sessionToken !== null;
+    return this.renewSession();
+  }
+
+  /** Re-exchange through the launcher handoff. Single flight; never rejects. */
+  private renewSession(): Promise<boolean> {
+    const secret = this.handoffSecret;
+    if (!secret) return Promise.resolve(false);
+    if (this.renewal === null) {
+      this.renewal = (async () => {
+        try {
+          await this.rebootstrap(secret);
+          return true;
+        } catch {
+          // The caller clears the session; the app's own reconnect reports why.
+          return false;
+        } finally {
+          this.renewal = null;
+        }
+      })();
+    }
+    return this.renewal;
   }
 
   private authHeaders(init?: HeadersInit): Headers {

@@ -117,11 +117,14 @@ export function App({ api: providedApi }: Props) {
   const [launcherCredentials] = useState(readLauncherCredentials);
   // The read above is pure; the URL scrub is a side effect and belongs here.
   useEffect(() => {
-    // Both are side effects and both are idempotent, so StrictMode's second
-    // invocation is a no-op.
+    // All of these are side effects and all are idempotent, so StrictMode's
+    // second invocation is a no-op.
     persistHandoffSecret(launcherCredentials.handoffSecret);
+    // The client renews an expired session itself, in place, so it needs the
+    // secret too. Without this a 401 reached the workspace and remounted it.
+    api.setHandoffSecret(launcherCredentials.handoffSecret);
     scrubLauncherCredentials();
-  }, [launcherCredentials.handoffSecret]);
+  }, [api, launcherCredentials.handoffSecret]);
   const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
   const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
@@ -147,10 +150,17 @@ export function App({ api: providedApi }: Props) {
       if (reconnectInFlight.current === operation) reconnectInFlight.current = null;
     });
   }, [api, handoffSecret]);
+  // The client renews an expired session in place and only notifies once that
+  // failed (or was impossible), so this is the fallback: leave the workspace
+  // and try the handoff again from onboarding, which also reports why it
+  // failed. The guard makes a late or duplicate call harmless -- a 401 from a
+  // request sent under an older token, or a second report after the reconnect
+  // already succeeded, must not tear down a session that works.
   const handleSessionExpired = useCallback(() => {
+    if (api.hasSession) return;
     setSessionReady(false);
     void reconnect();
-  }, [reconnect]);
+  }, [api, reconnect]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
 
@@ -293,11 +303,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         .then((nextGroups) => {
           if (isCurrentGroupLoad()) setGroups(nextGroups);
         })
-        .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) {
-            if (isCurrentLoad()) onSessionExpired();
-          }
-          else if (isCurrentGroupLoad()) setGroups([]);
+        .catch(() => {
+          if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
       setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
@@ -307,22 +314,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         .then((nextModels) => {
           if (isCurrentModelLoad()) setModels(nextModels);
         })
-        .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) {
-            if (isCurrentLoad()) onSessionExpired();
-          }
-          else if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
+        .catch(() => {
+          if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
         });
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401 && isCurrentLoad()) {
-        onSessionExpired();
-        return;
-      }
+      // No 401 branch anywhere in this file: the client renews an expired
+      // session in place, and only when it cannot does it clear the session
+      // and tell the app's listener, which owns the way back to onboarding.
       if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
-  }, [api, onSessionExpired, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
+  }, [api, setChats, setGroups, setModels, setSettings, setLlamacppStatus]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
@@ -364,8 +367,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       try {
         const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
         setExecutionTasks(response.tasks);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+      } catch {
+        // A failed poll keeps the last list and the next tick retries.
       }
     });
     executionTaskRefreshRef.current = refresh;
@@ -378,7 +381,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       },
     );
     return refresh;
-  }, [api, onSessionExpired]);
+  }, [api]);
 
   // A second is the right cadence while something is actually running or
   // waiting on approval. With nothing in flight it was still a SQLite query
@@ -403,10 +406,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       const response = await api.system();
       setLlamacppStatus(response.llamacpp ?? null);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
+    } catch {
+      // Keep the last known status; the next tick retries.
     }
-  }, [api, onSessionExpired, setLlamacppStatus]);
+  }, [api, setLlamacppStatus]);
   useVisiblePolling(refreshLlamacppStatus, 2000, selectedModelIsGGUF);
 
   const visibleExecutionTasks = system?.execution_preview_available
@@ -418,8 +421,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       await api.cancelExecution(jobId);
       await refreshExecutionTasks();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not stop the background task."), "error");
+      notify(apiMessage(error, "Could not stop the background task."), "error");
     }
   };
 
@@ -432,19 +434,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       await refreshExecutionTasks();
       notify(decision === "approved" ? "Background task approved once." : "Background task denied.", "success");
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not record the approval decision."), "error");
+      notify(apiMessage(error, "Could not record the approval decision."), "error");
     }
   };
 
-  const loadCodeSource = async (jobId: string) => {
-    try {
-      return await api.executionSource(jobId);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      throw error;
-    }
-  };
+  const loadCodeSource = (jobId: string) => api.executionSource(jobId);
 
   const renameChat = async (id: string, title: string): Promise<boolean> => {
     try {
@@ -467,8 +461,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onSessionExpired();
-      else notify(apiMessage(error, "Could not download the execution artifact."), "error");
+      notify(apiMessage(error, "Could not download the execution artifact."), "error");
     }
   };
 
@@ -704,10 +697,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        if (isCurrentModelJob()) onSessionExpired();
-      }
-      else if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
+      if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
       return null;
     } finally {
       if (isCurrentModelJob()) setModelBusy(false);

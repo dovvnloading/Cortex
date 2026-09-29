@@ -40,6 +40,18 @@ describe("App", () => {
     return null;
   };
 
+  /**
+   * Record whether the onboarding boundary is ever rendered. Asserting only the
+   * end state cannot tell "renewed in place" from "left and came back".
+   */
+  const watchOnboarding = () => {
+    let shown = false;
+    const check = () => { if (document.querySelector(".onboarding")) shown = true; };
+    const observer = new MutationObserver(check);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return { wasShown: () => shown, stop: () => observer.disconnect() };
+  };
+
   const callsTo = (fetcher: { mock: { calls: readonly (readonly unknown[])[] } }, suffix: string) =>
     fetcher.mock.calls.filter(([input]) => String(input).endsWith(suffix));
 
@@ -111,40 +123,69 @@ describe("App", () => {
     expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
   });
 
-  it("rebootstraps a live desktop window after its session expires", async () => {
+  it("renews an expired session without leaving the workspace", async () => {
+    // A 401 used to swap the whole workspace for the onboarding card and mount
+    // it again from scratch -- a spinner and a second load of every list -- to
+    // do what is a sub-second loopback exchange. The client now renews in place.
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     window.history.replaceState({}, "", "/#handoff=desktop-handoff");
-    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
     let expireSystem = true;
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/system") && expireSystem) {
         expireSystem = false;
-        return json({ detail: "Local session expired." }, 401);
+        return respond({ detail: "Local session expired." }, 401);
       }
-      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
-      if (url.endsWith("/chat-groups")) return json([]);
-      if (url.endsWith("/chats")) return json([]);
-      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
-      if (url.endsWith("/memories")) return json({ memos: [] });
-      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.endsWith("/memories")) return respond({ memos: [] });
       if (url.endsWith("/session/handoff")) {
         expect(new Headers(init?.headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
-        return json({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+        return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
       }
-      if (url.endsWith("/session/exchange")) return json({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
-      return json({ detail: "Unexpected test route." }, 404);
+      if (url.endsWith("/session/exchange")) return respond({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
     });
+    const onboarding = watchOnboarding();
 
-    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    try {
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
-    await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input).endsWith("/session/handoff"))).toBe(true));
-    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
-    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/session/exchange"))).toHaveLength(1);
-    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+      expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+      expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
+      expect(callsTo(fetcher, "/session/exchange")).toHaveLength(1);
+      // Loaded once. A remount would have loaded the chat list a second time.
+      expect(callsTo(fetcher, "/chats")).toHaveLength(1);
+      expect(onboarding.wasShown()).toBe(false);
+      expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+    } finally {
+      onboarding.stop();
+    }
+  });
+
+  it("renews once when every request of the first load has expired", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/session/handoff")) return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+      if (url.endsWith("/session/exchange")) return respond({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      if (new Headers(init?.headers).get("Authorization") === "Bearer local-session") {
+        return respond({ detail: "Local session expired." }, 401);
+      }
+      if (url.endsWith("/memories")) return respond({ memos: [] });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+    const onboarding = watchOnboarding();
+
+    try {
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+      expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+      expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
+      expect(callsTo(fetcher, "/session/exchange")).toHaveLength(1);
+      expect(onboarding.wasShown()).toBe(false);
+    } finally {
+      onboarding.stop();
+    }
   });
 
   it("recovers the session after a reload that dropped the launch fragment", async () => {
@@ -254,6 +295,68 @@ describe("App", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
   });
 
+  it("resumes the running generation once the session is back after a failed renewal", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({
+      jobId: "job-expired",
+      threadId: "thread-expired",
+      lastEventId: 3,
+    }));
+    window.history.replaceState({}, "", "/chat/thread-expired");
+    const streamEvents = [
+      { event_id: 1, event: "generation.content_delta", job_id: "job-expired", thread_id: "thread-expired", data: { delta: "Recovered answer" } },
+      { event_id: 2, event: "generation.completed", job_id: "job-expired", thread_id: "thread-expired", data: {} },
+    ];
+    let handoffs = 0;
+    let releaseHandoff!: () => void;
+    const secondHandoff = new Promise<void>((resolve) => { releaseHandoff = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/session/handoff")) {
+        handoffs += 1;
+        // The launcher is busy for the client's own renewal; the app's
+        // reconnect from onboarding is held so the in-between state is visible.
+        if (handoffs === 1) return respond({ detail: "Launcher busy." }, 503);
+        await secondHandoff;
+        return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+      }
+      if (url.endsWith("/session/exchange")) return respond({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      if (url.endsWith("/generations/job-expired/events")) {
+        if (new Headers(init?.headers).get("Authorization") === "Bearer local-session") {
+          return respond({ detail: "Local session expired." }, 401);
+        }
+        return new Response(
+          streamEvents.map((event) => `id: ${event.event_id}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      if (url.endsWith("/chats")) return respond([{ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z" }]);
+      if (url.endsWith("/chats/thread-expired")) return respond({ id: "thread-expired", title: "Interrupted", timestamp: "2026-07-21T18:00:00Z", revision: 1, messages: [] });
+      if (url.endsWith("/settings")) return respond({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return respond({ memos: [] });
+      if (url.endsWith("/models")) return respond({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    await import("../features/chat/ChatPage");
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    // The first attach is refused and cannot be renewed yet, so the app falls
+    // back to onboarding -- with the generation still tracked, not discarded.
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 12_000 })).toBeVisible();
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.active.generation") ?? "null")).toMatchObject({ jobId: "job-expired" });
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-expired", threadId: "thread-expired" });
+
+    // The session comes back; the workspace re-attaches and finishes the job.
+    releaseHandoff();
+    await waitFor(() => expect(callsTo(fetcher, "/generations/job-expired/events")).toHaveLength(2), { timeout: 12_000 });
+    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }), { timeout: 12_000 });
+    expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull();
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+    expect(handoffs).toBe(2);
+  });
+
   it("returns to onboarding when a model job stream reports an expired session", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -282,6 +385,61 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Start local workspace" })).toBeVisible();
     expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
+  });
+
+  it("a stale 401 from a request sent under the previous token does not restart the re-exchanged session", async () => {
+    // A slow request sent under the old token fails after another request has
+    // already renewed the session. Answering that 401 with a second handoff,
+    // exchange and remount is what the hand-written branches used to do.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    let releaseSlowGroups!: (response: Response) => void;
+    const slowGroups = new Promise<Response>((resolve) => { releaseSlowGroups = resolve; });
+    const group = { id: "group-filed", name: "Filed", collapsed: false, created_at: "2026-07-21T18:00:00Z", updated_at: "2026-07-21T18:00:00Z" };
+    let groupRequests = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/session/handoff")) return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+      if (url.endsWith("/session/exchange")) return respond({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      if (url.endsWith("/chat-groups")) {
+        groupRequests += 1;
+        return groupRequests === 1 ? slowGroups : respond([group]);
+      }
+      if (url.endsWith("/settings") && init?.method === "PUT") {
+        // The theme toggle is what finds the session expired.
+        if (new Headers(init.headers).get("Authorization") === "Bearer local-session") {
+          return respond({ detail: "Local session expired." }, 401);
+        }
+        return respond({ settings: { models: { chat: null, title: null }, appearance: { theme: "light" } } });
+      }
+      if (url.endsWith("/memories")) return respond({ memos: [] });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+    const onboarding = watchOnboarding();
+
+    try {
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+      expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+
+      const user = userEvent.setup();
+      await user.keyboard("{Control>}k{/Control}");
+      await user.click(await screen.findByText("Toggle theme"));
+      expect(await screen.findByText("Settings saved.")).toBeVisible();
+      expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
+
+      // The group list was requested with the old token and is still pending.
+      await act(async () => {
+        releaseSlowGroups(respond({ detail: "Local session expired." }, 401));
+      });
+
+      await waitFor(() => expect(useChatStore.getState().groups.map((item) => item.id)).toEqual(["group-filed"]));
+      expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
+      expect(callsTo(fetcher, "/session/exchange")).toHaveLength(1);
+      expect(onboarding.wasShown()).toBe(false);
+      expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+    } finally {
+      onboarding.stop();
+    }
   });
 
   it("opens the workspace when the model service is unavailable", async () => {
