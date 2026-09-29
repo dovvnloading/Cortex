@@ -19,6 +19,7 @@ const SettingsPanel = lazyRoute<SettingsPanelProps>(() => import("../features/se
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
+import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { applyStoredTheme, DEFAULT_THEME_PREFERENCE } from "../lib/theme";
@@ -378,6 +379,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
+      // `chatResponse` is the whole list, so any other saved draft belongs to a chat that is gone.
+      pruneComposerDrafts(chatResponse.map((chat) => chat.id));
       // Groups are organisation on top of the chats, so they load out of band
       // like the model inventory does: if the endpoint is unavailable the
       // library still opens with every chat present, just ungrouped. Blocking
@@ -581,6 +584,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const commit = async () => {
       try {
         await api.deleteChat(id);
+        discardComposerDraft(id);
         // Take the row out of the list before it is un-hidden, so it cannot flash back.
         setChats((current) => current.filter((chat) => chat.id !== id));
         setChatDeletePending(id, false);

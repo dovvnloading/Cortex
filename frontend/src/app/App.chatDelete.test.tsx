@@ -86,6 +86,7 @@ describe("App chat deletion with Undo", () => {
     const { fetcher, deletes } = workspace();
     await openWorkspace(fetcher);
 
+    window.localStorage.setItem("cortex.composer.draft.chat-a", "unsent text, kept for Undo");
 
     await deleteChatAndControlTime("Alpha plan");
 
@@ -101,16 +102,18 @@ describe("App chat deletion with Undo", () => {
     expect(toastRegion().getByText("Chat restored.")).toBeVisible();
     expect(toastRegion().queryByText("Chat deleted.")).not.toBeInTheDocument();
 
-    // Long after the window would have closed, nothing was ever sent.
+    // Long after the window would have closed, nothing was ever sent, and the draft is intact.
     await passTime(60_000);
     await settle();
     expect(deletes).toEqual([]);
+    expect(window.localStorage.getItem("cortex.composer.draft.chat-a")).toBe("unsent text, kept for Undo");
     expect(useChatStore.getState().chats.map((chat) => chat.id)).toEqual(["chat-a", "chat-b"]);
   });
 
   it("sends exactly one delete when the Undo window closes, and the chat stays gone", async () => {
     const { fetcher, deletes } = workspace();
     await openWorkspace(fetcher);
+    window.localStorage.setItem("cortex.composer.draft.chat-a", "unsent text for the doomed chat");
 
     await deleteChatAndControlTime("Alpha plan");
     await passTime(UNDO_WINDOW_MS - 1);
@@ -123,6 +126,7 @@ describe("App chat deletion with Undo", () => {
     await passTime(60_000);
 
     expect(deletes).toEqual(["chat-a"]);
+    expect(window.localStorage.getItem("cortex.composer.draft.chat-a")).toBeNull();
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete Alpha plan" })).not.toBeInTheDocument();
     expect(useChatStore.getState().chats.map((chat) => chat.id)).toEqual(["chat-b"]);
