@@ -335,6 +335,34 @@ def _backup_file_locked_by_another_program(monkeypatch: pytest.MonkeyPatch, repo
     monkeypatch.setattr(os, "replace", replace)
 
 
+def test_a_backup_held_briefly_by_another_program_is_still_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A scanner holding the backup for a few milliseconds is not a failed backup."""
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    backup_before = repository.backup_path.read_bytes()
+    real_replace = os.replace
+    backup = os.path.normcase(os.path.abspath(repository.backup_path))
+    refused: list[str] = []
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(destination)) == backup and len(refused) < 2:
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = SQLiteSettingsRepository(repository.db_path)
+    monkeypatch.undo()
+
+    assert len(refused) == 2
+    assert reopened.backup_status == ("ok", None)
+    assert repository.backup_path.read_bytes() != backup_before
+    assert SQLiteSettingsRepository._database_is_valid(repository.backup_path)
+
+
 def _snapshot_that_fails_verification(monkeypatch: pytest.MonkeyPatch, repository) -> None:
     def torn(_source, destination, **_kwargs):
         Path(destination).write_bytes(b"torn snapshot")

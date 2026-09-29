@@ -38,6 +38,7 @@ from cortex_backend.repositories.sqlite_backup import (
     open_at_rest,
     put_sidecars_back,
     quick_check_at_rest,
+    replace_with_retry,
     snapshot_database,
     utc_now_iso,
 )
@@ -457,17 +458,17 @@ class DatabaseManager:
             if displace_existing_to is not None and os.path.exists(destination):
                 older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
                 try:
-                    os.replace(destination, displace_existing_to)
+                    replace_with_retry(destination, displace_existing_to)
                 except OSError:
                     cls._drop_spare_name(older_file_kept_as)
                     raise
                 displaced_to = displace_existing_to
             try:
-                os.replace(temporary_path, destination)
+                replace_with_retry(temporary_path, destination)
             except OSError:
                 if displaced_to is not None:
                     try:
-                        os.replace(displaced_to, destination)
+                        replace_with_retry(displaced_to, destination)
                     except OSError:
                         logging.warning("Could not return a displaced database file to its name.")
                     else:
@@ -536,7 +537,7 @@ class DatabaseManager:
         if spare is None:
             return
         try:
-            os.replace(spare, path)
+            replace_with_retry(spare, path)
         except OSError:
             logging.warning("Could not return an older database backup to its name.")
 
@@ -1718,8 +1719,13 @@ class PermanentMemoryManager:
             )
             os.close(fd)
             shutil.copy2(source, temporary_path)
+            # The copy is the recovery file for the next launch, so it gets the
+            # same flush to disk the primary gets in _save_memos before it is
+            # moved into place; copy2 only hands the bytes to the OS.
+            with open(temporary_path, "r+b") as copy:
+                os.fsync(copy.fileno())
             cls._read_memos(temporary_path)
-            os.replace(temporary_path, destination)
+            replace_with_retry(temporary_path, destination)
             temporary_path = None
         except (OSError, shutil.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise PersistenceError(
@@ -1829,7 +1835,7 @@ class PermanentMemoryManager:
         """
         damaged_path = f"{self.memory_file_path}.corrupt"
         try:
-            os.replace(self.memory_file_path, damaged_path)
+            replace_with_retry(self.memory_file_path, damaged_path)
         except OSError as exc:
             # Usually a lock. The save that follows would fail on the same
             # file anyway, so report the condition rather than pressing on.
@@ -1866,7 +1872,7 @@ class PermanentMemoryManager:
             self._prepare_primary_for_save()
             if os.path.exists(self.memory_file_path):
                 self._atomic_copy_memos(self.memory_file_path, self.backup_file_path)
-            os.replace(temporary_path, self.memory_file_path)
+            replace_with_retry(temporary_path, self.memory_file_path)
             temporary_path = None
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise PersistenceError(

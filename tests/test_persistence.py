@@ -1,5 +1,6 @@
 """Persistence, migration, and recovery tests for local Cortex data."""
 
+import errno
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import cortex_backend.repositories.storage as storage
 from cortex_backend.repositories.storage import (
@@ -474,3 +477,103 @@ class TimestampZoneTests(unittest.TestCase):
                 [message["content"] for message in forked],
                 ["first", "second"],
             )
+
+
+# -- Windows sharing violations and the memory backup copy ---------------------------
+
+
+def _memory_manager(tmp_path: Path) -> tuple[PermanentMemoryManager, Path]:
+    memory_file = tmp_path / "memory.json"
+    manager = PermanentMemoryManager(memory_file_path=str(memory_file))
+    manager.add_memo("first")  # the next save has a primary to back up
+    return manager, memory_file
+
+
+def _on_disk_memos(path: Path) -> list[str]:
+    return json.loads(path.read_text(encoding="utf-8"))["memos"]
+
+
+def _leftover_temporaries(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir() if entry.name.endswith(".tmp"))
+
+
+def _hold_the_memory_file(monkeypatch: pytest.MonkeyPatch, memory_file: Path, *, refusals: int):
+    """Refuse the first ``refusals`` renames onto the memory file, as a scanner holding it would."""
+    real_replace = os.replace
+    target = os.path.normcase(os.path.abspath(memory_file))
+    attempts: list[str] = []
+    waits: list[float] = []
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(destination)) == target:
+            attempts.append(str(source))
+            if len(attempts) <= refusals:
+                raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr("time.sleep", waits.append)
+    return attempts, waits
+
+
+def test_a_transient_sharing_violation_does_not_fail_a_memory_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, memory_file = _memory_manager(tmp_path)
+    attempts, waits = _hold_the_memory_file(monkeypatch, memory_file, refusals=2)
+
+    manager.add_memo("second")
+    monkeypatch.undo()
+
+    assert len(attempts) == 3 and len(waits) == 2
+    assert manager.get_memos() == ["first", "second"]
+    assert _on_disk_memos(memory_file) == ["first", "second"]
+    assert _on_disk_memos(Path(manager.backup_file_path)) == ["first"]
+    assert _leftover_temporaries(tmp_path) == []
+
+
+def test_a_sharing_violation_that_does_not_lift_fails_the_save_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, memory_file = _memory_manager(tmp_path)
+    before = memory_file.read_bytes()
+    attempts, _ = _hold_the_memory_file(monkeypatch, memory_file, refusals=10_000)
+
+    with pytest.raises(PersistenceError):
+        manager.add_memo("second")
+    monkeypatch.undo()
+
+    assert len(attempts) == 4  # bounded, not a loop
+    assert manager.get_memos() == ["first"]  # the in-memory list rolled back with the file
+    assert memory_file.read_bytes() == before
+    assert _leftover_temporaries(tmp_path) == []
+
+
+def test_the_memory_backup_copy_is_flushed_to_disk_before_it_replaces_the_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backup is what the next launch restores from, so it gets the same
+    fsync the primary gets: one for the new file and one for the backup copy."""
+    manager, _ = _memory_manager(tmp_path)
+    backup = os.path.normcase(os.path.abspath(manager.backup_file_path))
+    real_replace, real_fsync = os.replace, os.fsync
+    flushed_before_backup_replaced: list[int] = []
+    flushes = 0
+
+    def fsync(descriptor):
+        nonlocal flushes
+        flushes += 1
+        return real_fsync(descriptor)
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(destination)) == backup:
+            flushed_before_backup_replaced.append(flushes)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+
+    manager.add_memo("second")
+    monkeypatch.undo()
+
+    assert flushed_before_backup_replaced == [2]

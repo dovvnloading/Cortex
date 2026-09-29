@@ -719,8 +719,9 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
         if (
             os.path.normcase(os.path.abspath(destination)) == backup
             and str(source).endswith(".tmp")
-            and not refused
         ):
+            # Refused on every try: a lock that lifts is retried and succeeds
+            # (see tests/test_persistence.py), so this one has to stay.
             refused.append(str(source))
             raise PermissionError(errno.EACCES, "The process cannot access the file")
         return real_replace(source, destination, *args, **kwargs)
@@ -736,6 +737,40 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
     assert DatabaseManager._database_is_valid(manager.backup_path)
     assert _leftover_temporaries(tmp_path) == []
     assert _reopen(manager).backup_status == ("ok", None)
+
+
+def test_a_backup_held_briefly_by_another_program_is_still_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scanner holding the backup for a few milliseconds is not a failed backup."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    backup_before = Path(manager.backup_path).read_bytes()
+    real_replace = os.replace
+    backup = os.path.normcase(os.path.abspath(manager.backup_path))
+    refused: list[str] = []
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    def replace(source, destination, *args, **kwargs):
+        if (
+            os.path.normcase(os.path.abspath(destination)) == backup
+            and str(source).endswith(".tmp")
+            and len(refused) < 2
+        ):
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert len(refused) == 2
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.backup_path).read_bytes() != backup_before
+    assert reopened.load_chat("thread-1")["title"] == "Changed after the last backup"
+    assert DatabaseManager._database_is_valid(manager.backup_path)
 
 
 def _stray_files(directory: Path) -> list[str]:
@@ -762,8 +797,9 @@ def test_a_backup_that_cannot_take_its_place_keeps_both_generations_where_they_w
         if (
             os.path.normcase(os.path.abspath(destination)) == backup
             and str(source).endswith(".tmp")
-            and not refused
         ):
+            # Refused on every try: a lock that lifts is retried and succeeds
+            # (see tests/test_persistence.py), so this one has to stay.
             refused.append(str(source))
             raise PermissionError(errno.EACCES, "The process cannot access the file")
         return real_replace(source, destination, *args, **kwargs)
