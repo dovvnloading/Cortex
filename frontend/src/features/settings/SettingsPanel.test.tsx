@@ -160,8 +160,10 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    // An unrelated edit, e.g. toggling the theme, must not wipe the still-valid
+    // An unrelated edit, e.g. changing the theme, must not wipe the still-valid
     // configured chat model just because the inventory came back empty.
+    await user.click(screen.getByRole("combobox", { name: "Theme" }));
+    await user.click(await screen.findByRole("option", { name: "Light" }));
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
@@ -398,6 +400,9 @@ describe("SettingsPanel", () => {
     await user.click(screen.getByRole("button", { name: /AI Model/ }));
     await user.clear(screen.getByLabelText("Context window"));
     await user.clear(screen.getByLabelText("Seed"));
+    // Clearing wrote nothing into the draft, so there is nothing to save yet.
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    await user.click(screen.getByLabelText(/Bypass Cortex's default system prompt/));
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() => expect(onSave).toHaveBeenCalled());

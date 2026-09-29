@@ -8,6 +8,8 @@ import type {
 } from "../../../../contracts/cortex-api";
 import { GENERATION_DEFAULTS, resolveGenerationValues, type ParamKey } from "../../lib/generationParams";
 import { displayModelName, isGGUFModel, localModelNames, modelFacts, modelSource } from "../../lib/localModels";
+import { registerNavigationGuard } from "../../lib/navigation";
+import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
 import { Select } from "../../shared/ui/Select";
 import {
   ContextWindowField,
@@ -29,7 +31,11 @@ export type SettingsPanelProps = {
   onRetryMemory?: () => void;
   saving: boolean;
   memoryBusy: boolean;
-  onSave: (settings: CortexSettings) => Promise<void>;
+  /**
+   * Resolves to the saved document, or `null` when nothing was saved. Leaving
+   * the screen after "Save and close" depends on telling the two apart.
+   */
+  onSave: (settings: CortexSettings) => Promise<CortexSettings | null | void>;
   onAddMemory: (memo: string) => Promise<void>;
   onReplaceMemory: (memos: string[]) => Promise<void>;
   onClearMemory: () => Promise<void>;
@@ -41,6 +47,7 @@ export type SettingsPanelProps = {
   onPullModel: (model: string) => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
   onDownloadGGUF: (request: ModelDownloadRequest) => Promise<void>;
+  /** Should leave through `navigate()`: that is where unsaved edits are asked about. */
   onClose: () => void;
 };
 
@@ -119,13 +126,64 @@ export function SettingsPanel({
   onClose,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
-  const baselineRef = useRef(settings);
+  const [baseline, setBaseline] = useState(settings);
   const [section, setSection] = useState<SettingsSection>("general");
+  // Adopt fields changed elsewhere while keeping local edits. This happens
+  // while rendering rather than in an effect so that `dirty` below is never
+  // computed against a draft that has not caught up: an effect would show
+  // "Unsaved changes" for a frame after every successful save.
+  if (baseline !== settings) {
+    setBaseline(settings);
+    setDraft(mergeChangedValues(draft, baseline, settings));
+  }
+  const dirty = !valuesEqual(draft, settings);
+  const dirtyRef = useRef(dirty);
   useEffect(() => {
-    const previousBaseline = baselineRef.current;
-    setDraft((currentDraft) => mergeChangedValues(currentDraft, previousBaseline, settings));
-    baselineRef.current = settings;
-  }, [settings]);
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  // Leaving with unsaved edits asks first. `navigate()` consults this guard,
+  // which covers the sidebar, links, the command palette and the Close button.
+  // Concurrent navigations share one prompt.
+  const pendingLeaveRef = useRef<{ promise: Promise<boolean>; resolve: (allow: boolean) => void } | null>(null);
+  const [leavePromptOpen, setLeavePromptOpen] = useState(false);
+  const [leaveSaving, setLeaveSaving] = useState(false);
+  const settleLeave = (allow: boolean) => {
+    const pending = pendingLeaveRef.current;
+    pendingLeaveRef.current = null;
+    setLeavePromptOpen(false);
+    pending?.resolve(allow);
+  };
+  useEffect(() => {
+    const unregister = registerNavigationGuard(() => {
+      if (!dirtyRef.current) return true;
+      if (!pendingLeaveRef.current) {
+        let resolve: (allow: boolean) => void = () => {};
+        const promise = new Promise<boolean>((done) => { resolve = done; });
+        pendingLeaveRef.current = { promise, resolve };
+        setLeavePromptOpen(true);
+      }
+      return pendingLeaveRef.current.promise;
+    });
+    return () => {
+      unregister();
+      // If this screen goes away with the prompt open, stay put.
+      pendingLeaveRef.current?.resolve(false);
+      pendingLeaveRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dirty) return undefined;
+    // Closing the window or reloading is not a route change; let the browser
+    // ask, as it does for any page with unsaved input.
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   const installedModels = localModelNames(models);
   const appearance = draft.appearance ?? {};
@@ -170,11 +228,12 @@ export function SettingsPanel({
       detail: [modelSource(model, detail) === "gguf" ? "GGUF file" : "Ollama", ...modelFacts(detail), ...(detail?.supports_vision ? ["Vision"] : [])].join(" · "),
     };
   });
-  const saveDraft = () => {
-    const latest = mergeChangedValues(draft, baselineRef.current, settings);
+  const saveDraft = async () => {
+    const submitted = draft;
+    const latest = mergeChangedValues(draft, baseline, settings);
     const latestModels = latest.models ?? {};
-    const chatWasEdited = !valuesEqual(draft.models?.chat, baselineRef.current.models?.chat);
-    return onSave({
+    const chatWasEdited = !valuesEqual(draft.models?.chat, baseline.models?.chat);
+    const saved = await onSave({
       ...latest,
       models: {
         ...latestModels,
@@ -187,6 +246,26 @@ export function SettingsPanel({
         title: null,
       },
     });
+    // The server may store a field differently from how it was typed (it trims
+    // the target language, for one). Show what was stored for every field that
+    // has not been edited since this save started, so a saved draft is clean.
+    if (saved) setDraft((current) => mergeChangedValues(current, submitted, saved));
+    return saved;
+  };
+
+  const saveAndLeave = async () => {
+    setLeaveSaving(true);
+    let saved: boolean;
+    try {
+      // `undefined` is a save that reported nothing; only an explicit null failed.
+      saved = (await saveDraft()) !== null;
+    } catch {
+      saved = false;
+    } finally {
+      setLeaveSaving(false);
+    }
+    // A failed save leaves the edits on screen; the caller has already said why.
+    settleLeave(saved);
   };
 
   return (
@@ -194,6 +273,9 @@ export function SettingsPanel({
       <header className="settings-dialog-header">
         <div className="settings-title-group">
           <h2 id="settings-title">Settings</h2>
+          <span aria-live="polite">
+            {dirty && <span className="settings-dirty-pill">Unsaved changes</span>}
+          </span>
         </div>
         <button className="icon-button icon-button-small" type="button" aria-label="Close settings" onClick={onClose}>
           <X aria-hidden="true" size={17} />
@@ -404,10 +486,28 @@ export function SettingsPanel({
 
       <footer className="settings-dialog-footer">
         <button className="button button-secondary" type="button" onClick={onClose}>Close</button>
-        <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving}>
+        <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving || !dirty}>
           <Save aria-hidden="true" size={16} /> {saving ? "Saving..." : "Save settings"}
         </button>
       </footer>
+
+      {leavePromptOpen && (
+        <AlertDialog.Root open onOpenChange={(open) => { if (!open && !leaveSaving) settleLeave(false); }}>
+          <DialogContent>
+            <AlertDialog.Title>Save your changes?</AlertDialog.Title>
+            <AlertDialog.Description className="delete-dialog-description">
+              You have unsaved changes to your settings. Leaving now would discard them.
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <button type="button" className="button button-secondary" onClick={() => settleLeave(false)} disabled={leaveSaving}>Keep editing</button>
+              <button type="button" className="button button-danger" onClick={() => settleLeave(true)} disabled={leaveSaving}>Discard</button>
+              <button type="button" className="button button-primary" onClick={() => void saveAndLeave()} disabled={leaveSaving}>
+                {leaveSaving ? "Saving..." : "Save and close"}
+              </button>
+            </div>
+          </DialogContent>
+        </AlertDialog.Root>
+      )}
     </section>
   );
 }

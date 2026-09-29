@@ -344,8 +344,66 @@ def test_native_window_uses_private_isolated_edge_webview(
     assert loaded_urls == ["http://127.0.0.1:8765"]
     assert dark_title_bar_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex"}]
     assert window_icon_calls == [{"pid": desktop_module.os.getpid(), "title": "Cortex", "icon_path": icon}]
-    assert webview_settings["ALLOW_DOWNLOADS"] is False
+    assert webview_settings["ALLOW_DOWNLOADS"] is True
     assert webview_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
+
+
+def _run_window_against_pywebview_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, object]:
+    """Run the window with settings that start as pywebview 6 ships them."""
+    webview_settings: dict[str, object] = {
+        "ALLOW_DOWNLOADS": False,
+        "ALLOW_FILE_URLS": True,
+        "OPEN_EXTERNAL_LINKS_IN_BROWSER": True,
+    }
+    window = SimpleNamespace(load_url=lambda url: None)
+
+    class FakeWebview:
+        renderer = "edgechromium"
+        settings = webview_settings
+
+        @staticmethod
+        def create_window(*args, **kwargs):
+            return window
+
+        @staticmethod
+        def start(*, func, gui, debug, private_mode, storage_path):
+            func()
+
+    monkeypatch.setattr(
+        desktop_module.importlib,
+        "import_module",
+        lambda name: FakeWebview if name == "webview" else None,
+    )
+    monkeypatch.setattr(desktop_module.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_module, "_apply_windows_dark_title_bar", lambda **kwargs: True)
+    desktop_module.run_desktop_window(
+        DesktopWindowConfig(url="http://127.0.0.1:8765", storage_path=tmp_path / "webview")
+    )
+    return webview_settings
+
+
+def test_native_window_allows_user_initiated_downloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # pywebview's Edge backend cancels every download while this is false, so
+    # the "Download artifact" button silently did nothing in the native window.
+    settings = _run_window_against_pywebview_defaults(tmp_path, monkeypatch)
+
+    assert settings["ALLOW_DOWNLOADS"] is True
+    # Links still leave for the system browser rather than opening in the window.
+    assert settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] is True
+
+
+def test_native_window_does_not_grant_file_url_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Left at pywebview's default this starts WebView2 with
+    # --allow-file-access-from-files. Cortex is served over loopback HTTP.
+    settings = _run_window_against_pywebview_defaults(tmp_path, monkeypatch)
+
+    assert settings["ALLOW_FILE_URLS"] is False
 
 
 def test_native_window_legacy_start_without_icon_option_still_launches(
