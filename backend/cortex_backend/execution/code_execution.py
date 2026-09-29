@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -317,6 +317,8 @@ class _Size(NamedTuple):
 
 
 _PERCENT_SPEC = re.compile(r"%(?:\([^)]*\))?[-#0 +]*(\*|\d+)?(?:\.(\*|\d+))?")
+# The same spec for a place no key can close: past the template's last ``)``.
+_PERCENT_SPEC_UNKEYED = re.compile(r"%[-#0 +]*(\*|\d+)?(?:\.(\*|\d+))?")
 
 
 class _CodeValidator(ast.NodeVisitor):
@@ -723,10 +725,32 @@ def _check_format_numbers(spec: str) -> None:
         _check_format_width(digits)
 
 
+def _percent_specs(template: str) -> Iterator[re.Match[str]]:
+    """Every conversion spec in ``template``, found in one linear pass.
+
+    A ``(key)`` can only close if a ``)`` follows it. With ``finditer`` each
+    ``%(`` in an unclosed run scanned ahead to the end of the template for a
+    ``)`` that never came, so ``"%(" * 30000`` cost about 1.8 s of validator
+    CPU. One look for the template's last ``)`` says where keys stop being
+    possible: a ``%(`` before it always closes, and matches after it use the
+    pattern without a key.
+    """
+
+    last_close = template.rfind(")")
+    position = 0
+    while position < len(template):
+        pattern = _PERCENT_SPEC if position <= last_close else _PERCENT_SPEC_UNKEYED
+        match = pattern.search(template, position)
+        if match is None:
+            return
+        yield match
+        position = match.end()
+
+
 def _check_percent_format(template: str) -> None:
     """Apply the same limit to a printf-style ``"%10d" % value`` template."""
 
-    for match in _PERCENT_SPEC.finditer(template):
+    for match in _percent_specs(template):
         for field in match.groups():
             if field == "*":
                 raise CodeExecutionError("format_width_not_constant")

@@ -13,10 +13,12 @@ job object stay the limits that always hold.
 from __future__ import annotations
 
 import sys
+import time
 
 import pytest
 
 from cortex_backend.execution.code_execution import (
+    MAX_CODE_SOURCE_BYTES,
     CodeExecutionError,
     CodeExecutionRequest,
     validate_code_source,
@@ -68,6 +70,14 @@ _ESCAPES = {
     "percent template width taken from an argument": (
         '_result = "%*d" % (5, 1)',
         "format_width_not_constant",
+    ),
+    "percent template width behind a mapping key": (
+        '_result = "%(n)10001d" % {"n": 1}',
+        "format_width_too_large",
+    ),
+    "percent template width after a run of unclosed keys": (
+        '_result = "' + "%(" * 500 + '%10001d" % 1',
+        "format_width_too_large",
     ),
     "range with a computed bound": ("_result = list(range(10 ** 9))", "bounded_range_required"),
     "range past the per-range cap outside a loop": (
@@ -127,6 +137,7 @@ _STILL_ALLOWED = {
     "a padded format": "_result = f\"{'x':>10}\"",
     "a zero-padded format": '_result = f"{5:010d}"',
     "a percent template": '_result = "%5.2f items" % 2.5',
+    "a percent template with a mapping key": '_result = "%(n)5d items" % {"n": 3}',
     "a literal percent sign": '_result = "100%"',
     "an escaped percent sign": '_result = "%d%%" % 5',
     "a sorted range": "_result = sorted(range(100))",
@@ -201,6 +212,33 @@ def test_a_very_long_expression_is_refused_not_a_crash() -> None:
         validate_code_source(source)
 
     assert refused.value.code in {"source_too_complex", "syntax_invalid"}
+
+
+def test_a_hostile_percent_template_is_checked_in_linear_time() -> None:
+    """A run of unclosed mapping keys must not make the template check quadratic.
+
+    Every ``%(`` used to scan to the end of the template looking for a ``)``
+    that never came, so a template of them at the source-size limit cost about
+    1.8 s of validator CPU, and a request validated it twice. The bound is
+    generous next to the few milliseconds a linear scan takes and well under
+    what the quadratic one cost, and it counts CPU time so a busy machine does
+    not decide the outcome.
+    """
+
+    source = '_result = "' + "%(" * 32_000 + '" % 1'
+    assert MAX_CODE_SOURCE_BYTES - 4_096 < len(source.encode("utf-8")) <= MAX_CODE_SOURCE_BYTES
+
+    started = time.process_time()
+    validate_code_source(source)
+    CodeExecutionRequest(
+        owner="a" * 64,
+        request_id="hostile-template",
+        source=source,
+        intent_summary="A synthetic template that must not stall validation.",
+    )
+    elapsed = time.process_time() - started
+
+    assert elapsed < 0.5, f"validating a hostile percent template took {elapsed:.2f}s of CPU"
 
 
 def test_growth_carried_through_a_name_is_not_tracked() -> None:
