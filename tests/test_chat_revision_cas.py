@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 from threading import Barrier
 from pathlib import Path
 
@@ -144,6 +145,53 @@ def test_the_chat_and_its_overview_report_the_same_revision(repository):
     repository.replace_message("thread", answer, "second answer")
 
     assert repository.get_chat("thread")["revision"] == _revision(repository) == 3
+
+
+def test_load_chat_reads_the_revision_and_the_messages_of_the_same_moment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A write landing between the two reads of load_chat must not be half seen.
+
+    A guarded write is compared against the revision the caller read, so a chat
+    that pairs an older revision with newer messages would let the caller build
+    on rows it never saw. The write is made, through the store's own write path,
+    the instant the statement that reads the messages starts.
+    """
+    database = DatabaseManager(db_path=str(tmp_path / "chats.sqlite"))
+    database.add_message("thread", "user", "one", thread_title="Topic", expected_revision=0)
+    database.add_message("thread", "assistant", "two", expected_revision=1)
+    landed: list[str] = []
+    failures: list[BaseException] = []
+
+    def write_between_the_reads(statement: str) -> None:
+        if landed or "FROM messages" not in statement or not statement.lstrip().upper().startswith("SELECT"):
+            return
+        landed.append("written")
+        try:
+            database.add_message("thread", "user", "three", expected_revision=2)
+        except BaseException as exc:  # a trace callback's errors vanish, so keep them for the test
+            failures.append(exc)
+
+    class TracedConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.set_trace_callback(write_between_the_reads)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *args, **kwargs: real_connect(*args, factory=TracedConnection, **kwargs)
+    )
+    chat = database.load_chat("thread")
+    monkeypatch.undo()
+
+    assert failures == []
+    assert landed == ["written"], "the second write never got its chance"
+    # Both halves are from before the write, and agree with each other.
+    assert chat is not None
+    assert [message["content"] for message in chat["messages"]] == ["one", "two"]
+    assert chat["revision"] == len(chat["messages"]) == 2
+    # The write itself was not lost: the next read sees it, at the revision it produced.
+    assert database.load_chat("thread")["revision"] == 3
 
 
 def test_renaming_or_filing_a_chat_does_not_move_its_revision(repository):

@@ -637,6 +637,39 @@ def test_a_second_migration_pass_is_silent_and_retires_the_source_directory(
     assert {chat["id"] for chat in manager.get_all_chats_summary()} == {"one", "two"}
 
 
+def test_an_imported_legacy_chat_starts_at_the_revision_of_its_message_count(tmp_path: Path) -> None:
+    """The revision a client reads after an import is what its next write is checked against."""
+    manager, legacy = _legacy_manager(tmp_path)
+    for name, count in (("three", 3), ("one", 1)):
+        (legacy / f"{name}.json").write_text(
+            json.dumps(
+                {
+                    "id": name,
+                    "title": name,
+                    "messages": [
+                        {"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index}"}
+                        for index in range(count)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert manager.migrate_from_json_if_needed().migrated == 2
+
+    for name, count in (("three", 3), ("one", 1)):
+        chat = manager.load_chat(name)
+        assert chat is not None and len(chat["messages"]) == count
+        assert chat["revision"] == count
+        assert manager.load_chat_overview(name)["revision"] == count
+    # A client that loaded the imported chat can continue it; one holding revision 0 cannot.
+    with pytest.raises(PersistenceError) as stale:
+        manager.add_message("three", "user", "from a stale client", expected_revision=0)
+    assert stale.value.operation == "chat_revision_conflict"
+    manager.add_message("three", "user", "next", expected_revision=3)
+    assert manager.load_chat_overview("three")["revision"] == 4
+
+
 def test_an_empty_legacy_directory_is_retired_without_a_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
