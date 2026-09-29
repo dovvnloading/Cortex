@@ -11,6 +11,7 @@ exception class and source locations -- file, line, function -- and nothing else
 
 from __future__ import annotations
 
+import contextlib
 from contextvars import ContextVar
 import logging
 import os
@@ -18,9 +19,12 @@ import traceback
 from uuid import uuid4
 
 from starlette.datastructures import MutableHeaders
+from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 REQUEST_ID_HEADER = "X-Request-ID"
+
+logger = logging.getLogger(__name__)
 
 _request_id: ContextVar[str | None] = ContextVar("cortex_request_id", default=None)
 
@@ -49,6 +53,14 @@ class RequestIdMiddleware:
     The caller's own ``X-Request-ID`` is deliberately not adopted: an id that
     ends up in log lines must be one this process made, or a request could put
     text of its choosing into them.
+
+    An exception that no route or handler dealt with would otherwise reach
+    Starlette's outermost error handler, which sits outside this middleware and
+    answers with a plain-text 500 that carries no id. It is caught here first: it
+    is logged with the id (class and frames only, never its text), answered with
+    a generic 500 that quotes the id, and then raised again, so the server and
+    the test client still see it exactly as before. If the response had already
+    started -- a stream that broke part way -- only the log line is added.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -60,14 +72,28 @@ class RequestIdMiddleware:
             return
         request_id = new_request_id()
         token = _request_id.set(request_id)
+        response_started = False
 
         async def send_with_request_id(message: Message) -> None:
+            nonlocal response_started
             if message["type"] == "http.response.start":
+                response_started = True
                 MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
             await send(message)
 
         try:
             await self.app(scope, receive, send_with_request_id)
+        except Exception as exc:
+            log_failure(logger, "Cortex API request failed", exc, request_id=request_id)
+            if not response_started:
+                # The original exception is raised again below, so a failure to
+                # send this answer (a caller that has gone) must not replace it.
+                with contextlib.suppress(Exception):
+                    await JSONResponse(
+                        {"detail": f"Internal server error. (Request ID: {request_id})"},
+                        status_code=500,
+                    )(scope, receive, send_with_request_id)
+            raise
         finally:
             _request_id.reset(token)
 

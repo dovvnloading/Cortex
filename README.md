@@ -454,10 +454,14 @@ browser cookies, history, extensions, or profiles. Prompts, responses, memories,
 and raw model output are excluded from diagnostic logs. When a request fails
 with a server error, the log records the exception class and the source
 locations it passed through, never its text, tagged with a short request id.
-Every API response carries that id in an `X-Request-ID` header, and the message
-for a failed request quotes it, so a report can be matched to its log line.
-Ollama remains local unless `CORTEX_OLLAMA_HOST` is intentionally configured
-otherwise.
+Every response the API sends carries that id in an `X-Request-ID` header
+(refusals by the host check and the size limit included; a response the web
+server itself sends before a request reaches Cortex, for a malformed request,
+does not). The message of a failed repository call and of an unhandled server
+error also quotes it, so a report can be matched to its log line; other error
+messages, such as a 404, a 409 or a change that did not persist, carry the
+header only. Ollama remains local unless `CORTEX_OLLAMA_HOST` is intentionally
+configured otherwise.
 
 The code-execution worker is a bounded containment boundary, not a claim of
 arbitrary operating-system isolation. Review the exact source and capabilities
