@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -24,14 +25,18 @@ from app_factory import build_app  # noqa: E402
 from cortex_backend import __version__ as CORTEX_VERSION  # noqa: E402
 from cortex_backend.core.paths import AppPathError, AppPaths  # noqa: E402
 from cortex_backend.launcher import (  # noqa: E402
+    WINDOW_TITLE,
     DesktopWindowConfig,
     DesktopWindowError,
     FrontendBuildError,
     InstanceLock,
+    InstanceRecord,
     WebViewRuntimeError,
+    WindowActivation,
     activate_process_window,
     ensure_frontend,
     ensure_webview2_runtime,
+    process_is_alive,
     run_desktop_window,
 )
 from cortex_backend.launcher.supervisor import (  # noqa: E402
@@ -49,7 +54,23 @@ DEFAULT_PORT = 0
 FRONTEND_PORT = 5173
 STARTUP_LOG_NAME = "startup.log"
 MAX_STARTUP_LOG_BYTES = 64 * 1024
+# How long uvicorn waits for open connections and background tasks once a
+# shutdown starts. It sits inside the launcher's 15 second wait for the server
+# thread, together with the job registry's own cancellation grace and the
+# runtime teardown that follows.
+GRACEFUL_SHUTDOWN_SECONDS = 5.0
+# A second launch waits this long for the first instance's window (the first
+# opens it only after the frontend build and any WebView2 install); each
+# attempt searches for the window for POLL seconds, then rests RETRY seconds.
+SECOND_LAUNCH_WAIT_SECONDS = 90.0
+SECOND_LAUNCH_POLL_SECONDS = 1.0
+SECOND_LAUNCH_RETRY_SECONDS = 0.25
 _last_startup_log_path: Path | None = None
+# _launch records that stopping the backend failed; _run_web turns that into a
+# failing exit only when nothing else failed, and main() reads the result to
+# skip the startup dialog for it.
+_backend_stop_failed = False
+_backend_abandoned_at_exit = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,6 +254,33 @@ def _startup_dialog_message(log_path: Path | None) -> str:
     )
 
 
+class _CortexServer(uvicorn.Server):
+    """A uvicorn server whose forced exit really exits and still tears down.
+
+    ``force_exit`` (a second Ctrl+C, or the launcher's own escalation) was
+    meant to be the way out of a stuck graceful shutdown, but in uvicorn it
+    does two things wrong. It skips ``lifespan.shutdown()`` -- the teardown
+    that cancels running jobs, stops the execution workers and terminates
+    llama-server -- and it cannot end the wait itself: the final
+    ``wait_closed()`` blocks while any response is still being written, so an
+    open event stream outlives it. Here a forced exit cancels the running
+    request tasks, the same thing the graceful timeout does, and then runs the
+    teardown. Running that teardown again after a normal one is harmless: the
+    lifespan has already completed.
+    """
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        graceful = asyncio.ensure_future(super().shutdown(sockets=sockets))
+        while not graceful.done():
+            if self.force_exit:
+                for task in list(self.server_state.tasks):
+                    task.cancel(msg="Task cancelled, forced exit requested")
+            await asyncio.wait({graceful}, timeout=0.1)
+        await graceful
+        if self.force_exit:
+            await self.lifespan.shutdown()
+
+
 def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
     # A PyInstaller windowed executable intentionally has no console streams.
     # Uvicorn's stock formatter probes ``sys.stderr.isatty()`` while it builds
@@ -248,8 +296,13 @@ def _server_for_app(app, *, port: int, log_level: str) -> uvicorn.Server:
         log_level=log_level,
         access_log=False,
         log_config=log_config,
+        # The default is to wait for every open connection forever, so one
+        # attached event stream held the process open after the window closed.
+        # After this long uvicorn cancels what is still running and carries on
+        # to the lifespan teardown.
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
-    server = uvicorn.Server(config)
+    server = _CortexServer(config)
     app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)
     return server
 
@@ -263,13 +316,11 @@ def _install_shutdown_signals(server: uvicorn.Server) -> None:
     -- so uvicorn's escalation never exists here and has to be carried by this
     handler instead.
 
-    Escalation is not a nicety. Graceful shutdown waits on
-    ``while self.server_state.connections and not self.force_exit``, with
-    ``timeout_graceful_shutdown`` left at its default of ``None``, so one
-    still-open SSE stream holds the process open indefinitely. Uvicorn logs
-    "Waiting for connections to close. (CTRL+C to force quit)" while it waits;
-    without this, that instruction is untrue and the only way out is killing
-    the process.
+    Escalation is still needed even though graceful shutdown is now bounded
+    (``timeout_graceful_shutdown``): uvicorn logs "Waiting for connections to
+    close. (CTRL+C to force quit)" while it waits, and without this handler
+    that instruction is untrue. A forced exit skips uvicorn's own lifespan
+    teardown, which is why the server is a ``_CortexServer``.
     """
     def request_shutdown(_signum: int, _frame: object) -> None:
         # Matches uvicorn's own handle_exit: the first interrupt asks, a
@@ -297,6 +348,15 @@ def _monitor_native_window(
     """Close the shell only after sustained backend-liveness failure."""
     failed_probes = 0
     while not window.events.closed.is_set():
+        if server.should_exit:
+            # Shutdown was requested here or by the backend itself (the
+            # in-app quit, Ctrl+C). There is nothing left for the window to
+            # show, so close it now rather than after eight failed probes.
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            return
         ready = wait_for_http(
             readiness_url,
             timeout=0.25,
@@ -346,7 +406,79 @@ def _run_headless(*, backend, frontend, server) -> int:
     return 0 if server.should_exit else 1
 
 
+def _acquire_or_hand_off(
+    instance: InstanceLock, *, port: int, headless: bool
+) -> tuple[InstanceRecord | None, int]:
+    """Take the instance lock, or hand this launch over to the instance that holds it.
+
+    Returns ``(record, 0)`` when this process owns the lock and should start.
+    Otherwise the launch is over and the second element is its exit code.
+
+    The first instance opens its window only after the frontend build, the
+    readiness gate and possibly a WebView2 install -- minutes, on a source tree
+    -- and the second launch is exactly what an impatient user does during
+    that. So it waits, bounded, for the window instead of reporting a failure.
+    If the first instance dies meanwhile its lock is free, and this launch
+    starts normally. Nothing on this path is an error: the app is running or
+    starting, which is what the user asked for.
+    """
+    deadline = time.monotonic() + SECOND_LAUNCH_WAIT_SECONDS
+    while True:
+        record = instance.acquire(port=port)
+        if record is not None:
+            return record, 0
+        existing = instance.read_record()
+        if existing is None:
+            print(
+                "Cortex could not acquire its instance lock and no valid running-instance record exists.",
+                file=sys.stderr,
+            )
+            return None, 2
+        if headless:
+            print(f"Cortex is already running on loopback port {existing.port}.")
+            return None, 0
+        while process_is_alive(existing.pid):
+            outcome = activate_process_window(
+                existing.pid, title=WINDOW_TITLE, timeout=SECOND_LAUNCH_POLL_SECONDS
+            )
+            if outcome is WindowActivation.ACTIVATED:
+                return None, 0
+            if outcome is WindowActivation.NOT_FOREGROUND:
+                print(
+                    "Cortex is already running; its window could not be brought to the front.",
+                    file=sys.stderr,
+                )
+                return None, 0
+            if time.monotonic() >= deadline:
+                print("Cortex is still starting; its window has not appeared yet.", file=sys.stderr)
+                return None, 0
+            time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
+        # The instance that owned the lock has exited, so its lock should be
+        # free: go round and take it. If it never is, the record is stale in a
+        # way this cannot resolve, and that is a failure.
+        if time.monotonic() >= deadline:
+            print(
+                "Cortex is not running, but its instance lock could not be taken.",
+                file=sys.stderr,
+            )
+            return None, 2
+        time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
+
+
 def _run_web(args: argparse.Namespace) -> int:
+    """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
+    global _backend_abandoned_at_exit, _backend_stop_failed
+    _backend_abandoned_at_exit = False
+    _backend_stop_failed = False
+    result = _launch(args)
+    if result == 0 and _backend_stop_failed:
+        _backend_abandoned_at_exit = True
+        return 1
+    return result
+
+
+def _launch(args: argparse.Namespace) -> int:
+    global _backend_stop_failed
     packaged = _is_packaged()
     frontend_root = _frontend_root()
 
@@ -390,25 +522,11 @@ def _run_web(args: argparse.Namespace) -> int:
 
     try:
         with InstanceLock(paths.data_dir) as instance:
-            record = instance.acquire(port=backend_port)
+            record, handoff_exit = _acquire_or_hand_off(
+                instance, port=backend_port, headless=args.headless
+            )
             if record is None:
-                existing = instance.read_record()
-                if existing is None:
-                    print(
-                        "Cortex could not acquire its instance lock and no valid running-instance record exists.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                if args.headless:
-                    print(f"Cortex is already running on loopback port {existing.port}.")
-                    return 0
-                if not activate_process_window(existing.pid):
-                    print(
-                        "Cortex is already running, but its native window could not be activated.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                return 0
+                return handoff_exit
 
             if backend_listener is None:
                 try:
@@ -497,12 +615,18 @@ def _run_web(args: argparse.Namespace) -> int:
                     return _run_headless(backend=backend, frontend=frontend, server=server)
 
                 ensure_webview2_runtime(_resource_root())
-                token = app.state.session_manager.bootstrap_token
+                # The token is good for five minutes from the moment it is
+                # issued, and everything above -- the readiness gate, the Vite
+                # gate, a WebView2 install that can run for ten minutes -- may
+                # have used that up if it had been issued when the app was
+                # built. Issue it here, immediately before the window needs it.
+                token, _expires_at = app.state.session_manager.issue_bootstrap_token()
                 print("Cortex is ready in its native desktop window.")
                 run_desktop_window(
                     DesktopWindowConfig(
                         url=_desktop_url(browser_port, token, handoff_secret),
                         storage_path=paths.webview_profile,
+                        title=WINDOW_TITLE,
                         icon_path=_app_asset_root() / "assets" / "cortex.ico",
                         debug=args.dev,
                     ),
@@ -545,6 +669,12 @@ def _run_web(args: argparse.Namespace) -> int:
                     try:
                         backend.stop()
                     except (RuntimeError, TimeoutError) as exc:
+                        _backend_stop_failed = True
+                        _write_startup_diagnostic(
+                            stage="backend shutdown",
+                            error=exc,
+                            data_dir=args.data_dir,
+                        )
                         print(str(exc), file=sys.stderr)
     finally:
         if backend_listener is not None:
@@ -573,7 +703,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Cortex startup error: {exc}", file=sys.stderr)
         result = 1
-    if result and _is_packaged() and os.name == "nt":
+    # A backend abandoned at exit is not a startup failure, and a modal box
+    # would keep the process alive after the user has already quit.
+    if result and not _backend_abandoned_at_exit and _is_packaged() and os.name == "nt":
         try:
             import ctypes
 

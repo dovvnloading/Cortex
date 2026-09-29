@@ -207,6 +207,18 @@ export function App({ api: providedApi }: Props) {
             setBootstrapToken("");
             setSessionReady(true);
           } catch (error) {
+            if (error instanceof ApiError && error.status === 401) {
+              // The launcher's bootstrap token is single-use and short-lived,
+              // so a 401 means this one is spent or stale and submitting it
+              // again can never work. Forget it so no retry offers it, and
+              // when the handoff secret is still known ask the running
+              // backend for a fresh one instead.
+              setBootstrapToken("");
+              if (handoffSecret) {
+                await reconnect();
+                return;
+              }
+            }
             setOnboardingError(error instanceof ApiError ? error.detail : "Could not open the local workspace.");
           } finally {
             setConnecting(false);

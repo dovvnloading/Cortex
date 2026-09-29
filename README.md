@@ -358,7 +358,9 @@ restore.
 - If the native window does not open from source, reinstall `requirements.txt`
   and verify that the Microsoft Edge WebView2 Runtime is installed.
 - If a previous Cortex instance is already running, launching Cortex again
-  restores its native window rather than starting a second server.
+  restores its native window rather than starting a second server. If that
+  instance is still starting, the second launch waits up to 90 seconds for its
+  window instead of reporting an error.
 
 ## Privacy and security
 

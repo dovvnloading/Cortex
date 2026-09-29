@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+import ctypes
+import http.client
 import json
+import os
 from pathlib import Path
 import signal
 import socket
+import subprocess
+import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +27,7 @@ from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
 from cortex_backend.launcher import supervisor as supervisor_module
 from cortex_backend.launcher import webview_runtime as runtime_module
-from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError
+from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError, WindowActivation
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
 from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
@@ -616,7 +624,9 @@ def test_default_runtime_starts_backend_then_native_window(
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            session_manager=SimpleNamespace(bootstrap_token="bootstrap-token")
+            session_manager=SimpleNamespace(
+                issue_bootstrap_token=lambda: ("bootstrap-token", None)
+            )
         )
     )
     server = SimpleNamespace(should_exit=False)
@@ -697,6 +707,10 @@ def test_default_runtime_starts_backend_then_native_window(
         destroy=lambda: None,
     )
     monkeypatch.setattr(launcher_main.time, "sleep", lambda *_args, **_kwargs: None)
+    # The window closing set should_exit above; a monitor that starts under an
+    # owned shutdown closes at once (covered separately), so make the backend
+    # look live again to exercise the probing path.
+    server.should_exit = False
     monitor(fake_window)
     assert probed_urls[-1] == (
         f"http://127.0.0.1:{reserved_port[0]}/api/v1/health/live"
@@ -1370,3 +1384,780 @@ def test_build_app_creates_one_ssl_context(tmp_path: Path, monkeypatch: pytest.M
     build_app(data_dir=tmp_path / "app-data", serve_frontend=False)
 
     assert fresh_builds == 1
+
+
+class _LaunchFakes:
+    """What ``_run_web`` needs to run a whole launch without a window or a port.
+
+    Everything that would touch the machine -- the instance lock, the frontend
+    build, the server thread, WebView2 and the native window -- is replaced.
+    ``calls`` records the order of the interesting steps, and ``on_window`` is
+    what runs in place of the GUI loop.
+    """
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        session_manager: object | None = None,
+        backend_stop_error: BaseException | None = None,
+        instance_class: type | None = None,
+        calls: list[str] | None = None,
+    ) -> None:
+        self.calls: list[str] = [] if calls is None else calls
+        self.window_configs: list[DesktopWindowConfig] = []
+        self.server = SimpleNamespace(should_exit=False, force_exit=False)
+        self.record = SimpleNamespace(pid=1234, port=0)
+        self.on_window: Callable[[DesktopWindowConfig, object], None] = lambda config, monitor: None
+        fakes = self
+        manager = session_manager or SimpleNamespace(
+            issue_bootstrap_token=lambda: ("bootstrap-token", None),
+        )
+        app = SimpleNamespace(state=SimpleNamespace(session_manager=manager))
+
+        class FakeInstance:
+            def __init__(self, _profile_dir):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                pass
+
+            def acquire(self, *, port):
+                fakes.record.port = port
+                return fakes.record
+
+            def read_secret(self, _record):
+                return "handoff-secret"
+
+        class FakeBackend:
+            def __init__(self, _server, *, sockets):
+                self.sockets = sockets
+                self.running = False
+                self.accepting_startup = True
+                self.error = None
+
+            def start(self):
+                self.running = True
+
+            def stop(self):
+                self.running = False
+                for listener in self.sockets:
+                    listener.close()
+                if backend_stop_error is not None:
+                    raise backend_stop_error
+
+        def window(config, monitor):
+            fakes.window_configs.append(config)
+            fakes.calls.append("window")
+            fakes.on_window(config, monitor)
+
+        monkeypatch.setattr(launcher_main, "InstanceLock", instance_class or FakeInstance)
+        monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_a, **_k: tmp_path)
+        monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
+        monkeypatch.setattr(launcher_main, "_server_for_app", lambda *_a, **_k: self.server)
+        monkeypatch.setattr(launcher_main, "_install_shutdown_signals", lambda _server: None)
+        monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
+        monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            launcher_main, "ensure_webview2_runtime", lambda _root: self.calls.append("runtime")
+        )
+        monkeypatch.setattr(launcher_main, "run_desktop_window", window)
+
+
+def _launch_args(tmp_path: Path, *extra: str):
+    return launcher_main.build_parser().parse_args(["--data-dir", str(tmp_path), *extra])
+
+
+def test_server_for_app_bounds_graceful_shutdown():
+    """uvicorn's default is to wait for every open connection forever."""
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    server = launcher_main._server_for_app(app, port=43125, log_level="info")
+
+    assert isinstance(server, launcher_main._CortexServer)
+    assert server.config.timeout_graceful_shutdown == launcher_main.GRACEFUL_SHUTDOWN_SECONDS
+    assert 0 < launcher_main.GRACEFUL_SHUTDOWN_SECONDS <= 10
+
+
+class _HoldOpenApp:
+    """An ASGI app with one response that never ends and an observable teardown."""
+
+    def __init__(self) -> None:
+        self.state = SimpleNamespace()
+        self.torn_down = threading.Event()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            await receive()
+            await send({"type": "lifespan.startup.complete"})
+            await receive()
+            self.torn_down.set()
+            await send({"type": "lifespan.shutdown.complete"})
+            return
+        headers = [(b"content-type", b"text/event-stream")]
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        if scope["path"] == "/hold":
+            while True:
+                await send({"type": "http.response.body", "body": b": hold\n\n", "more_body": True})
+                await asyncio.sleep(0.05)
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+def _serve_with_an_open_stream(monkeypatch: pytest.MonkeyPatch, *, graceful: float):
+    """Start the real server with one client attached to an endless response."""
+    monkeypatch.setattr(launcher_main, "GRACEFUL_SHUTDOWN_SECONDS", graceful)
+    app = _HoldOpenApp()
+    listener = launcher_main._reserve_port(0)
+    port = int(listener.getsockname()[1])
+    server = launcher_main._server_for_app(app, port=port, log_level="error")
+    supervisor = supervisor_module.ServerSupervisor(server, sockets=[listener])
+    supervisor.start()
+    assert supervisor_module.wait_for_http(
+        f"http://127.0.0.1:{port}/ready", timeout=10, is_alive=lambda: supervisor.accepting_startup
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("GET", "/hold")
+    assert connection.getresponse().read(3) == b": h"
+    return app, server, supervisor, connection
+
+
+def test_graceful_shutdown_gives_up_on_an_open_stream_and_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app, server, supervisor, connection = _serve_with_an_open_stream(monkeypatch, graceful=0.3)
+    try:
+        server.should_exit = True
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=10)
+        assert not supervisor.thread.is_alive(), "shutdown waited on the open stream"
+        assert app.torn_down.is_set()
+        assert server.force_exit is False
+    finally:
+        connection.close()
+        if supervisor.running and supervisor.thread is not None:
+            server.force_exit = True
+            supervisor.thread.join(timeout=10)
+
+
+def test_forced_exit_still_runs_the_lifespan_teardown(monkeypatch: pytest.MonkeyPatch):
+    """Ctrl+C twice, or the launcher's escalation, must not skip teardown.
+
+    uvicorn skips ``lifespan.shutdown()`` once ``force_exit`` is set, and that
+    teardown is what cancels jobs and terminates llama-server.
+    """
+    app, server, supervisor, connection = _serve_with_an_open_stream(monkeypatch, graceful=600.0)
+    try:
+        server.should_exit = True
+        server.force_exit = True
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=10)
+        assert not supervisor.thread.is_alive()
+        assert app.torn_down.is_set(), "a forced exit skipped the lifespan teardown"
+    finally:
+        connection.close()
+        if supervisor.running and supervisor.thread is not None:
+            server.force_exit = True
+            supervisor.thread.join(timeout=10)
+
+
+def test_supervisor_stop_escalates_to_force_exit():
+    release = threading.Event()
+
+    class StubbornServer:
+        should_exit = False
+        force_exit = False
+
+        def run(self):
+            # The orderly path never finishes on its own; only force_exit does.
+            deadline = time.monotonic() + 10
+            while not self.force_exit and time.monotonic() < deadline:
+                release.wait(timeout=0.005)
+
+    server = StubbornServer()
+    supervisor = supervisor_module.ServerSupervisor(server)
+    supervisor.start()
+
+    supervisor.stop(timeout=0.05, force_timeout=5.0)
+
+    assert server.should_exit is True
+    assert server.force_exit is True
+    assert not supervisor.running
+
+
+def test_supervisor_stop_raises_when_even_a_forced_exit_does_not_finish():
+    release = threading.Event()
+
+    class WedgedServer:
+        should_exit = False
+        force_exit = False
+
+        def run(self):
+            release.wait(timeout=10)
+
+    server = WedgedServer()
+    supervisor = supervisor_module.ServerSupervisor(server)
+    supervisor.start()
+    try:
+        with pytest.raises(TimeoutError, match="did not stop"):
+            supervisor.stop(timeout=0.05, force_timeout=0.05)
+        assert server.force_exit is True
+    finally:
+        release.set()
+        assert supervisor.thread is not None
+        supervisor.thread.join(timeout=5)
+
+
+def test_monitor_closes_window_immediately_after_owned_shutdown(monkeypatch: pytest.MonkeyPatch):
+    """Once the backend is stopping there is nothing to show, so no probe grace."""
+    probes: list[str] = []
+    monkeypatch.setattr(
+        launcher_main, "wait_for_http", lambda url, **_kwargs: probes.append(url) or False
+    )
+    destroyed: list[bool] = []
+    window = SimpleNamespace(
+        events=SimpleNamespace(closed=SimpleNamespace(is_set=lambda: False)),
+        destroy=lambda: destroyed.append(True),
+    )
+
+    launcher_main._monitor_native_window(
+        window,
+        backend=SimpleNamespace(error=None),
+        frontend=None,
+        server=SimpleNamespace(should_exit=True),
+        readiness_url="http://127.0.0.1:43125/api/v1/health/live",
+    )
+
+    assert destroyed == [True]
+    assert probes == []
+
+
+def test_run_web_does_not_exit_zero_when_the_backend_will_not_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(
+        monkeypatch,
+        tmp_path,
+        backend_stop_error=TimeoutError("Cortex backend did not stop within the shutdown grace period."),
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    assert launcher_main._backend_abandoned_at_exit is True
+    recorded = (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(encoding="utf-8")
+    assert "stage=backend shutdown" in recorded
+    assert fakes.calls == ["runtime", "window"]
+
+
+def test_run_web_exits_zero_when_the_backend_stops_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert launcher_main._backend_abandoned_at_exit is False
+
+
+def _record_startup_dialogs(monkeypatch: pytest.MonkeyPatch, resources: Path) -> list[str]:
+    """Act as the packaged app and collect the text of every message box."""
+    shown: list[str] = []
+    user32 = SimpleNamespace(MessageBoxW=lambda _hwnd, text, *_rest: shown.append(text))
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(launcher_main, "_is_packaged", lambda: True)
+    monkeypatch.setattr(launcher_main, "_frontend_root", lambda: resources)
+    monkeypatch.setattr(launcher_main, "_resource_root", lambda: resources)
+    monkeypatch.setattr(launcher_main, "_app_asset_root", lambda: resources)
+    monkeypatch.setattr(launcher_main.os, "name", "nt")
+    return shown
+
+
+def test_an_abandoned_backend_at_exit_does_not_show_the_could_not_start_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(
+        monkeypatch,
+        tmp_path,
+        backend_stop_error=TimeoutError("Cortex backend did not stop within the shutdown grace period."),
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert shown == []
+
+
+def test_a_startup_failure_still_shows_the_could_not_start_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_window(_config, _monitor):
+        raise DesktopWindowError("synthetic window failure")
+
+    fakes.on_window = failing_window
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    assert len(shown) == 1
+    assert "Cortex could not start" in shown[0]
+
+
+def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The token lives five minutes; it must start after the slow steps.
+
+    It used to be read from the session manager that ``build_app`` created,
+    before the readiness gate, the Vite gate and a WebView2 install that can
+    run for ten minutes, so a slow launch opened the window on a token that had
+    already expired.
+    """
+    calls: list[str] = []
+
+    def issue() -> tuple[str, None]:
+        calls.append("issue")
+        return "fresh-token", None
+
+    manager = SimpleNamespace(bootstrap_token="stale-token", issue_bootstrap_token=issue)
+    fakes = _LaunchFakes(monkeypatch, tmp_path, session_manager=manager, calls=calls)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert calls == ["runtime", "issue", "window"]
+    (config,) = fakes.window_configs
+    assert config.url == (
+        f"http://127.0.0.1:{fakes.record.port}/#bootstrap=fresh-token&handoff=handoff-secret"
+    )
+    assert "stale-token" not in config.url
+
+
+def _held_instance_class(acquired: list[bool], *, existing: object | None):
+    """An instance lock another process holds; ``acquired`` scripts each attempt.
+
+    ``acquired[i]`` says whether attempt ``i`` gets the lock (the last entry
+    repeats), and ``existing`` is the record left by the holder.
+    """
+    record = SimpleNamespace(pid=1234, port=0)
+    attempts: list[int] = []
+
+    class HeldInstance:
+        def __init__(self, _profile_dir):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            pass
+
+        def acquire(self, *, port):
+            attempts.append(port)
+            granted = acquired[min(len(attempts), len(acquired)) - 1]
+            if granted:
+                record.port = port
+            return record if granted else None
+
+        def read_record(self):
+            return existing
+
+        def read_secret(self, _record):
+            return "handoff-secret"
+
+    HeldInstance.attempts = attempts  # type: ignore[attr-defined]
+    return HeldInstance
+
+
+_FIRST_INSTANCE = SimpleNamespace(pid=4321, port=5555)
+
+
+def _second_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    activations: list[WindowActivation],
+    alive: list[bool] | None = None,
+    acquired: list[bool] | None = None,
+    existing: object | None = _FIRST_INSTANCE,
+    wait: float = 5.0,
+):
+    """Wire a launch that finds another instance already holding the lock.
+
+    ``activations`` scripts what each search for the first instance's window
+    finds (the last entry repeats) and ``alive`` whether it is still running.
+    Returns the launch fakes and the log of activation attempts.
+    """
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_WAIT_SECONDS", wait)
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_RETRY_SECONDS", 0.001)
+    held = _held_instance_class(acquired or [False], existing=existing)
+    fakes = _LaunchFakes(monkeypatch, tmp_path, instance_class=held)
+    attempts: list[tuple[int, str]] = []
+    liveness = alive or [True]
+    checks: list[int] = []
+
+    def activate(pid, *, title, timeout):
+        attempts.append((pid, title))
+        return activations[min(len(attempts), len(activations)) - 1]
+
+    def is_alive(_pid):
+        checks.append(1)
+        return liveness[min(len(checks), len(liveness)) - 1]
+
+    monkeypatch.setattr(launcher_main, "activate_process_window", activate)
+    monkeypatch.setattr(launcher_main, "process_is_alive", is_alive)
+    return fakes, attempts, held
+
+
+def test_second_launch_waits_for_the_first_instances_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A second double-click during a slow first launch is not an error.
+
+    The first instance opens its window only after the frontend build, the
+    readiness gate and possibly a WebView2 install. The second launch used to
+    look for that window for three seconds, then exit 2 and show "could not
+    start" -- with a message about a diagnostic log nobody had tried to write.
+    """
+    fakes, attempts, _held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[
+            WindowActivation.NO_WINDOW,
+            WindowActivation.NO_WINDOW,
+            WindowActivation.NO_WINDOW,
+            WindowActivation.ACTIVATED,
+        ],
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert attempts == [(4321, "Cortex")] * 4
+    assert fakes.calls == [], "the second launch must not start a second instance"
+    assert shown == []
+    assert "could not" not in capsys.readouterr().err
+
+
+def test_second_launch_starts_normally_when_the_first_instance_died(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        alive=[True, False],
+        acquired=[False, True],
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert len(attempts) == 1, "it kept looking for a window after the process was gone"
+    assert len(held.attempts) == 2, "the lock was not retried after the first instance died"
+    assert fakes.calls == ["runtime", "window"], "the launch did not go on to open its own window"
+
+
+def test_second_launch_gives_up_quietly_when_the_window_never_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NO_WINDOW], wait=0.05
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    started = time.monotonic()
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert time.monotonic() - started < 5
+    assert attempts, "it never looked for the window"
+    assert fakes.calls == []
+    assert shown == [], "an error dialog appeared for a launch that is merely slow"
+    assert "still starting" in capsys.readouterr().err
+
+
+def test_second_launch_reports_a_window_that_will_not_take_focus_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """An elevated first instance: the window exists but cannot be brought forward."""
+    _fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NOT_FOREGROUND]
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert len(attempts) == 1
+    assert shown == []
+    assert "could not be brought to the front" in capsys.readouterr().err
+
+
+def test_second_launch_fails_when_the_dead_instances_lock_can_never_be_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, _attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        alive=[False],
+        acquired=[False],
+        wait=0.05,
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    assert len(held.attempts) > 1
+    assert fakes.calls == []
+
+
+def test_second_launch_without_a_valid_record_is_still_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.ACTIVATED], existing=None
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 2
+
+    assert attempts == []
+    assert fakes.calls == []
+
+
+def test_second_headless_launch_reports_the_running_instance_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    _fakes, attempts, _held = _second_launch(
+        monkeypatch, tmp_path, activations=[WindowActivation.NO_WINDOW]
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path, "--headless")) == 0
+
+    assert attempts == []
+    assert "already running on loopback port 5555" in capsys.readouterr().out
+
+
+class _FakeUser32:
+    """Records the window calls ``activate_process_window`` makes."""
+
+    def __init__(self, *, foreground: bool) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self._foreground = foreground
+
+        def show(hwnd, command):
+            self.calls.append(("ShowWindowAsync", command))
+            return 1
+
+        def focus(hwnd):
+            self.calls.append(("SetForegroundWindow", hwnd))
+            return 1 if self._foreground else 0
+
+        self.ShowWindowAsync = show
+        self.SetForegroundWindow = focus
+
+
+@pytest.mark.parametrize(
+    ("window", "foreground", "expected"),
+    [
+        (777, True, WindowActivation.ACTIVATED),
+        (777, False, WindowActivation.NOT_FOREGROUND),
+        (None, True, WindowActivation.NO_WINDOW),
+    ],
+)
+def test_activate_process_window_reports_what_actually_happened(
+    monkeypatch: pytest.MonkeyPatch,
+    window: int | None,
+    foreground: bool,
+    expected: WindowActivation,
+):
+    searched: list[tuple[int, str]] = []
+    user32 = _FakeUser32(foreground=foreground)
+    monkeypatch.setattr(
+        desktop_module,
+        "_find_process_window",
+        lambda pid, title, *, timeout: searched.append((pid, title)) or window,
+    )
+    monkeypatch.setattr(desktop_module.ctypes, "WinDLL", lambda *_a, **_k: user32, raising=False)
+
+    assert desktop_module.activate_process_window(4321, title="Cortex Test", timeout=0.01) is expected
+
+    assert searched == [(4321, "Cortex Test")]
+    if window is None:
+        assert user32.calls == []
+    else:
+        assert user32.calls == [("ShowWindowAsync", 9), ("SetForegroundWindow", 777)]
+
+
+_SLEEP_FOREVER = [sys.executable, "-c", "import time; time.sleep(120)"]
+windows_only = pytest.mark.skipif(os.name != "nt", reason="uses Windows job objects and process APIs")
+
+
+def _recording_job(*, fail_assign: bool = False):
+    from cortex_backend.core.win_jobs import JobObjectError
+
+    class RecordingJob:
+        assigned: list[int] = []
+        closed = 0
+
+        def assign(self, pid: int) -> None:
+            type(self).assigned.append(pid)
+            if fail_assign:
+                raise JobObjectError("could not assign the process to containment")
+
+        def close(self) -> None:
+            type(self).closed += 1
+
+    return RecordingJob
+
+
+def _wait_until_gone(pid: int, *, describe: str) -> None:
+    from support import wait_until
+
+    wait_until(lambda: not desktop_module.process_is_alive(pid), timeout=30, describe=describe)
+
+
+def _kill_tree(pid: int) -> None:
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+
+
+@windows_only
+def test_child_process_supervisor_assigns_a_kill_on_close_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Vite is started in a job that dies with the launcher.
+
+    ``taskkill`` at an orderly stop was the only thing ending the Node and
+    esbuild tree, so a launcher that was killed or crashed left it holding the
+    dev port and a CPU.
+    """
+    job = _recording_job()
+    monkeypatch.setattr(supervisor_module, "KillOnCloseJob", job)
+    supervisor = supervisor_module.ChildProcessSupervisor(_SLEEP_FOREVER, cwd=tmp_path)
+
+    supervisor.start()
+    try:
+        assert supervisor.process is not None
+        assert job.assigned == [supervisor.process.pid]
+        assert job.closed == 0, "the job must stay open while the child runs"
+    finally:
+        supervisor.stop()
+
+    assert job.closed == 1
+    assert supervisor.running is False
+
+
+@windows_only
+def test_child_process_supervisor_fails_closed_when_the_child_cannot_be_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    job = _recording_job(fail_assign=True)
+    monkeypatch.setattr(supervisor_module, "KillOnCloseJob", job)
+    supervisor = supervisor_module.ChildProcessSupervisor(_SLEEP_FOREVER, cwd=tmp_path)
+
+    with pytest.raises(RuntimeError, match="contain"):
+        supervisor.start()
+
+    (pid,) = job.assigned
+    assert supervisor.process is not None and supervisor.process.pid == pid
+    _wait_until_gone(pid, describe="the uncontained child to be stopped")
+    assert job.closed == 1
+
+
+@windows_only
+def test_child_process_supervisor_stop_terminates_the_tree(tmp_path: Path):
+    grandchild_pid_file = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open(r'{grandchild_pid_file}', 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    supervisor = supervisor_module.ChildProcessSupervisor([sys.executable, "-c", script], cwd=tmp_path)
+    from support import wait_until
+
+    supervisor.start()
+    grandchild = 0
+    try:
+        wait_until(
+            lambda: grandchild_pid_file.exists() and grandchild_pid_file.read_text().strip(),
+            timeout=30,
+            describe="the child to start its own child",
+        )
+        grandchild = int(grandchild_pid_file.read_text().strip())
+        assert desktop_module.process_is_alive(grandchild)
+        assert supervisor.process is not None
+        child = supervisor.process.pid
+
+        supervisor.stop()
+
+        _wait_until_gone(child, describe="the supervised child to end")
+        _wait_until_gone(grandchild, describe="the supervised child's own child to end")
+    finally:
+        if supervisor.process is not None:
+            _kill_tree(supervisor.process.pid)
+        if grandchild:
+            _kill_tree(grandchild)
+
+
+@windows_only
+def test_a_launcher_killed_outright_takes_its_supervised_child_with_it(tmp_path: Path):
+    """The point of the job: no ``stop()`` runs, and the child still ends."""
+    from support import wait_until
+
+    backend_dir = Path(supervisor_module.__file__).resolve().parents[2]
+    pid_file = tmp_path / "child.pid"
+    launcher_script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from cortex_backend.launcher.supervisor import ChildProcessSupervisor\n"
+        "supervisor = ChildProcessSupervisor(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'], cwd=Path.cwd()\n"
+        ")\n"
+        "supervisor.start()\n"
+        f"Path(r'{pid_file}').write_text(str(supervisor.process.pid))\n"
+        "time.sleep(120)\n"
+    )
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", launcher_script],
+        env={**os.environ, "PYTHONPATH": str(backend_dir)},
+    )
+    child = 0
+    try:
+        wait_until(
+            lambda: pid_file.exists() and pid_file.read_text().strip(),
+            timeout=30,
+            describe="the launcher to start its child",
+        )
+        child = int(pid_file.read_text().strip())
+        assert desktop_module.process_is_alive(child)
+
+        launcher.kill()  # TerminateProcess: nothing in the launcher gets to run
+        launcher.wait(timeout=20)
+
+        _wait_until_gone(child, describe="the child of a killed launcher to end")
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=10)
+        if child:
+            _kill_tree(child)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses the Windows process APIs")
+def test_process_is_alive_tells_a_running_process_from_an_exited_one():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert desktop_module.process_is_alive(child.pid) is True
+        child.kill()
+        child.wait(timeout=10)
+        # The Popen object still holds its handle, so the process object
+        # exists but is signalled: that is "exited", not "alive".
+        assert desktop_module.process_is_alive(child.pid) is False
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+    assert desktop_module.process_is_alive(0) is False
+    assert desktop_module.process_is_alive(-5) is False

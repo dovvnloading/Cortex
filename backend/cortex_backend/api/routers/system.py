@@ -81,6 +81,10 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         if callback is None:
             raise HTTPException(status_code=409, detail="Shutdown is unavailable in this preview.")
         request.app.state.shutting_down = True
+        # Cancel jobs before asking the server to stop. The server drains open
+        # responses first and only then runs the lifespan teardown that would
+        # cancel them, and a generation stream ends only when its job does.
+        request.app.state.jobs.begin_shutdown()
         callback()
         return ShutdownResponse()
 

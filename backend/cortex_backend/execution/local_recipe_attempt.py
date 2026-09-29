@@ -13,9 +13,12 @@ from threading import Event, Lock
 import time
 from typing import Any
 
+from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
+
 from .lifecycle import RuntimeHealth
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
+    _contain_worker,
     _stop_process,
 )
 from .models import ExecutionJob
@@ -120,6 +123,7 @@ class LocalRecipeWorkerAttempt:
         except Exception:
             raise RecipeExecutionError("worker_plan_invalid") from None
         receiver = sender = process = None
+        worker_job: KillOnCloseJob | None = None
         try:
             receiver, sender = self._context.Pipe(duplex=False)
             process = self._context.Process(
@@ -133,6 +137,10 @@ class LocalRecipeWorkerAttempt:
                     raise RecipeExecutionError("worker_closed")
                 self._process = process
             process.start()
+            try:
+                worker_job = _contain_worker(process)
+            except JobObjectError:
+                raise RecipeExecutionError("process_isolation_unavailable") from None
             sender.close()
             sender = None
             deadline = time.monotonic() + self._timeout_seconds
@@ -165,6 +173,8 @@ class LocalRecipeWorkerAttempt:
                     pass
             if process is not None:
                 _stop_process(process, grace_seconds=self._cancel_grace_seconds)
+            if worker_job is not None:
+                worker_job.close()
             with self._lock:
                 if self._process is process:
                     self._process = None

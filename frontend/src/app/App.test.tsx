@@ -272,6 +272,86 @@ describe("App", () => {
     expect(window.location.href).not.toContain("handoff=");
   });
 
+  /** A backend whose bootstrap exchange accepts only the tokens in `valid`. */
+  const bootstrapBackend = (valid: string[], failure: { status: number; detail: string }) => {
+    const exchanged: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/session/exchange")) {
+        const token = (JSON.parse(String(init?.body)) as { bootstrap_token: string }).bootstrap_token;
+        exchanged.push(token);
+        if (!valid.includes(token)) return respond({ detail: failure.detail }, failure.status);
+        return respond({ session_token: "session-1", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
+      }
+      if (url.endsWith("/session/handoff")) return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
+      if (url.endsWith("/memories")) return respond({ memos: [] });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+    return { fetcher, exchanged };
+  };
+
+  it("falls back to the handoff when the launch token expired before the window opened", async () => {
+    // A slow launch (a WebView2 install, antivirus) can outlast the token's
+    // five minutes. Onboarding used to offer "Retry workspace startup", which
+    // submitted the same dead token again and could never succeed.
+    window.history.replaceState({}, "", "/#bootstrap=expired-token&handoff=desktop-handoff");
+    const { fetcher, exchanged } = bootstrapBackend(
+      ["fresh-bootstrap"],
+      { status: 401, detail: "Cortex bootstrap token invalid or already used." },
+    );
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(exchanged).toEqual(["expired-token", "fresh-bootstrap"]);
+    expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Retry workspace startup" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer to retry a spent launch token when there is no handoff to fall back on", async () => {
+    window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/#bootstrap=spent-token");
+    const { fetcher, exchanged } = bootstrapBackend(
+      [],
+      { status: 401, detail: "Cortex bootstrap token invalid or already used." },
+    );
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or already used");
+    expect(screen.getByRole("heading", { name: "Start local workspace" })).toBeVisible();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(exchanged).toEqual(["spent-token"]);
+    expect(callsTo(fetcher, "/session/handoff")).toHaveLength(0);
+  });
+
+  it("still offers a retry of the launch token after a failure that is not a rejection", async () => {
+    // A 503 says nothing about the token, which is still unspent.
+    window.history.replaceState({}, "", "/#bootstrap=launch-token&handoff=desktop-handoff");
+    let unavailable = true;
+    const { fetcher: inner, exchanged } = bootstrapBackend(
+      ["launch-token"],
+      { status: 503, detail: "Launcher busy." },
+    );
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).endsWith("/session/exchange") && unavailable) {
+        unavailable = false;
+        exchanged.push("launch-token");
+        return respond({ detail: "Launcher busy." }, 503);
+      }
+      return inner(input, init);
+    });
+    const user = userEvent.setup();
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    await user.click(await screen.findByRole("button", { name: "Retry workspace startup" }));
+
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(exchanged).toEqual(["launch-token", "launch-token"]);
+    expect(callsTo(fetcher, "/session/handoff")).toHaveLength(0);
+  });
+
   it("returns to onboarding but keeps the running generation when its stream session cannot be renewed", async () => {
     // No handoff secret: nothing can renew the session, so the app has to go
     // back to onboarding. The job is still running on the backend, though, and

@@ -43,6 +43,11 @@ LIVE_READER_EVENT_HEADROOM = 8
 DEFAULT_MAX_EVENT_BYTES = 1_048_576
 _EVENT_DATA_TRUNCATED = "Event data omitted because it exceeded the retention limit."
 
+# How long an event stream that was told to stop keeps waiting for its job to
+# publish a terminal event. Cancellation normally lands within a few poll
+# ticks; this only bounds a worker that is stuck and never answers it.
+STREAM_STOP_FLUSH_SECONDS = 1.0
+
 
 class JobConflict(RuntimeError):
     """Raised when the single active job for a kind already exists."""
@@ -587,6 +592,7 @@ class JobRegistry:
         *,
         owner: str,
         after_sequence: int = 0,
+        stop: Callable[[], bool] | None = None,
     ):
         """Yield retained and newly published events in sequence order.
 
@@ -596,6 +602,12 @@ class JobRegistry:
         at that oldest event, while sequence IDs continue to identify the
         original ordering.  Terminal status and its final event are always
         retained for a job that remains in this registry.
+
+        ``stop`` lets the caller end a stream whose job has not finished. Once
+        it returns true the stream keeps delivering for at most
+        ``STREAM_STOP_FLUSH_SECONDS`` -- long enough for a worker that was just
+        asked to cancel to publish its terminal event -- and then ends,
+        terminal or not.
         """
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
@@ -605,14 +617,24 @@ class JobRegistry:
         with self._lock:
             record.live_cursors[reader_id] = cursor
         try:
-            async for event in self._drain(record, reader_id, cursor):
+            async for event in self._drain(record, reader_id, cursor, stop):
                 yield event
         finally:
             with self._lock:
                 record.live_cursors.pop(reader_id, None)
 
-    async def _drain(self, record, reader_id: int, cursor: int):
+    async def _drain(
+        self,
+        record,
+        reader_id: int,
+        cursor: int,
+        stop: Callable[[], bool] | None = None,
+    ):
+        loop = asyncio.get_running_loop()
+        stop_deadline: float | None = None
         while True:
+            if stop_deadline is None and stop is not None and stop():
+                stop_deadline = loop.time() + STREAM_STOP_FLUSH_SECONDS
             with self._lock:
                 # record.events is appended in sequence order and evicted from
                 # the front, so it is always sorted. Scanning all of it on
@@ -632,10 +654,55 @@ class JobRegistry:
                     # has actually got, not just where it started.
                     if reader_id in record.live_cursors:
                         record.live_cursors[reader_id] = cursor
+                if stop_deadline is not None and loop.time() >= stop_deadline:
+                    return
                 continue
             if terminal:
                 return
+            if stop_deadline is not None and loop.time() >= stop_deadline:
+                return
             await asyncio.sleep(self._poll_seconds)
+
+    def begin_shutdown(self) -> None:
+        """Stop admitting work and ask every live job to stop, without waiting.
+
+        This is the synchronous first half of :meth:`shutdown`. It exists so a
+        caller that is about to ask the server to stop can cancel jobs *first*:
+        the server drains open responses before it runs the lifespan teardown
+        that calls :meth:`shutdown`, and a generation stream only ends when its
+        job does. Safe to call more than once and from any thread; a job that
+        is already cancelling, committing or finished is left alone.
+        """
+        with self._lock:
+            self._begin_shutdown_locked()
+
+    def _begin_shutdown_locked(self) -> None:
+        self._accepting = False
+        records = [
+            record
+            for record in self._records.values()
+            if record.status not in TERMINAL_STATUSES
+        ]
+        for record in records:
+            if record.commit_started:
+                continue
+            if record.status != "cancelling":
+                record.cancel_event.set()
+                self._append_event(
+                    record,
+                    kind="state",
+                    status="cancelling",
+                    data={"message": "Stopping response during shutdown..."},
+                )
+            # See cancel(): a record still preparing has no task yet, but
+            # start_reserved's phase three will close it out once it sees
+            # that admission has stopped accepting work.
+            if record.task is None and not record.starting:
+                record.prepared = True
+                record.reservation_token = None
+                self._finalize_cancellation(record)
+                if self._active.get(record.kind) == record.job_id:
+                    self._active.pop(record.kind, None)
 
     async def shutdown(self) -> None:
         """Request cancellation and wait for owned workers to finish safely.
@@ -656,32 +723,7 @@ class JobRegistry:
         can proceed with the rest of teardown.
         """
         with self._lock:
-            self._accepting = False
-            records = [
-                record
-                for record in self._records.values()
-                if record.status not in TERMINAL_STATUSES
-            ]
-            for record in records:
-                if record.commit_started:
-                    continue
-                if record.status != "cancelling":
-                    record.cancel_event.set()
-                    self._append_event(
-                        record,
-                        kind="state",
-                        status="cancelling",
-                        data={"message": "Stopping response during shutdown..."},
-                    )
-                # See cancel(): a record still preparing has no task yet, but
-                # start_reserved's phase three will close it out once it sees
-                # that admission has stopped accepting work.
-                if record.task is None and not record.starting:
-                    record.prepared = True
-                    record.reservation_token = None
-                    self._finalize_cancellation(record)
-                    if self._active.get(record.kind) == record.job_id:
-                        self._active.pop(record.kind, None)
+            self._begin_shutdown_locked()
             tasks = [record.task for record in self._records.values() if record.task]
         pending = {task for task in tasks if task is not asyncio.current_task()}
         if not pending:

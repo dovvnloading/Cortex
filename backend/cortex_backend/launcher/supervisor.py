@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
+
 
 DEV_SERVER_ID_HEADER = "X-Cortex-Dev-Server"
 
@@ -100,10 +102,20 @@ class ServerSupervisor:
         """Remain probeable until the server exits or is asked to stop."""
         return not self.exited_unexpectedly.is_set() and not self.server.should_exit
 
-    def stop(self, *, timeout: float = 15.0) -> None:
+    def stop(self, *, timeout: float = 15.0, force_timeout: float = 5.0) -> None:
+        """Ask the server to stop, escalate once, and raise if it still runs.
+
+        The first wait covers an orderly shutdown. When it is not enough the
+        server is told to stop waiting on anything (``force_exit``) and given
+        ``force_timeout`` more to finish; a server that is still alive after
+        that is abandoned, and the caller is told.
+        """
         self.server.should_exit = True
         if self.thread is not None:
             self.thread.join(timeout=timeout)
+            if self.thread.is_alive():
+                self.server.force_exit = True
+                self.thread.join(timeout=force_timeout)
         if self.thread is not None and self.thread.is_alive():
             raise TimeoutError("Cortex backend did not stop within the shutdown grace period.")
         if self.error is not None:
@@ -111,7 +123,11 @@ class ServerSupervisor:
 
 
 class ChildProcessSupervisor:
-    """Own a development child and terminate its complete Windows tree."""
+    """Own a development child and terminate its complete Windows tree.
+
+    The child also runs in a kill-on-close job object, so the tree ends with
+    this process even when ``stop`` never gets to run.
+    """
 
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str] | None = None):
         self.command = command
@@ -119,6 +135,10 @@ class ChildProcessSupervisor:
         self.env = env
         self.process: subprocess.Popen[str] | None = None
         self._log_thread: threading.Thread | None = None
+        # Owns the child's tree for as long as this object lives: if Cortex
+        # dies without running stop(), Windows closes the handle with it and
+        # ends the tree. Kept here so it also closes on an orderly stop.
+        self._job: KillOnCloseJob | None = None
 
     def start(self) -> None:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -134,6 +154,18 @@ class ChildProcessSupervisor:
             )
         except OSError as exc:
             raise RuntimeError("Could not start the supervised frontend process.") from exc
+
+        if os.name == "nt":
+            # Assigned right after the child starts, so a grandchild it spawned
+            # in that instant is outside the job; stop() still ends the whole
+            # tree with taskkill.
+            try:
+                self._job = KillOnCloseJob()
+                self._job.assign(self.process.pid)
+            except JobObjectError as exc:
+                self._kill_tree()
+                self._close_job()
+                raise RuntimeError("Could not contain the supervised frontend process.") from exc
 
         def stream_logs() -> None:
             if self.process is None or self.process.stdout is None:
@@ -153,18 +185,30 @@ class ChildProcessSupervisor:
         return self.process.poll() if self.process is not None else None
 
     def stop(self, *, timeout: float = 10.0) -> None:
-        if self.process is None or self.process.poll() is not None:
+        try:
+            if self.process is None or self.process.poll() is not None:
+                return
+            self._kill_tree()
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError("The supervised frontend process did not stop.") from exc
+        finally:
+            self._close_job()
+
+    def _kill_tree(self) -> None:
+        if self.process is None:
             return
-        pid = self.process.pid
         if os.name == "nt":
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
                 capture_output=True,
                 check=False,
             )
         else:  # pragma: no cover - Windows is the supported launcher target
             self.process.terminate()
-        try:
-            self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("The supervised frontend process did not stop.") from exc
+
+    def _close_job(self) -> None:
+        job, self._job = self._job, None
+        if job is not None:
+            job.close()

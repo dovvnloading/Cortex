@@ -34,13 +34,22 @@ import subprocess
 import sys
 import threading
 import time
-from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from collections.abc import Callable, Mapping
 
 import httpx
+
+from cortex_backend.core.win_jobs import (
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE as _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS as _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+    PROCESS_SET_QUOTA as _PROCESS_SET_QUOTA,
+    PROCESS_TERMINATE as _PROCESS_TERMINATE,
+    JobObjectExtendedLimitInformation as _JobObjectExtendedLimitInformation,
+    JobWin32 as _JobWin32,
+    real_job_win32 as _real_job_win32,
+)
 
 from .binary_fetcher import BinaryFetcher
 from .binary_release import GpuBackend, PinnedRelease
@@ -250,79 +259,11 @@ def _spawn_process(
     )
 
 
-# Windows Job Object plumbing so llama-server cannot outlive this process.
-# The struct layout below is stable, documented Win32 API surface.
-_JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_PROCESS_SET_QUOTA = 0x0100
-_PROCESS_TERMINATE = 0x0001
-
-
+# Windows Job Object plumbing so llama-server cannot outlive this process. The
+# structure layouts and kernel32 entry points are shared with the other
+# kill-on-close users in cortex_backend.core.win_jobs.
 class _JobObjectContainmentError(RuntimeError):
     """Raised when a model process cannot be contained by a Job Object."""
-
-
-class _JobObjectBasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time", ctypes.c_int64),
-        ("per_job_user_time", ctypes.c_int64),
-        ("limit_flags", wintypes.DWORD),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", wintypes.DWORD),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", wintypes.DWORD),
-        ("scheduling_class", wintypes.DWORD),
-    ]
-
-
-class _JobObjectIoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _JobObjectExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _JobObjectBasicLimitInformation),
-        ("io_info", _JobObjectIoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
-
-
-class _JobWin32(Protocol):
-    """The handful of kernel32 entry points needed to assign a kill-on-close
-    Job Object -- small and injectable so tests can verify the exact call
-    sequence without touching real Windows APIs or spawning a real process."""
-
-    def CreateJobObjectW(self, security_attributes: Any, name: Any) -> int: ...
-    def SetInformationJobObject(self, job: int, info_class: int, info: Any, info_size: int) -> int: ...
-    def OpenProcess(self, access: int, inherit_handle: int, pid: int) -> int: ...
-    def AssignProcessToJobObject(self, job: int, process: int) -> int: ...
-    def CloseHandle(self, handle: int) -> int: ...
-
-
-def _real_job_win32() -> _JobWin32:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
-    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-    kernel32.SetInformationJobObject.restype = wintypes.BOOL
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    return kernel32
 
 
 class _JobObjectLauncher:

@@ -152,6 +152,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 job_id,
                 owner=_durable_owner(principal),
                 after_sequence=cursor,
+                # An open stream would hold graceful shutdown open for as long
+                # as its job runs; end it once shutdown has been requested.
+                stop=lambda: request.app.state.shutting_down,
             )
         except (JobNotFound, JobOwnershipError) as exc:
             _raise_job_error(exc)
@@ -325,6 +328,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 job_id,
                 owner=_durable_owner(principal),
                 after_sequence=cursor,
+                # An open stream would hold graceful shutdown open for as long
+                # as its job runs; end it once shutdown has been requested.
+                stop=lambda: request.app.state.shutting_down,
             )
         except (JobNotFound, JobOwnershipError) as exc:
             _raise_job_error(exc)
