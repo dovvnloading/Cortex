@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from cortex_backend.repositories import sqlite_reclaim
-from cortex_backend.repositories.sqlite_reclaim import reclaim_free_space
+from cortex_backend.repositories.sqlite_reclaim import BACKOFF_SECONDS, reclaim_free_space
 
 ROWS_KEPT = 100
 
@@ -117,7 +118,12 @@ def test_running_out_of_time_rewrites_nothing_and_a_later_run_finishes(tmp_path:
             before.auto_vacuum,
         )
         assert untouched.intact
-        assert reclaim_free_space(path) in ("trimmed", "rewritten")
+        # An interrupted rewrite is not retried at once (see the back-off tests
+        # below); a later launch, past the back-off, finishes it.
+        assert reclaim_free_space(path, wall_clock=lambda: time.time() + BACKOFF_SECONDS + 1) in (
+            "trimmed",
+            "rewritten",
+        )
         assert _facts(path).rows == before.rows
 
 
@@ -208,3 +214,133 @@ def test_a_file_that_is_not_a_database_is_reported_not_raised(tmp_path: Path) ->
 
     assert reclaim_free_space(path) == "gave_up"
     assert path.read_bytes() == before
+
+
+# -- a rewrite that fails is not retried at every launch -------------------------------
+
+
+def _marker(path: Path) -> Path:
+    return Path(f"{path}.reclaim-backoff")
+
+
+class _Rewrites:
+    """Counts the full rewrites a test lets through, without changing what they do."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.count = 0
+        real = sqlite_reclaim._rewrite
+
+        def counted(connection: sqlite3.Connection):
+            self.count += 1
+            return real(connection)
+
+        monkeypatch.setattr(sqlite_reclaim, "_rewrite", counted)
+
+
+def test_a_rewrite_that_ran_out_of_time_is_not_tried_again_until_the_backoff_has_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without this, a file whose rewrite needs more than the limit adds the limit to every launch."""
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False, keep=700)
+    before = _facts(path)
+    rewrites = _Rewrites(monkeypatch)
+    failed_at = 1_000_000.0
+
+    assert reclaim_free_space(path, time_limit=0.0, wall_clock=lambda: failed_at) == "gave_up"
+    assert rewrites.count == 1
+    assert _marker(path).read_text(encoding="ascii").strip() == str(int(failed_at))
+
+    # Every launch for the next week costs nothing and touches nothing.
+    for launch in (1, 3600, BACKOFF_SECONDS - 1):
+        now = failed_at + launch
+        assert reclaim_free_space(path, wall_clock=lambda now=now: now) == "backed_off"
+    assert rewrites.count == 1
+    assert (_facts(path).rows, _facts(path).free_pages, _facts(path).auto_vacuum) == (
+        before.rows,
+        before.free_pages,
+        0,
+    )
+
+    # After it, the rewrite is tried again, finishes, and the note of the failure goes.
+    assert reclaim_free_space(path, wall_clock=lambda: failed_at + BACKOFF_SECONDS) == "rewritten"
+    assert rewrites.count == 2
+    after = _facts(path)
+    assert (after.free_pages, after.auto_vacuum, after.rows, after.intact) == (0, 2, before.rows, True)
+    assert not _marker(path).exists()
+
+
+def test_a_rewrite_that_fails_for_any_other_reason_is_backed_off_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False)
+
+    def full_disk(_connection: sqlite3.Connection):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(sqlite_reclaim, "_rewrite", full_disk)
+    assert reclaim_free_space(path, wall_clock=lambda: 5_000.0) == "gave_up"
+    assert _marker(path).exists()
+    monkeypatch.undo()
+
+    assert reclaim_free_space(path, wall_clock=lambda: 5_001.0) == "backed_off"
+    assert _facts(path).auto_vacuum == 0
+
+
+def test_a_rewrite_held_off_by_another_writer_is_not_backed_off(tmp_path: Path) -> None:
+    """A lock says nothing about the rewrite: the next launch may well succeed."""
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False)
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        assert reclaim_free_space(path, busy_timeout=0.05) == "gave_up"
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert not _marker(path).exists()
+    assert reclaim_free_space(path) == "rewritten"
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["not a time", "", "\x00\x01", "1e999999", "-1", "99999999999"],
+    ids=["text", "empty", "binary", "overflow", "ancient", "in-the-future"],
+)
+def test_a_marker_that_says_nothing_usable_does_not_hold_the_rewrite_off(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False)
+    _marker(path).write_bytes(content.encode("ascii"))
+
+    assert reclaim_free_space(path, wall_clock=lambda: 1_000_000.0) == "rewritten"
+
+    assert not _marker(path).exists()
+
+
+def test_the_backoff_does_not_slow_the_incremental_path(tmp_path: Path) -> None:
+    """Only the whole-file rewrite is repeated cost; incremental steps keep what they freed."""
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=True)
+    _marker(path).write_text(f"{int(time.time())}\n", encoding="ascii")
+
+    assert reclaim_free_space(path) == "trimmed"
+
+
+def test_a_marker_that_cannot_be_written_or_read_is_not_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False, keep=700)
+    _marker(path).mkdir()  # nothing can be written to, or read from, this name
+
+    assert reclaim_free_space(path, time_limit=0.0) == "gave_up"
+    assert reclaim_free_space(path, wall_clock=lambda: time.time() + BACKOFF_SECONDS + 1) == "rewritten"
+
+
+def test_a_database_with_nothing_to_reclaim_leaves_no_marker(tmp_path: Path) -> None:
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=False, deleted=False)
+
+    assert reclaim_free_space(path, time_limit=0.0) == "nothing_to_do"
+
+    assert not _marker(path).exists()

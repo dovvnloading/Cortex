@@ -16,7 +16,7 @@ import sys
 import pytest
 
 from sqlite_faults import volume_without_write_ahead_logging
-from cortex_backend.repositories import storage
+from cortex_backend.repositories import sqlite_reclaim, storage
 from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
 
@@ -1200,15 +1200,20 @@ def test_startup_reclaims_free_pages_after_large_deletes(tmp_path: Path) -> None
     assert DatabaseManager._database_is_valid(db_path)
 
 
-def test_startup_converts_an_existing_database_once_most_of_it_is_free(tmp_path: Path) -> None:
-    """A file made before this release has no auto-vacuum; one rewrite fixes that."""
-    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+def _database_without_auto_vacuum(db_path: str) -> None:
+    """An empty current-schema database as a release before auto-vacuum created it."""
     connection = sqlite3.connect(db_path)
     for step in range(1, DatabaseManager.SCHEMA_VERSION + 1):
         storage._MIGRATIONS[step](connection)
     connection.execute(f"PRAGMA user_version = {DatabaseManager.SCHEMA_VERSION}")
     connection.commit()
     connection.close()
+
+
+def test_startup_converts_an_existing_database_once_most_of_it_is_free(tmp_path: Path) -> None:
+    """A file made before this release has no auto-vacuum; one rewrite fixes that."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    _database_without_auto_vacuum(db_path)
     manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
     assert _space_facts(db_path)["auto_vacuum"] == 0  # an existing file is not silently altered
     kept = _fill_then_delete(manager, keep=3)
@@ -1221,6 +1226,53 @@ def test_startup_converts_an_existing_database_once_most_of_it_is_free(tmp_path:
     assert after["bytes"] < before["bytes"] / 4
     assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
     assert DatabaseManager._database_is_valid(db_path)
+
+
+def test_a_rewrite_that_failed_at_one_launch_is_not_retried_at_the_next_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file whose rewrite cannot finish in the time limit must not cost every launch that limit."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    _database_without_auto_vacuum(db_path)
+    kept = _fill_then_delete(
+        DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir), keep=3
+    )
+    before = _space_facts(db_path)
+    marker = Path(f"{db_path}.reclaim-backoff")
+
+    # A launch whose rewrite cannot finish (out of time or out of room, as SQLite
+    # reports it): it is rolled back, and the launch carries on regardless.
+    def cannot_finish(_connection: sqlite3.Connection):
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(sqlite_reclaim, "_rewrite", cannot_finish)
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    monkeypatch.undo()
+    assert _space_facts(db_path) == before
+    assert marker.exists()
+
+    # The launches after it leave the file alone, however much time they would have had.
+    rewrites: list[str] = []
+    real_rewrite = sqlite_reclaim._rewrite
+
+    def counted(connection: sqlite3.Connection):
+        rewrites.append("ran")
+        return real_rewrite(connection)
+
+    monkeypatch.setattr(sqlite_reclaim, "_rewrite", counted)
+    for _launch in range(3):
+        DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert rewrites == []
+    assert _space_facts(db_path) == before
+
+    # Once the back-off is over (the marker holds only the time of the failure) it is tried again.
+    marker.write_text("0\n", encoding="ascii")
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert rewrites == ["ran"]
+    after = _space_facts(db_path)
+    assert (after["free_pages"], after["auto_vacuum"]) == (0, 2)
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert not marker.exists()
 
 
 def test_a_database_that_is_mostly_in_use_is_not_touched_at_startup(tmp_path: Path) -> None:

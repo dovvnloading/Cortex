@@ -1042,7 +1042,10 @@ class DatabaseManager:
           request, so it never competes with a write, and another connection
           holding the write lock only makes it give up;
         * it is bounded in time and in size, and it is all-or-nothing, so
-          whatever the outcome the file holds exactly the rows it held.
+          whatever the outcome the file holds exactly the rows it held;
+        * a full rewrite that fails or runs out of time is not tried again for a
+          week (a marker beside the database, see sqlite_reclaim), so a file it
+          cannot finish on does not cost every launch the whole time limit.
 
         A failure is logged and ignored, like a failed backup: it is not a
         reason to refuse to start.

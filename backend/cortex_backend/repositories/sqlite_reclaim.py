@@ -17,6 +17,16 @@ Two mechanisms return it, and this module uses whichever the file supports:
   once with ``auto_vacuum = INCREMENTAL`` set also converts the file, so every
   later start can use the cheap path.
 
+A rewrite that fails or runs out of time is rolled back, and it would fail the
+same way at the next start: a file just under the size ceiling whose rewrite
+takes longer than the time limit would add that whole limit to every launch,
+for good. So the failure is noted in a small marker file beside the database
+(``<database>.reclaim-backoff``, holding only the time), and no rewrite is tried
+again until ``BACKOFF_SECONDS`` have passed. The marker is only ever read as a
+time: one that is unreadable, or dated in the future, is ignored, and another
+program holding the write lock is not a failure of the rewrite and leaves none.
+The incremental path needs no such delay, because every pass keeps what it freed.
+
 Nothing here runs unless more than a quarter of the file is free pages, so a
 healthy database is never touched. Callers own the safety around it: the chat
 store calls this once at startup, after a verified backup of the same content
@@ -46,6 +56,13 @@ MIN_FREE_PAGES = 64
 TIME_LIMIT_SECONDS = 20.0
 BUSY_TIMEOUT_SECONDS = 5.0
 
+# After a rewrite fails or times out, none is tried again for this long. A week
+# is long enough to stop a slow rewrite costing every launch its time limit, and
+# short enough that a database that has since shrunk or a drive that has since
+# been cleaned out is tried again soon.
+BACKOFF_SECONDS = 7 * 24 * 60 * 60
+BACKOFF_MARKER_SUFFIX = ".reclaim-backoff"
+
 # A VACUUM rewrites everything that is kept. Past this much live content it could
 # outlast the time limit on every start and never finish, so it is left alone.
 MAX_VACUUM_LIVE_BYTES = 1024 * 1024 * 1024
@@ -66,6 +83,7 @@ Outcome = Literal[
     "rewritten",
     "too_large",
     "not_enough_space",
+    "backed_off",
     "gave_up",
 ]
 
@@ -76,14 +94,19 @@ def reclaim_free_space(
     time_limit: float = TIME_LIMIT_SECONDS,
     busy_timeout: float = BUSY_TIMEOUT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    backoff: float = BACKOFF_SECONDS,
+    wall_clock: Callable[[], float] = time.time,
 ) -> Outcome:
     """Return a database's free pages to the file system if there are many.
 
     ``"nothing_to_do"`` is the answer for a file that is not mostly empty (and
     for one that is missing); ``"trimmed"`` and ``"rewritten"`` say the
     incremental vacuum or a full ``VACUUM`` ran to the end; the rest say why
-    nothing was done or finished. In every case the database holds exactly the
-    rows it held before, and it is safe to call again.
+    nothing was done or finished; ``"backed_off"`` is a rewrite that was not
+    tried because an earlier one failed less than ``backoff`` seconds ago (by
+    ``wall_clock``, since the marker has to outlive the process). In every case
+    the database holds exactly the rows it held before, and it is safe to call
+    again.
     """
     if not os.path.exists(path):
         return "nothing_to_do"
@@ -115,7 +138,20 @@ def reclaim_free_space(
             return "too_large"
         if not _room_for_a_second_copy(Path(path).resolve().parent, live_bytes):
             return "not_enough_space"
-        return _rewrite(connection)
+        marker = _backoff_marker(path)
+        if _backed_off(marker, wall_clock(), backoff):
+            return "backed_off"
+        try:
+            outcome = _rewrite(connection)
+        except (sqlite3.Error, OSError) as exc:
+            # A rewrite that was cut off, ran out of room or failed some other
+            # way would do the same at the next start. Another connection
+            # holding the lock says nothing about the rewrite itself.
+            if not _is_lock_contention(exc):
+                _note_failed_rewrite(marker, wall_clock())
+            raise
+        _forget_failed_rewrite(marker)
+        return outcome
     except (sqlite3.Error, OSError) as exc:
         # The type only: the message of an OS or SQLite error can carry the path.
         logging.warning("Could not reclaim unused space in a database (%s).", type(exc).__name__)
@@ -167,6 +203,49 @@ def _shrink_the_file(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
     except sqlite3.Error as exc:
         logging.info("The database log could not be truncated yet (%s).", type(exc).__name__)
+
+
+def _backoff_marker(path: str | os.PathLike[str]) -> Path:
+    return Path(f"{os.fspath(path)}{BACKOFF_MARKER_SUFFIX}")
+
+
+def _backed_off(marker: Path, now: float, backoff: float) -> bool:
+    """Whether a failed rewrite is recent enough that another is not tried yet.
+
+    A missing or unreadable marker is no marker. So is one dated in the future,
+    which only a clock that was set back can produce: honouring it would delay
+    the next attempt by more than ``backoff``.
+    """
+    try:
+        failed_at = float(marker.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return False
+    return 0 <= now - failed_at < backoff
+
+
+def _note_failed_rewrite(marker: Path, now: float) -> None:
+    """Record when a rewrite failed. Best effort: not being able to is not an error."""
+    try:
+        marker.write_text(f"{int(now)}\n", encoding="ascii")
+    except OSError as exc:
+        logging.info("Could not note the failed rewrite of a database (%s).", type(exc).__name__)
+
+
+def _forget_failed_rewrite(marker: Path) -> None:
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logging.info("Could not remove the note of a failed database rewrite (%s).", type(exc).__name__)
+
+
+def _is_lock_contention(exc: BaseException) -> bool:
+    """Whether SQLite gave up because another connection held the database."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
 
 
 def _room_for_a_second_copy(directory: Path, live_bytes: int) -> bool:
