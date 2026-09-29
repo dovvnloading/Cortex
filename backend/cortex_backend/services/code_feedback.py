@@ -142,8 +142,14 @@ REJECTION_MESSAGES: Mapping[str, str] = {
     "exponent_too_large": "The program raised a number to a power that is far too large.",
     # Raised for any multiplication by an integer literal over 100000, whether
     # or not a sequence is involved, so the wording must cover plain arithmetic.
-    "sequence_too_large": "The program multiplied by a number that is far too large.",
+    # It is also raised when a chain of repeats or joins would build a list or
+    # string over 100000 items.
+    "sequence_too_large": "The program multiplied by a number, or built a list or string, that is far too large.",
     "sequence_bound_required": "The program repeated a value an unpredictable number of times.",
+    "integer_too_large": "The program built a whole number far too large for Cortex to handle safely.",
+    "allocation_too_large": "The program would build far more data than Cortex allows.",
+    "format_width_too_large": "The program asked for a text width or precision far larger than Cortex allows.",
+    "format_width_not_constant": "The program picked a text width or precision while running, which Cortex does not allow.",
     "comparison_not_allowed": "The program used a comparison Cortex does not allow.",
     "name_not_allowed": "The program used a name that is off limits inside Cortex.",
     "constant_not_allowed": "The program used a kind of value Cortex does not allow.",
@@ -248,12 +254,12 @@ REPAIR_HINTS: Mapping[str, str] = {
     # single repair turn is spent for nothing.
     "bounded_range_required": (
         "Loops and comprehensions must iterate over range() with plain integer literals, and one "
-        "range may span at most 10000 steps, for example `for i in range(100):`. Iterating a list, "
-        "a string or a variable is not accepted."
+        "range may span at most 10000 steps, for example `for i in range(100):`. Every other "
+        "range() call needs literals too. Iterating a list, a string or a variable is not accepted."
     ),
     "loop_work_too_large": (
-        "Reduce the ranges: each range() may span at most 10000 steps, and all nested loops "
-        "together at most 100000 iterations."
+        "Reduce the ranges: each range() may span at most 10000 steps, and all nested loops, "
+        "comprehensions and range() calls together at most 100000 iterations."
     ),
     # Augmented assignment (`x += 1`) IS accepted -- the contract recommends it
     # for building strings -- so this must not tell the model to remove it.
@@ -267,11 +273,27 @@ REPAIR_HINTS: Mapping[str, str] = {
     ),
     "sequence_too_large": (
         "Multiply by a whole number of 100000 or less, whether you are scaling a number or "
-        "repeating a list or string."
+        "repeating a list or string, and keep any repeated or joined list or string under "
+        "100000 items in all."
     ),
     "sequence_bound_required": (
         "When repeating a list or string with *, use an integer literal for the count, "
         "for example `[0] * 10`."
+    ),
+    "integer_too_large": (
+        "Keep whole-number results small: a chain of powers or products must stay under 65536 "
+        "bits, so avoid nesting powers such as `(9 ** 1000) ** 1000`."
+    ),
+    "allocation_too_large": (
+        "Build less data: repeated lists and strings, counting every pass of the loops around "
+        "them, must stay under 10000000 items in all."
+    ),
+    "format_width_too_large": (
+        "Use a format width or precision of at most 10000, for example `f\"{x:>10}\"`."
+    ),
+    "format_width_not_constant": (
+        "Write the format width or precision as a literal number, for example `f\"{x:>10}\"`, "
+        "not `f\"{x:>{w}}\"`, and not `*` in a `%` template."
     ),
     "comparison_not_allowed": "Compare values with only == != < <= > >= in, not in, is and is not.",
     "name_not_allowed": (
