@@ -135,6 +135,37 @@ def _system_text(prompt: list[dict[str, Any]]) -> str:
     return "\n".join(str(message["content"]) for message in prompt if message["role"] == "system")
 
 
+def _fixed_tokens(*, memories: bool, contract: bool, instructions: str | None = None) -> int:
+    """What the fixed part of a turn costs: the system prompt, whichever optional parts are on, and "hello"."""
+    prompt = PromptTemplate.build_synthesis_prompt(
+        "hello",
+        "No history available.",
+        [],
+        memories,
+        instructions,
+        code_execution_eligible=contract,
+    )
+    return SynthesisAgent.estimate_prompt_tokens(prompt)
+
+
+def _room(window: int) -> int:
+    """The tokens a prompt may take in ``window``: what is left after the answer's share."""
+    return window - SynthesisAgent.output_token_reservation(window)
+
+
+def _window_with_room_for(tokens: int) -> int:
+    """The smallest window whose room holds ``tokens``.
+
+    The windows these tests exercise are worked out from what the prompts cost
+    rather than written down, so rewording an asset moves them with it instead of
+    silently turning a test of trimming into a test of nothing.
+    """
+    window = 256
+    while _room(window) < tokens:
+        window += 1
+    return window
+
+
 # --- the plan --------------------------------------------------------------
 
 
@@ -147,8 +178,11 @@ def test_a_window_with_room_keeps_everything() -> None:
 
 
 def test_the_memory_instructions_go_before_the_code_contract() -> None:
-    """At 4096 the two together are over the limit (about 3300 estimated against 3072), either alone is not."""
-    plan = _plan(num_ctx=4096)
+    """Where the two together are over the limit and the contract alone is not, the memory goes."""
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=True))
+    assert _fixed_tokens(memories=True, contract=True) > _room(window)
+
+    plan = _plan(num_ctx=window)
 
     assert plan.fits
     assert (plan.memories_enabled, plan.code_execution_eligible) == (False, True)
@@ -156,7 +190,10 @@ def test_the_memory_instructions_go_before_the_code_contract() -> None:
 
 
 def test_both_go_when_the_window_cannot_hold_the_contract_either() -> None:
-    plan = _plan(num_ctx=2048)
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False))
+    assert _fixed_tokens(memories=False, contract=True) > _room(window)
+
+    plan = _plan(num_ctx=window)
 
     assert plan.fits
     assert (plan.memories_enabled, plan.code_execution_eligible) == (False, False)
@@ -168,7 +205,11 @@ def test_both_go_when_the_window_cannot_hold_the_contract_either() -> None:
 def test_a_plan_never_turns_a_feature_on_and_reports_only_what_it_dropped(
     memories: bool, contract: bool
 ) -> None:
-    plan = _plan(num_ctx=2048, memories_enabled=memories, code_execution_eligible=contract)
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False))
+    assert _fixed_tokens(memories=True, contract=False) > _room(window)
+    assert _fixed_tokens(memories=False, contract=True) > _room(window)
+
+    plan = _plan(num_ctx=window, memories_enabled=memories, code_execution_eligible=contract)
 
     assert plan.fits
     assert not plan.memories_enabled and not plan.code_execution_eligible
@@ -215,10 +256,12 @@ def test_the_engine_does_not_send_an_optional_part_the_window_cannot_hold(
 ) -> None:
     """The service drops these first; a direct caller is refused rather than sent a prompt that overflows."""
     client = _RecordingClient()
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False))
+    assert _fixed_tokens(memories=memories, contract=contract) > _room(window)
 
     with pytest.raises(ModelOperationError):
         _agent(client, code_execution_eligible=contract).generate(
-            "hello", "No history available.", [], memories, None, options={"num_ctx": 2048}
+            "hello", "No history available.", [], memories, None, options={"num_ctx": window}
         )
 
     assert client.prompts == []
@@ -242,8 +285,13 @@ def test_memories_are_dropped_from_a_small_window_and_the_user_is_told() -> None
     client = _RecordingClient()
     sink = _Sink()
 
+    # Room for the fixed part and about one exchange, but not for the memory
+    # instructions as well.
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False, instructions="Be concise.") + 240)
+    assert _fixed_tokens(memories=True, contract=False, instructions="Be concise.") > _room(window)
+
     result = _service(client, memories=("prefers tea",)).generate(
-        _snapshot(num_ctx=2048, memories_enabled=True),
+        _snapshot(num_ctx=window, memories_enabled=True),
         progress_sink=sink,
         history_messages=_history(),
     )
@@ -256,7 +304,7 @@ def test_memories_are_dropped_from_a_small_window_and_the_user_is_told() -> None
     # ...and the memory instructions and the memory itself are what went.
     assert PromptTemplate._load_memory_prompt()[:80] not in system
     assert "prefers tea" not in "\n".join(str(message["content"]) for message in prompt)
-    assert SynthesisAgent.estimate_prompt_tokens(prompt) <= 2048 - SynthesisAgent.output_token_reservation(2048)
+    assert SynthesisAgent.estimate_prompt_tokens(prompt) <= _room(window)
     # History was sized for the smaller prompt, not thrown away with the memories.
     kept = [message for message in prompt if message["role"] == "assistant"]
     assert 0 < len(kept) < 12
@@ -269,8 +317,11 @@ def test_the_code_contract_is_dropped_when_it_does_not_fit_and_no_proposal_is_ta
     client = _RecordingClient()
     sink = _Sink()
 
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False, instructions="Be concise.") + 100)
+    assert _fixed_tokens(memories=False, contract=True, instructions="Be concise.") > _room(window)
+
     result = _service(client).generate(
-        _snapshot(num_ctx=2048, code_execution_eligible=True),
+        _snapshot(num_ctx=window, code_execution_eligible=True),
         progress_sink=sink,
         history_messages=_history(),
     )
@@ -287,8 +338,12 @@ def test_the_notice_names_both_when_both_are_dropped_even_with_nothing_saved() -
     client = _RecordingClient()
     sink = _Sink()
 
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=False, instructions="Be concise.") + 50)
+    assert _fixed_tokens(memories=True, contract=False, instructions="Be concise.") > _room(window)
+    assert _fixed_tokens(memories=False, contract=True, instructions="Be concise.") > _room(window)
+
     _service(client).generate(
-        _snapshot(num_ctx=2048, memories_enabled=True, code_execution_eligible=True),
+        _snapshot(num_ctx=window, memories_enabled=True, code_execution_eligible=True),
         progress_sink=sink,
         history_messages=_history(2),
     )
@@ -303,12 +358,14 @@ def test_the_notice_names_both_when_both_are_dropped_even_with_nothing_saved() -
 
 
 def test_only_what_is_over_the_limit_is_dropped() -> None:
-    """At 4096 the code contract fits once the memory instructions are gone, so it stays."""
+    """Where the code contract fits once the memory instructions are gone, it stays."""
     client = _RecordingClient()
     sink = _Sink()
+    window = _window_with_room_for(_fixed_tokens(memories=False, contract=True, instructions="Be concise.") + 200)
+    assert _fixed_tokens(memories=True, contract=True, instructions="Be concise.") > _room(window)
 
     _service(client, memories=("prefers tea",)).generate(
-        _snapshot(num_ctx=4096, memories_enabled=True, code_execution_eligible=True),
+        _snapshot(num_ctx=window, memories_enabled=True, code_execution_eligible=True),
         progress_sink=sink,
         history_messages=_history(4),
     )

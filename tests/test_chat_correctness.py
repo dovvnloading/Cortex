@@ -825,8 +825,9 @@ class HistoryRetentionTests(unittest.TestCase):
     def test_retained_history_is_contiguous_and_marks_omitted_turns(self):
         # One large exchange in the middle: the walk used to skip it and keep
         # the older, smaller ones, so the model saw 0-4 and 6-11 with a hole
-        # where the largest answer had been.
-        messages = _exchanges(12, oversized={5: 20_000})
+        # where the largest answer had been. Big enough to overflow the window
+        # by itself, whatever the fixed prompt around it costs.
+        messages = _exchanges(12, oversized={5: 40_000})
 
         transcript, structured = SynthesisAgent.fit_history(list(messages), **self.BUDGET)
 

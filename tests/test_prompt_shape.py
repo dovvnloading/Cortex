@@ -230,6 +230,51 @@ def test_memory_usage_rules_are_absent_when_memory_is_off() -> None:
     )
 
 
+def test_the_system_prompt_contains_no_termination_phrase() -> None:
+    """A phrase that ends the chat must never be offered to the model, or it gets said.
+
+    The refusal policy used to tell the model to answer hostile messages with a
+    fixed sentence declaring the interaction terminated. That sentence then sat
+    in the history, and a small model pattern-matched it on later, harmless
+    turns. Refusing is decline-and-redirect now, and nothing in the prompt
+    announces an ending.
+    """
+    prompt = PromptTemplate._load_system_prompt()
+    lowered = prompt.lower()
+
+    for phrase in ("terminated", "no longer assist", "hostile", "aggressive"):
+        assert phrase not in lowered
+    assert "decline" in lowered
+    assert "what you can help with" in lowered
+    # The built-in prompt is sent with every turn; it stays small.
+    assert SynthesisAgent.estimate_tokens(prompt) <= 250
+
+
+def test_memory_prompt_names_the_real_memory_section_and_stays_within_budget() -> None:
+    """The prompt has to describe the section the model is actually given.
+
+    It used to promise a "[Relevant Memories]" section that nothing ever built,
+    while the data arrived under a different header inside different fences --
+    and it cost about three times as much as it needed to on every turn with
+    memory on, whether or not anything was stored.
+    """
+    prompt = PromptTemplate._load_memory_prompt()
+    user = _prompt(
+        history_messages=_HISTORY,
+        permanent_memories=["User prefers brief answers."],
+        memories_enabled=True,
+    )[-1]["content"]
+
+    header = user.splitlines()[0]
+    assert header.startswith("## STORED MEMORY")
+    assert header in prompt
+    assert "BEGIN UNTRUSTED MEMORY DATA" in prompt
+    assert "END UNTRUSTED MEMORY DATA" in prompt
+    assert "[Relevant Memories]" not in prompt
+    assert "terminated" not in prompt.lower()
+    assert SynthesisAgent.estimate_tokens(prompt) <= 300
+
+
 def test_the_memory_notice_in_the_user_turn_stays_short() -> None:
     """A regression guard on the per-turn cost, not on exact wording."""
 
