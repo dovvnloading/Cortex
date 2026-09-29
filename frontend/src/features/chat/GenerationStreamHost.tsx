@@ -37,9 +37,10 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
   //
   // Known limit: when the app finds that a newer session already exists it
   // ignores the refusal and keeps this host mounted, so the job stays tracked
-  // with nothing reading it until the workspace remounts. The consumer's other
-  // exits are its own stop or the job ending; an abort it did not ask for is
-  // retried inside the consumer, not left to this guard.
+  // with nothing reading it until the workspace remounts. Apart from a refused
+  // session the consumer ends only when it is stopped or the job is over; an
+  // abort it did not ask for is retried inside the consumer, not left to this
+  // guard.
   const attachedJobIdRef = useRef<string | null>(null);
 
   const onCompleted = useCallback(

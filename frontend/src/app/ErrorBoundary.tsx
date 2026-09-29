@@ -45,10 +45,10 @@ export class ErrorBoundary extends Component<Props, State> {
     const record = recordCrash(error, info.componentStack, this.props.scope ?? "app");
     if (import.meta.env.PROD) {
       // An error's own text comes from running code and can carry anything it
-      // was holding; a console line is also what gets copied into reports. A
-      // production build says what kind of error it was and where to find the
-      // details the person can copy.
-      console.error("Cortex UI boundary caught an error. Use Copy details on the error screen.", record.name);
+      // was holding, and a console line is what gets copied into reports. A
+      // production build logs what kind of error it was and says the text is
+      // withheld.
+      console.error("Cortex UI boundary caught an error. Its text is not logged in production builds.", record.name);
       return;
     }
     // A development build runs on the developer's own machine, where the full
