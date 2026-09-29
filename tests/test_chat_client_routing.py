@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
+import logging
 import time
 from pathlib import Path
 from threading import Event, Thread
@@ -18,6 +21,7 @@ from cortex_backend.llamacpp.server_manager import ServerHandle
 from cortex_backend.services.chat_client import OllamaChatClient, RoutingChatClient
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.testing.fake_llamacpp import FakeLlamaCppState, create_fake_llamacpp_app
+from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 
 
 class _RecordingOllamaClient:
@@ -431,6 +435,82 @@ def test_the_routing_client_reaches_the_ollama_client_with_the_status_callback()
     router.chat(model="qwen3:8b", messages=[], options={})
 
     assert statuses == ["Loading qwen3:8b into Ollama..."]
+
+
+def test_the_fake_ollama_lists_no_running_models_unless_it_is_told_which_are_loaded(
+    ollama_state: FakeOllamaState,
+) -> None:
+    with TestClient(create_fake_ollama_app(ollama_state)) as http:
+        assert http.get("/api/ps").json() == {"models": []}
+
+        ollama_state.loaded_models.add("qwen3:8b")
+        (running,) = http.get("/api/ps").json()["models"]
+
+    assert running["name"] == running["model"] == "qwen3:8b"
+    assert running["details"]["family"] and running["expires_at"] and running["size_vram"]
+
+
+@contextmanager
+def _fake_ollama_listening(state: FakeOllamaState) -> Iterator[str]:
+    """The fake Ollama's HTTP app on a loopback port, for the real ``ollama`` client to call."""
+    import uvicorn
+    from support import wait_until
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_fake_ollama_app(state), host="127.0.0.1", port=0, log_level="warning", lifespan="off"
+        )
+    )
+    thread = Thread(target=server.run, name="cortex-test-fake-ollama", daemon=True)
+    thread.start()
+    try:
+        wait_until(
+            lambda: server.started or not thread.is_alive(), timeout=10, describe="the fake Ollama to listen"
+        )
+        assert server.started, "the fake Ollama did not start"
+        yield f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+class _EchoOllamaWithRealPs:
+    """``ps`` answered by a real ``ollama`` client; ``chat`` by an echo, since only ``ps`` is under test."""
+
+    def __init__(self, real_client) -> None:
+        self._real_client = real_client
+
+    def ps(self):
+        return self._real_client.ps()
+
+    def chat(self, *, model, messages, options, **extra):
+        return {"message": {"content": "hi"}}
+
+
+@pytest.mark.parametrize(
+    ("ollama_state", "announced"),
+    [
+        pytest.param({}, ["Loading qwen3:8b into Ollama..."], id="nothing-loaded"),
+        pytest.param({"loaded_models": {"qwen3:8b"}}, [], id="model-loaded"),
+    ],
+    indirect=["ollama_state"],
+)
+def test_a_real_ollama_client_learns_from_the_fake_whether_the_model_is_loaded(
+    ollama_state: FakeOllamaState, announced: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without ``/api/ps`` the fake answered 404: no message, and a warning on every turn."""
+    import ollama
+
+    statuses: list[str] = []
+    with caplog.at_level(logging.WARNING), _fake_ollama_listening(ollama_state) as host:
+        client = OllamaChatClient(_EchoOllamaWithRealPs(ollama.Client(host=host)))
+        client.set_status_callback(statuses.append)
+
+        result = client.chat(model="qwen3:8b", messages=[], options={})
+
+    assert result["message"]["content"] == "hi"
+    assert statuses == announced
+    assert "could not ask Ollama" not in caplog.text
 
 
 def test_keep_alive_travels_as_a_request_field_and_not_as_an_option() -> None:
