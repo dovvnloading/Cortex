@@ -20,10 +20,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 import ipaddress
 import os
+from pathlib import Path
 import re
 import socket
 from urllib.parse import urlsplit
 
+import httpx
 from hypothesis import example, given, strategies as st
 import pytest
 
@@ -34,6 +36,7 @@ from cortex_backend.llamacpp.download import (
     GGUFDownloadError,
     _normalize_huggingface_blob_url,
     _validate_download_url,
+    download_gguf,
     resolve_download_url,
 )
 
@@ -158,7 +161,14 @@ _SOURCES = st.one_of(
         DownloadSource,
         source=st.just("huggingface"),
         repo_id=st.from_regex(r"[A-Za-z0-9._-]{1,12}/[A-Za-z0-9._-]{1,12}", fullmatch=True),
-        filename=st.from_regex(r"[A-Za-z0-9._-]{1,12}", fullmatch=True).map(lambda stem: f"{stem}.gguf"),
+        filename=st.builds(
+            lambda folders, stem: "/".join([*folders, f"{stem}.gguf"]),
+            st.lists(
+                st.from_regex(r"[A-Za-z0-9._-]{1,8}", fullmatch=True).filter(lambda name: name not in {".", ".."}),
+                max_size=3,
+            ),
+            st.from_regex(r"[A-Za-z0-9._-]{1,12}", fullmatch=True),
+        ),
     ),
     st.builds(
         DownloadSource,
@@ -197,8 +207,13 @@ def test_a_download_request_resolves_to_a_safe_address_and_file_name_or_is_refus
     assert os.path.basename(filename) == filename
     assert "/" not in filename and "\\" not in filename and os.sep not in filename
     if request.source == "huggingface":
-        assert url == f"https://huggingface.co/{request.repo_id}/resolve/main/{filename}"
-        assert url.count("/") == 7
+        # Fetched from its path in the repository, saved under its basename: the
+        # models folder is flat, and every segment of the path is a plain name.
+        segments = request.filename.split("/")
+        assert url == f"https://huggingface.co/{request.repo_id}/resolve/main/{request.filename}"
+        assert filename == segments[-1]
+        assert all(segment not in {"", ".", ".."} for segment in segments)
+        assert url.count("/") == 6 + len(segments)
     else:
         assert os.path.basename(urlsplit(url).path) == filename
 
@@ -212,18 +227,89 @@ def test_only_an_https_url_is_ever_resolved(scheme: str, host: str) -> None:
         resolve_download_url(DownloadSource(source="url", url=f"{scheme}://{host}/model.gguf"))
 
 
-@given(
-    head=st.from_regex(r"[a-z0-9]{1,8}", fullmatch=True),
-    separator=st.sampled_from(("/", "\\", "../", "..\\", "/../", "%2f", "\n", "\x00", " ", ":", "*")),
-    tail=st.from_regex(r"[a-z0-9]{1,8}", fullmatch=True),
-)
-def test_a_huggingface_file_name_is_one_plain_component(head: str, separator: str, tail: str) -> None:
-    """A name that could name a place other than the models folder is refused, not trimmed."""
+_SEGMENT = st.from_regex(r"[a-z0-9]{1,8}", fullmatch=True)
 
-    request = DownloadSource(source="huggingface", repo_id="owner/name", filename=f"{head}{separator}{tail}.gguf")
+
+@given(
+    head=_SEGMENT,
+    separator=st.sampled_from(("\\", "..\\", "%2f", "\n", "\x00", " ", ":", "*", "//", "/../", "/./", "/..\\")),
+    tail=_SEGMENT,
+    in_folder=st.booleans(),
+)
+def test_a_huggingface_file_path_is_refused_unless_every_segment_is_a_plain_name(
+    head: str, separator: str, tail: str, in_folder: bool
+) -> None:
+    """A name that could reach a place other than the repository path is refused, not trimmed.
+
+    The odd segment is either the file name itself or a folder above it.
+    """
+
+    name = f"{head}{separator}{tail}/model.gguf" if in_folder else f"{head}{separator}{tail}.gguf"
+    request = DownloadSource(source="huggingface", repo_id="owner/name", filename=name)
 
     with pytest.raises(GGUFDownloadError):
         resolve_download_url(request)
+
+
+@given(name=_SEGMENT, template=st.sampled_from(("/{}.gguf", "../{}.gguf", "./{}.gguf", "{}/../m.gguf", "{}/")))
+def test_a_huggingface_file_path_cannot_start_climb_or_end_outside_the_repository(name: str, template: str) -> None:
+    request = DownloadSource(source="huggingface", repo_id="owner/name", filename=template.format(name))
+
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(request)
+
+
+@given(folders=st.lists(_SEGMENT, min_size=1, max_size=7), stem=_SEGMENT)
+def test_a_huggingface_file_in_sub_folders_is_fetched_by_path_and_saved_by_name(
+    folders: list[str], stem: str
+) -> None:
+    path = "/".join([*folders, f"{stem}.gguf"])
+
+    url, filename = resolve_download_url(DownloadSource(source="huggingface", repo_id="owner/name", filename=path))
+
+    assert url == f"https://huggingface.co/owner/name/resolve/main/{path}"
+    assert filename == f"{stem}.gguf"
+
+
+def test_a_huggingface_file_path_has_a_depth_limit() -> None:
+    deepest = "/".join(["d"] * 7 + ["model.gguf"])  # eight segments: the documented limit
+    too_deep = "/".join(["d"] * 8 + ["model.gguf"])
+
+    accepted = resolve_download_url(DownloadSource(source="huggingface", repo_id="owner/name", filename=deepest))
+    assert accepted[1] == "model.gguf"
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(DownloadSource(source="huggingface", repo_id="owner/name", filename=too_deep))
+
+
+@pytest.fixture(scope="module")
+def models_directory(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("models")
+
+
+@given(
+    head=_SEGMENT,
+    separator=st.sampled_from(("/", "\\", "../", "..\\", ":", "*", " ", "\n", "\x00")),
+    tail=_SEGMENT,
+)
+def test_a_download_is_never_saved_under_a_name_that_is_not_one_plain_file_name(
+    models_directory: Path, head: str, separator: str, tail: str
+) -> None:
+    """The target name is checked before anything is fetched or created, so a
+    separator in it cannot place a file outside the models folder."""
+
+    def refuse_to_fetch(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a download started under a name that should have been refused first")
+
+    client = httpx.Client(transport=httpx.MockTransport(refuse_to_fetch))
+    with pytest.raises(GGUFDownloadError):
+        download_gguf(
+            "https://example.com/model.gguf",
+            f"{head}{separator}{tail}.gguf",
+            models_directory,
+            http_client=client,
+        )
+
+    assert not any(models_directory.iterdir())
 
 
 @given(request=_SOURCES)
