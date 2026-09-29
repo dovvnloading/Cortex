@@ -181,3 +181,96 @@ def test_generation_route_maps_a_concurrent_chat_write_race_to_409():
 
     assert response.status_code == 409
     assert "revision changed" in response.json()["detail"].lower()
+
+
+class _ChangeAfterRead:
+    """Change the chat right after the regenerate route has read it.
+
+    The route reads the transcript to validate its target, and admission then
+    re-checks only the revision inside ``prepare()``. Anything that lands in
+    between is exactly what that re-check exists for, so this fires once, on
+    the first read of the chat after it is armed, after the read has returned.
+    """
+
+    def __init__(self, inner, *, thread_id: str, change):
+        self.inner = inner
+        self._thread_id = thread_id
+        self._change = change
+        self.armed = False
+        self.fired = False
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def get_chat(self, thread_id):
+        chat = self.inner.get_chat(thread_id)
+        if self.armed and not self.fired and thread_id == self._thread_id:
+            self.fired = True
+            self._change(self.inner, thread_id)
+        return chat
+
+
+def _regeneration_that_meets_a_change(change):
+    """Run a regeneration of the last reply while ``change`` lands mid-flight."""
+    thread_id = "regenerate-race"
+    dependencies = build_demo_dependencies()
+    racing = _ChangeAfterRead(dependencies.chats, thread_id=thread_id, change=change)
+    dependencies.chats = racing
+    racing.inner.create_chat(thread_id, "Regenerate race")
+    racing.inner.add_message(thread_id, "user", "the question")
+    reply_id = racing.inner.add_message(thread_id, "assistant", "the original reply")
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        racing.armed = True
+        response = client.post(
+            f"/api/v1/chats/{thread_id}/regenerations",
+            json={"request_id": "regenerate-race-1", "message_id": reply_id},
+            headers=headers,
+        )
+        racing.armed = False
+        # The failed attempt must not have left the generation slot taken.
+        follow_up = client.post(
+            "/api/v1/generations",
+            json={"thread_id": "another-thread", "user_input": "still works"},
+            headers=headers,
+        )
+    assert racing.fired, "the change never landed between the route's read and prepare()"
+    return response, follow_up, racing.inner, thread_id
+
+
+def test_regeneration_refuses_a_chat_that_grew_between_the_read_and_prepare():
+    """The route validated its target against a transcript that is no longer current.
+
+    A message appended after the route's read and before ``prepare()`` must make
+    the admission re-check answer 409, and nothing may be regenerated over it.
+    """
+
+    def append_a_message(inner, thread_id):
+        inner.add_message(thread_id, "user", "a message that arrived in between")
+
+    response, follow_up, inner, thread_id = _regeneration_that_meets_a_change(append_a_message)
+
+    assert response.status_code == 409, response.text
+    assert "chat changed" in response.json()["detail"].lower()
+    messages = inner.get_chat(thread_id)["messages"]
+    assert [message["content"] for message in messages] == [
+        "the question",
+        "the original reply",
+        "a message that arrived in between",
+    ]
+    assert follow_up.status_code == 202
+
+
+def test_regeneration_of_a_chat_deleted_between_the_read_and_prepare_is_a_404():
+    """A chat that is gone is not a conflict, and must not be recreated to hold a reply."""
+
+    def delete_the_chat(inner, thread_id):
+        inner.delete_chat(thread_id)
+
+    response, follow_up, inner, thread_id = _regeneration_that_meets_a_change(delete_the_chat)
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Chat not found."
+    assert inner.get_chat(thread_id) is None
+    assert follow_up.status_code == 202

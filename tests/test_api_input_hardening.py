@@ -32,6 +32,9 @@ from cortex_backend.execution.recipes import (
     RecipeValidationError,
     parse_image_transform,
 )
+from cortex_backend.execution.lifecycle import ExecutionLifecycle, RuntimeHealth
+from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
+from cortex_backend.execution.recipe_coordinator import RecipeExecutionCoordinator
 from cortex_backend.execution.repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
@@ -337,6 +340,68 @@ def test_a_job_that_does_not_exist_is_still_a_404_for_approval_and_cancel(tmp_pa
 
     assert decision.status_code == 404
     assert cancel.status_code == 404
+
+
+def _app_over_a_real_coordinator(kind: str, tmp_path: Path):
+    """The API over the coordinator that ships, not the deterministic double.
+
+    The route maps ``ExecutionJobNotFound`` to 404, so each coordinator's own
+    ``cancel`` has to raise exactly that for a job it cannot find.
+    """
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    if kind == "local":
+        app = create_app(
+            build_demo_dependencies(),
+            allowed_hosts=("testserver",),
+            preview=True,
+            execution_coordinator=LocalExecutionCoordinator(repository, code_timeout_seconds=3.0),
+        )
+    else:
+        lifecycle = ExecutionLifecycle(
+            repository,
+            coordinator_factory=lambda repo: RecipeExecutionCoordinator(repo, lambda _job: None),
+            health_check=RuntimeHealth.ready,
+            enabled=True,
+            profile="local",
+        )
+        app = create_app(
+            build_demo_dependencies(),
+            allowed_hosts=("testserver",),
+            execution_lifecycle=lifecycle,
+            installation_principal_id=repository.installation_principal_id,
+        )
+    return app, repository
+
+
+@pytest.mark.parametrize("kind", ["local", "recipe"])
+def test_cancelling_an_unknown_or_foreign_job_is_a_404_on_the_real_coordinators(
+    tmp_path: Path, kind: str
+) -> None:
+    app, repository = _app_over_a_real_coordinator(kind, tmp_path)
+    repository.create_job(
+        job_id="someone-elses-job",
+        owner="f" * 64,
+        request_id="someone-elses-request",
+        profile="fake.v1",
+        payload={},
+    )
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+
+        unknown = client.post("/api/v1/execution/no-such-job/cancel", headers=headers)
+        foreign = client.post("/api/v1/execution/someone-elses-job/cancel", headers=headers)
+        decision = client.post(
+            "/api/v1/execution/no-such-job/approval",
+            json={"decision": "approved"},
+            headers=headers,
+        )
+
+    for response in (unknown, foreign):
+        assert response.status_code == 404, response.text
+        assert response.json() == {"detail": "Execution job not found."}
+    assert decision.status_code == 404, decision.text
+    # A job that is not the caller's is not stopped by asking.
+    assert repository.get_job("someone-elses-job").status == "queued"
 
 
 @pytest.mark.parametrize("blank", ["   ", "\t\n", "​", ""])
