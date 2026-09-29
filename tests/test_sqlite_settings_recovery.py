@@ -604,4 +604,8 @@ def test_a_crash_between_setting_the_log_aside_and_moving_the_primary_recovers_n
     recovered = SQLiteSettingsRepository(repository.db_path)
 
     assert recovered.load().settings == original
-    assert [entry.read_bytes() for entry in preserved] == [b"newest committed frames"]
+    # The log did not stay stranded under the first attempt's name: the second
+    # recovery moved it beside the primary it quarantined.
+    assert recovered.recovery_report is not None
+    adopted = Path(f"{recovered.recovery_report.quarantined_path}-wal")
+    assert adopted.read_bytes() == b"newest committed frames"

@@ -22,11 +22,21 @@ from .sqlite_backup import (
     SIDECAR_SUFFIXES,
     BackupStatus,
     RecoveryReport,
+    adopt_orphaned_sidecars,
     failure_detail,
+    find_interrupted_recovery,
     move_sidecars,
     put_sidecars_back,
     snapshot_database,
     utc_now_iso,
+)
+from .sqlite_schema import (
+    Migration,
+    SchemaTooNewError,
+    WriteAheadLogUnavailableError,
+    open_for_upgrade,
+    prepare_database,
+    stored_version,
 )
 from .settings import (
     SettingsMigrationReport,
@@ -37,7 +47,11 @@ from .settings import (
 )
 
 
+# The version stamped into each stored settings payload (cortex_settings.schema_version).
 SETTINGS_SCHEMA_VERSION = 1
+# The version of the database file itself: PRAGMA user_version, and the ladder
+# below. It has one step today, and files written before it existed report 0.
+SETTINGS_DATABASE_VERSION = 1
 MIGRATION_KEY = "qsettings-to-sqlite-v1"
 
 # Top-level sections that CortexSettings used to carry and no longer does.
@@ -58,6 +72,45 @@ def _without_retired_keys(payload: str) -> dict:
     if not isinstance(decoded, dict):
         raise ValueError("stored settings payload must be a JSON object")
     return {key: value for key, value in decoded.items() if key not in RETIRED_SETTINGS_KEYS}
+
+
+def _migrate_to_v1(connection: sqlite3.Connection) -> None:
+    """The settings row and the migration ledger. Idempotent: every install so
+    far has these tables while still reporting user_version 0."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cortex_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            schema_version INTEGER NOT NULL,
+            revision INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings_migration_ledger (
+            migration_key TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            imported_keys TEXT NOT NULL,
+            invalid_keys TEXT NOT NULL,
+            backup_path TEXT,
+            message TEXT,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+# Step n brings the file from version n-1 to n; see sqlite_schema.prepare_database.
+_MIGRATIONS: dict[int, Migration] = {1: _migrate_to_v1}
+
+_NEWER_SCHEMA_MESSAGE = (
+    "The settings database was written by a newer Cortex release than this one. Install that "
+    "release, or restore a settings backup taken before it was upgraded."
+)
 
 
 def _write_lock_for(path: Path) -> RLock:
@@ -100,6 +153,9 @@ class SQLiteSettingsRepository:
         # stop Cortex from starting on a healthy primary.
         self.backup_status = BackupStatus("skipped", "No backup was refreshed at startup.")
         self.recovery_report: RecoveryReport | None = None
+        # synchronous = NORMAL is only crash-safe under write-ahead logging, so
+        # connect() applies it once _ensure_schema has read WAL back as enabled.
+        self._wal_confirmed = False
         self.legacy = legacy
         # Every repository instance for a database shares this lock. Backup
         # rotation is file I/O rather than SQLite I/O, so SQLite's own
@@ -204,7 +260,8 @@ class SQLiteSettingsRepository:
             connection = sqlite3.connect(self.db_path, timeout=10.0)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 10000")
-            connection.execute("PRAGMA synchronous = NORMAL")
+            if self._wal_confirmed:
+                connection.execute("PRAGMA synchronous = NORMAL")
             yield connection
             connection.commit()
         except sqlite3.Error as exc:
@@ -220,47 +277,35 @@ class SQLiteSettingsRepository:
                 connection.close()
 
     def _ensure_schema(self) -> None:
+        """Bring the file to ``SETTINGS_DATABASE_VERSION``.
+
+        The order is in sqlite_schema.prepare_database: version gate, then
+        write-ahead logging read back rather than assumed, then one transaction
+        per missing step. WAL is not optional here: connect() runs with
+        synchronous = NORMAL, which is only crash-safe under WAL -- in the
+        default rollback-journal mode the same pragma lets an OS crash or power
+        loss corrupt the file outright. Backups stay whole because
+        _create_backup reads through SQLite's online backup API.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self.connect() as connection:
-                # WAL is stored in the database header, so this only has to run
-                # once to apply to every later connection. It is not optional
-                # here: connect() sets synchronous = NORMAL, and NORMAL is only
-                # crash-safe under WAL. In the default rollback-journal mode the
-                # same pragma lets an OS crash or power loss corrupt the file
-                # outright, which is exactly why the chat store switched (see
-                # storage._create_tables). Backups stay whole because
-                # _create_backup reads through SQLite's online backup API.
-                connection.execute("PRAGMA journal_mode = WAL")
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS cortex_settings (
-                        id INTEGER PRIMARY KEY CHECK (id = 1),
-                        schema_version INTEGER NOT NULL,
-                        revision INTEGER NOT NULL,
-                        payload TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS settings_migration_ledger (
-                        migration_key TEXT PRIMARY KEY,
-                        source TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        imported_keys TEXT NOT NULL,
-                        invalid_keys TEXT NOT NULL,
-                        backup_path TEXT,
-                        message TEXT,
-                        applied_at TEXT NOT NULL
-                    )
-                    """
-                )
-        except SettingsRepositoryError:
-            raise
+            connection = open_for_upgrade(self.db_path)
+            try:
+                prepare_database(connection, _MIGRATIONS, target=SETTINGS_DATABASE_VERSION)
+            finally:
+                connection.close()
+        except SchemaTooNewError as exc:
+            raise SettingsRepositoryError(_NEWER_SCHEMA_MESSAGE) from exc
+        except WriteAheadLogUnavailableError as exc:
+            raise SettingsRepositoryError(
+                "SQLite would not enable write-ahead logging for the settings database (it "
+                f"reported journal mode '{exc.mode}'), which Cortex needs to store settings "
+                "safely. Some network, cloud-synced and removable drives do not support it. "
+                "Start Cortex with --data-dir pointing at a folder on a local drive."
+            ) from exc
         except Exception as exc:
             raise SettingsRepositoryError("Could not initialize settings schema.") from exc
+        self._wal_confirmed = True
 
     @staticmethod
     def _database_is_valid(path: Path) -> bool:
@@ -357,24 +402,103 @@ class SQLiteSettingsRepository:
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.db_path.exists():
-            return None
+            return self._resume_interrupted_recovery()
         if self._database_is_valid(self.db_path):
+            # Before any backup is refreshed from it: an older release that
+            # refused a newer file at _ensure_schema would otherwise rotate the
+            # older-schema backups away on every launch first.
+            self._refuse_newer_schema()
             return self._refresh_startup_backup()
 
-        for candidate in (self.backup_path, self.previous_backup_path):
-            if not candidate.exists() or not self._database_is_valid(candidate):
-                continue
-            self.recovery_report = self._recover_from(candidate)
-            self.last_corrupt_path = Path(self.recovery_report.quarantined_path)
-            logging.error(
-                "Settings database was corrupt; recovered from a verified backup. "
-                "The corrupt file and its write-ahead log were preserved for "
-                "inspection (path omitted from logs)."
+        candidate = self._first_valid_backup()
+        if candidate is None:
+            raise SettingsRepositoryError(
+                "Settings database is corrupt and no valid backup is available."
             )
-            return str(candidate)
+        self._record_recovery(
+            self._recover_from(candidate),
+            "Settings database was corrupt; recovered from a verified backup.",
+        )
+        return str(candidate)
 
-        raise SettingsRepositoryError(
-            "Settings database is corrupt and no valid backup is available."
+    def _refuse_newer_schema(self) -> None:
+        """Refuse a file a newer release upgraded, having read only its version."""
+        try:
+            connection = sqlite3.connect(
+                f"{self.db_path.resolve().as_uri()}?mode=ro", timeout=10.0, uri=True
+            )
+            try:
+                version = stored_version(connection)
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            return  # Unreadable here means the ordinary paths report it.
+        if version > SETTINGS_DATABASE_VERSION:
+            raise SettingsRepositoryError(_NEWER_SCHEMA_MESSAGE)
+
+    def _first_valid_backup(self) -> Path | None:
+        """The newest backup generation that passes a full integrity check."""
+        for candidate in (self.backup_path, self.previous_backup_path):
+            if candidate.exists() and self._database_is_valid(candidate):
+                return candidate
+        return None
+
+    def _record_recovery(self, report: RecoveryReport, message: str) -> None:
+        self.recovery_report = report
+        self.last_corrupt_path = Path(report.quarantined_path)
+        logging.error(
+            "%s The corrupt file and its write-ahead log were preserved for "
+            "inspection (path omitted from logs).",
+            message,
+        )
+
+    def _resume_interrupted_recovery(self) -> str | None:
+        """Finish a recovery that died after moving the primary aside.
+
+        Recovery quarantines the corrupt primary and then publishes the
+        restored copy. Dying in between leaves no primary, and carrying on would
+        create an empty database that the next backup refresh then puts over the
+        good backup. A missing primary beside a quarantined ``.corrupt-<id>``
+        file and a valid backup is that state, so the backup is restored now.
+        With no valid backup there is nothing to restore from and a new
+        database is created as it always was.
+        """
+        quarantined = find_interrupted_recovery(self.db_path)
+        if quarantined is None:
+            return None
+        candidate = self._first_valid_backup()
+        if candidate is None:
+            logging.warning(
+                "The settings database is missing beside a quarantined corrupt copy and no valid "
+                "backup exists; starting a new database."
+            )
+            return None
+        self._record_recovery(
+            self._finish_interrupted_recovery(candidate, quarantined),
+            "A previous recovery of the settings database was interrupted; finished it from a "
+            "verified backup.",
+        )
+        return str(candidate)
+
+    def _finish_interrupted_recovery(self, candidate: Path, quarantined: Path) -> RecoveryReport:
+        """Publish ``candidate`` as the primary; the corrupt one is already aside."""
+        try:
+            # A log with no database beside it is replayed onto whatever file is
+            # created there next, so it goes to the quarantined file as usual.
+            move_sidecars(self.db_path, quarantined)
+        except OSError as exc:
+            raise SettingsRepositoryError(
+                "Could not preserve the write-ahead log of the settings database before "
+                "finishing an interrupted recovery."
+            ) from exc
+        # Nothing to roll back if this fails: the primary was already aside, the
+        # next launch finds the same state and tries again.
+        self._atomic_copy_database(candidate, self.db_path)
+        return RecoveryReport(
+            recovered_from=str(candidate),
+            quarantined_path=str(quarantined),
+            at=utc_now_iso(),
+            adopted_sidecars=adopt_orphaned_sidecars(self.db_path, quarantined),
         )
 
     def _recover_from(self, candidate: Path) -> RecoveryReport:
@@ -432,6 +556,7 @@ class SQLiteSettingsRepository:
             recovered_from=str(candidate),
             quarantined_path=str(corrupt_path),
             at=utc_now_iso(),
+            adopted_sidecars=adopt_orphaned_sidecars(self.db_path, corrupt_path),
         )
 
     def _sidecar_paths(self) -> tuple[Path, ...]:
