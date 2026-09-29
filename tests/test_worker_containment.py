@@ -60,7 +60,7 @@ from cortex_backend.execution.local_scratch_attempt import (
     LocalScratchAttempt,
 )
 from cortex_backend.execution.recipe_coordinator import RecipeExecutionError
-from cortex_backend.execution.recipe_provider import MAX_DECODED_BYTES, MAX_INPUT_BYTES, MAX_OUTPUT_BYTES
+from cortex_backend.execution.recipe_provider import MAX_DECODED_BYTES, MAX_DIMENSION, MAX_PIXELS
 from cortex_backend.execution.recipes import parse_image_transform
 from cortex_backend.execution.scratch_compute import SCRATCH_WORKER_MEMORY_BYTES, ScratchComputeError
 from cortex_backend.launcher.desktop import process_is_alive
@@ -408,15 +408,35 @@ def test_the_code_worker_keeps_the_limits_it_had_before_the_jobs_were_shared():
     assert limits.cpu_seconds == 4.0
 
 
-def test_the_image_worker_memory_ceiling_covers_a_plan_at_every_provider_ceiling():
-    """The 256 MiB decode budget is one image; a step holds three, and the input stays resident.
+# Measured on the real worker under a real job, in MiB (the comment on
+# RECIPE_WORKER_MEMORY_BYTES says how): the largest peak of any kind, a lossless
+# WebP encode of full-entropy 64-megapixel noise that the provider then refuses
+# as over its output limit, and the largest peak of a request that succeeds.
+_MEASURED_WORST_PEAK_MIB = 2942
+_MEASURED_WORST_SUCCESS_MIB = 2308
 
-    A real 64-megapixel image through eight contrast steps was measured at
-    about 800 MiB of committed job memory, so the ceiling has to sit well above
-    the old 256 MiB and above three decoded images plus the encoded input.
+
+def test_the_image_worker_memory_ceiling_covers_the_provider_at_its_own_limits():
+    """The ceiling comes from measurement, and keeps a margin over the worst of it.
+
+    The first ceiling was three decoded images plus the encoded input and
+    output, a figure that contrast alone justified (about 800 MiB at 64
+    megapixels). Resize and lossless WebP output need far more, so an accepted
+    64-megapixel request failed under the job. Real-job tests run those cases;
+    this one holds the constant to the numbers it was sized from.
     """
 
-    assert RECIPE_WORKER_MEMORY_BYTES >= 3 * MAX_DECODED_BYTES + MAX_INPUT_BYTES + MAX_OUTPUT_BYTES
+    mib = 1024 * 1024
+    rgba = 4
+    image = MAX_PIXELS * rgba
+    # A LANCZOS resize of RGBA holds its source, a premultiplied copy, a
+    # dst_w x src_h buffer of up to MAX_DIMENSION squared, and the result.
+    resize_working_set = 2 * image + MAX_DIMENSION * MAX_DIMENSION * rgba + image
+
+    assert image == MAX_DECODED_BYTES
+    assert RECIPE_WORKER_MEMORY_BYTES > 1.25 * resize_working_set
+    assert RECIPE_WORKER_MEMORY_BYTES >= 1.25 * _MEASURED_WORST_PEAK_MIB * mib
+    assert RECIPE_WORKER_MEMORY_BYTES >= 1.5 * _MEASURED_WORST_SUCCESS_MIB * mib
     assert RECIPE_WORKER_MEMORY_BYTES > MAX_CODE_MEMORY_BYTES * 4
     # Both the process and the job are held to it, and the worker gets one process.
     assert RECIPE_WORKER_JOB_LIMITS.process_memory_bytes == RECIPE_WORKER_MEMORY_BYTES

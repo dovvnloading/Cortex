@@ -33,9 +33,6 @@ from .local_process import (
 from .models import ExecutionJob
 from .recipe_coordinator import RecipeExecutionError, RecipeWorkerOutput
 from .recipe_provider import (
-    MAX_DECODED_BYTES,
-    MAX_INPUT_BYTES,
-    MAX_OUTPUT_BYTES,
     RecipeImageProvider,
     RecipeProviderError,
     pin_plugin_registry,
@@ -47,20 +44,36 @@ DEFAULT_IMAGE_TIMEOUT_SECONDS = 45.0
 # than transforming a small image, so the child gets its own start-up budget
 # before the transform clock starts.
 DEFAULT_IMAGE_STARTUP_TIMEOUT_SECONDS = 15.0
-# The provider's 256 MiB decode budget is an estimate for one image, not an
-# operating-system ceiling. A step such as contrast holds its source, an
-# intermediate and its result at once, so three decoded images, and the
-# encoded input stays in memory throughout. The encoded output is added too,
-# although it is never held at the same time as all three, and 256 MiB covers
-# the interpreter, the imports and allocator overhead. Measured on a real
-# worker, a 64-megapixel RGBA image through eight contrast steps peaks at
-# about 800 MiB of committed job memory, so a legitimate input at the
-# provider's own ceiling fits with room to spare while a decoder that runs away
-# is still stopped by the operating system.
-_WORKER_HEADROOM_BYTES = 256 * 1024 * 1024
-RECIPE_WORKER_MEMORY_BYTES = (
-    3 * MAX_DECODED_BYTES + MAX_INPUT_BYTES + MAX_OUTPUT_BYTES + _WORKER_HEADROOM_BYTES
-)
+# The ceiling is sized from what the real worker was measured to need at the
+# provider's own limits, not derived from them. The provider's 256 MiB decode
+# budget describes one decoded image; what an operation or an encoder holds on
+# top of that (a premultiplied copy, a resampling buffer, encoder tables) is
+# not something arithmetic on the limits gets right. The first ceiling here
+# came from contrast alone (about 800 MiB at 64 megapixels) and refused
+# legitimate 60-64 megapixel resizes and WebP output.
+#
+# Measured: the real worker, spawned and put in a real job whose limit was
+# raised to 12 GiB, reading the job's own peak committed-memory counter after
+# the transform. Inputs are synthetic 64-megapixel RGBA images (the provider's
+# ceiling) unless noted; Pillow 12.3.0, Python 3.14, Windows 11.
+#   contrast or brightness x8, PNG or JPEG out                   about 800 MiB
+#   grayscale, crop, rotate or same-size resize, PNG out         about 540 MiB
+#   JPEG / lossless WebP input, contrast, PNG out               814 / 1569 MiB
+#   LANCZOS resize 8192x8192 -> 16384x4096                            1311 MiB
+#   LANCZOS resize 4096x16384 -> 16384x4096                           1825 MiB
+#     (source, premultiplied copy, 1 GiB dst_w x src_h buffer, result)
+#   the same two resizes from a 98 MiB input                   1410 / 1923 MiB
+#   lossless WebP out (method 6), smooth image                 1888 - 1952 MiB
+#   lossless WebP out, from a 98 MiB PNG (largest success)     2243 - 2308 MiB
+#   lossless WebP out, from full-entropy noise                 2885 - 2942 MiB
+# The last row is refused whatever the ceiling (the provider reports
+# output_too_large: the result is over the 128 MiB output limit), but it is
+# where memory goes highest, so it sets the size: 4 GiB is 39 percent above
+# that 2942 MiB, the largest peak of any kind, and 77 percent above 2308 MiB,
+# the largest that succeeds. The job still stops a decoder that runs away; this
+# caps committed memory and reserves nothing. POSIX applies the same figure as
+# an address-space limit, which is best effort and was not measured.
+RECIPE_WORKER_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
 # The worker decodes untrusted bytes and starts nothing, so the job allows it
 # exactly one process.
 RECIPE_WORKER_JOB_LIMITS = JobLimits(

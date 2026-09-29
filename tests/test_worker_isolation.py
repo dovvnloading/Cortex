@@ -10,6 +10,8 @@ entry-point-order checks run everywhere.
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from io import BytesIO
 import json
 import multiprocessing
@@ -306,6 +308,139 @@ def test_a_decoder_that_needs_more_than_the_ceiling_is_stopped_by_the_operating_
         )
 
     assert raised.value.code in {"worker_failed", "worker_provider_failed"}
+
+
+# -- The ceiling holds at the provider's own limits -----------------------------
+#
+# The ceiling was first sized from contrast alone and refused legitimate
+# 60-64 megapixel requests: an 8192x8192 RGBA image to WebP, and the two
+# resizes to 16384x4096. Each runs here, in a real worker under the real job,
+# at the largest size the provider accepts. Their peaks were measured at about
+# 1.9, 1.8 and 1.3 GiB against the 4 GiB ceiling.
+
+
+class _MemoryStatus(ctypes.Structure):
+    _fields_ = [
+        ("length", wintypes.DWORD),
+        ("memory_load", wintypes.DWORD),
+        ("total_physical", ctypes.c_uint64),
+        ("available_physical", ctypes.c_uint64),
+        ("total_commit", ctypes.c_uint64),
+        ("available_commit", ctypes.c_uint64),
+        ("total_virtual", ctypes.c_uint64),
+        ("available_virtual", ctypes.c_uint64),
+        ("available_extended_virtual", ctypes.c_uint64),
+    ]
+
+
+def _available_commit_bytes() -> int | None:
+    """Memory the system can still commit right now, or ``None`` if it cannot be read."""
+
+    if os.name != "nt":
+        return None
+    status = _MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MemoryStatus)]
+    kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return int(status.available_commit)
+
+
+# The worker peaks near 2 GiB on these cases and the test builds a 256 MiB
+# image of its own, so a machine with less than this left to commit would fail
+# them for the wrong reason.
+_COMMIT_NEEDED_BYTES = 3 * 1024 * _MIB
+
+
+def _skip_when_commit_is_scarce() -> None:
+    available = _available_commit_bytes()
+    if available is not None and available < _COMMIT_NEEDED_BYTES:
+        pytest.skip(
+            f"needs about {_COMMIT_NEEDED_BYTES // _MIB} MiB of committable memory, "
+            f"{available // _MIB} MiB is available"
+        )
+
+
+def _plan(steps: list[dict[str, Any]], output_format: str):
+    return parse_image_transform(
+        {
+            "schema_version": "artifact.transform.v1",
+            "input_artifact_id": "artifact-1",
+            "steps": steps,
+            "output_format": output_format,
+        }
+    )
+
+
+def _run_at_the_providers_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    size: tuple[int, int],
+    steps: list[dict[str, Any]],
+    output_format: str,
+):
+    """One real worker, one real job, one image at the provider's pixel ceiling."""
+
+    _skip_when_commit_is_scarce()
+    built: list[JobLimits | None] = []
+    monkeypatch.setattr(local_process, "KillOnCloseJob", _spying_job(built))
+    # The default transform budget is a production choice; a loaded CI machine
+    # must not turn a memory test into a timing test.
+    attempt = LocalRecipeWorkerAttempt(None, timeout_seconds=100.0, startup_timeout_seconds=60.0)
+
+    output = attempt.transform("request", "job-1", _plan(steps, output_format), _png(size), Event())
+
+    assert built == ([RECIPE_WORKER_JOB_LIMITS] if os.name == "nt" else [])
+    with Image.open(BytesIO(output.content)) as produced:
+        assert (produced.format, produced.width, produced.height) == (
+            output.format,
+            output.width,
+            output.height,
+        )
+    return output
+
+
+@windows_only
+def test_an_8192_square_rgba_image_is_written_as_webp_under_the_real_job(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Lossless WebP output is the largest step the worker takes: about 1.9 GiB at 64 megapixels."""
+
+    output = _run_at_the_providers_limit(
+        monkeypatch, (8192, 8192), [{"op": "contrast", "factor": "1.2"}], "webp"
+    )
+
+    assert (output.format, output.width, output.height) == ("WEBP", 8192, 8192)
+
+
+@windows_only
+def test_the_widest_resize_4096x16384_to_16384x4096_runs_under_the_real_job(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The most any resize can need, and the slowest case here (about ten seconds).
+
+    Resampling 4096x16384 to 16384x4096 holds the source, a premultiplied copy,
+    a 1 GiB intermediate of 16384x16384 pixels, and the result at once: about
+    1.8 GiB. Every other resize the provider accepts needs less.
+    """
+
+    output = _run_at_the_providers_limit(
+        monkeypatch, (4096, 16384), [{"op": "resize", "width": 16384, "height": 4096}], "png"
+    )
+
+    assert (output.format, output.width, output.height) == ("PNG", 16384, 4096)
+
+
+@windows_only
+def test_an_8192_square_image_resized_to_16384x4096_runs_under_the_real_job(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    output = _run_at_the_providers_limit(
+        monkeypatch, (8192, 8192), [{"op": "resize", "width": 16384, "height": 4096}], "png"
+    )
+
+    assert (output.format, output.width, output.height) == ("PNG", 16384, 4096)
 
 
 # -- The environment a worker is left with -------------------------------------
