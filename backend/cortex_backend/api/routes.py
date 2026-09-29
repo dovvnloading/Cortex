@@ -67,7 +67,13 @@ from cortex_backend.execution.lifecycle import (
     ScratchCapable,
 )
 from cortex_backend.services.model_catalog import GGUF_PREFIX
-from cortex_backend.execution.models import ExecutionJob, ExecutionEvent, TerminalExecutionStatus
+from cortex_backend.execution.models import (
+    ExecutionApproval,
+    ExecutionEvent,
+    ExecutionJob,
+    ExecutionJobListing,
+    TerminalExecutionStatus,
+)
 from cortex_backend.execution.recipe_coordinator import (
     RecipeExecutionError,
 )
@@ -79,6 +85,7 @@ from cortex_backend.execution.scratch_compute import (
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import (
+    JobKind,
     JobNotFound,
     JobOwnershipError,
     JobReservation,
@@ -181,9 +188,9 @@ def _call_with_timeout(
     return outcome[0] if outcome else None
 
 
-# A client may supply the id of a chat that does not exist yet -- both
-# add_message() and _start_generation_job() then create that chat using the
-# client's literal string as its permanent primary key. A server-generated id
+# A client may supply the id of a chat that does not exist yet --
+# _start_generation_job() then creates that chat using the client's literal
+# string as its permanent primary key. A server-generated id
 # is always uuid4().hex (32 lowercase hex characters), which trivially
 # satisfies this pattern, so the cap below never bites a legitimate id; it
 # exists only to keep a client from turning the primary key into something
@@ -1405,18 +1412,34 @@ def _job_response(snapshot: JobSnapshot) -> JobStatusResponse:
         thread_id=snapshot.thread_id,
         status=snapshot.status,
         sequence=snapshot.sequence,
+        can_cancel=snapshot.can_cancel,
         error=snapshot.error,
         result=dict(snapshot.result) if snapshot.result is not None else None,
     )
 
 
 def _job_status(
-    request: Request, job_id: str, principal: SessionPrincipal
+    request: Request,
+    job_id: str,
+    principal: SessionPrincipal,
+    *,
+    kind: JobKind | None = None,
 ) -> JobSnapshot:
+    """Read one of this owner's jobs; with ``kind``, only if it is of that kind.
+
+    A job of another kind reads as unknown -- the same 404 as an id that does
+    not exist -- so the ``/generations`` family cannot be used to read, follow
+    or stop a model or download job.
+    """
     try:
-        return request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
+        snapshot: JobSnapshot = request.app.state.jobs.status(
+            job_id, owner=_durable_owner(principal)
+        )
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
+    if kind is not None and snapshot.kind != kind:
+        _raise_job_error(JobNotFound(job_id))
+    return snapshot
 
 
 # What each ChatDomainError code means to an HTTP client. A client decides from
@@ -1619,6 +1642,7 @@ def _attachment_owner(request: Request, principal: SessionPrincipal) -> str:
 
 def _raise_chat_attachment_error(exc: ChatAttachmentError) -> NoReturn:
     messages = {
+        "attachment_filename_invalid": "The file name is too long or contains only punctuation.",
         "attachment_too_large": "Files must be 10 MB or smaller.",
         "attachment_type_unsupported": "Cortex supports images and common text/code/config documents.",
         "attachment_not_text": "That document is not a readable text file.",
@@ -1699,43 +1723,6 @@ def _resolve_generation_attachments(
     return tuple(resolved)
 
 
-def _validate_chat_attachment_refs(
-    request: Request,
-    deps: BackendDependenciesProtocol,
-    principal: SessionPrincipal,
-    references: list[ChatAttachment],
-) -> list[ChatAttachment]:
-    """Validate metadata-only message writes against the local attachment store."""
-
-    if not references:
-        return []
-    if len(references) > MAX_CHAT_ATTACHMENTS:
-        raise ChatDomainError(
-            "A message can include at most eight attachments.", code="invalid_input"
-        )
-    if sum(item.size for item in references) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES:
-        raise ChatDomainError(
-            "The combined attachment size is too large for one message.",
-            code="invalid_input",
-        )
-    service = _chat_attachment_service(request, deps)
-    owner = _attachment_owner(request, principal)
-    normalized: list[ChatAttachment] = []
-    seen: set[str] = set()
-    for reference in references:
-        if reference.attachment_id in seen:
-            raise ChatDomainError(
-                "The same attachment cannot be added twice.", code="invalid_input"
-            )
-        seen.add(reference.attachment_id)
-        try:
-            resolved = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
-        except ChatAttachmentError:
-            raise
-        normalized.append(ChatAttachment.model_validate(resolved.descriptor.as_dict()))
-    return normalized
-
-
 def _execution_repository(request: Request):
     return _execution_runtime(request).repository
 
@@ -1757,6 +1744,20 @@ def _execution_message(event: ExecutionEvent | None) -> str | None:
 def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatusResponse:
     event = _execution_latest_event(repository, job)
     approval = repository.get_approval(job.job_id, owner=job.owner)
+    return _execution_status_from(job, event, approval)
+
+
+def _execution_status_from(
+    job: ExecutionJob,
+    event: ExecutionEvent | None,
+    approval: ExecutionApproval | None,
+) -> ExecutionStatusResponse:
+    """Describe a job from what has already been read about it.
+
+    One place builds the response for the single-job routes, which look the
+    event and approval up per request, and for the task list, which gets them
+    from its one listing query, so the two cannot describe a job differently.
+    """
     approval_state = approval.state if approval is not None else job.approval_state
     code_fields = _code_job_fields(job)
     return ExecutionStatusResponse(
@@ -1784,8 +1785,9 @@ def _execution_status_response(repository, job: ExecutionJob) -> ExecutionStatus
     )
 
 
-def _execution_task_summary(repository, job: ExecutionJob) -> ExecutionTaskSummary:
-    response = _execution_status_response(repository, job)
+def _execution_task_summary(listing: ExecutionJobListing) -> ExecutionTaskSummary:
+    job = listing.job
+    response = _execution_status_from(job, listing.latest_event, listing.approval)
     code_fields = _code_job_fields(job, include_result=True)
     if job.profile != CODE_EXECUTION_PROFILE:
         code_fields = {"result": _generic_execution_result(job.result)}

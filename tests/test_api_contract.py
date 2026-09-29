@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 import pytest
@@ -413,13 +412,10 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
 
         chat = client.post("/api/v1/chats", json={"title": "New Chat"}, headers=headers)
         thread_id = chat.json()["id"]
-        message = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert message.status_code == 200
-        assert len(message.json()["messages"]) == 1
+        app.state.dependencies.chats.add_message(thread_id, "user", "hello")
+        reloaded = client.get(f"/api/v1/chats/{thread_id}", headers=headers)
+        assert reloaded.status_code == 200
+        assert len(reloaded.json()["messages"]) == 1
 
         assert (
             client.post(
@@ -449,58 +445,47 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         assert "qwen3:8b" in models.json()["installed_models"]
 
 
-def test_add_message_rejects_malformed_new_chat_thread_id():
-    """A client-chosen thread_id only becomes a new chat's id if it is safe.
+def test_clients_cannot_author_assistant_turns():
+    """The only way into a chat's transcript is a generation, never a raw write.
 
-    ``POST /chats/{thread_id}/messages`` creates a brand new chat using the
-    literal path segment as its permanent id whenever no chat with that id
-    exists yet. A pathological id (whitespace, a slash-like sequence, a
-    control character, ...) must be rejected with 422 before that happens.
+    ``POST /chats/{id}/messages`` used to accept any role, so any session could
+    fabricate the assistant and system turns the model is later shown as
+    history. Nothing in the app called it. It is gone, and a caller that tries
+    the old shape gets a plain 404 and changes nothing.
     """
 
     dependencies = build_demo_dependencies()
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    dependencies.chats.create_chat("existing-chat", "Existing")
     with TestClient(app) as client:
         headers = _session(client, app)
-        for bad_thread_id in ("has space", "control\x07char", "semi;colon"):
-            encoded = quote(bad_thread_id, safe="")
-            response = client.post(
-                f"/api/v1/chats/{encoded}/messages",
-                json={"role": "user", "content": "hello"},
-                headers=headers,
-            )
-            assert response.status_code == 422, bad_thread_id
-            assert "thread_id" in response.json()["detail"]
-            assert dependencies.chats.get_chat(bad_thread_id) is None
+        for role in ("assistant", "system", "user"):
+            for thread_id in ("existing-chat", "brand-new-chat"):
+                response = client.post(
+                    f"/api/v1/chats/{thread_id}/messages",
+                    json={"role": role, "content": "forged turn"},
+                    headers=headers,
+                )
+                assert response.status_code in {404, 405}, (role, thread_id)
+
+        assert dependencies.chats.get_chat("existing-chat")["messages"] == []
+        assert dependencies.chats.get_chat("brand-new-chat") is None
+
+    documented = {
+        (method, path)
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+    }
+    assert ("post", "/api/v1/chats/{thread_id}/messages") not in documented
 
 
-def test_add_message_with_valid_new_thread_id_creates_chat():
-    """A well-formed client-chosen thread_id may still create a brand new chat."""
+def test_generation_with_preexisting_nonconforming_chat_id_still_works():
+    """A chat id that predates the new-chat id check keeps working unconditionally.
 
-    dependencies = build_demo_dependencies()
-    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
-    with TestClient(app) as client:
-        headers = _session(client, app)
-        new_thread_id = "Client-Chosen_Thread-123"
-        response = client.post(
-            f"/api/v1/chats/{new_thread_id}/messages",
-            json={"role": "user", "content": "hello"},
-            headers=headers,
-        )
-        assert response.status_code == 200
-        assert response.json()["id"] == new_thread_id
-        chat = dependencies.chats.get_chat(new_thread_id)
-        assert chat is not None
-        assert chat["messages"][0]["content"] == "hello"
-
-
-def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
-    """A chat id that predates this check keeps working unconditionally.
-
-    The new format check only ever gates chat *creation*. Looking up or
-    appending to an already-existing chat -- however it got its id -- must
-    keep succeeding for backward compatibility with any local database
-    populated before this validation existed.
+    The format check only ever gates chat *creation*. Sending another turn to an
+    already-existing chat -- however it got its id -- must keep succeeding for
+    backward compatibility with any local database populated before the
+    validation existed.
     """
 
     dependencies = build_demo_dependencies()
@@ -509,14 +494,13 @@ def test_add_message_to_preexisting_nonconforming_chat_id_still_works():
     app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
     with TestClient(app) as client:
         headers = _session(client, app)
-        encoded = quote(legacy_thread_id, safe="")
         response = client.post(
-            f"/api/v1/chats/{encoded}/messages",
-            json={"role": "user", "content": "hello"},
+            "/api/v1/generations",
+            json={"thread_id": legacy_thread_id, "user_input": "hello"},
             headers=headers,
         )
-        assert response.status_code == 200
-        assert response.json()["id"] == legacy_thread_id
+        assert response.status_code == 202
+        assert response.json()["thread_id"] == legacy_thread_id
         chat = dependencies.chats.get_chat(legacy_thread_id)
         assert chat["messages"][0]["content"] == "hello"
 
@@ -658,6 +642,195 @@ def test_generation_conflict_and_cancellation_are_explicit():
             "cancelling",
             "cancelled",
         ]
+
+
+def _preflight(client: TestClient, *, origin: str, headers: str, path: str = "/api/v1/session/handoff"):
+    return client.options(
+        path,
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": headers,
+        },
+    )
+
+
+def test_preflight_allows_the_handoff_header():
+    """A page on another loopback port can renew its session.
+
+    The client sends ``X-Cortex-Handoff`` on ``POST /session/handoff``. The
+    preflight used to leave it off the allow list, so a client pointed at a
+    loopback API origin could not rebootstrap after its session expired.
+    """
+
+    _, client = _client()
+    with client:
+        allowed = _preflight(
+            client,
+            origin="http://localhost:5173",
+            headers="x-cortex-handoff, content-type, authorization, last-event-id",
+        )
+        assert allowed.status_code == 200
+        assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+        offered = {
+            name.strip().lower()
+            for name in allowed.headers["access-control-allow-headers"].split(",")
+        }
+        assert {"x-cortex-handoff", "authorization", "content-type", "last-event-id"} <= offered
+
+        # The list is exact, and only loopback origins are trusted.
+        assert _preflight(client, origin="http://localhost:5173", headers="x-something-else").status_code == 400
+        assert _preflight(client, origin="https://example.test", headers="x-cortex-handoff").status_code == 400
+        assert _preflight(client, origin="http://localhost.example.test", headers="x-cortex-handoff").status_code == 400
+
+
+def test_generation_routes_refuse_non_generation_jobs():
+    """``/generations`` is the chat family; a model job is not its to read or stop.
+
+    ``/jobs`` is the generic family and answers for every kind. Reading a
+    ``models`` job through ``/generations`` used to succeed, and cancelling it
+    there stopped it, so the two families were interchangeable by accident.
+    """
+
+    dependencies = build_demo_dependencies()
+    pull_started = Event()
+    pull_saw_cancel = Event()
+
+    def blocked_pull(model, *, progress_callback=None, cancellation_event=None, verify=True):
+        del model, progress_callback, verify
+        pull_started.set()
+        # Bounded: a cancel that never arrives ends the job instead of hanging it.
+        if cancellation_event is not None and cancellation_event.wait(timeout=5.0):
+            pull_saw_cancel.set()
+        return False
+
+    dependencies.models.pull_model = blocked_pull
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        pull = client.post("/api/v1/models/pulls", json={"model": "tiny:latest"}, headers=headers)
+        assert pull.status_code == 202
+        model_job = pull.json()["job_id"]
+        assert pull_started.wait(timeout=5.0), "the model job did not start"
+
+        unknown = client.get("/api/v1/generations/no-such-job", headers=headers)
+        assert unknown.status_code == 404
+        for method, path in (
+            ("GET", f"/api/v1/generations/{model_job}"),
+            ("POST", f"/api/v1/generations/{model_job}/cancel"),
+            ("GET", f"/api/v1/generations/{model_job}/events"),
+        ):
+            refused = client.request(method, path, headers=headers)
+            assert refused.status_code == 404, (method, path)
+            # Indistinguishable from an id that does not exist.
+            assert refused.json() == unknown.json(), (method, path)
+
+        # The refused cancel changed nothing: the job is untouched ...
+        still = client.get(f"/api/v1/jobs/{model_job}", headers=headers)
+        assert still.status_code == 200
+        assert still.json()["kind"] == "models"
+        assert still.json()["status"] == "running"
+        assert not pull_saw_cancel.is_set()
+
+        # ... and the generic family still stops it.
+        stopped = client.post(f"/api/v1/jobs/{model_job}/cancel", headers=headers)
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "cancelling"
+        wait_until(pull_saw_cancel.is_set, timeout=5.0, describe="the pull to see the cancel")
+
+        # A generation job is served by both families.
+        generation = client.post(
+            "/api/v1/generations",
+            json={"thread_id": "kind-check", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        for family in ("generations", "jobs"):
+            served = client.get(f"/api/v1/{family}/{generation['job_id']}", headers=headers)
+            assert served.status_code == 200, family
+            assert served.json()["kind"] == "generation"
+
+    tags = {tag["name"]: tag["description"] for tag in app.openapi()["tags"]}
+    assert "generic job family" in tags["jobs"]
+    assert "kind generation" in tags["generations"]
+
+
+def test_cancel_after_commit_reports_it_cannot_cancel():
+    """A Stop that arrives after the commit point says it was not honoured.
+
+    The status stays ``running`` because the answer is being saved, which is
+    also what a job that simply has not noticed the Stop yet looks like. The
+    ``can_cancel`` flag is what tells the two apart.
+    """
+
+    dependencies = build_demo_dependencies(
+        ollama_state=FakeOllamaState(generation_delay_seconds=0.3)
+    )
+    past_commit = Event()
+    release_title = Event()
+
+    def title_after_commit(snapshot, response, cancellation_event=None):
+        del snapshot, response, cancellation_event
+        past_commit.set()
+        release_title.wait(timeout=10.0)
+        return "Committed title"
+
+    dependencies.generation.generate_chat_title = title_after_commit
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            before = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-early", "thread_id": "early", "user_input": "slow"},
+                headers=headers,
+            ).json()
+            early = client.get(f"/api/v1/generations/{before['job_id']}", headers=headers).json()
+            assert early["status"] in {"queued", "running"}
+            assert early["can_cancel"] is True
+            honoured = client.post(
+                f"/api/v1/generations/{before['job_id']}/cancel", headers=headers
+            ).json()
+            assert honoured["status"] == "cancelling"
+            assert honoured["can_cancel"] is False  # nothing further to cancel
+            wait_until(
+                lambda: client.get(
+                    f"/api/v1/generations/{before['job_id']}", headers=headers
+                ).json()["status"]
+                == "cancelled",
+                describe="the early Stop to finish",
+            )
+
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-late", "thread_id": "late", "user_input": "hello"},
+                headers=headers,
+            ).json()
+            assert past_commit.wait(timeout=10.0), "the job did not reach its commit point"
+
+            refused = client.post(
+                f"/api/v1/generations/{accepted['job_id']}/cancel", headers=headers
+            )
+            assert refused.status_code == 200
+            assert refused.json()["status"] == "running"
+            assert refused.json()["can_cancel"] is False
+            polled = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert polled.json()["can_cancel"] is False
+            # The generic family reports the same thing.
+            assert client.get(
+                f"/api/v1/jobs/{accepted['job_id']}", headers=headers
+            ).json()["can_cancel"] is False
+
+            release_title.set()
+            with client.stream(
+                "GET", f"/api/v1/generations/{accepted['job_id']}/events", headers=headers
+            ) as response:
+                events = _events("".join(response.iter_text()))
+            assert events[-1]["event"] == "generation.completed"
+            finished = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert finished.json()["status"] == "succeeded"
+            assert finished.json()["can_cancel"] is False
+    finally:
+        release_title.set()
 
 
 def test_fake_ollama_server_and_model_failures_are_deterministic():
@@ -1877,11 +2050,12 @@ def test_an_oversized_body_refusal_carries_the_request_id(client, headers, how):
         # Refused on the header alone, before any of the body is read.
         request = {"content": b"x", "headers": {"Content-Length": str(MAX_REQUEST_BODY_BYTES + 1)}}
     else:
-        chunk = b"x" * (1024 * 1024)
+        chunk = b"x" * (64 * 1024)
         request = {"content": (chunk for _ in range(MAX_REQUEST_BODY_BYTES // len(chunk) + 1))}
 
+    # Not the attachment routes: those keep a larger ceiling than every other POST.
     response = client.post(
-        "/api/v1/attachments",
+        "/api/v1/generations",
         headers={**headers, "Content-Type": "application/json", **request.pop("headers", {})},
         **request,
     )

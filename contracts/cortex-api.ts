@@ -5,15 +5,6 @@ export interface AddMemoryRequest {
   memo: string;
 }
 
-export interface AddMessageRequest {
-  role: "user" | "assistant" | "system";
-  content: string;
-  base_revision?: number | null;
-  sources?: Array<unknown> | null;
-  thoughts?: string | null;
-  attachments?: Array<ChatAttachment> | null;
-}
-
 export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
@@ -383,6 +374,7 @@ export interface JobStatusResponse {
   thread_id?: string | null;
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   sequence: number;
+  can_cancel?: boolean;
   error?: string | null;
   result?: Record<string, unknown> | null;
 }

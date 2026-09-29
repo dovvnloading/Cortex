@@ -248,7 +248,7 @@ def test_opening_an_execution_stream_reads_the_job_off_the_loop(
 
 
 def test_existence_checks_do_not_read_the_transcript() -> None:
-    """Renaming, filing, and appending to a chat only ask whether it exists."""
+    """Renaming and filing a chat only ask whether it exists."""
     app, probe = _probed_app()
     with TestClient(app) as client:
         headers = session_headers(client, app)
@@ -269,25 +269,16 @@ def test_existence_checks_do_not_read_the_transcript() -> None:
         file_reads = probe.calls["chats.get_chat"]
         list_reads = probe.calls["chats.list_summaries"]
 
-        probe.reset()
-        appended = client.post(
-            f"/api/v1/chats/{thread_id}/messages",
-            json={"role": "user", "content": "one more"},
-            headers=headers,
-        )
-        append_reads = probe.calls["chats.get_chat"]
-
-    assert renamed.status_code == filed.status_code == appended.status_code == 200
+    assert renamed.status_code == filed.status_code == 200
     assert filed.json() == {
         "id": thread_id,
         "title": "Renamed",
         "timestamp": filed.json()["timestamp"],
         "group_id": group["id"],
     }
-    # The response of rename and append is the chat itself, so that one read is
-    # the point of the call; the existence check before it must not add another.
+    # The response of a rename is the chat itself, so that one read is the point
+    # of the call; the existence check before it must not add another.
     assert rename_reads == 1
-    assert append_reads == 1
     assert file_reads == 0
     assert list_reads == 0
 
@@ -304,20 +295,13 @@ def _history_after(setup: Callable[[TestClient, dict[str, str]], str], **turn: A
     return _roles(probe.engine_histories[0])
 
 
-def _post_message(client: TestClient, headers: dict[str, str], thread_id: str, role: str, content: str) -> None:
-    posted = client.post(
-        f"/api/v1/chats/{thread_id}/messages",
-        json={"role": role, "content": content},
-        headers=headers,
-    )
-    assert posted.status_code == 200, posted.text
-
-
 def _chat_with(*messages: tuple[str, str]) -> Callable[[TestClient, dict[str, str]], str]:
     def setup(client: TestClient, headers: dict[str, str]) -> str:
         thread_id = client.post("/api/v1/chats", json={"title": "History"}, headers=headers).json()["id"]
+        # No route writes a raw turn, so the earlier turns go in as the
+        # generation worker would have written them.
         for role, content in messages:
-            _post_message(client, headers, thread_id, role, content)
+            client.app.state.dependencies.chats.add_message(thread_id, role, content)
         return thread_id
 
     return setup
