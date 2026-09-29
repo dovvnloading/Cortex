@@ -2341,10 +2341,54 @@
             ],
             "title": "Active Backend"
           },
+          "backend_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Note"
+          },
           "binary_present": {
             "default": false,
             "title": "Binary Present",
             "type": "boolean"
+          },
+          "context_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Note"
+          },
+          "gpu_layers_offloaded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Layers Offloaded"
+          },
+          "gpu_layers_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Layers Total"
           },
           "last_error": {
             "anyOf": [
@@ -2444,6 +2488,14 @@
       "LlamaCppSettings": {
         "additionalProperties": false,
         "properties": {
+          "extra_args": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Args",
+            "type": "array"
+          },
           "gpu_backend": {
             "default": "auto",
             "enum": [
@@ -2453,6 +2505,13 @@
             ],
             "title": "Gpu Backend",
             "type": "string"
+          },
+          "idle_unload_minutes": {
+            "default": 30,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Idle Unload Minutes",
+            "type": "integer"
           }
         },
         "title": "LlamaCppSettings",
@@ -4997,6 +5056,30 @@
         "tags": [
           "jobs"
         ]
+      }
+    },
+    "/api/v1/llamacpp/unload": {
+      "post": {
+        "description": "Stop the loaded local model to free its memory; the next message loads it again.\n\nSafe to repeat: with nothing loaded it changes nothing and reports the\nstatus. Refused with 409 while a response is being generated or a model\nis loading, because that would cut the answer off.",
+        "operationId": "unload_llamacpp_api_v1_llamacpp_unload_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlamaCppRuntimeStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Unload Llamacpp"
       }
     },
     "/api/v1/memories": {

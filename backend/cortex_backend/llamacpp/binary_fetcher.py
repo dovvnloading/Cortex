@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -53,6 +54,16 @@ _CANCELLABLE_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=30.
 _MAX_BINARY_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 # Mirrors download.py's ``MIN_FREE_SPACE_BYTES`` safety reserve.
 _MIN_FREE_SPACE_BYTES = 128 * 1024 * 1024
+# The only directories pruning ever considers: a release build this fetcher
+# extracts (``<tag>-<backend>``, tag being llama.cpp's ``b<build number>``) and
+# the ``.prune-`` name a superseded one is renamed to on its way out. In-progress
+# ``.download-`` and ``.extract-`` names deliberately match neither.
+_RELEASE_DIR_RE = re.compile(r"^b(\d+)-(?:cpu|vulkan)$")
+_PRUNING_DIR_RE = re.compile(r"^\.prune-[0-9a-f]{32}$")
+# One pruning pass removes at most this many directories; a runtime folder holds
+# a handful, so reaching it means something else is going on and the rest waits
+# for the next launch.
+_MAX_PRUNED_PER_PASS = 8
 
 
 @runtime_checkable
@@ -65,6 +76,28 @@ class Cancellable(Protocol):
 
     def is_set(self) -> bool:
         ...
+
+
+def _cancelled(cancellation_event: Cancellable | None) -> bool:
+    return cancellation_event is not None and cancellation_event.is_set()
+
+
+def _directory_in_use(root: Path) -> bool:
+    """Whether a program is running from ``root``, or holds a file in it open.
+
+    Opens each file for writing and closes it again without writing: a running
+    program's image and its loaded libraries refuse that, and so does a file
+    another process keeps open. Anything that cannot be listed or opened counts
+    as in use, because the caller's alternative is deleting it.
+    """
+    try:
+        for path in root.rglob("*"):
+            if path.is_file():
+                with path.open("r+b"):
+                    pass
+    except OSError:
+        return True
+    return False
 
 
 def _raise_if_cancelled(cancellation_event: Cancellable | None) -> None:
@@ -167,6 +200,7 @@ class BinaryFetcher:
         self._runtime_dir = runtime_dir
         self._http = http_client
         self._verification_cache: dict[Path, tuple[_TreeIdentity, bool]] = {}
+        self._pruned_for: str | None = None
 
     def _verify_directory(
         self,
@@ -248,6 +282,7 @@ class BinaryFetcher:
         if self._verify_directory(
             target_dir, asset, force_hash=True, cancellation_event=cancellation_event
         ):
+            self._prune_superseded_builds(release, cancellation_event)
             return exe_path
 
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -279,7 +314,77 @@ class BinaryFetcher:
             raise BinaryVerificationError(
                 f"Downloaded llama.cpp binary for '{backend}' failed verification."
             )
+        self._prune_superseded_builds(release, cancellation_event)
         return exe_path
+
+    def _prune_superseded_builds(
+        self, release: PinnedRelease, cancellation_event: Cancellable | None = None
+    ) -> None:
+        """Delete runtime builds older than the pinned release, once per process.
+
+        Every pin bump used to leave a 100-200 MB build behind for good. Run only
+        after ``release`` itself has been verified, so there is always a working
+        runtime to fall back on, and never allowed to fail the launch that
+        triggered it: whatever cannot be removed now is tried again next time.
+
+        Only a sibling named like one of this fetcher's own builds and with a
+        strictly lower build number is touched -- never the pinned release
+        (either backend), a newer one (a rolled-back Cortex sharing this data
+        folder), an in-progress download or extraction, or anything unrecognised.
+        A build a process is running from is left alone. Windows refuses to open
+        a running program's image, or a library it has loaded, for writing, so
+        every file is tried that way first (nothing is written); the directory
+        is then renamed, which is refused while any file in it is held open, and
+        only the renamed copy is deleted, so a half-deleted build is never left
+        under a name something could launch. Names are logged, never contents.
+
+        Whatever cannot be removed now is tried again the next time Cortex starts.
+        """
+        if self._pruned_for == release.tag:
+            return
+        self._pruned_for = release.tag
+        current = _RELEASE_DIR_RE.match(f"{release.tag}-cpu")
+        if current is None:
+            return
+        current_build = int(current.group(1))
+        try:
+            root = self._runtime_dir.resolve()
+            candidates = sorted(self._runtime_dir.iterdir(), key=lambda entry: entry.name)
+        except OSError:
+            return
+        removed = 0
+        for entry in candidates:
+            if removed >= _MAX_PRUNED_PER_PASS or _cancelled(cancellation_event):
+                break
+            try:
+                leftover = _PRUNING_DIR_RE.match(entry.name) is not None
+                match = _RELEASE_DIR_RE.match(entry.name)
+                if not leftover and (match is None or int(match.group(1)) >= current_build):
+                    continue
+                # Only a real directory directly inside the runtime folder: a
+                # link or junction could lead anywhere, and is not ours to delete.
+                if entry.is_symlink() or not entry.is_dir() or entry.resolve().parent != root:
+                    continue
+                if leftover:
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    if _directory_in_use(entry):
+                        logger.info("Kept an older local runtime build that is in use (%s).", entry.name)
+                        continue
+                    claimed = self._runtime_dir / f".prune-{uuid4().hex}"
+                    try:
+                        os.replace(entry, claimed)
+                    except OSError:
+                        logger.info("Kept an older local runtime build that is in use (%s).", entry.name)
+                        continue
+                    self._verification_cache.pop(entry, None)
+                    shutil.rmtree(claimed, ignore_errors=True)
+                    logger.info("Removed a superseded local runtime build (%s).", entry.name)
+                removed += 1
+            except Exception as exc:
+                logger.warning(
+                    "Could not remove a superseded local runtime build (%s).", type(exc).__name__
+                )
 
     def _target_dir(self, release: PinnedRelease, backend: GpuBackend) -> Path:
         return self._runtime_dir / f"{release.tag}-{backend}"

@@ -23,6 +23,7 @@ from cortex_backend.llamacpp.errors import (
     BinaryVerificationError,
     CrashLoopError,
     LlamaCppError,
+    RuntimeBusyError,
     ServerLaunchError,
     ServerStartTimeoutError,
 )
@@ -253,8 +254,12 @@ def _manager(
     health_timeout_seconds: float = 5.0,
     startup_cap_seconds: float | None = None,
     release=_ANY_RELEASE,
+    **overrides,
 ) -> LlamaServerManager:
     extra = {} if startup_cap_seconds is None else {"startup_cap_seconds": startup_cap_seconds}
+    # The default probe reads this machine's graphics loader, which would make
+    # every "auto" test depend on where it runs.
+    extra.setdefault("vulkan_loader_probe", lambda: True)
     return LlamaServerManager(
         runtime_dir=tmp_path,
         fetcher=fetcher,
@@ -264,7 +269,7 @@ def _manager(
         health_timeout_seconds=health_timeout_seconds,
         launcher=launcher,
         http_client=http_client,
-        **extra,
+        **{**extra, **overrides},
     )
 
 
@@ -2733,3 +2738,921 @@ def test_the_warm_health_retry_passes_the_declared_timeout(tmp_path: Path) -> No
     assert "_HEALTH_RETRY_TIMEOUT_SECONDS" in source, (
         "the retry path must pass the timeout it declares"
     )
+
+
+# ---------------------------------------------------------------------------
+# A GPU build that cannot load is not downloaded (RT-09)
+# ---------------------------------------------------------------------------
+
+
+def _launch_with_probe(tmp_path: Path, *, gpu_backend: str, probe) -> tuple[LlamaServerManager, _FakeFetcher, _QueueLauncher]:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+        vulkan_loader_probe=probe,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager, fetcher, launcher
+
+
+def test_without_a_vulkan_loader_auto_asks_only_for_the_cpu_build(tmp_path: Path) -> None:
+    manager, fetcher, launcher = _launch_with_probe(tmp_path, gpu_backend="auto", probe=lambda: False)
+
+    # The roughly 100 MB Vulkan archive was never requested, let alone launched.
+    assert fetcher.ensure_binary_calls == ["cpu"]
+    assert len(launcher.launch_args) == 1
+    args = launcher.launch_args[0]
+    assert args[args.index("-ngl") + 1] == "0"
+    status = manager.status
+    assert status.state == "ready"
+    assert status.active_backend == "cpu"
+    assert status.backend_note is not None
+    assert "Vulkan" in status.backend_note
+
+
+def test_with_a_vulkan_loader_auto_still_tries_the_gpu_build_first(tmp_path: Path) -> None:
+    manager, fetcher, launcher = _launch_with_probe(tmp_path, gpu_backend="auto", probe=lambda: True)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
+    args = launcher.launch_args[0]
+    assert args[args.index("-ngl") + 1] == "auto"
+    assert manager.status.active_backend == "vulkan"
+    assert manager.status.backend_note is None
+
+
+def test_an_explicit_vulkan_choice_is_honoured_even_when_the_probe_finds_no_loader(tmp_path: Path) -> None:
+    """The probe can be wrong about an unusual install; the user asked for this build."""
+    manager, fetcher, _launcher = _launch_with_probe(tmp_path, gpu_backend="vulkan", probe=lambda: False)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
+    assert manager.status.backend_note is None
+
+
+def test_an_explicit_cpu_choice_never_consults_the_probe(tmp_path: Path) -> None:
+    probed: list[bool] = []
+
+    def probe() -> bool:
+        probed.append(True)
+        return False
+
+    manager, fetcher, _launcher = _launch_with_probe(tmp_path, gpu_backend="cpu", probe=probe)
+
+    assert probed == []
+    assert fetcher.ensure_binary_calls == ["cpu"]
+    assert manager.status.backend_note is None
+
+
+def test_the_skip_note_describes_the_latest_launch_only(tmp_path: Path) -> None:
+    loader_present = [False]
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend="auto",
+        vulkan_loader_probe=lambda: loader_present[0],
+    )
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    assert manager.status.backend_note is not None
+
+    loader_present[0] = True  # a driver was installed in the meantime
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert fetcher.ensure_binary_calls == ["cpu", "vulkan"]
+    assert manager.status.active_backend == "vulkan"
+    assert manager.status.backend_note is None
+
+
+def test_the_loader_probe_looks_in_system32_then_on_the_search_path(tmp_path: Path) -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    windows = tmp_path / "Windows"
+    (windows / "System32").mkdir(parents=True)
+    environ = {"SystemRoot": str(windows)}
+    never = lambda name: (_ for _ in ()).throw(AssertionError(f"searched for {name}"))  # noqa: E731
+
+    assert _vulkan_loader_present(platform="win32", environ=environ, find_library=lambda name: None) is False
+
+    (windows / "System32" / "vulkan-1.dll").write_bytes(b"loader")
+    assert _vulkan_loader_present(platform="win32", environ=environ, find_library=never) is True
+
+    # Not in System32, but somewhere on the search path (a redistributable
+    # runtime next to the driver).
+    assert _vulkan_loader_present(
+        platform="win32", environ={}, find_library=lambda name: "C:/vulkan/vulkan-1.dll"
+    ) is True
+
+
+def test_the_loader_probe_does_not_change_behaviour_off_windows() -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    assert _vulkan_loader_present(platform="linux", environ={}, find_library=lambda name: None) is True
+
+
+def test_a_failing_search_counts_as_no_loader() -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    def broken(name: str) -> str:
+        raise OSError("search failed")
+
+    assert _vulkan_loader_present(platform="win32", environ={}, find_library=broken) is False
+
+
+# ---------------------------------------------------------------------------
+# What the runtime says about GPU use, not just which build launched (RT-08)
+# ---------------------------------------------------------------------------
+
+_LISTENING_BYTES = b"0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
+
+
+class _OutputPopen(_FakePopen):
+    """A child whose output is exactly ``lines``, then the line that says it is listening."""
+
+    def __init__(self, *lines: bytes, listening: bool = True, after: tuple[bytes, ...] = ()) -> None:
+        super().__init__()
+        self.stdout = io.BytesIO(b"".join(lines) + (_LISTENING_BYTES if listening else b"") + b"".join(after))
+
+
+def _ready_with_output(tmp_path: Path, popen: _FakePopen, *, gpu_backend: str = "vulkan") -> LlamaServerManager:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([popen]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"load_tensors: offloaded 24/33 layers to GPU\n",
+        b"0.05.123.456 I load_tensors: offloaded 24/33 layers to GPU\n",
+        b"llm_load_tensors: offloaded 24/33 layers to GPU\r\n",
+        b"load_tensors: Offloaded 24 / 33 layers to gpu\n",
+    ],
+)
+def test_the_offload_line_before_listening_is_reported_on_the_status(tmp_path: Path, line: bytes) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: loading model tensors\n", line))
+
+    status = manager.status
+    assert status.state == "ready"
+    assert (status.gpu_layers_offloaded, status.gpu_layers_total) == (24, 33)
+
+
+def test_a_gpu_build_that_offloaded_nothing_says_so(tmp_path: Path) -> None:
+    """The Vulkan build launching is not the GPU being used: 0 layers is the CPU."""
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: offloaded 0/33 layers to GPU\n"))
+
+    status = manager.status
+    assert status.active_backend == "vulkan"
+    assert (status.gpu_layers_offloaded, status.gpu_layers_total) == (0, 33)
+
+
+def test_no_offload_line_means_unknown_not_zero(tmp_path: Path) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"some other loader output\n"))
+
+    status = manager.status
+    assert status.state == "ready"
+    assert status.active_backend == "vulkan"
+    assert status.gpu_layers_offloaded is None
+    assert status.gpu_layers_total is None
+
+
+def test_the_last_offload_line_wins(tmp_path: Path) -> None:
+    manager = _ready_with_output(
+        tmp_path,
+        _OutputPopen(
+            b"load_tensors: offloaded 10/33 layers to GPU\n",
+            b"load_tensors: offloaded 33/33 layers to GPU\n",
+        ),
+    )
+
+    assert (manager.status.gpu_layers_offloaded, manager.status.gpu_layers_total) == (33, 33)
+
+
+def test_an_offload_line_after_the_server_is_listening_is_not_this_load(tmp_path: Path) -> None:
+    manager = _ready_with_output(
+        tmp_path,
+        _OutputPopen(b"load_tensors: offloaded 12/33 layers to GPU\n", after=(b"load_tensors: offloaded 1/2 layers to GPU\n",)),
+    )
+
+    assert (manager.status.gpu_layers_offloaded, manager.status.gpu_layers_total) == (12, 33)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # What the model file says about itself is chosen by whoever made it.
+        b"print_info: general.name = load_tensors: offloaded 99/99 layers to GPU\n",
+        b"llama_model_loader: - kv   3: general.name str = load_tensors: offloaded 99/99 layers to GPU\n",
+        # Not a line the loader prints: a claim buried in other text.
+        b"the model says load_tensors: offloaded 99/99 layers to GPU and then more\n",
+        # Counts that cannot be true.
+        b"load_tensors: offloaded 40/33 layers to GPU\n",
+        b"load_tensors: offloaded 0/0 layers to GPU\n",
+        # Absurdly long lines are not parsed at all.
+        b"x" * 600 + b" load_tensors: offloaded 5/6 layers to GPU\n",
+    ],
+)
+def test_lines_that_cannot_be_trusted_are_not_reported(tmp_path: Path, line: bytes) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(line))
+
+    assert manager.status.state == "ready"
+    assert manager.status.gpu_layers_offloaded is None
+    assert manager.status.gpu_layers_total is None
+
+
+def test_a_new_server_does_not_inherit_the_previous_servers_counts(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([
+            _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n"),
+            _OutputPopen(b"nothing useful\n"),
+        ]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend="vulkan",
+    )
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    assert manager.status.gpu_layers_offloaded == 24
+
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert manager.status.gpu_layers_offloaded is None
+
+
+def test_the_counts_are_only_reported_while_the_server_is_ready(tmp_path: Path) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n"))
+    assert manager.status.gpu_layers_offloaded == 24
+
+    manager.stop()
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.gpu_layers_offloaded is None
+    assert status.gpu_layers_total is None
+
+
+def test_the_offload_counts_are_the_only_thing_taken_from_the_line(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    manager = _ready_with_output(
+        tmp_path, _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n")
+    )
+
+    assert "offloaded" not in caplog.text
+    assert "load_tensors" not in caplog.text
+    assert manager.status.gpu_layers_total == 33
+
+
+# ---------------------------------------------------------------------------
+# Advanced runtime options and a context window the model was trained for (RT-22)
+# ---------------------------------------------------------------------------
+
+
+def _write_gguf(path: Path, *, context_length: int | None, architecture: str = "llama") -> None:
+    import gguf
+    import numpy as np
+
+    writer = gguf.GGUFWriter(str(path), architecture)
+    if context_length is not None:
+        writer.add_context_length(context_length)
+    writer.add_name(path.stem)
+    writer.add_tensor("dummy.weight", np.zeros((2, 2), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
+def _manager_for_a_real_file(tmp_path: Path, model_path: Path, processes: list[_FakePopen], **overrides):
+    client = _RecordingAttestationClient({"model_path": str(model_path), "build_info": "b10311-test"})
+    launcher = _QueueLauncher(processes)
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=client, **overrides)
+    return manager, launcher
+
+
+def _context_argument(argv: list[str]) -> str:
+    return argv[argv.index("-c") + 1]
+
+
+def test_the_advanced_options_are_appended_after_the_fixed_launch_contract(tmp_path: Path) -> None:
+    options = ("-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on", "-t", "8")
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: options,
+    )
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    argv = launcher.launch_args[0]
+    assert tuple(argv[-len(options):]) == options
+    fixed = argv[: -len(options)]
+    # The contract in front of them is untouched, and appears exactly once.
+    assert fixed[fixed.index("--host") + 1] == "127.0.0.1"
+    assert fixed[fixed.index("--port") + 1] == "0"
+    assert fixed.count("--host") == fixed.count("--port") == fixed.count("-c") == fixed.count("-m") == 1
+    assert "--api-key" not in argv
+
+
+def test_no_advanced_options_leaves_the_launch_exactly_as_it_was(tmp_path: Path) -> None:
+    plain = _QueueLauncher([_FakePopen()])
+    empty = _QueueLauncher([_FakePopen()])
+    _manager(tmp_path, fetcher=_FakeFetcher(), launcher=plain, http_client=_AlwaysHealthyClient()).ensure_ready(
+        tmp_path / "model.gguf", num_ctx=4096
+    )
+    _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=empty, http_client=_AlwaysHealthyClient(), extra_args=lambda: ()
+    ).ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert plain.launch_args == empty.launch_args
+
+
+def test_changing_the_advanced_options_restarts_the_server_and_says_why(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-t", "4")]
+    first, second = _FakePopen(), _FakePopen()
+    launcher = _QueueLauncher([first, second])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 1  # unchanged options reuse the server
+
+    current[0] = ("-t", "8")
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert launcher.launch_args[1][-2:] == ["-t", "8"]
+    assert first.terminated
+    assert manager.status.last_restart_reason == "the advanced runtime options changed"
+
+
+def test_clearing_the_advanced_options_relaunches_without_them(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-fa", "off")]
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    current[0] = ()
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert "-fa" not in launcher.launch_args[1]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--host", "0.0.0.0"),
+        ("--port", "8080"),
+        ("--api-key", "secret"),
+        ("-m", "other.gguf"),
+        ("-c", "999999"),
+        ("-ngl", "99"),
+        ("--unknown-flag",),
+        ("-t", "4", "--host", "0.0.0.0"),
+    ],
+)
+def test_options_that_would_change_the_launch_contract_never_reach_the_child(
+    tmp_path: Path, options: tuple[str, ...]
+) -> None:
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: options,
+    )
+
+    with pytest.raises(LlamaCppError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert launcher.launch_args == []
+    assert "not valid" in str(raised.value)
+    # The message is Cortex's own; it does not repeat what was configured.
+    for word in options:
+        assert word not in str(raised.value)
+
+
+def test_changing_the_advanced_options_gives_a_failing_launch_a_fresh_start(tmp_path: Path) -> None:
+    current: list[tuple[str, ...]] = [("-t", "4")]
+    launcher = _QueueLauncher([_FakePopen(exit_immediately=True) for _ in range(3)] + [_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        extra_args=lambda: current[0],
+    )
+    model_path = tmp_path / "model.gguf"
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=4096)
+    with pytest.raises(CrashLoopError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 3
+
+    current[0] = ("-t", "2")  # the option that was making it fail, fixed
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 4
+    assert manager.status.state == "ready"
+
+
+def test_a_window_above_the_trained_context_is_lowered_and_the_status_says_so(tmp_path: Path) -> None:
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+    messages: list[str] = []
+
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+
+    assert _context_argument(launcher.launch_args[0]) == "4096"
+    note = manager.status.context_note
+    assert note is not None
+    assert "4096" in note and "32768" in note
+    # Said once, through the progress callback, when the launch happened.
+    assert messages.count(note) == 1
+
+
+def test_asking_for_the_same_oversized_window_again_reuses_the_server(tmp_path: Path) -> None:
+    """The reuse decision must see the lowered value, or every message would reload the model."""
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen(), _FakePopen()])
+    messages: list[str] = []
+
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=32768, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=16384, on_status=messages.append)
+    manager.ensure_ready(model_path, num_ctx=2048, on_status=messages.append)
+
+    assert len(launcher.launch_args) == 1
+    assert sum("limited to 4096" in message for message in messages) == 1
+    assert manager.ready_handle(model_path, num_ctx=32768) is not None
+
+
+def test_a_window_within_the_trained_context_is_used_as_asked_and_carries_no_note(tmp_path: Path) -> None:
+    model_path = tmp_path / "long.gguf"
+    _write_gguf(model_path, context_length=131072)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    assert _context_argument(launcher.launch_args[0]) == "32768"
+    assert manager.status.context_note is None
+
+
+def test_the_note_goes_away_when_a_later_request_fits(tmp_path: Path) -> None:
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, _launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+    manager.ensure_ready(model_path, num_ctx=32768)
+    assert manager.status.context_note is not None
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert manager.status.context_note is None
+
+
+def test_a_model_that_does_not_say_what_it_was_trained_for_is_not_limited(tmp_path: Path) -> None:
+    model_path = tmp_path / "silent.gguf"
+    _write_gguf(model_path, context_length=None)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    assert _context_argument(launcher.launch_args[0]) == "32768"
+    assert manager.status.context_note is None
+
+
+def test_an_implausibly_small_trained_context_is_treated_as_unknown(tmp_path: Path) -> None:
+    model_path = tmp_path / "odd.gguf"
+    _write_gguf(model_path, context_length=64)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert _context_argument(launcher.launch_args[0]) == "8192"
+
+
+def test_a_file_that_cannot_be_read_as_gguf_is_not_limited_and_not_reread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    model_path = tmp_path / "broken.gguf"
+    model_path.write_bytes(b"not a gguf file at all")
+    reads: list[Path] = []
+
+    def unreadable(path: Path):
+        reads.append(path)
+        return None
+
+    monkeypatch.setattr(module, "read_gguf_metadata", unreadable)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=8192)
+    manager.ensure_ready(model_path, num_ctx=8192)
+
+    assert _context_argument(launcher.launch_args[0]) == "8192"
+    assert reads == [model_path]  # read once for this version of the file
+
+
+def test_a_changed_model_file_is_read_again(tmp_path: Path) -> None:
+    model_path = tmp_path / "grows.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen(), _FakePopen()])
+    manager.ensure_ready(model_path, num_ctx=32768)
+    assert _context_argument(launcher.launch_args[0]) == "4096"
+
+    model_path.unlink()
+    # A different architecture name also makes the file a different size, so the
+    # change is seen even if the two writes share a timestamp tick.
+    _write_gguf(model_path, context_length=16384, architecture="llamax")
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    # A different file (the model was replaced), so the window is re-derived and
+    # the larger trained context needs a bigger server than the one running.
+    assert _context_argument(launcher.launch_args[1]) == "16384"
+
+
+def test_a_request_with_no_preference_is_still_held_to_the_trained_context(tmp_path: Path) -> None:
+    model_path = tmp_path / "tiny.gguf"
+    _write_gguf(model_path, context_length=2048)
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen()])
+
+    manager.ensure_ready(model_path, num_ctx=None)
+
+    assert _context_argument(launcher.launch_args[0]) == "2048"
+    assert manager.status.context_note is None
+
+
+def test_the_trained_context_limit_is_applied_before_the_crash_loop_key(tmp_path: Path) -> None:
+    """Three failures at an oversized request count against the value actually launched."""
+    model_path = tmp_path / "small.gguf"
+    _write_gguf(model_path, context_length=4096)
+    manager, launcher = _manager_for_a_real_file(
+        tmp_path, model_path, [_FakePopen(exit_immediately=True) for _ in range(3)]
+    )
+
+    for requested in (8192, 32768, 65536):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=requested)
+    with pytest.raises(CrashLoopError):
+        manager.ensure_ready(model_path, num_ctx=16384)
+
+    assert [_context_argument(argv) for argv in launcher.launch_args] == ["4096"] * 3
+
+
+# ---------------------------------------------------------------------------
+# Unloading the model: on request and after an idle period (RT-07)
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A clock the test moves by hand; nothing here waits for real time."""
+
+    def __init__(self) -> None:
+        self.now = 10_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def idle_managers():
+    """Build managers with an idle setting, and close every one at teardown.
+
+    The idle watcher is a ``cortex-`` thread, so a manager that is not closed
+    fails the session's thread check.
+    """
+    created: list[LlamaServerManager] = []
+
+    def build(tmp_path: Path, *, minutes=lambda: 5, processes=None, clock=None, **overrides):
+        clock = clock or _Clock()
+        launcher = _QueueLauncher(processes if processes is not None else [_FakePopen(), _FakePopen()])
+        manager = _manager(
+            tmp_path,
+            fetcher=_FakeFetcher(),
+            launcher=launcher,
+            http_client=_AlwaysHealthyClient(),
+            idle_unload_minutes=minutes,
+            clock=clock,
+            **overrides,
+        )
+        created.append(manager)
+        return manager, launcher, clock
+
+    yield build
+    for manager in created:
+        manager.close()
+
+
+def test_a_model_idle_for_the_whole_period_is_unloaded_and_the_reason_is_recorded(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(5 * 60 - 1)
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+    clock.advance(1)
+    assert manager.unload_if_idle() is True
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.loaded_model is None
+    assert process.terminated
+    assert status.last_restart_reason == "the model was unloaded after 5 minutes without use"
+    assert status.last_error is None
+
+
+def test_the_next_request_after_an_idle_unload_starts_the_model_again(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    clock.advance(10 * 60)
+    assert manager.unload_if_idle() is True
+
+    handle = manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert handle.model_path == model_path
+    status = manager.status
+    assert status.state == "ready"
+    # The reason the model had to be loaded again is still on record.
+    assert status.last_restart_reason == "the model was unloaded after 5 minutes without use"
+
+
+def test_an_open_request_keeps_the_model_loaded_however_long_it_takes(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with manager.request_scope():
+        clock.advance(3 * 3600)  # a generation far longer than the idle period
+        assert manager.unload_if_idle() is False
+        assert manager.status.state == "ready"
+
+    # The idle period starts when the request ends, not when it began.
+    clock.advance(5 * 60 - 1)
+    assert manager.unload_if_idle() is False
+    clock.advance(1)
+    assert manager.unload_if_idle() is True
+
+
+def test_every_use_restarts_the_idle_period(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    clock.advance(4 * 60)
+    manager.ensure_ready(model_path, num_ctx=4096)  # a warm reuse is a use
+    clock.advance(4 * 60)
+
+    assert manager.unload_if_idle() is False  # eight minutes since it loaded, four since it was used
+    clock.advance(60)
+    assert manager.unload_if_idle() is True
+    assert len(launcher.launch_args) == 1
+
+
+@pytest.mark.parametrize("setting", [0, -3])
+def test_zero_turns_the_idle_unload_off(tmp_path: Path, idle_managers, setting: int) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=lambda: setting)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(30 * 24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+
+def test_a_manager_without_the_setting_never_unloads_and_starts_no_watcher(tmp_path: Path) -> None:
+    clock = _Clock()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+        clock=clock,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(30 * 24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager._idle_thread is None
+    assert manager.status.state == "ready"
+
+
+def test_the_setting_is_read_at_every_check(tmp_path: Path, idle_managers) -> None:
+    minutes = [30]
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=lambda: minutes[0])
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(6 * 60)
+    assert manager.unload_if_idle() is False
+
+    minutes[0] = 5  # changed in Settings while the model stays loaded
+
+    assert manager.unload_if_idle() is True
+
+
+def test_an_unreadable_setting_means_never_not_unload(tmp_path: Path, idle_managers) -> None:
+    def broken() -> int:
+        raise RuntimeError("settings database unavailable")
+
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=broken)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+
+def test_a_load_or_restart_in_flight_is_never_waited_for_or_cut_short(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(60 * 60)
+
+    # The slow-path lock is what a load, a restart or a health check holds.
+    with manager._ensure_lock:
+        assert manager.unload_if_idle() is False
+        assert manager.status.state == "ready"
+
+    assert manager.unload_if_idle() is True
+
+
+def test_a_request_that_arrives_while_the_model_is_being_released_gets_it_loaded_again(
+    tmp_path: Path, idle_managers
+) -> None:
+    """The unload holds the same lock as a load, so a request waits for it and then loads."""
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    clock.advance(60 * 60)
+    lock = _ContentionSignallingLock()
+    manager._ensure_lock = lock  # type: ignore[assignment]
+    original = manager._terminate_and_reset
+    request_result: list[object] = []
+    inside_teardown = threading.Event()
+
+    def teardown_that_waits_for_the_request() -> bool:
+        if threading.current_thread() is worker:
+            return original()
+        inside_teardown.set()
+        assert lock.contended.wait(5.0), "the request never queued behind the unload"
+        return original()
+
+    def request() -> None:
+        assert inside_teardown.wait(5.0)
+        request_result.append(manager.ensure_ready(model_path, num_ctx=4096))
+
+    worker = threading.Thread(target=request, name="test-request")
+    manager._terminate_and_reset = teardown_that_waits_for_the_request  # type: ignore[method-assign]
+    worker.start()
+    try:
+        assert manager.unload_if_idle() is True
+    finally:
+        worker.join(timeout=10.0)
+
+    assert not worker.is_alive()
+    assert len(request_result) == 1
+    assert len(launcher.launch_args) == 2
+    assert manager.status.state == "ready"
+
+
+def test_a_manual_unload_stops_the_model_and_is_safe_to_repeat(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.unload() is True
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.loaded_model is None
+    assert process.terminated
+    assert status.last_restart_reason == "the model was unloaded at your request"
+    assert manager.unload() is False  # nothing left to unload; not an error
+    assert manager.status.state == "idle"
+
+
+def test_a_manual_unload_with_nothing_loaded_changes_nothing(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+
+    assert manager.unload() is False
+
+    assert launcher.launch_args == []
+    assert manager.status.last_restart_reason is None
+
+
+def test_a_manual_unload_is_refused_while_a_request_is_using_the_model(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with manager.request_scope(), pytest.raises(RuntimeBusyError) as refused:
+        manager.unload()
+
+    assert "answering a request" in str(refused.value)
+    assert not process.terminated
+    assert manager.status.state == "ready"
+    assert manager.unload() is True  # once the request ends it goes through
+
+
+def test_a_manual_unload_is_refused_while_a_model_is_loading(
+    tmp_path: Path, idle_managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    monkeypatch.setattr(module, "_UNLOAD_LOCK_TIMEOUT_SECONDS", 0.05)
+    manager, _launcher, _clock = idle_managers(tmp_path)
+
+    with manager._ensure_lock, pytest.raises(RuntimeBusyError) as refused:
+        manager.unload()
+
+    assert "being loaded" in str(refused.value)
+
+
+def test_a_manual_unload_after_the_manager_closed_fails_closed(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path)
+    manager.close()
+
+    with pytest.raises(LlamaCppError, match="closed"):
+        manager.unload()
+
+
+def test_a_process_that_will_not_exit_is_reported_and_not_called_unloaded(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path, processes=[_UnstoppablePopen()])
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(LlamaCppError, match="did not exit cleanly"):
+        manager.unload()
+
+    assert manager.status.state == "stopping"
+
+
+def test_the_watcher_unloads_an_idle_model_by_itself_and_is_gone_after_close(tmp_path: Path, idle_managers) -> None:
+    from support import wait_until
+
+    manager, launcher, clock = idle_managers(tmp_path, idle_check_interval_seconds=0.01)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    watcher = manager._idle_thread
+    assert watcher is not None and watcher.name == "cortex-llama-idle-unload"
+
+    clock.advance(6 * 60)
+
+    wait_until(lambda: manager.status.state == "idle", describe="the idle model to be unloaded")
+    assert process.terminated
+    manager.close()
+    watcher.join(timeout=5.0)
+    assert not watcher.is_alive()
+
+
+def test_one_watcher_serves_every_load(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    first = manager._idle_thread
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert manager._idle_thread is first
+    assert first is not None and first.is_alive()
+
+
+def test_the_default_check_interval_is_well_under_the_smallest_period(tmp_path: Path) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    assert module._IDLE_CHECK_INTERVAL_SECONDS <= 60.0

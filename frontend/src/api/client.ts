@@ -31,6 +31,7 @@ import type {
   JobAccepted,
   JobStatusResponse,
   HealthResponse,
+  LlamaCppRuntimeStatus,
   HandoffResponse,
   MemoryResponse,
   ModelDownloadRequest,
@@ -325,6 +326,14 @@ export class CortexApi {
 
   system(): Promise<SystemResponse> {
     return this.request<SystemResponse>("/system");
+  }
+
+  /**
+   * Stop the loaded local (GGUF) model to free its memory. The next message
+   * loads it again. Refused with 409 while a response is being generated.
+   */
+  unloadLlamaCpp(): Promise<LlamaCppRuntimeStatus> {
+    return this.request<LlamaCppRuntimeStatus>("/llamacpp/unload", { method: "POST" });
   }
 
   chats(): Promise<ChatSummary[]> {

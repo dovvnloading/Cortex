@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+from cortex_backend.llamacpp.extra_args import validate_extra_args
 
 
 ModelTag = Annotated[
@@ -57,6 +59,21 @@ class LlamaCppSettings(_SettingsModel):
     # "auto" tries Vulkan (broad GPU support, no extra toolkit) first and
     # falls back to the CPU build if Vulkan can't launch on this machine.
     gpu_backend: Literal["auto", "vulkan", "cpu"] = "auto"
+    # Minutes without a request after which the loaded model is released, so a
+    # 20 GB model does not keep its memory while the machine is used for
+    # something else. The next message loads it again. 0 keeps it loaded until
+    # Cortex exits or another model is chosen.
+    idle_unload_minutes: int = Field(default=30, ge=0, le=1440)
+    # Advanced runtime options appended to the launch (KV-cache types, flash
+    # attention, thread counts). Only an allow-list is accepted; the flags that
+    # define the launch -- model, context, address, key -- are refused. See
+    # cortex_backend.llamacpp.extra_args.
+    extra_args: tuple[str, ...] = ()
+
+    @field_validator("extra_args")
+    @classmethod
+    def _check_extra_args(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return validate_extra_args(value)
 
 
 class GenerationSettings(_SettingsModel):

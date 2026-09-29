@@ -2191,3 +2191,150 @@ def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -
 
     assert response["prompt_eval_count"] == 321
     assert response["prompt_token_count"] == 321
+
+
+# ---------------------------------------------------------------------------
+# The chat client tells the provider when the server is in use (RT-07)
+# ---------------------------------------------------------------------------
+
+
+class _ScopedProvider(_StaticProvider):
+    """Tracks use the way the real manager does, and records the order of events."""
+
+    def __init__(self, base_url: str, events: list[str]) -> None:
+        super().__init__(base_url)
+        self.events = events
+
+    @contextmanager
+    def request_scope(self):
+        self.events.append("scope open")
+        try:
+            yield
+        finally:
+            self.events.append("scope closed")
+
+    def ensure_ready(self, model_path: Path, *, num_ctx, on_status=None, cancellation_event=None) -> ServerHandle:
+        self.events.append("ensure_ready")
+        return super().ensure_ready(
+            model_path, num_ctx=num_ctx, on_status=on_status, cancellation_event=cancellation_event
+        )
+
+    def ready_handle(self, model_path: Path, *, num_ctx) -> ServerHandle:
+        del num_ctx
+        self.events.append("ready_handle")
+        return ServerHandle(base_url=self._base_url, model_path=model_path)
+
+
+def _recording_http(events: list[str], response: httpx.Response) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        events.append(f"http {request.url.path}")
+        return response
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+_STREAMED_ANSWER = httpx.Response(
+    200,
+    content=b'data: {"choices": [{"delta": {"content": "hi"}}]}\n\ndata: [DONE]\n\n',
+    headers={"content-type": "text/event-stream"},
+)
+
+
+def test_the_server_is_marked_in_use_from_before_it_is_readied_until_the_reply_is_done(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    events: list[str] = []
+    http_client = _recording_http(events, httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}))
+    client = LlamaCppChatClient(
+        _ScopedProvider("http://fakellama", events), models_directory=lambda: tmp_path, http_client=http_client
+    )
+
+    client.chat(model="gguf:tiny.gguf", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert events == ["scope open", "ensure_ready", "http /v1/chat/completions", "scope closed"]
+
+
+def test_a_streamed_reply_holds_the_scope_until_the_last_chunk(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    events: list[str] = []
+    http_client = _recording_http(events, _STREAMED_ANSWER)
+    client = LlamaCppChatClient(
+        _ScopedProvider("http://fakellama", events), models_directory=lambda: tmp_path, http_client=http_client
+    )
+
+    client.chat(
+        model="gguf:tiny.gguf",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        cancellation_event=Event(),
+        on_delta=lambda kind, text: events.append(f"delta {kind} {text}"),
+    )
+
+    assert events == [
+        "scope open",
+        "ensure_ready",
+        "http /v1/chat/completions",
+        "delta content hi",
+        "scope closed",
+    ]
+
+
+def test_the_scope_is_closed_when_the_server_fails(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    events: list[str] = []
+    http_client = _recording_http(events, httpx.Response(500, json={"error": {"message": "boom"}}))
+    client = LlamaCppChatClient(
+        _ScopedProvider("http://fakellama", events), models_directory=lambda: tmp_path, http_client=http_client
+    )
+
+    with pytest.raises(LlamaCppError):
+        client.chat(model="gguf:tiny.gguf", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert events[0] == "scope open"
+    assert events[-1] == "scope closed"
+    assert events.count("scope closed") == 1
+
+
+def test_the_scope_is_closed_when_the_runtime_cannot_be_started(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    events: list[str] = []
+
+    class _FailingProvider(_ScopedProvider):
+        def ensure_ready(self, model_path: Path, *, num_ctx, on_status=None, cancellation_event=None):
+            self.events.append("ensure_ready")
+            raise LlamaCppError("The local model runtime could not start.")
+
+    client = LlamaCppChatClient(
+        _FailingProvider("http://fakellama", events),
+        models_directory=lambda: tmp_path,
+        http_client=_recording_http(events, httpx.Response(200, json={})),
+    )
+
+    with pytest.raises(LlamaCppError):
+        client.chat(model="gguf:tiny.gguf", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert events == ["scope open", "ensure_ready", "scope closed"]
+
+
+def test_counting_tokens_also_counts_as_use(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    events: list[str] = []
+    http_client = _recording_http(events, httpx.Response(200, json={"tokens": [1, 2, 3]}))
+    client = LlamaCppChatClient(
+        _ScopedProvider("http://fakellama", events), models_directory=lambda: tmp_path, http_client=http_client
+    )
+
+    assert client.tokenize(model="gguf:tiny.gguf", text="some text", options={}) == 3
+
+    assert events == ["scope open", "ready_handle", "http /tokenize", "scope closed"]
+
+
+def test_a_provider_that_does_not_track_use_is_left_alone(tmp_path: Path) -> None:
+    (tmp_path / "tiny.gguf").write_bytes(b"fake")
+    http_client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}))
+    )
+    client = LlamaCppChatClient(_StaticProvider("http://fakellama"), models_directory=lambda: tmp_path, http_client=http_client)
+
+    result = client.chat(model="gguf:tiny.gguf", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert result["message"]["content"] == "ok"
