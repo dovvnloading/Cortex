@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Copy, FileText, GitBranch, Image as ImageIcon, RefreshCw } from "lucide-react";
 import type { ChatAttachment, ChatMessage, GenerationStats } from "../../../../contracts/cortex-api";
 import { formatMessageTime } from "../../lib/messageTime";
@@ -20,7 +20,29 @@ function AttachmentList({ attachments }: { attachments?: ChatAttachment[] | null
   );
 }
 
-export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onFork, forking }: { message: ChatMessage; isFinalAssistant: boolean; busy: boolean; onRegenerate: () => void; onFork: () => void; forking: boolean }) {
+type MessageCardProps = {
+  message: ChatMessage;
+  /** Position in the transcript. Handed back to `onRegenerate` so one callback can serve every card. */
+  index: number;
+  isFinalAssistant: boolean;
+  busy: boolean;
+  forking: boolean;
+  /**
+   * Both callbacks take the message rather than being bound to it, so the
+   * parent can pass one stable function to every card. A closure per card, new
+   * on every render, defeated `memo` below and re-parsed every message's
+   * Markdown for each streamed frame.
+   */
+  onRegenerate: (message: ChatMessage, index: number) => void;
+  onFork: (message: ChatMessage) => void;
+};
+
+/**
+ * Memoised: a transcript card only has to render again when its own message or
+ * its own busy/final/forking state changes, not whenever the transcript around
+ * it does. That is what keeps a long chat cheap while a reply streams in.
+ */
+export const MessageCard = memo(function MessageCard({ message, index, isFinalAssistant, busy, forking, onRegenerate, onFork }: MessageCardProps) {
   const [copied, setCopied] = useState(false);
   const untranslated = useChatStore((state) => (message.id ? state.untranslatedMessageIds[message.id] === true : false));
   const copy = async () => {
@@ -56,15 +78,15 @@ export function MessageCard({ message, isFinalAssistant, busy, onRegenerate, onF
         <div className="message-actions" aria-label="Message actions">
           <button className="icon-button icon-button-small" type="button" aria-label={copied ? "Message copied" : "Copy message"} title={copied ? "Copied" : "Copy message"} onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="message-action-feedback">Copied</span>}</button>
           {message.role === "assistant" && <>
-            <button className="icon-button icon-button-small" type="button" aria-label="Regenerate response" title="Regenerate response" disabled={!isFinalAssistant || busy} onClick={onRegenerate}><RefreshCw size={14} aria-hidden="true" /></button>
-            <button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" title="Fork chat from this message" disabled={busy || forking || !message.id} onClick={onFork}><GitBranch size={14} aria-hidden="true" /></button>
+            <button className="icon-button icon-button-small" type="button" aria-label="Regenerate response" title="Regenerate response" disabled={!isFinalAssistant || busy} onClick={() => onRegenerate(message, index)}><RefreshCw size={14} aria-hidden="true" /></button>
+            <button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" title="Fork chat from this message" disabled={busy || forking || !message.id} onClick={() => onFork(message)}><GitBranch size={14} aria-hidden="true" /></button>
           </>}
         </div>
         <MessageMeta timestamp={message.timestamp} stats={message.stats} />
       </div>
     </article>
   );
-}
+});
 
 function MessageMeta({ timestamp, stats }: { timestamp?: string | null; stats?: GenerationStats | null }) {
   const displayTime = formatMessageTime(timestamp);

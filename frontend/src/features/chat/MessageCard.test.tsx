@@ -8,7 +8,7 @@ const NOTE = "Couldn't translate this answer; showing the original.";
 
 function renderCard(message: ChatMessage) {
   return render(
-    <MessageCard message={message} isFinalAssistant busy={false} onRegenerate={vi.fn()} onFork={vi.fn()} forking={false} />,
+    <MessageCard message={message} index={0} isFinalAssistant busy={false} onRegenerate={vi.fn()} onFork={vi.fn()} forking={false} />,
   );
 }
 

@@ -15,6 +15,7 @@ type Props = {
   finalAssistantId: string | null;
   busy: boolean;
   forkingMessageId: string | null;
+  /** Keep this and `onFork` referentially stable; a new function each render re-renders every card. */
   onRegenerate: (message: ChatMessage, index: number) => void;
   onFork: (message: ChatMessage) => void;
   onNearEndChange: (isNearEnd: boolean) => void;
@@ -99,10 +100,14 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
     <MessageCard
       key={message.id ?? `${message.role}-${index}`}
       message={message}
+      index={index}
       isFinalAssistant={message.id === finalAssistantId}
       busy={busy}
-      onRegenerate={() => onRegenerate(message, index)}
-      onFork={() => onFork(message)}
+      // Passed through as received, not wrapped: a closure per card would be a
+      // new prop on every render and defeat MessageCard's memo. Callers keep
+      // these stable (useCallback).
+      onRegenerate={onRegenerate}
+      onFork={onFork}
       forking={forkingMessageId === message.id}
     />
   );

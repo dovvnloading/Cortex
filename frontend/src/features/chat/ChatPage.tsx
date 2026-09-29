@@ -5,7 +5,7 @@ import { ApiError, CortexApi } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
-import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { useShallow } from "zustand/react/shallow";
 import { useFileDropZone } from "../../hooks/useFileDropZone";
 import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
@@ -14,7 +14,7 @@ import { useUiStore } from "../../stores/useUiStore";
 import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
-import { SafeMarkdown } from "../markdown/SafeMarkdown";
+import { PendingAssistantMessage } from "./PendingAssistantMessage";
 
 const DEFAULT_GENERATION_SETTINGS = {
   temperature: 0.7,
@@ -100,7 +100,18 @@ export function ChatPage({
   onClearMemory,
   onSessionExpired,
 }: Props) {
-  const generation = useChatStore((state) => state.generation);
+  // Only the fields this page acts on. The streamed text is deliberately not
+  // among them: the store rebuilds `generation` on every flushed frame, and
+  // reading it here re-rendered the whole page -- every persisted message and
+  // the composer -- for text that only the pending bubble draws (see
+  // PendingAssistantMessage). `useShallow` keeps this a no-op re-render unless
+  // one of these four values actually changes.
+  const generation = useChatStore(useShallow((state) => ({
+    jobId: state.generation.jobId,
+    threadId: state.generation.threadId,
+    phase: state.generation.phase,
+    contentReady: state.generation.contentReady,
+  })));
   const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
   const setThreadOptions = useChatStore((state) => state.setThreadOptions);
   const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
@@ -205,15 +216,19 @@ export function ChatPage({
     if (isNearTranscriptEnd.current) {
       messageListRef.current?.scrollToBottom();
     }
-  }, [currentChat?.messages?.length, generation.partialContent, generation.partialThoughts]);
+  }, [currentChat?.messages?.length]);
 
-  // New tokens while scrolled away from the bottom surface a "jump to
-  // latest" affordance instead of yanking the viewport down.
-  useEffect(() => {
-    if (!isNearTranscriptEnd.current && (generation.partialContent || generation.partialThoughts)) {
+  // The pending bubble reports each change to the visible reply. A reader at
+  // the bottom is followed down; new text while scrolled away surfaces a "jump
+  // to latest" affordance instead of yanking the viewport. Stable, because it
+  // is a prop of a component that renders once per streamed frame.
+  const followStreamedOutput = useCallback(() => {
+    if (isNearTranscriptEnd.current) {
+      messageListRef.current?.scrollToBottom();
+    } else {
       setShowJumpToLatest(true);
     }
-  }, [generation.partialContent, generation.partialThoughts]);
+  }, []);
 
   const messages = useMemo(
     () => currentChat?.messages ?? [],
@@ -834,6 +849,27 @@ export function ChatPage({
     ? `Selected model "${selectedModel ?? "this model"}" cannot accept images. Choose a vision model or remove the image.`
     : null;
 
+  // These two go to every transcript card, so each must keep one identity
+  // across renders or the cards' memo is defeated. `startGeneration` and `fork`
+  // close over live state and change every render, so they are read through a
+  // ref that is refreshed after each one.
+  const latestHandlers = useRef({ messages, startGeneration, fork });
+  useEffect(() => {
+    latestHandlers.current = { messages, startGeneration, fork };
+  });
+  const regenerateFrom = useCallback((message: ChatMessage, index: number) => {
+    const { messages: current, startGeneration: start } = latestHandlers.current;
+    const userTurn = current[index - 1];
+    void start(
+      userTurn?.role === "user" ? userTurn.content : "",
+      message.id ?? undefined,
+      userTurn?.role === "user" ? userTurn.attachments ?? [] : [],
+    );
+  }, []);
+  const forkFrom = useCallback((message: ChatMessage) => {
+    void latestHandlers.current.fork(message);
+  }, []);
+
   const handleNearEndChange = (isNearEnd: boolean) => {
     isNearTranscriptEnd.current = isNearEnd;
     if (isNearEnd) setShowJumpToLatest(false);
@@ -863,34 +899,10 @@ export function ChatPage({
         finalAssistantId={finalAssistantId}
         busy={Boolean(generation.jobId) || starting}
         forkingMessageId={forkingMessage}
-        onRegenerate={(message, index) => {
-          const userTurn = messages[index - 1];
-          void startGeneration(
-            userTurn?.role === "user" ? userTurn.content : "",
-            message.id ?? undefined,
-            userTurn?.role === "user" ? userTurn.attachments ?? [] : [],
-          );
-        }}
-        onFork={(message) => void fork(message)}
+        onRegenerate={regenerateFrom}
+        onFork={forkFrom}
         onNearEndChange={handleNearEndChange}
-        trailingContent={
-          <>
-            {activeJobForCurrentThread && !generation.partialContent && !generation.partialThoughts && <GenerationStatus status={generation.statusText} />}
-            {activeJobForCurrentThread && (generation.partialContent || generation.partialThoughts) && (
-              /* Same markup and the same unframed treatment as a persisted
-                 assistant message, so when this is replaced by the real one
-                 nothing about the message changes shape or position. */
-              <article className="message-card message-assistant message-pending" aria-label={generation.contentReady ? "Cortex response ready, saving..." : "Cortex response in progress"}>
-                <div className="message-bubble">
-                  {generation.partialContent && <div className="markdown-body"><SafeMarkdown content={generation.partialContent} finalized={generation.contentReady} />{!generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}</div>}
-                  {!generation.partialContent && !generation.contentReady && <span className="streaming-caret" aria-hidden="true" />}
-                </div>
-                {/* Collapses in step with the "Live" badge, matching the persisted card's default state so the swap is invisible. */}
-                {generation.partialThoughts && <details className="reasoning" open={!generation.contentReady}><summary><span>Reasoning</span>{!generation.contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={generation.partialThoughts} finalized={generation.contentReady} /></div></div></details>}
-              </article>
-            )}
-          </>
-        }
+        trailingContent={activeJobForCurrentThread ? <PendingAssistantMessage key={generation.jobId} onOutputChange={followStreamedOutput} /> : null}
       />
       <div className="input-container composer-dock">
         {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}>Jump to latest</button>}
@@ -965,19 +977,6 @@ function MemoryClearConfirmDialog({
         </div>
       </DialogContent>
     </Dialog.Root>
-  );
-}
-
-function GenerationStatus({ status }: { status: string }) {
-  return (
-    <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress">
-      <div className="message-bubble">
-        <div className="generation-status" role="status">
-          {humanizeGenerationStatus(status)}
-          <span className="generation-status-dots" aria-hidden="true"><i /><i /><i /></span>
-        </div>
-      </div>
-    </article>
   );
 }
 
