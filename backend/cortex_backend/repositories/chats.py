@@ -262,6 +262,8 @@ class InMemoryChatRepository:
                     message["id"] = self._new_message_id()
                 else:
                     self._advance_message_counter(message["id"])
+            # A seeded chat starts from its message count, as a stored one does.
+            copied.setdefault("revision", len(copied.get("messages", [])))
             self._chats[str(chat["id"])] = copied
 
     def _new_message_id(self) -> str:
@@ -363,7 +365,7 @@ class InMemoryChatRepository:
                 "title": chat.get("title"),
                 "timestamp": chat.get("timestamp"),
                 "group_id": chat.get("group_id"),
-                "revision": len(chat.get("messages", ())),
+                "revision": chat["revision"],
             }
 
     def create_chat(self, thread_id: str, title: str) -> None:
@@ -375,6 +377,7 @@ class InMemoryChatRepository:
                 "title": title,
                 "timestamp": self._timestamp(),
                 "group_id": None,
+                "revision": 0,
                 "messages": [],
             }
 
@@ -386,7 +389,7 @@ class InMemoryChatRepository:
             return
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("expected_revision must be a non-negative integer")
-        actual_revision = len(chat.get("messages", ()))
+        actual_revision = chat["revision"]
         if actual_revision != expected_revision:
             raise ChatRevisionConflict(
                 f"Chat revision changed (expected {expected_revision}, found {actual_revision})."
@@ -433,6 +436,7 @@ class InMemoryChatRepository:
                 }
             )
             chat["timestamp"] = self._timestamp()
+            chat["revision"] += 1
             return message_id
 
     def rename_chat(self, thread_id: str, title: str) -> None:
@@ -481,6 +485,7 @@ class InMemoryChatRepository:
                         or (forked_at + timedelta(microseconds=index)).isoformat(),
                     }
                 )
+            copied["revision"] = len(copied["messages"])
             self._chats[new_thread_id] = copied
 
     def replace_message(
@@ -514,5 +519,8 @@ class InMemoryChatRepository:
                     if attachments is not None:
                         message["attachments"] = deepcopy(attachments)
                     chat["timestamp"] = self._timestamp()
+                    # The count did not change, the reply did: the revision
+                    # moves so a second regeneration from the same state is stale.
+                    chat["revision"] += 1
                     return
             raise MessageNotFound("Message does not exist.")

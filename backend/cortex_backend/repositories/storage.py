@@ -228,11 +228,32 @@ def _migrate_to_v4(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(group_id)")
 
 
+def _migrate_to_v5(connection: sqlite3.Connection) -> None:
+    """A revision that moves whenever a chat's messages do.
+
+    The revision used to be the number of messages, which a regeneration leaves
+    unchanged: it replaces the last reply, so two regenerations started from the
+    same state both passed the compare-and-swap. It is now its own counter,
+    raised by every write to a chat's messages. Existing chats start from their
+    message count, which is what the clients last saw, and the column is only
+    ever added: nothing is rewritten or dropped, and an older release refuses
+    the file (see DatabaseManager._unsupported_schema_error) instead of
+    misreading it.
+    """
+    add_column_if_missing(connection, "threads", "revision", "INTEGER NOT NULL DEFAULT 0")
+    # MAX() keeps a re-run from ever lowering a revision that has moved on.
+    connection.execute(
+        "UPDATE threads SET revision = MAX(revision, "
+        "(SELECT COUNT(*) FROM messages WHERE messages.thread_id = threads.id))"
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }
 
 
@@ -279,7 +300,7 @@ def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(
         self,
@@ -1177,8 +1198,13 @@ class DatabaseManager:
                         skipped += 1
                     else:
                         conn.execute(
-                            "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                            (chat_data['id'], chat_data['title'], chat_data['timestamp']),
+                            "INSERT INTO threads (id, title, timestamp, revision) VALUES (?, ?, ?, ?)",
+                            (
+                                chat_data['id'],
+                                chat_data['title'],
+                                chat_data['timestamp'],
+                                len(chat_data['messages']),
+                            ),
                         )
                         try:
                             base_timestamp = datetime.fromisoformat(
@@ -1249,10 +1275,12 @@ class DatabaseManager:
         """Creates a new chat thread and bulk-inserts a list of messages."""
         try:
             with self.connect() as conn:
-                # 1. Create the new thread entry
+                # 1. Create the new thread entry. Its revision starts at the number
+                # of messages it is about to hold, like any chat that has had
+                # that many appended.
                 conn.execute(
-                    "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, _utc_now_iso())
+                    "INSERT INTO threads (id, title, timestamp, revision) VALUES (?, ?, ?, ?)",
+                    (thread_id, title, _utc_now_iso(), len(messages))
                 )
                 
                 # 2. Prepare and insert all messages for the new thread
@@ -1334,9 +1362,10 @@ class DatabaseManager:
                     json.dumps(stats) if stats else None,
                     _utc_now_iso()
                 ))
-                # Update the thread's main timestamp to reflect recent activity
+                # Update the thread's main timestamp to reflect recent activity,
+                # and move its revision so anyone holding the old one is stale.
                 conn.execute(
-                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    "UPDATE threads SET timestamp = ?, revision = revision + 1 WHERE id = ?",
                     (_utc_now_iso(), thread_id)
                 )
                 return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -1359,12 +1388,12 @@ class DatabaseManager:
             return
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("expected_revision must be a non-negative integer")
-        actual_revision = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()[0]
-        )
+        row = conn.execute(
+            "SELECT revision FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        # A chat that does not exist yet is at revision 0.
+        actual_revision = int(row[0]) if row is not None else 0
         if actual_revision != expected_revision:
             raise PersistenceError(
                 f"Chat revision changed (expected {expected_revision}, found {actual_revision}).",
@@ -1372,30 +1401,23 @@ class DatabaseManager:
             )
 
     def load_chat_overview(self, thread_id: str) -> dict | None:
-        """Thread metadata and message count, without loading the messages.
+        """Thread metadata and revision, without loading the messages.
 
-        chat_revision() is the message count, and a caller that needs only the
-        revision or the title should not pay for every row of a long thread
-        being read and JSON-decoded. Returns the same keys load_chat does,
-        minus "messages", plus "revision".
+        A caller that needs only the revision or the title should not pay for
+        every row of a long thread being read and JSON-decoded. Returns the same
+        keys load_chat does, minus "messages".
         """
         try:
             with self.connect() as conn:
                 row = conn.execute(
-                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    "SELECT id, title, timestamp, group_id, revision FROM threads WHERE id = ?",
                     (thread_id,),
                 ).fetchone()
                 if not row:
                     return None
                 overview = dict(row)
-                if "timestamp" in overview:
-                    overview["timestamp"] = _as_utc_iso(overview["timestamp"])
-                overview["revision"] = int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
-                        (thread_id,),
-                    ).fetchone()[0]
-                )
+                overview["timestamp"] = _as_utc_iso(overview["timestamp"])
+                overview["revision"] = int(overview["revision"])
                 return overview
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1408,9 +1430,13 @@ class DatabaseManager:
         """Loads a full chat thread (metadata and messages) from the database."""
         try:
             with self.connect() as conn:
+                # One read transaction, so the revision and the messages come
+                # from the same moment: a write landing between two separate
+                # reads would otherwise pair an older revision with newer rows.
+                conn.execute("BEGIN")
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    "SELECT id, title, timestamp, group_id, revision FROM threads WHERE id = ?",
                     (thread_id,),
                 )
                 thread_row = cursor.fetchone()
@@ -1418,8 +1444,8 @@ class DatabaseManager:
                     return None
                 
                 chat_data = dict(thread_row)
-                if 'timestamp' in chat_data:
-                    chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
+                chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
+                chat_data['revision'] = int(chat_data['revision'])
                 
                 cursor.execute(
                     "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp FROM messages "
@@ -1470,7 +1496,7 @@ class DatabaseManager:
         """Deletes the most recent 'assistant' role message from a given thread."""
         try:
             with self.connect() as conn:
-                conn.execute("""
+                cursor = conn.execute("""
                     DELETE FROM messages 
                     WHERE id = (
                         SELECT id FROM messages 
@@ -1479,6 +1505,11 @@ class DatabaseManager:
                         LIMIT 1
                     )
                 """, (thread_id,))
+                if cursor.rowcount > 0:
+                    # The messages changed, so the revision moves with them.
+                    conn.execute(
+                        "UPDATE threads SET revision = revision + 1 WHERE id = ?", (thread_id,)
+                    )
                 logging.info("Deleted the last assistant message for a chat thread.")
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1541,8 +1572,11 @@ class DatabaseManager:
                         f"Assistant message {message_id} was not found.",
                         operation="message_not_found",
                     )
+                # A regeneration leaves the message count as it was, so the
+                # revision has to move on its own for a second regeneration
+                # started from the same state to be recognised as stale.
                 conn.execute(
-                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    "UPDATE threads SET timestamp = ?, revision = revision + 1 WHERE id = ?",
                     (_utc_now_iso(), thread_id),
                 )
         except PersistenceError as exc:

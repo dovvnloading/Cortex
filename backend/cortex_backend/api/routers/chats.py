@@ -414,6 +414,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         reservation=reservation,
                         target_message_id=payload.message_id,
                         transcript=messages,
+                        transcript_revision=current_revision,
                     )
                 finally:
                     request.app.state.jobs.abort_reservation(

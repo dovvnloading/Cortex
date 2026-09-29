@@ -397,7 +397,7 @@ def test_retrying_an_unanswered_message_does_not_repeat_it_in_the_history() -> N
 
 def test_the_sqlite_repository_takes_the_same_single_read_path(tmp_path: Path) -> None:
     """The same flow over the real database, where the transcript is decoded
-    from rows and the revision is a count."""
+    from rows and the revision is a stored counter."""
     app, probe = _probed_app(
         chats=LegacyDatabaseChatRepository(DatabaseManager(db_path=str(tmp_path / "chats.sqlite")))
     )

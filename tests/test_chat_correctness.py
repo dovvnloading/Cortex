@@ -1004,9 +1004,9 @@ class ChatOverviewTests(unittest.TestCase):
     """The overview must agree with the full load on everything it reports.
 
     A generation turn reads the thread five times. Three of those reads want
-    only the title or the revision, and chat_revision() is the message count --
-    so the cheap read has to produce exactly the number the expensive one
-    would, or a compare-and-swap starts rejecting valid writes.
+    only the title or the revision, and chat_revision() reads the stored
+    counter -- so the cheap read has to produce exactly the number the
+    expensive one would, or a compare-and-swap starts rejecting valid writes.
     """
 
     def _repository(self, directory):

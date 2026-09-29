@@ -32,7 +32,17 @@ class ChatDomainError(RuntimeError):
 
 
 def chat_revision(chat: Mapping[str, Any]) -> int:
-    """Use the persisted ordered message count as the current chat revision."""
+    """The chat's persisted revision: a counter that moves whenever its messages do.
+
+    Appending, replacing (regenerating) or removing a message all move it, so a
+    write guarded by the revision it was read at fails if any of them happened
+    in between. It is not the message count: a regeneration changes a message
+    without changing the count. A chat mapping that carries no revision (a test
+    double that predates the counter) falls back to the count.
+    """
+    revision = chat.get("revision")
+    if type(revision) is int and revision >= 0:
+        return revision
     return len(chat.get("messages", ()))
 
 
