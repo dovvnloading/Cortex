@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -20,11 +21,18 @@ import pytest
 
 from cortex_backend.llamacpp.errors import (
     BinaryVerificationError,
+    CrashLoopError,
     LlamaCppError,
     ServerLaunchError,
     ServerStartTimeoutError,
 )
-from cortex_backend.llamacpp.server_manager import _LISTENING_PORT_RE, LlamaServerManager
+from cortex_backend.llamacpp.launch_failure import launch_failure_message
+from cortex_backend.llamacpp.server_manager import (
+    _LISTENING_PORT_RE,
+    LlamaServerManager,
+    _drain_output,
+    _ReuseVerdict,
+)
 
 
 class _FakePopen:
@@ -243,8 +251,10 @@ def _manager(
     http_client,
     gpu_backend: str = "cpu",
     health_timeout_seconds: float = 5.0,
+    startup_cap_seconds: float | None = None,
     release=_ANY_RELEASE,
 ) -> LlamaServerManager:
+    extra = {} if startup_cap_seconds is None else {"startup_cap_seconds": startup_cap_seconds}
     return LlamaServerManager(
         runtime_dir=tmp_path,
         fetcher=fetcher,
@@ -254,6 +264,7 @@ def _manager(
         health_timeout_seconds=health_timeout_seconds,
         launcher=launcher,
         http_client=http_client,
+        **extra,
     )
 
 
@@ -489,7 +500,10 @@ def test_start_strips_llama_arg_environment(
     monkeypatch.setenv("LLAMA_ARG_HF_REPO", "synthetic/repo-name")
     monkeypatch.setenv("LLAMA_ARG_MMPROJ", "C:/synthetic/projector.gguf")
     monkeypatch.setenv("LLAMA_LOG_FILE", "C:/synthetic/child.log")
+    monkeypatch.setenv("LLAMA_SERVER_CHILD_MODE", "synthetic-mode")
     monkeypatch.setenv("LLAMA_API_KEY", "inherited-synthetic-key")
+    monkeypatch.setenv("LLAMA_CACHE", "C:/synthetic/cache")
+    monkeypatch.setenv("LLAMA_TRACE", "1")
     monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")
     monkeypatch.setenv("VK_ICD_FILENAMES", "C:/synthetic/icd.json")
     launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
@@ -505,11 +519,18 @@ def test_start_strips_llama_arg_environment(
     assert len(launcher.launch_envs) == 2
     for env in launcher.launch_envs:
         assert env is not None
-        assert not [name for name in env if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_"))]
+        assert not [
+            name
+            for name in env
+            if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_", "LLAMA_SERVER_"))
+        ]
         # Tuning knobs users legitimately set for the GPU stack survive, as
-        # does everything the child needs to run at all.
+        # does everything the child needs to run at all, and so do the other
+        # LLAMA_* names: none of them overrides an option Cortex passes.
         assert env["GGML_VK_VISIBLE_DEVICES"] == "0"
         assert env["VK_ICD_FILENAMES"] == "C:/synthetic/icd.json"
+        assert env["LLAMA_CACHE"] == "C:/synthetic/cache"
+        assert env["LLAMA_TRACE"] == "1"
         assert env.get("PATH") == os.environ.get("PATH")
     first_env = launcher.launch_envs[0]
     assert first_env is not None
@@ -520,12 +541,19 @@ def test_start_strips_llama_arg_environment(
     notices = [r for r in caplog.records if "environment variables" in r.getMessage()]
     assert len(notices) == 1
     message = notices[0].getMessage()
-    for name in ("LLAMA_ARG_HF_REPO", "LLAMA_ARG_MMPROJ", "LLAMA_ARG_N_PARALLEL", "LLAMA_LOG_FILE"):
+    for name in (
+        "LLAMA_ARG_HF_REPO",
+        "LLAMA_ARG_MMPROJ",
+        "LLAMA_ARG_N_PARALLEL",
+        "LLAMA_LOG_FILE",
+        "LLAMA_SERVER_CHILD_MODE",
+    ):
         assert name in message
-    # Names only: never the values, and never the key that stays.
-    for value in ("synthetic/repo-name", "projector.gguf", "child.log", "inherited-synthetic-key"):
+    # Names only: never the values, and never a name that stays.
+    for value in ("synthetic/repo-name", "projector.gguf", "child.log", "synthetic-mode", "inherited-synthetic-key"):
         assert value not in caplog.text
-    assert "LLAMA_API_KEY" not in message
+    for kept in ("LLAMA_API_KEY", "LLAMA_CACHE", "LLAMA_TRACE"):
+        assert kept not in message
 
 
 def test_child_environment_matches_prefixes_case_insensitively_and_keeps_the_rest() -> None:
@@ -534,20 +562,25 @@ def test_child_environment_matches_prefixes_case_insensitively_and_keeps_the_res
     parent = {
         "llama_arg_ctx_size": "1",
         "Llama_Log_Prefix": "1",
+        "llama_server_child_mode": "1",
         "LLAMA_ARG": "not-a-prefix-match",
         "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_SERVERLESS": "not-a-prefix-match",
         "LLAMA_CACHE": "C:/synthetic/cache",
+        "LLAMA_TRACE": "1",
         "GGML_THREADS": "2",
         "PATH": "C:/synthetic/bin",
     }
 
     env, stripped = _child_environment(parent, "fresh-key")
 
-    assert stripped == ("Llama_Log_Prefix", "llama_arg_ctx_size")
+    assert stripped == ("Llama_Log_Prefix", "llama_arg_ctx_size", "llama_server_child_mode")
     assert env == {
         "LLAMA_ARG": "not-a-prefix-match",
         "LLAMA_LOGGING": "not-a-prefix-match",
+        "LLAMA_SERVERLESS": "not-a-prefix-match",
         "LLAMA_CACHE": "C:/synthetic/cache",
+        "LLAMA_TRACE": "1",
         "GGML_THREADS": "2",
         "PATH": "C:/synthetic/bin",
         "LLAMA_API_KEY": "fresh-key",
@@ -560,7 +593,7 @@ def test_start_without_inherited_llama_variables_logs_no_notice(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     for name in list(os.environ):
-        if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_")):
+        if name.upper().startswith(("LLAMA_ARG_", "LLAMA_LOG_", "LLAMA_SERVER_")):
             monkeypatch.delenv(name)
     manager = _manager(
         tmp_path,
@@ -618,8 +651,18 @@ def test_loaded_context_comes_from_props(
     assert manager.status.loaded_context is None
 
 
-def test_loaded_context_matching_the_request_is_not_warned_about(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
+@pytest.mark.parametrize(
+    ("requested", "loaded"),
+    [
+        (4096, 4096),
+        # A window larger than asked for is no shortfall: nothing in the
+        # conversation stops fitting sooner than the setting promised.
+        (4000, 4096),
+        (4096, 8192),
+    ],
+)
+def test_a_loaded_context_that_is_not_smaller_than_requested_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path, requested: int, loaded: int
 ) -> None:
     model_path = tmp_path / "model.gguf"
     manager = _manager(
@@ -627,14 +670,15 @@ def test_loaded_context_matching_the_request_is_not_warned_about(
         fetcher=_FakeFetcher(),
         launcher=_QueueLauncher([_FakePopen()]),
         http_client=_RecordingAttestationClient(
-            _props_with_context(model_path, {"n_ctx": 4096})
+            _props_with_context(model_path, {"n_ctx": loaded})
         ),
     )
 
     with caplog.at_level("WARNING", logger="cortex_backend.llamacpp.server_manager"):
-        manager.ensure_ready(model_path, num_ctx=4096)
+        manager.ensure_ready(model_path, num_ctx=requested)
 
-    assert manager.status.loaded_context == 4096
+    # Still reported truthfully through status, whatever it was.
+    assert manager.status.loaded_context == loaded
     assert not [r for r in caplog.records if "context" in r.getMessage()]
 
 
@@ -743,6 +787,64 @@ def test_ensure_ready_reports_status_only_while_actually_starting(tmp_path: Path
     messages.clear()
     manager.ensure_ready(model_path, num_ctx=4096, on_status=messages.append)
     assert messages == []
+
+
+class _StateRecordingFetcher(_FakeFetcher):
+    """Records the state the manager publishes while each fetcher call runs.
+
+    Reads the private field rather than ``status``: ``status`` itself asks the
+    fetcher whether a binary is cached, which would recurse into this class.
+    """
+
+    def __init__(self, *, cached: bool) -> None:
+        super().__init__()
+        if cached:
+            self._cached.add("cpu")
+        self.manager: LlamaServerManager | None = None
+        self.states: list[tuple[str, str]] = []
+
+    def _record(self, call: str) -> None:
+        assert self.manager is not None
+        with self.manager._state_lock:
+            self.states.append((call, self.manager._state))
+
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
+        self._record("is_cached")
+        return super().is_cached(release, backend, cancellation_event=cancellation_event)
+
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
+        self._record("ensure_binary")
+        return super().ensure_binary(release, backend, cancellation_event=cancellation_event)
+
+
+def test_a_cached_binary_never_reports_downloading(tmp_path: Path) -> None:
+    """Publishing "downloading_binary" before asking the cache made every
+    launch with a runtime already on disk flash "Downloading runtime..."."""
+    fetcher = _StateRecordingFetcher(cached=True)
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]), http_client=_AlwaysHealthyClient()
+    )
+    fetcher.manager = manager
+    messages: list[str] = []
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096, on_status=messages.append)
+
+    assert fetcher.states == [("is_cached", "starting"), ("ensure_binary", "starting")]
+    assert not any("Downloading" in message for message in messages)
+    assert manager.status.state == "ready"
+
+
+def test_an_uncached_binary_reports_downloading_only_while_it_downloads(tmp_path: Path) -> None:
+    fetcher = _StateRecordingFetcher(cached=False)
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]), http_client=_AlwaysHealthyClient()
+    )
+    fetcher.manager = manager
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert fetcher.states == [("is_cached", "starting"), ("ensure_binary", "downloading_binary")]
+    assert manager.status.state == "ready"
 
 
 def test_ensure_ready_restarts_when_num_ctx_changes(tmp_path: Path) -> None:
@@ -908,6 +1010,308 @@ def test_slow_but_alive_process_times_out_without_gpu_fallback(tmp_path: Path) -
     # A timeout (process alive, just slow) must NOT be recorded as a known-bad
     # backend -- only an early process exit means "this backend can't launch here".
     assert not (tmp_path / "preferred_gpu_backend.json").exists()
+
+
+class _ScriptedOutput:
+    """A child's stdout that the test feeds while the manager is waiting on it.
+
+    Reads block like a pipe does, but are bounded so a test that forgets to
+    close it cannot hang.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: queue.Queue[bytes] = queue.Queue()
+
+    def feed(self, data: bytes) -> None:
+        self._chunks.put(data)
+
+    def close(self) -> None:
+        self._chunks.put(b"")
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        try:
+            return self._chunks.get(timeout=10.0)
+        except queue.Empty:
+            return b""
+
+    def readline(self) -> bytes:
+        return self.read1()
+
+
+class _Trickle:
+    """Feeds a scripted child a chunk every ``interval`` seconds from a thread.
+
+    ``chunks`` is consumed in order; ``forever`` (if given) is then repeated
+    until the context ends. Waiting on the stop event, never a bare sleep,
+    keeps every wait bounded and lets the test end the feed early.
+    """
+
+    def __init__(
+        self,
+        output: _ScriptedOutput,
+        chunks: list[bytes],
+        *,
+        interval: float,
+        forever: bytes | None = None,
+    ) -> None:
+        self._output = output
+        self._chunks = chunks
+        self._interval = interval
+        self._forever = forever
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        for chunk in self._chunks:
+            if self._stopped.wait(self._interval):
+                return
+            self._output.feed(chunk)
+        while self._forever is not None and not self._stopped.wait(self._interval):
+            self._output.feed(self._forever)
+
+    def __enter__(self) -> _Trickle:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stopped.set()
+        self._output.close()
+        self._thread.join(5.0)
+
+
+_PROGRESS_LINE = b"load_tensors: loaded tensor batch\n"
+
+
+def _scripted_child() -> tuple[_FakePopen, _ScriptedOutput]:
+    process = _FakePopen()
+    output = _ScriptedOutput()
+    process.stdout = output  # type: ignore[assignment]
+    return process, output
+
+
+def test_startup_deadline_extends_while_the_child_is_still_logging(tmp_path: Path) -> None:
+    """A large model on a slow disk keeps loading long after a fixed wall clock
+    would have given up on it. The silence span is 0.5s; the child writes for
+    0.9s before it is listening."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+    script = [_PROGRESS_LINE] * 30 + [_LISTENING_LINE.encode()]
+
+    started = time.monotonic()
+    with _Trickle(output, script, interval=0.03):
+        handle = manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert handle is not None
+    assert manager.status.state == "ready"
+    assert elapsed > 0.5, "the start outlived the silence span, which is the point"
+
+
+def test_output_without_a_line_ending_still_counts_as_the_child_being_alive(tmp_path: Path) -> None:
+    """llama.cpp writes loading progress as dots with no newline; waiting for a
+    completed line would call a busy child silent."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+    script = [b"."] * 30 + [b"\n" + _LISTENING_LINE.encode()]
+
+    started = time.monotonic()
+    with _Trickle(output, script, interval=0.03):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert time.monotonic() - started > 0.5
+
+
+def test_a_silent_child_still_times_out_after_the_silence_span(tmp_path: Path) -> None:
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.5,
+    )
+
+    started = time.monotonic()
+    with _Trickle(output, [], interval=1.0), pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "startup_timeout"
+    assert 0.4 < elapsed < 5.0
+    assert process.terminated is True
+
+
+def test_a_child_that_never_goes_quiet_is_still_stopped_at_the_absolute_cap(tmp_path: Path) -> None:
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.3,
+        startup_cap_seconds=0.8,
+    )
+
+    started = time.monotonic()
+    feed = _Trickle(output, [], interval=0.02, forever=_PROGRESS_LINE)
+    with feed, pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "startup_timeout"
+    assert 0.7 < elapsed < 8.0
+    assert process.terminated is True
+    assert manager.status.state == "failed"
+
+
+def test_a_listening_server_that_never_answers_is_not_kept_waiting_by_its_own_logging(
+    tmp_path: Path,
+) -> None:
+    """Once it is listening, llama-server logs every request -- including the
+    health probes made while waiting for it -- so counting its output would
+    never let a server that cannot answer time out before the cap."""
+    process, output = _scripted_child()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.3,
+        startup_cap_seconds=6.0,
+    )
+
+    started = time.monotonic()
+    feed = _Trickle(
+        output,
+        [_LISTENING_LINE.encode()],
+        interval=0.01,
+        forever=b"srv log_server_r: request: GET /health\n",
+    )
+    with feed, pytest.raises(ServerStartTimeoutError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    elapsed = time.monotonic() - started
+
+    assert raised.value.failure_code == "health_check_failed"
+    assert elapsed < 4.0, "waited for the cap instead of the span after the listening line"
+
+
+def test_the_absolute_cap_is_never_shorter_than_the_silence_span(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+        health_timeout_seconds=0.4,
+        startup_cap_seconds=0.05,
+    )
+
+    assert manager._startup_cap_seconds == 0.4
+
+
+def test_the_default_deadline_is_three_minutes_of_silence_under_a_half_hour_cap(tmp_path: Path) -> None:
+    manager = LlamaServerManager(
+        runtime_dir=tmp_path,
+        fetcher=_FakeFetcher(),  # type: ignore[arg-type]
+        release=None,
+        gpu_backend_setting=lambda: "cpu",
+        models_directory=lambda: tmp_path,
+        http_client=_AlwaysHealthyClient(),  # type: ignore[arg-type]
+    )
+
+    assert manager._health_timeout_seconds == 180.0
+    assert manager._startup_cap_seconds == 1800.0
+
+
+class _ChunkedStream:
+    """Hands out prepared chunks one read at a time, like a pipe delivering as it goes."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = list(chunks)
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_drain_output_reports_activity_for_every_chunk_even_without_a_line_ending() -> None:
+    sink: list[str] = []
+    lines_seen_at_each_activity: list[int] = []
+
+    _drain_output(
+        _ChunkedStream(b"...", b"..", b" done\nnext"),
+        sink,
+        None,
+        lambda: lines_seen_at_each_activity.append(len(sink)),
+    )
+
+    # Activity fired for each chunk, and for the first two before any line existed.
+    assert lines_seen_at_each_activity == [0, 0, 0]
+    assert sink == ["..... done", "next"]
+
+
+def test_drain_output_reassembles_lines_split_across_chunks_and_keeps_a_final_unterminated_one() -> None:
+    sink: list[str] = []
+    passed_on: list[str] = []
+
+    _drain_output(_ChunkedStream(b"first li", b"ne\r\nsecond\n\n", b"third"), sink, passed_on.append)
+
+    assert sink == ["first line", "second", "third"]
+    assert passed_on == sink
+
+
+def test_drain_output_cuts_a_line_that_never_ends_and_keeps_only_a_bounded_tail() -> None:
+    from cortex_backend.llamacpp import server_manager
+
+    endless = b"." * (server_manager._MAX_UNTERMINATED_LINE_BYTES + 10)
+    sink: list[str] = []
+    _drain_output(_ChunkedStream(endless), sink)
+    assert len(sink) == 1
+    assert len(sink[0]) == len(endless)
+
+    lines = [f"line {index}\n".encode() for index in range(server_manager._STDERR_TAIL_LINES + 50)]
+    sink = []
+    _drain_output(_ChunkedStream(b"".join(lines)), sink)
+    assert len(sink) == server_manager._STDERR_TAIL_LINES
+    assert sink[-1] == f"line {server_manager._STDERR_TAIL_LINES + 49}"
+
+
+def test_drain_output_still_reads_streams_that_only_offer_readline() -> None:
+    class LineOnly:
+        def __init__(self) -> None:
+            self.lines = [b"x\n", b"y\n"]
+
+        def readline(self) -> bytes:
+            return self.lines.pop(0) if self.lines else b""
+
+    sink: list[str] = []
+    activity: list[int] = []
+
+    _drain_output(LineOnly(), sink, None, lambda: activity.append(1))
+
+    assert sink == ["x", "y"]
+    assert activity == [1, 1]
+
+
+def test_drain_output_reads_a_real_buffered_pipe_stream() -> None:
+    sink: list[str] = []
+
+    _drain_output(io.BufferedReader(io.BytesIO(b"a\nb\n")), sink)
+
+    assert sink == ["a", "b"]
 
 
 def test_start_timeout_reports_a_terminal_state_instead_of_starting(tmp_path: Path) -> None:
@@ -1348,6 +1752,341 @@ def test_launch_failure_status_omits_raw_child_output(tmp_path: Path) -> None:
     )
 
 
+class _ExitedPopen(_FakePopen):
+    """A child that has already exited with ``exit_code``, leaving ``output`` behind."""
+
+    def __init__(self, output: str = "", *, exit_code: int = 1) -> None:
+        super().__init__()
+        self.exit_code = exit_code
+        self.stdout = io.BytesIO(output.encode())
+
+
+class _LateOutput:
+    """Output that reaches the reader only after the child is already seen to have exited."""
+
+    def __init__(self, data: bytes, *, delay_seconds: float) -> None:
+        self._data = data
+        self._gate = threading.Event()
+        threading.Timer(delay_seconds, self._gate.set).start()
+
+    def read1(self, size: int = -1) -> bytes:
+        del size
+        if not self._gate.wait(5.0):
+            return b""
+        data, self._data = self._data, b""
+        return data
+
+    def readline(self) -> bytes:
+        return self.read1()
+
+
+_LISTENING_LINE = "0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
+
+
+def _launch_failure(
+    tmp_path: Path, process: _FakePopen, *, gpu_backend: str = "cpu"
+) -> tuple[LlamaServerManager, ServerLaunchError]:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([process]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+    )
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager, raised.value
+
+
+def test_launch_failure_is_classified_without_relaying_child_text(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Six different causes used to read as one sentence blaming memory. The
+    child's output only decides *which* fixed message is shown; nothing it said
+    reaches status, the error, or the log."""
+    architecture = "zzz-private-arch-name"
+    output = (
+        f"llama_model_load: error loading model architecture: unknown model architecture: '{architecture}'\n"
+        "llama_model_load_from_file_impl: failed to load model\n"
+    )
+
+    with caplog.at_level("DEBUG"):
+        manager, error = _launch_failure(tmp_path, _ExitedPopen(output))
+
+    status = manager.status
+    assert status.state == "failed"
+    assert status.last_failure_code == "unsupported_architecture"
+    assert status.last_error == launch_failure_message("unsupported_architecture")
+    assert error.failure_code == "unsupported_architecture"
+    assert error.error == status.last_error
+    for text in (status.last_error, str(error), status.last_restart_reason or "", caplog.text):
+        assert architecture not in text
+        assert "llama_model_load" not in text
+    # Naming the cause in the log is fine; it is one of a closed set.
+    assert "unsupported_architecture" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("llama_model_load: error loading model: tensor 'blk.3.ffn_up.weight' data is not within the file bounds\n", "model_unreadable"),
+        ("ggml_backend_alloc_ctx_tensors: failed to allocate buffer\nfailed to load model\n", "memory"),
+        ("llama_model_load: error loading model: illegal split file idx: 1\n", "missing_shards"),
+        ("llama_model_load: error loading model architecture: unknown model architecture: 'clip'\n", "projector_not_a_model"),
+        ("ggml_vulkan: No devices found.\n", "no_gpu"),
+        ("srv  operator(): couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 0\n", "port_unavailable"),
+    ],
+)
+def test_each_recognised_launch_failure_gets_its_own_cause_and_message(
+    tmp_path: Path, output: str, code: str
+) -> None:
+    manager, error = _launch_failure(tmp_path, _ExitedPopen(output))
+
+    assert error.failure_code == code
+    assert manager.status.last_failure_code == code
+    assert manager.status.last_error == launch_failure_message(code)  # type: ignore[arg-type]
+    assert manager.status.last_error != launch_failure_message("runtime_exited")
+
+
+@pytest.mark.parametrize("exit_code", [0xC0000135, -1073741515])
+def test_a_child_that_cannot_load_its_libraries_is_reported_as_a_blocked_or_missing_runtime(
+    tmp_path: Path, exit_code: int
+) -> None:
+    """Such a process prints nothing; the Windows exit code is the only evidence,
+    and Popen may hand it back signed or unsigned."""
+    manager, error = _launch_failure(tmp_path, _ExitedPopen("", exit_code=exit_code))
+
+    assert error.failure_code == "runtime_unusable"
+    assert manager.status.last_failure_code == "runtime_unusable"
+
+
+def test_an_exit_that_says_nothing_is_reported_as_unexplained_rather_than_guessed(tmp_path: Path) -> None:
+    manager, error = _launch_failure(tmp_path, _ExitedPopen(_LISTENING_LINE, exit_code=1))
+
+    assert error.failure_code == "runtime_exited"
+    assert manager.status.last_error == launch_failure_message("runtime_exited")
+    assert "could not tell why" in (manager.status.last_error or "")
+
+
+def test_the_output_that_explains_an_exit_is_read_even_when_it_arrives_after_the_exit_is_seen(
+    tmp_path: Path,
+) -> None:
+    process = _ExitedPopen()
+    process.stdout = _LateOutput(b"ggml: out of memory\n", delay_seconds=0.05)  # type: ignore[assignment]
+
+    manager, error = _launch_failure(tmp_path, process)
+
+    assert error.failure_code == "memory"
+    assert manager.status.last_failure_code == "memory"
+
+
+def test_a_program_that_cannot_be_spawned_is_reported_as_a_blocked_or_missing_runtime(tmp_path: Path) -> None:
+    def blocked(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
+        del argv, cwd, env
+        raise PermissionError("synthetic: blocked by security software")
+
+    manager = _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=blocked, http_client=_AlwaysHealthyClient()
+    )
+
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert raised.value.failure_code == "runtime_unusable"
+    assert manager.status.last_failure_code == "runtime_unusable"
+    assert manager.status.last_error == launch_failure_message("runtime_unusable")
+    assert "blocked by security software" not in str(raised.value)
+
+
+def test_a_containment_failure_is_not_blamed_on_security_software(tmp_path: Path) -> None:
+    def cannot_contain(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None):
+        del argv, cwd, env
+        raise RuntimeError("could not assign the model process to containment")
+
+    manager = _manager(
+        tmp_path, fetcher=_FakeFetcher(), launcher=cannot_contain, http_client=_AlwaysHealthyClient()
+    )
+
+    with pytest.raises(ServerLaunchError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert raised.value.failure_code is None
+    assert manager.status.last_failure_code is None
+    assert manager.status.last_error == (
+        "The local model runtime could not start. Check System settings and try again."
+    )
+
+
+def test_a_load_that_never_finishes_is_told_apart_from_a_server_that_never_answers(tmp_path: Path) -> None:
+    silent = _FakePopen()
+    silent.stdout = io.BytesIO(b"")
+    never_listening = _manager(
+        tmp_path / "a",
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([silent]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    with pytest.raises(ServerStartTimeoutError) as raised:
+        never_listening.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert raised.value.failure_code == "startup_timeout"
+    assert never_listening.status.last_failure_code == "startup_timeout"
+    assert never_listening.status.last_error == launch_failure_message("startup_timeout")
+
+    # The default fake child announces its port, then the health probe fails.
+    never_answering = _manager(
+        tmp_path / "b",
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    with pytest.raises(ServerStartTimeoutError) as raised:
+        never_answering.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert raised.value.failure_code == "health_check_failed"
+    assert never_answering.status.last_failure_code == "health_check_failed"
+
+
+def test_the_failure_code_clears_once_a_server_is_ready(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_ExitedPopen("ggml: out of memory\n"), _FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    with pytest.raises(ServerLaunchError):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert manager.status.last_failure_code == "memory"
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=2048)
+
+    assert manager.status.state == "ready"
+    assert manager.status.last_failure_code is None
+    assert manager.status.last_error is None
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("ggml: out of memory\n", "memory"),
+        ("llama_model_load: error loading model: illegal split file idx: 1\n", "missing_shards"),
+        ("ggml_vulkan: No devices found.\n", "no_gpu"),
+        (_LISTENING_LINE, "runtime_exited"),
+    ],
+)
+def test_the_crash_loop_refusal_names_the_cause_instead_of_blaming_memory(
+    tmp_path: Path, output: str, code: str
+) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_ExitedPopen(output) for _ in range(3)]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    message = str(raised.value)
+    assert launch_failure_message(code) in message  # type: ignore[arg-type]
+    assert "3 times" in message
+    assert manager.status.last_error == message
+    assert manager.status.last_failure_code == code
+    if code != "memory":
+        assert "does not fit in available memory" not in message
+
+
+def test_a_slow_load_that_keeps_timing_out_is_not_blamed_on_memory(tmp_path: Path) -> None:
+    def silent() -> _FakePopen:
+        process = _FakePopen()
+        process.stdout = io.BytesIO(b"")
+        return process
+
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([silent() for _ in range(3)]),
+        http_client=_AlwaysUnhealthyClient(),
+        health_timeout_seconds=0.05,
+    )
+    for _ in range(3):
+        with pytest.raises(ServerStartTimeoutError):
+            manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    message = str(raised.value)
+    assert "took too long to load" in message
+    assert "slow or busy disk" in message
+    assert "memory" not in message
+
+
+def test_a_crash_after_ready_is_classified_from_the_retained_output(tmp_path: Path) -> None:
+    def child() -> _FakePopen:
+        process = _FakePopen()
+        process.stdout = io.BytesIO(("ggml: out of memory\n" + _LISTENING_LINE).encode())
+        return process
+
+    processes = [child() for _ in range(3)]
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher(list(processes)),
+        http_client=_AlwaysHealthyClient(),
+    )
+    model_path = tmp_path / "model.gguf"
+
+    for process in processes:
+        manager.ensure_ready(model_path, num_ctx=4096)
+        assert manager.status.last_failure_code is None
+        process.exit_code = 1  # dies after having been ready
+
+    with pytest.raises(CrashLoopError) as raised:
+        manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert launch_failure_message("memory") in str(raised.value)
+    assert manager.status.last_failure_code == "memory"
+
+
+def test_a_server_that_stops_answering_is_recorded_as_a_failed_health_check(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([]),
+        http_client=_AlwaysHealthyClient(),
+    )
+    verdict = _ReuseVerdict(
+        reusable=False,
+        reason="the runtime stopped responding to health checks (3 attempts)",
+        failure=True,
+    )
+
+    manager._record_restart(verdict, tmp_path / "model.gguf", 4096)
+
+    assert manager.status.last_failure_code == "health_check_failed"
+
+
+def test_a_classified_launch_error_reaches_the_user_unchanged_and_an_unclassified_one_does_not(
+    tmp_path: Path,
+) -> None:
+    from cortex_backend.services.llm import _generation_failure_message
+
+    _manager_unused, error = _launch_failure(
+        tmp_path, _ExitedPopen("llama_model_load: error loading model: illegal split file idx: 1\n")
+    )
+
+    message, details = _generation_failure_message(error)
+
+    assert message == launch_failure_message("missing_shards")
+    assert details == "llamacpp_missing_shards"
+    # Without a code the error is ordinary runtime text again, not guidance.
+    assert not getattr(ServerLaunchError("The local model runtime could not start."), "is_user_guidance", False)
+
+
 def test_a_dead_process_is_restarted_with_the_exit_code_recorded(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     first = _FakePopen()
@@ -1425,7 +2164,10 @@ def test_a_crash_loop_stops_with_an_honest_error_instead_of_thrashing(tmp_path: 
         manager.ensure_ready(model_path, num_ctx=6144)
 
     assert len(launcher.launch_args) == 3  # the guard fired BEFORE a fourth reload
-    assert "does not fit in available memory" in str(raised.value)
+    # Nothing in the child's output said why, so the refusal says so instead of
+    # guessing at memory.
+    assert "could not tell why" in str(raised.value)
+    assert "3 times" in str(raised.value)
     assert manager.status.state == "failed"
 
     # And it keeps refusing fast -- no half-thrash of reload-every-other-message.
@@ -1466,7 +2208,10 @@ def test_repeated_launch_failures_are_tracked_and_trip_the_crash_loop_guard(tmp_
         manager.ensure_ready(model_path, num_ctx=4096)
 
     assert len(launcher.launch_args) == 3  # the guard fired before a fourth doomed attempt
-    assert "does not fit in available memory" in str(raised.value)
+    # Nothing in the child's output said why, so the refusal says so instead of
+    # guessing at memory.
+    assert "could not tell why" in str(raised.value)
+    assert "3 times" in str(raised.value)
     assert manager.status.state == "failed"
 
 
