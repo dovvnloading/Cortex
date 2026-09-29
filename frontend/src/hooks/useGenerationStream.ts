@@ -451,7 +451,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
         // finishing late (its terminal reload is awaited above) must not
         // clear the marker a newer job has since installed, which would let
         // a second consumer attach to that newer job in parallel. On a 401
-        // this release is what lets the host attach again.
+        // the job is left tracked and this release lets the next consumer
+        // (the host, remounted once the session is renewed) attach to it.
         if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }
