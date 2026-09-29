@@ -121,6 +121,26 @@ def test_running_out_of_time_rewrites_nothing_and_a_later_run_finishes(tmp_path:
         assert _facts(path).rows == before.rows
 
 
+def test_a_step_that_frees_nothing_ends_the_pass_instead_of_spinning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "chats.sqlite"
+    _history(path, incremental=True)
+    real_pragma = sqlite_reclaim._pragma
+    steps: list[str] = []
+
+    def stuck(connection: sqlite3.Connection, name: str) -> int:
+        if name == "freelist_count":
+            steps.append(name)
+            return 500  # the free list never shrinks
+        return real_pragma(connection, name)
+
+    monkeypatch.setattr(sqlite_reclaim, "_pragma", stuck)
+
+    assert reclaim_free_space(path, time_limit=5.0) == "gave_up"
+    assert len(steps) <= 3  # the check, one step, the check that saw no progress
+
+
 def test_a_database_another_connection_is_writing_is_left_alone(tmp_path: Path) -> None:
     for incremental in (False, True):
         path = tmp_path / f"chats-{incremental}.sqlite"

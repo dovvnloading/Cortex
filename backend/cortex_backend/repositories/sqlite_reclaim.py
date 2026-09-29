@@ -131,11 +131,18 @@ def _pragma(connection: sqlite3.Connection, name: str) -> int:
 
 def _trim(connection: sqlite3.Connection, deadline: float, clock: Callable[[], float]) -> Outcome:
     """Hand free pages back in small steps until none are left or time is up."""
-    while _pragma(connection, "freelist_count") > 0:
+    remaining = _pragma(connection, "freelist_count")
+    while remaining > 0:
         if clock() >= deadline:
             return "gave_up"
         # The pragma only frees a page for each row it is asked to produce.
         connection.execute(f"PRAGMA incremental_vacuum({_INCREMENTAL_STEP_PAGES})").fetchall()
+        freed = remaining - _pragma(connection, "freelist_count")
+        if freed <= 0:
+            # A step that frees nothing would otherwise spin until the clock
+            # ran out, at every start.
+            return "gave_up"
+        remaining -= freed
     _shrink_the_file(connection)
     return "trimmed"
 
