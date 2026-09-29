@@ -57,8 +57,8 @@ MAX_STARTUP_LOG_BYTES = 64 * 1024
 # How long uvicorn waits for open connections and background tasks once a
 # shutdown starts. It sits inside the launcher's 15 second wait for the server
 # thread, together with the job registry's own cancellation grace and the
-# runtime teardown that follows.
-GRACEFUL_SHUTDOWN_SECONDS = 5.0
+# runtime teardown that follows. A whole number: uvicorn types it int | None.
+GRACEFUL_SHUTDOWN_SECONDS = 5
 # A second launch waits this long for the first instance's window (the first
 # opens it only after the frontend build and any WebView2 install); each
 # attempt searches for the window for POLL seconds, then rests RETRY seconds.
