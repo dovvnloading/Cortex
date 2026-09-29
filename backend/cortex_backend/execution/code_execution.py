@@ -66,7 +66,12 @@ MAX_CODE_PROCESS_ARGUMENT_BYTES = 16 * 1024
 MAX_CODE_NETWORK_REQUESTS = 4
 MAX_CODE_NETWORK_URL_CHARS = 2048
 MAX_CODE_NETWORK_RESPONSE_BYTES = MAX_CODE_OUTPUT_BYTES
-MAX_CODE_TRACE_EVENTS = 2_000_000
+# A budget of executed source *lines*, not instructions: the interpreter's
+# trace hook delivers one event per line (roughly two per loop iteration), so
+# this is about a million iterations of a small loop. It only catches a program
+# that keeps running many cheap statements; the parent's wall clock and the
+# job object are what bound everything else.
+MAX_CODE_TRACE_LINES = 2_000_000
 MAX_CODE_LIST_ENTRIES = 2048
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -1383,21 +1388,26 @@ class _BoundedTextWriter(io.TextIOBase):
         return "".join(self._chunks)
 
 
-class _ExecutionGuard:
-    """Cooperative instruction watchdog for platforms without rlimit."""
+class _LineGuard:
+    """Cooperative line watchdog for platforms without rlimit.
+
+    It checks a line budget and the wall clock each time the interpreter starts
+    a new source line of the approved program. It does not see instructions:
+    one line that spends its whole time inside a single operation, a huge
+    integer power for instance, is never interrupted from here. That case is
+    kept out by the validator's static size bounds, and stopped by the parent's
+    wall clock and the job object's memory limit.
+    """
 
     def __init__(self) -> None:
         self.deadline = time.monotonic() + MAX_CODE_TIMEOUT_SECONDS
-        self.events = 0
+        self.lines = 0
 
     def trace(self, frame: Any, event: str, _arg: Any) -> Callable[..., Any]:
-        if frame.f_code.co_filename == "<cortex-code>":
-            if event == "call":
-                frame.f_trace_opcodes = True
-            elif event in {"line", "opcode"}:
-                self.events += 1
-                if self.events > MAX_CODE_TRACE_EVENTS or time.monotonic() >= self.deadline:
-                    raise CodeExecutionError("runtime_limit")
+        if event == "line" and frame.f_code.co_filename == "<cortex-code>":
+            self.lines += 1
+            if self.lines > MAX_CODE_TRACE_LINES or time.monotonic() >= self.deadline:
+                raise CodeExecutionError("runtime_limit")
         return self.trace
 
 
@@ -1429,7 +1439,7 @@ def run_code_in_worker(source: str, capabilities: Mapping[str, Any] | None = Non
     }
     old_stdout, old_stderr = sys.stdout, sys.stderr
     old_trace = sys.gettrace()
-    guard = _ExecutionGuard()
+    guard = _LineGuard()
     try:
         sys.stdout, sys.stderr = stdout, stderr
         sys.settrace(guard.trace)
