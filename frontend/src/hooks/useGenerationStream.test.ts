@@ -642,6 +642,61 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
+  it("treats an unreachable backend as retryable on both the stream and the status check", async () => {
+    // The typed network failure is neither a lost session nor a vanished job:
+    // the generation is still running one process away, so keep trying.
+    const unreachable = () => new ApiError(0, "Cortex could not reach the local backend.", "network");
+    const generationStatus = vi.fn().mockRejectedValue(unreachable());
+    const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) return Promise.reject(unreachable());
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onSessionExpired = vi.fn();
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
+
+    act(() => {
+      result.current.start("job-unreachable", "thread-unreachable", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    expect(generationStatus).toHaveBeenCalledTimes(1);
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-unreachable", threadId: "thread-unreachable" });
+
+    act(() => result.current.stop());
+  });
+
+  it("gives the status check the stop signal so stopping does not leave it running", async () => {
+    const generationStatus = vi.fn((_jobId: string, options: { signal?: AbortSignal } = {}) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new ApiError(0, "The request was cancelled.", "aborted")), { once: true });
+    }));
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const api = fakeApi({ streamGeneration, generationStatus: generationStatus as unknown as CortexApi["generationStatus"] });
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-stop-status", "thread-stop-status", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+    await waitFor(() => expect(generationStatus).toHaveBeenCalledTimes(1));
+    const { signal } = generationStatus.mock.calls[0][1] as { signal: AbortSignal };
+    expect(signal.aborted).toBe(false);
+
+    act(() => result.current.stop());
+    expect(signal.aborted).toBe(true);
+    await settlePromises();
+
+    // A cancelled check is the caller's own doing: no failure, no more attempts.
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().generation.jobId).toBe("job-stop-status");
+  });
+
   it("reconnects with the accumulated cursor after a transient (non-401) stream error", async () => {
     const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-9", kind: "generation", status: "running", sequence: 1 });
     const streamGeneration = vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {

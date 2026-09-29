@@ -1,7 +1,7 @@
 import { Paperclip } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
-import { ApiError, CortexApi } from "../../api/client";
+import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
@@ -199,7 +199,7 @@ export function ChatPage({
       setChatLoad({
         threadId: requestedThreadId,
         loading: false,
-        error: requestError instanceof ApiError ? requestError.detail : "Could not load this chat.",
+        error: describeApiError(requestError, "Could not load this chat."),
       });
     }
   }, [api, threadId]);
@@ -344,7 +344,7 @@ export function ChatPage({
     try {
       await onClearMemory?.();
     } catch (error) {
-      useUiStore.getState().notify(error instanceof ApiError ? error.detail : "Could not clear memories.", "error");
+      useUiStore.getState().notify(describeApiError(error, "Could not clear memories."), "error");
     } finally {
       setMemoryClearPromptOpen(false);
     }
@@ -502,18 +502,16 @@ export function ChatPage({
       // admission did not happen and its key must not leak into a later
       // retry. Network failures and server errors remain ambiguous because
       // the backend may have admitted the job before the response was lost.
-      if (
-        requestError instanceof ApiError
-        && requestError.status >= 400
-        && requestError.status < 500
-        && pendingAdmissionRef.current?.requestId === requestId
-      ) {
+      if (isDefinitiveRejection(requestError) && pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
       }
       setGenerationError({
         threadId,
-        message: requestError instanceof ApiError ? requestError.detail : "The response could not be started. Your message is still here.",
-        retryable: true,
+        message: describeApiError(requestError, "The response could not be started. Your message is still here."),
+        // A validation error says the request itself is wrong; sending the
+        // same prompt again can only fail the same way, so the banner offers
+        // no Retry and leaves the fix to the draft.
+        retryable: !(requestError instanceof ApiError && requestError.kind === "validation"),
       });
       return null;
     } finally {
@@ -647,7 +645,7 @@ export function ChatPage({
       // again would start a second one alongside it.
       setGenerationError({
         threadId: jobThreadId,
-        message: requestError instanceof ApiError ? requestError.detail : "Could not stop the response.",
+        message: describeApiError(requestError, "Could not stop the response."),
         retryable: false,
       });
     } finally {
@@ -718,7 +716,7 @@ export function ChatPage({
       // Forking is not a generation. The thread is answered and unchanged.
       setGenerationError({
         threadId,
-        message: requestError instanceof ApiError ? requestError.detail : "Could not fork this chat.",
+        message: describeApiError(requestError, "Could not fork this chat."),
         retryable: false,
       });
     } finally {
@@ -796,7 +794,7 @@ export function ChatPage({
       }
     } catch (error) {
       commitStaged();
-      const detail = error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "The attachment could not be uploaded.";
+      const detail = describeApiError(error, error instanceof Error ? error.message : "The attachment could not be uploaded.");
       setAttachmentError(staged.length ? `${detail} Files attached before it were kept.` : detail);
     } finally {
       attachmentDraftTargetsRef.current.delete(target);

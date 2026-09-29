@@ -3,6 +3,7 @@ import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, Ex
 import {
   CortexApi,
   ApiError,
+  describeApiError,
   persistHandoffSecret,
   readPersistedHandoffSecret,
 } from "../api/client";
@@ -157,7 +158,7 @@ export function App({ api: providedApi }: Props) {
         setSessionEpoch((epoch) => epoch + 1);
         setSessionReady(true);
       } catch (error) {
-        setOnboardingError(error instanceof ApiError ? error.detail : "Could not reopen the local workspace.");
+        setOnboardingError(describeApiError(error, "Could not reopen the local workspace."));
       } finally {
         setConnecting(false);
       }
@@ -217,7 +218,7 @@ export function App({ api: providedApi }: Props) {
             setBootstrapToken("");
             setSessionReady(true);
           } catch (error) {
-            if (error instanceof ApiError && error.status === 401) {
+            if (error instanceof ApiError && error.kind === "auth") {
               // The launcher's bootstrap token is single-use and short-lived,
               // so a 401 means this one is spent or stale and submitting it
               // again can never work. Forget it so no retry offers it, and
@@ -229,7 +230,7 @@ export function App({ api: providedApi }: Props) {
                 return;
               }
             }
-            setOnboardingError(error instanceof ApiError ? error.detail : "Could not open the local workspace.");
+            setOnboardingError(describeApiError(error, "Could not open the local workspace."));
           } finally {
             setConnecting(false);
           }
@@ -361,7 +362,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // No 401 branch anywhere in this file: the client renews an expired
       // session in place, and only when it cannot does it clear the session
       // and tell the app's listener, which owns the way back to onboarding.
-      if (isCurrentLoad()) setLoadError(error instanceof ApiError ? error.detail : "Could not load the local workspace.");
+      if (isCurrentLoad()) setLoadError(describeApiError(error, "Could not load the local workspace."));
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
@@ -923,7 +924,7 @@ function shouldShowExecutionTask(task: ExecutionTaskSummary, runtimeStartedAt: s
 }
 
 function apiMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.detail : fallback;
+  return describeApiError(error, fallback);
 }
 
 function artifactFileExtension(mimeType: string): string {

@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import type { CortexApi } from "../api/client";
-import { ApiError } from "../api/client";
+import { ApiError, isAbortedError } from "../api/client";
 import { useChatStore } from "../stores/useChatStore";
 import { useUiStore } from "../stores/useUiStore";
 
@@ -336,13 +336,13 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               reconnectAttempt += 1;
             }
           } catch (streamError) {
-            if (controller.signal.aborted) return;
-            if (streamError instanceof ApiError && streamError.status === 401) {
+            if (controller.signal.aborted || isAbortedError(streamError)) return;
+            if (streamError instanceof ApiError && streamError.kind === "auth") {
               sessionExpired = true;
               break;
             }
             try {
-              const snapshot = await api.generationStatus(job.jobId);
+              const snapshot = await api.generationStatus(job.jobId, { signal: controller.signal });
               if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
                 terminal = true;
                 if (snapshot.status !== "succeeded") {
@@ -369,11 +369,12 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               // the pending message bubble reporting "Generating" forever
               // with no live connection left to correct it. Treat it like
               // any other dropped connection instead: keep retrying.
-              if (statusError instanceof ApiError && statusError.status === 401) {
+              if (controller.signal.aborted || isAbortedError(statusError)) return;
+              if (statusError instanceof ApiError && statusError.kind === "auth") {
                 sessionExpired = true;
                 break;
               }
-              if (statusError instanceof ApiError && (statusError.status === 403 || statusError.status === 404)) {
+              if (statusError instanceof ApiError && statusError.kind === "http" && (statusError.status === 403 || statusError.status === 404)) {
                 terminal = true;
                 onFailed(job.threadId, statusError.detail || "Generation is no longer available.");
                 break;

@@ -1446,6 +1446,68 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("Actually, something else");
   });
 
+  it("replays the same request id after the backend could not be reached", async () => {
+    // No answer at all is ambiguous: the backend may have admitted the job
+    // before the connection died, so Retry must reuse the idempotency key.
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(0, "Cortex could not reach the local backend.", "network"))
+      .mockResolvedValueOnce({
+        job_id: "job-replay",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-user-replay",
+      });
+    const api = chatApi({
+      generate,
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      streamGeneration: vi.fn(() => new Promise<void>(() => undefined)),
+    });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Did that land");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cortex could not reach the local backend.");
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).toBe(generate.mock.calls[0][0].request_id);
+  });
+
+  it("does not offer Retry for a rejection that resending the same message cannot fix", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn().mockRejectedValue(new ApiError(422, "user_input: String should have at most 100000 characters"));
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Far too long");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("user_input: String should have at most 100000 characters");
+    expect(screen.queryByRole("button", { name: "Retry last message" })).not.toBeInTheDocument();
+    // The draft stays, so the fix is an edit rather than retyping.
+    expect(composer).toHaveValue("Far too long");
+  });
+
+  it("spends the request id after a definitive rejection so the next send starts a new turn", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "This chat changed. Reload it and try again."))
+      .mockRejectedValueOnce(new ApiError(503, "Local runtime is unavailable."));
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Again");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+  });
+
   it("explains the image capability mismatch before a generation request is made", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {
