@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -14,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sqlite_faults import disk_full_when
 import cortex_backend.repositories.storage as storage
 from cortex_backend.repositories.storage import (
     DatabaseManager,
@@ -695,3 +698,152 @@ def test_a_chat_file_that_could_not_be_archived_stays_and_keeps_the_directory(
     assert again.skipped == 1  # already imported, so it is archived rather than duplicated
     assert not source.exists()
     assert len(manager.get_all_chats_summary()) == 1
+
+
+# -- a full disk ---------------------------------------------------------------------
+
+
+def _writes_a_message(sql: str) -> bool:
+    return sql.lstrip().upper().startswith(("INSERT INTO MESSAGES", "UPDATE MESSAGES"))
+
+
+def _a_chat_with_an_exchange(tmp_path: Path) -> tuple[DatabaseManager, dict]:
+    manager = DatabaseManager(db_path=str(tmp_path / "chats.sqlite"))
+    manager.add_message("t", "user", "kept", thread_title="Topic", expected_revision=0)
+    manager.add_message("t", "assistant", "answer", expected_revision=1)
+    chat = manager.load_chat("t")
+    assert chat is not None and chat["revision"] == 2
+    return manager, chat
+
+
+def test_a_full_disk_leaves_the_chat_consistent_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, before = _a_chat_with_an_exchange(tmp_path)
+    answer_id = int(before["messages"][1]["id"])
+    disk_full_when(monkeypatch, _writes_a_message)
+
+    with pytest.raises(PersistenceError) as appended:
+        manager.add_message("t", "user", "lost", expected_revision=2)
+    with pytest.raises(PersistenceError) as forked:
+        manager.create_chat_from_messages("fork", "Fork", before["messages"])
+    with pytest.raises(PersistenceError) as replaced:
+        manager.replace_message("t", answer_id, "rewritten", expected_revision=2)
+    monkeypatch.undo()
+
+    # The failure is reported as what it was, however many layers wrapped it.
+    for failure in (appended.value, forked.value, replaced.value):
+        assert isinstance(failure.cause, PersistenceError)
+        assert isinstance(failure.cause.cause, sqlite3.OperationalError)
+        assert "disk is full" in str(failure.cause.cause)
+    # Nothing was half written: the chat, its revision and its timestamp are as they were,
+    # and no empty fork was left behind.
+    assert manager.load_chat("t") == before
+    assert manager.load_chat("fork") is None
+    assert [item["id"] for item in manager.get_all_chats_summary()] == ["t"]
+    # The revision the failed write was guarded by was not spent: once there is room it goes through.
+    manager.replace_message("t", answer_id, "saved", expected_revision=2)
+    manager.add_message("t", "user", "next", expected_revision=3)
+    assert [message["content"] for message in manager.load_chat("t")["messages"]] == ["kept", "saved", "next"]
+    assert DatabaseManager._database_is_valid(manager.db_path)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        pytest.param(OSError(errno.ENOSPC, "No space left on device"), True, id="enospc"),
+        pytest.param(sqlite3.OperationalError("database or disk is full"), True, id="sqlite-full"),
+        pytest.param(sqlite3.OperationalError("database is locked"), False, id="locked"),
+        pytest.param(sqlite3.IntegrityError("FOREIGN KEY constraint failed"), False, id="constraint"),
+        pytest.param(PermissionError(errno.EACCES, "held by another program"), False, id="permission"),
+        pytest.param(RuntimeError("something else"), False, id="unrelated"),
+    ],
+)
+def test_only_a_full_disk_is_recognised_as_one(failure: BaseException, expected: bool) -> None:
+    from cortex_backend.api.routes import _is_disk_full
+
+    wrapped = PersistenceError("Failed to add message.", operation="add_message", cause=PersistenceError(
+        "SQLite operation failed.", operation="sqlite", cause=failure
+    ))
+    assert _is_disk_full(failure) is expected
+    assert _is_disk_full(wrapped) is expected  # found through the wrapping stores add
+    chained = RuntimeError("Could not save.")
+    chained.__cause__ = failure
+    assert _is_disk_full(chained) is expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="winerror only exists on Windows")
+def test_windows_disk_full_errors_are_recognised() -> None:
+    from cortex_backend.api.routes import _is_disk_full
+
+    for winerror in (39, 112):
+        assert _is_disk_full(OSError(0, "There is not enough space on the disk", None, winerror))
+    assert not _is_disk_full(OSError(0, "Access is denied", None, 5))
+
+
+def test_a_full_disk_is_reported_as_insufficient_storage_and_the_chat_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from cortex_backend.api import create_app
+    from cortex_backend.repositories.chats import LegacyDatabaseChatRepository
+    from cortex_backend.testing import build_demo_dependencies
+    from support import session_headers
+
+    manager, before = _a_chat_with_an_exchange(tmp_path)
+    dependencies = build_demo_dependencies()
+    dependencies.chats = LegacyDatabaseChatRepository(manager)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        disk_full_when(monkeypatch, _writes_a_message)
+
+        full = client.post(
+            "/api/v1/chats/t/messages", json={"role": "user", "content": "no room"}, headers=headers
+        )
+        monkeypatch.undo()
+
+        assert full.status_code == 507
+        detail = full.json()["detail"]
+        assert "disk is full" in detail and "Free some disk space" in detail
+        assert str(tmp_path) not in detail and "no room" not in detail
+        assert manager.load_chat("t") == before
+        # The same request goes through once there is room.
+        again = client.post(
+            "/api/v1/chats/t/messages", json={"role": "user", "content": "now it fits"}, headers=headers
+        )
+        assert again.status_code == 200
+        assert again.json()["revision"] == 3
+
+
+def test_a_failure_that_is_not_a_full_disk_is_still_an_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from cortex_backend.api import create_app
+    from cortex_backend.repositories.chats import LegacyDatabaseChatRepository
+    from cortex_backend.testing import build_demo_dependencies
+    from support import session_headers
+
+    manager, before = _a_chat_with_an_exchange(tmp_path)
+    dependencies = build_demo_dependencies()
+    dependencies.chats = LegacyDatabaseChatRepository(manager)
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    real_add = manager.add_message
+
+    def broken(*_args, **_kwargs):
+        raise PersistenceError("Failed to add message.", operation="add_message", cause=sqlite3.DatabaseError("x"))
+
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        monkeypatch.setattr(manager, "add_message", broken)
+        response = client.post(
+            "/api/v1/chats/t/messages", json={"role": "user", "content": "hello"}, headers=headers
+        )
+        monkeypatch.setattr(manager, "add_message", real_add)
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Could not save message."
+    assert manager.load_chat("t") == before

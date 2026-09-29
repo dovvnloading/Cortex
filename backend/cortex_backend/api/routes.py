@@ -13,10 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event as ThreadEvent, Thread
 import asyncio
+import errno
 import hashlib
 import json
 import logging
 import re
+import sqlite3
 from typing import Any, NoReturn, cast
 from uuid import uuid4
 
@@ -1433,10 +1435,45 @@ def _raise_job_error(exc: Exception) -> NoReturn:
     ) from exc
 
 
+# Windows reports a full volume as ERROR_DISK_FULL or ERROR_HANDLE_DISK_FULL,
+# which Python only sometimes maps to ENOSPC.
+_WINDOWS_DISK_FULL = frozenset({39, 112})
+
+
+def _is_disk_full(exc: BaseException) -> bool:
+    """Whether a repository failure, or anything it was raised from, is a full disk.
+
+    A store wraps what went wrong (``PersistenceError.cause``, or ``raise ...
+    from``), so the chain is followed. SQLite says "database or disk is full"
+    for SQLITE_FULL, and the file-copy paths raise ENOSPC.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and (
+            current.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC))
+            or getattr(current, "winerror", None) in _WINDOWS_DISK_FULL
+        ):
+            return True
+        if isinstance(current, sqlite3.OperationalError) and "disk is full" in str(current).lower():
+            return True
+        cause = getattr(current, "cause", None)
+        current = cause if isinstance(cause, BaseException) else current.__cause__
+    return False
+
+
 def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
     logging.error("Cortex API %s failed (%s).", operation, type(exc).__name__)
+    if _is_disk_full(exc):
+        # Not the server's fault and not a bug: nothing was saved because there
+        # is no room, and the user can fix that.
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=f"Could not {operation} because the disk is full. Free some disk space and try again.",
+        ) from exc
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"Could not {operation}.",
