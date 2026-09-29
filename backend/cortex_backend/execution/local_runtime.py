@@ -28,6 +28,12 @@ from typing import Any
 from uuid import uuid4
 
 from .artifact_boundary import ArtifactBoundary
+from .attachment_staging import (
+    ABANDONED_STAGE_SECONDS,
+    ATTACHMENT_INTERRUPTED,
+    ATTACHMENT_INTERRUPTED_MESSAGE,
+    ATTACHMENT_STAGE_PROFILE,
+)
 from .code_execution import (
     CODE_EXECUTION_PAYLOAD_SCHEMA,
     CODE_EXECUTION_PROFILE,
@@ -36,6 +42,7 @@ from .code_execution import (
     CodeExecutionRequest,
     MAX_CODE_TIMEOUT_SECONDS,
 )
+from .finish import UnsuccessfulJobWording, finish_unsuccessful_job
 from .lifecycle import RuntimeHealth
 from .local_code_attempt import (
     DEFAULT_CODE_STARTUP_TIMEOUT_SECONDS,
@@ -82,6 +89,19 @@ from .scratch_compute import (
 
 
 _LOGGER = logging.getLogger("cortex.execution.local_runtime")
+
+_CODE_WORDING = UnsuccessfulJobWording(
+    cancelled_event="code.cancelled",
+    failed_event="code.failed",
+    cancelled_message="Local code execution was cancelled.",
+    failed_message="Local code execution failed safely.",
+)
+_SCRATCH_WORDING = UnsuccessfulJobWording(
+    cancelled_event="cancelled",
+    failed_event="failed",
+    cancelled_message="Safe computation was cancelled.",
+    failed_message="Safe computation failed safely.",
+)
 
 # How long a code job waiting for approval sleeps before it looks again on its
 # own. Decisions, expiries, cancellation and shutdown all wake it sooner; this
@@ -160,9 +180,7 @@ class LocalExecutionCoordinator:
     def _probe_image_provider() -> RuntimeHealth:
         provider = RecipeImageProvider()
         try:
-            return provider.start(
-                RuntimeHealth.ready("The local image provider is being checked.")
-            )
+            return provider.start()
         except Exception:
             return RuntimeHealth.blocked(
                 "image_provider_unavailable",
@@ -407,9 +425,19 @@ class LocalExecutionCoordinator:
             self._recipe.recover_jobs(recovered)
             for job_id in recovered:
                 job = self.repository.get_job(job_id)
-                if job is None or job.profile != SCRATCH_COMPUTE_PROFILE:
+                if job is None:
                     continue
-                self._recover_scratch(job)
+                if job.profile == SCRATCH_COMPUTE_PROFILE:
+                    self._recover_scratch(job)
+                elif job.profile == ATTACHMENT_STAGE_PROFILE:
+                    self._fail_interrupted_attachment(job)
+                elif job.profile == CODE_EXECUTION_PROFILE and job.status in TerminalExecutionStatus:
+                    # A code job that crashed while cancelling was finished by
+                    # recovery itself (its lease had expired, so it went
+                    # straight to cancelled) and is never relaunched, so the
+                    # run's own cleanup never happens. Its workspace is ours to
+                    # remove: the process that used it is gone.
+                    self._discard_stale_code_workspace(job.job_id)
             try:
                 owner = self.repository.installation_principal_id
                 for job in self.repository.list_jobs(
@@ -423,6 +451,8 @@ class LocalExecutionCoordinator:
                         # cancelled as approval_expired; one still pending
                         # waits for a fresh decision.
                         self._launch_code(job.job_id)
+                    elif job.profile == ATTACHMENT_STAGE_PROFILE:
+                        self._retire_abandoned_attachment(job)
             except Exception:
                 pass
         except Exception:
@@ -440,6 +470,42 @@ class LocalExecutionCoordinator:
             self._supervisor_lease_active = False
             raise
         return recovered
+
+    def _fail_interrupted_attachment(self, job: ExecutionJob) -> None:
+        """Finish a staging job whose stager died holding its lease.
+
+        Nothing ever resumes an attachment: the bytes came from a request that
+        is gone. Left alone the job stayed queued for good -- a task in the
+        tray that could not be cleared, and a request id that answered "in
+        progress" from then on.
+        """
+
+        if job.status in TerminalExecutionStatus:
+            return
+        try:
+            self.repository.transition(
+                job.job_id,
+                status="failed",
+                event="failed",
+                phase="recovery",
+                data={"message": ATTACHMENT_INTERRUPTED_MESSAGE},
+                error=ATTACHMENT_INTERRUPTED,
+            )
+        except Exception:
+            pass
+
+    def _retire_abandoned_attachment(self, job: ExecutionJob) -> None:
+        """Retire a staging job that never got as far as holding a lease."""
+
+        try:
+            self.repository.retire_abandoned_job(
+                job.job_id,
+                idle_seconds=ABANDONED_STAGE_SECONDS,
+                error=ATTACHMENT_INTERRUPTED,
+                message=ATTACHMENT_INTERRUPTED_MESSAGE,
+            )
+        except Exception:
+            pass
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         if timeout < 0:
@@ -616,6 +682,13 @@ class LocalExecutionCoordinator:
                 # approved-but-unleased is not yet terminal anywhere else --
                 # without finishing it here, the job is left in "cancelling"
                 # forever, since nothing else will ever revisit it.
+                #
+                # No lease is held on this path, so the run's own cleanup in the
+                # finally block below never reaches a workspace an earlier
+                # attempt left (a crash while the job was cancelling). Nothing
+                # can be running for the job: one thread per job, and the
+                # launcher's instance lock keeps every other process out.
+                self._discard_stale_code_workspace(job_id)
                 self._finish_code_failure(job_id, cancel_event, "cancelled")
                 return
             if current.approval_state != "approved":
@@ -782,38 +855,15 @@ class LocalExecutionCoordinator:
             raise CodeExecutionError("recovery_invalid_payload") from None
 
     def _finish_code_failure(self, job_id: str, cancel_event: Event, failure_code: str) -> None:
-        # Re-evaluate after a guarded-transition conflict so a cancellation
-        # that commits first cannot be overwritten by a late worker failure.
-        for _ in range(3):
-            current = self.repository.get_job(job_id)
-            if current is None or current.status in TerminalExecutionStatus:
-                return
-            cancelled = (
-                failure_code == "cancelled"
-                or cancel_event.is_set()
-                or current.status == "cancelling"
-            )
-            try:
-                self.repository.transition(
-                    job_id,
-                    status="cancelled" if cancelled else "failed",
-                    event="code.cancelled" if cancelled else "code.failed",
-                    phase="cancelled" if cancelled else "failed",
-                    data={
-                        "message": (
-                            "Local code execution was cancelled."
-                            if cancelled
-                            else "Local code execution failed safely."
-                        )
-                    },
-                    error="cancelled" if cancelled else failure_code,
-                    expected_status=current.status,
-                )
-                return
-            except ExecutionTransitionConflict:
-                continue
-            except Exception:
-                return
+        # Guarded and re-evaluated after a conflict, so a cancellation that
+        # commits first cannot be overwritten by a late worker failure.
+        finish_unsuccessful_job(
+            self.repository,
+            job_id,
+            failure_code=failure_code,
+            cancel_requested=cancel_event.is_set,
+            wording=_CODE_WORDING,
+        )
 
     @staticmethod
     def _scratch_request_from_job(job: ExecutionJob) -> ScratchComputeRequest:
@@ -972,29 +1022,16 @@ class LocalExecutionCoordinator:
         cancel_event: Event,
         failure_code: str,
     ) -> None:
-        current = self.repository.get_job(job_id)
-        cancelled = (
-            failure_code == "cancelled"
-            or cancel_event.is_set()
-            or (current is not None and current.status == "cancelling")
+        # The same guarded write as the code profile: this used to read the job
+        # and then write with no guard, so a Stop landing between the two was
+        # recorded as a failure.
+        finish_unsuccessful_job(
+            self.repository,
+            job_id,
+            failure_code=failure_code,
+            cancel_requested=cancel_event.is_set,
+            wording=_SCRATCH_WORDING,
         )
-        try:
-            self.repository.transition(
-                job_id,
-                status="cancelled" if cancelled else "failed",
-                event="cancelled" if cancelled else "failed",
-                phase="cancelled" if cancelled else "failed",
-                data={
-                    "message": (
-                        "Safe computation was cancelled."
-                        if cancelled
-                        else "Safe computation failed safely."
-                    )
-                },
-                error="cancelled" if cancelled else failure_code,
-            )
-        except Exception:
-            pass
 
     def _fail_scratch_recovery(self, job_id: str, code: str) -> None:
         try:

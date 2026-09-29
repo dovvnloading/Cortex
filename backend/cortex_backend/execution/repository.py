@@ -5,12 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import itertools
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import stat
 from collections.abc import Iterator, Mapping
@@ -53,6 +55,24 @@ _SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 # The name cleanup gives an artifact's file in quarantine: ``<artifact id>-<uuid hex>.artifact``.
 _QUARANTINE_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[0-9a-f]{32}\.artifact")
+# What a crash leaves under the artifact root, by name. Each pattern is exact so
+# the sweep only ever touches something this repository (or the recipe
+# coordinator's staging) created.
+_TEMPORARY_ARTIFACT_NAME = re.compile(r"\.tmp-[0-9a-f]{32}")
+_ARTIFACT_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+_RECIPE_STAGING_NAME = re.compile(r"\.recipe-(?P<job_id>.+)-[a-z0-9_]{8}")
+# Written by an earlier build, never read, and left empty under every artifact root.
+_LEGACY_QUARANTINE_NAME = ".artifact_quarantine"
+# A file this new may still belong to a publish in flight, so the sweep leaves it.
+_STRAY_FILE_GRACE_SECONDS = 600.0
+# Bounds on one sweep: how many entries it looks at, and how many files inside a
+# single job directory.
+_SWEEP_ENTRY_BUDGET = 2_000
+_SWEEP_CHILD_LIMIT = 64
+# A path-component-safe job id, and a printable owner. The job id becomes a
+# directory name under the artifact root, so it is held to the same shape as an
+# artifact name; the owner never reaches the filesystem.
+_SAFE_OWNER = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
@@ -85,6 +105,15 @@ def _has_reparse_parent(path: Path) -> bool:
 
 class ExecutionRepositoryError(RuntimeError):
     """Safe repository boundary error."""
+
+
+class ExecutionIntegrityError(ExecutionRepositoryError):
+    """The store refused a write because a uniqueness or reference rule failed.
+
+    This is the only failure that can mean "that row already exists". A locked
+    database, a disk error or a failed append are the store being unable to
+    write, which says nothing about whether the row is there.
+    """
 
 
 class ExecutionStoreUnavailable(ExecutionRepositoryError):
@@ -217,6 +246,12 @@ class ExecutionRepository:
         # Moves whenever an approval is decided or expires, so a job waiting
         # for one can sleep instead of polling the store.
         self.approval_changes = ChangeSignal()
+        # Held while a job directory is created and given its first file, and
+        # while one is removed, so a publish that has just made its directory
+        # is never undone by the removal of an "empty" one.
+        self._directory_lock = RLock()
+        # Where the artifact-root sweep resumes; see sweep_artifact_root().
+        self._sweep_cursor = ""
         self._ensure_schema()
 
     @property
@@ -246,6 +281,10 @@ class ExecutionRepository:
             connection = self._new_connection()
             yield connection
             connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if connection is not None:
+                connection.rollback()
+            raise ExecutionIntegrityError("SQLite execution constraint failed.") from exc
         except sqlite3.Error as exc:
             if connection is not None:
                 connection.rollback()
@@ -631,6 +670,13 @@ class ExecutionRepository:
     ) -> tuple[ExecutionJob, bool]:
         if not PROFILE_NAME_PATTERN.fullmatch(profile):
             raise ValueError("profile must be a bounded lowercase identifier")
+        # The job id names the job's artifact directory, so an id that could
+        # lead out of the artifact root is refused when the job is created, not
+        # only when its first artifact is published.
+        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+            raise ValueError("job_id must be a bounded path-safe identifier")
+        if not isinstance(owner, str) or _SAFE_OWNER.fullmatch(owner) is None:
+            raise ValueError("owner must be a bounded printable identifier")
         encoded = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = self._now()
         try:
@@ -658,7 +704,12 @@ class ExecutionRepository:
                 if row is None:
                     raise ExecutionRepositoryError("job row vanished after insert")
                 return self._job_from_row(row), True
-        except ExecutionRepositoryError as exc:
+        except ExecutionIntegrityError as exc:
+            # Only a constraint failure can mean this request already has a job.
+            # Every other store error -- a locked database, a disk error, a
+            # failed event append -- propagates as itself: falling back to a
+            # lookup for those reported a store that could not write as a
+            # duplicate, and a caller told "already created" does not retry.
             with self.connect() as connection:
                 existing = connection.execute(
                     "SELECT job_id FROM execution_jobs WHERE owner = ? AND request_id = ?",
@@ -1516,6 +1567,87 @@ class ExecutionRepository:
                 recovered.append(job_id)
         return recovered
 
+    def retire_abandoned_job(
+        self,
+        job_id: str,
+        *,
+        idle_seconds: float,
+        error: str,
+        message: str,
+    ) -> ExecutionJob | None:
+        """Fail a job that no one is working on and return it as it now reads.
+
+        A job is abandoned when it is not terminal, has no live lease, has had
+        no write for ``idle_seconds`` and is not waiting on an approval. All of
+        that is decided in the transaction that writes the failure, so a worker
+        that claims the lease or a Stop that lands a moment earlier is never
+        overwritten. Anything else -- including a timestamp that does not
+        parse -- leaves the job untouched: failing a live job is the harm here,
+        leaving a dead one for a later pass is not. A job the user had already
+        stopped ends ``cancelled``, not ``failed``.
+
+        This is the way out for work whose worker died between creating the job
+        and finishing it without ever being recovered: recovery only sees jobs
+        that hold a lease row. ``None`` means the job does not exist.
+        """
+
+        if isinstance(idle_seconds, bool) or idle_seconds <= 0:
+            raise ValueError("idle_seconds must be positive")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, updated_at FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] not in TerminalExecutionStatus and self._is_abandoned(
+                connection, job_id, row["updated_at"], now, idle_seconds
+            ):
+                # A Stop the user already pressed is honoured, not relabelled.
+                stopped = row["status"] == "cancelling"
+                connection.execute("DELETE FROM execution_leases WHERE job_id = ?", (job_id,))
+                connection.execute(
+                    "UPDATE execution_jobs SET error = ? WHERE job_id = ?",
+                    ("cancelled" if stopped else error, job_id),
+                )
+                self._append_event_connection(
+                    connection,
+                    job_id=job_id,
+                    event="cancelled" if stopped else "failed",
+                    status="cancelled" if stopped else "failed",
+                    phase="recovery",
+                    data={"message": "Execution cancellation recovered." if stopped else message},
+                    now=now_text,
+                )
+            snapshot = self._read_job(connection, job_id, now_text)
+            return None if snapshot is None else self._job_from_row(snapshot)
+
+    @staticmethod
+    def _is_abandoned(
+        connection: sqlite3.Connection,
+        job_id: str,
+        updated_at: str,
+        now: datetime,
+        idle_seconds: float,
+    ) -> bool:
+        """Whether a non-terminal job has no lease, no pending consent and no recent write."""
+
+        if connection.execute(
+            "SELECT 1 FROM execution_approvals WHERE job_id = ?", (job_id,)
+        ).fetchone() is not None:
+            return False
+        lease = connection.execute(
+            "SELECT lease_expires_at FROM execution_leases WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        try:
+            if lease is not None and datetime.fromisoformat(lease["lease_expires_at"]) > now:
+                return False
+            return (now - datetime.fromisoformat(updated_at)).total_seconds() >= idle_seconds
+        except (TypeError, ValueError):
+            return False
+
     def publish_artifact(
         self,
         job_id: str,
@@ -1535,24 +1667,38 @@ class ExecutionRepository:
             raise ArtifactLimitError("Artifact exceeds the configured size limit.")
         if retention_seconds <= 0:
             raise ValueError("retention_seconds must be positive")
+        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+            raise ExecutionRepositoryError("Execution job does not exist.")
         if self.get_job(job_id) is None:
             raise ExecutionRepositoryError("Execution job does not exist.")
         artifact_id = uuid4().hex
         job_root = self.artifact_root / job_id
-        if job_root.exists() and _is_reparse_point(job_root):
-            raise ExecutionRepositoryError("Artifact root is unavailable.")
-        job_root.mkdir(parents=True, exist_ok=True)
         root = self.artifact_root.resolve()
-        resolved_job_root = job_root.resolve(strict=True)
-        if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
+        # Confined before anything is created: the check used to run after the
+        # mkdir, so a job id that led outside the root had already made its
+        # directories there by the time it was refused.
+        try:
+            planned = job_root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise ExecutionRepositoryError("Artifact root is unavailable.") from None
+        if _is_reparse_point(job_root) or planned.parent != root:
             raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
         target = job_root / f"{artifact_id}-{name}"
         temporary = target.with_name(f".tmp-{artifact_id}")
         digest = hashlib.sha256(content).hexdigest()
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=retention_seconds)
+        stream: Any = None
         try:
-            with temporary.open("xb") as stream:
+            with self._directory_lock:
+                job_root.mkdir(parents=True, exist_ok=True)
+                resolved_job_root = job_root.resolve(strict=True)
+                if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
+                    raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
+                # The temporary file exists before the lock is released, so the
+                # directory is never empty for a sweep to remove.
+                stream = temporary.open("xb")
+            with stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -1588,8 +1734,12 @@ class ExecutionRepository:
                     ),
                 )
         except Exception:
+            if stream is not None:
+                stream.close()
             target.unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
+            # The directory this call created (or found empty) is not left behind.
+            self._remove_empty_artifact_directory(job_root)
             raise
         return ExecutionArtifact(
             artifact_id=artifact_id,
@@ -1609,7 +1759,10 @@ class ExecutionRepository:
         *,
         owner: str | None = None,
     ) -> ExecutionArtifact | None:
-        """Return artifact metadata only when its owning job is visible."""
+        """Return artifact metadata only when its owning job is visible and it has not expired.
+
+        An expired artifact reads as absent, as it does in :meth:`read_artifact`.
+        """
 
         if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
             return None
@@ -1624,7 +1777,7 @@ class ExecutionRepository:
                 """,
                 (artifact_id, owner, owner),
             ).fetchone()
-        if row is None:
+        if row is None or self._is_expired(row["expires_at"]):
             return None
         return ExecutionArtifact(
             artifact_id=row["artifact_id"],
@@ -1638,42 +1791,59 @@ class ExecutionRepository:
             expires_at=row["expires_at"],
         )
 
-    def delete_artifact(self, artifact_id: str) -> None:
-        """Remove one unpublished/rolled-back artifact record and file safely."""
+    def delete_artifact(self, artifact_id: str, *, owner: str | None = None) -> None:
+        """Remove one unpublished/rolled-back artifact record and file safely.
 
+        The row goes first and the file after it, the order the retention
+        cleanup uses. Removing the file first left a row pointing at nothing
+        whenever the row's delete then failed to commit; the other way round
+        the worst case is a file no row names, which the artifact-root sweep
+        reclaims. ``owner`` restricts the call to that owner's artifacts.
+        """
+
+        if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
+            return
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT path FROM execution_artifacts WHERE artifact_id = ?",
-                (artifact_id,),
+                """
+                SELECT a.path
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.artifact_id = ?
+                  AND (? IS NULL OR j.owner = ?)
+                """,
+                (artifact_id, owner, owner),
             ).fetchone()
             if row is None:
                 return
-            path = Path(row["path"])
-            root = self.artifact_root.resolve()
-            try:
-                resolved = path.resolve(strict=False)
-            except (OSError, RuntimeError):
-                raise ExecutionRepositoryError("Artifact path is unavailable.") from None
-            if not resolved.is_relative_to(root) or _is_reparse_point(path):
-                raise ExecutionRepositoryError("Artifact path is unavailable.")
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
+            path = self._validated_cleanup_path(Path(row["path"]))
             connection.execute(
                 "DELETE FROM execution_artifacts WHERE artifact_id = ?",
                 (artifact_id,),
             )
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ExecutionRepositoryError("Artifact cleanup failed.") from exc
+        self._remove_empty_artifact_directory(path.parent)
 
-    def read_artifact(self, artifact_id: str) -> bytes:
+    def read_artifact(self, artifact_id: str, *, owner: str | None = None) -> bytes:
+        if not isinstance(artifact_id, str) or not _SAFE_NAME.fullmatch(artifact_id):
+            raise ExecutionRepositoryError("Artifact does not exist.")
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT path, size, sha256, expires_at FROM execution_artifacts WHERE artifact_id = ?",
-                (artifact_id,),
+                """
+                SELECT a.path, a.size, a.sha256, a.expires_at
+                FROM execution_artifacts a
+                JOIN execution_jobs j ON j.job_id = a.job_id
+                WHERE a.artifact_id = ?
+                  AND (? IS NULL OR j.owner = ?)
+                """,
+                (artifact_id, owner, owner),
             ).fetchone()
         if row is None:
             raise ExecutionRepositoryError("Artifact does not exist.")
-        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+        if self._is_expired(row["expires_at"]):
             raise ExecutionRepositoryError("Artifact retention has expired.")
         try:
             expected_size = int(row["size"])
@@ -2084,18 +2254,164 @@ class ExecutionRepository:
         return removed
 
     def _remove_empty_artifact_directory(self, directory: Path) -> None:
-        """Remove one artifact's now-empty job directory, never a root."""
+        """Remove one artifact's now-empty job directory, never a root.
+
+        Only a job directory qualifies: a direct child of the artifact root
+        whose name is not a reserved dot-name (``.quarantine``,
+        ``.code_workspaces``, a recipe staging directory).
+        """
 
         try:
             resolved = directory.resolve()
+            root = self.artifact_root.resolve()
         except (OSError, RuntimeError):
             return
-        if resolved in {self.artifact_root.resolve(), self.quarantine_root.resolve()}:
+        if resolved.parent != root or resolved.name.startswith("."):
             return
+        self._remove_empty_directory(directory)
+
+    def _remove_empty_directory(self, directory: Path) -> bool:
+        """``rmdir`` under the directory lock; False if it was not empty or not removable."""
+
+        with self._directory_lock:
+            try:
+                directory.rmdir()
+            except OSError:
+                return False
+        return True
+
+    @staticmethod
+    def _is_expired(expires_at: object, now: datetime | None = None) -> bool:
+        """Whether an artifact's expiry has passed; an unreadable expiry counts as passed."""
+
         try:
-            directory.rmdir()
+            expiry = datetime.fromisoformat(str(expires_at))
+        except ValueError:
+            return True
+        if expiry.tzinfo is None:
+            return True
+        return expiry <= (now or datetime.now(timezone.utc))
+
+    def sweep_artifact_root(self, *, now: datetime | None = None, limit: int = 100) -> int:
+        """Reclaim what a crash leaves under the artifact root; return how many things went.
+
+        Three things are stranded by a hard kill and were never reclaimed: a
+        ``.tmp-*`` file from a publish that died before its rename, a recipe
+        staging directory, and a job directory left empty. A file that
+        finished its rename but never got its row is reclaimed too. Each is
+        matched by exact name, is only touched when nothing can still need it,
+        and is left alone otherwise:
+
+        * a temporary or unreferenced file must be older than
+          ``_STRAY_FILE_GRACE_SECONDS`` (a publish in flight is milliseconds),
+          and an unreferenced file must have no artifact row by its id --
+          matched by id, not path, so a moved data directory cannot make live
+          artifacts look unreferenced;
+        * a staging directory goes only when its job is finished or gone;
+        * a job directory goes only when empty and no artifact row names its
+          job; and
+        * a link, a reparse point or anything of another name is never touched.
+
+        The pass is bounded: it removes at most ``limit`` things and looks at
+        at most ``_SWEEP_ENTRY_BUDGET`` entries, resuming where it stopped on
+        the next call. Best effort: a failure on one entry never stops the pass.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        stale_before = moment.timestamp() - _STRAY_FILE_GRACE_SECONDS
+        try:
+            names = sorted(entry.name for entry in self.artifact_root.iterdir())
         except OSError:
-            pass
+            return 0
+        removed = 0
+        examined = 0
+        finished = True
+        with self.connect() as connection:
+            for name in names:
+                if name <= self._sweep_cursor:
+                    continue
+                if removed >= limit or examined >= _SWEEP_ENTRY_BUDGET:
+                    finished = False
+                    break
+                gone, looked_at = self._sweep_entry(connection, self.artifact_root / name, stale_before)
+                removed += gone
+                examined += looked_at
+                self._sweep_cursor = name
+        if finished:
+            self._sweep_cursor = ""
+        return removed
+
+    def _sweep_entry(
+        self, connection: sqlite3.Connection, entry: Path, stale_before: float
+    ) -> tuple[int, int]:
+        """Sweep one entry directly under the artifact root; return (removed, examined)."""
+
+        name = entry.name
+        try:
+            if _is_reparse_point(entry) or not stat.S_ISDIR(entry.lstat().st_mode):
+                return 0, 1
+        except OSError:
+            return 0, 1
+        if name == _LEGACY_QUARANTINE_NAME:
+            return int(self._remove_empty_directory(entry)), 1
+        staging = _RECIPE_STAGING_NAME.fullmatch(name)
+        if staging is not None:
+            job_id = staging["job_id"]
+            if _SAFE_NAME.fullmatch(job_id) is None:
+                return 0, 1
+            job = connection.execute(
+                "SELECT status FROM execution_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if job is not None and job["status"] not in TerminalExecutionStatus:
+                return 0, 1  # its worker may still be writing here
+            try:
+                shutil.rmtree(entry)
+            except OSError:
+                return 0, 1
+            return 1, 1
+        if name.startswith(".") or _SAFE_NAME.fullmatch(name) is None:
+            return 0, 1
+        return self._sweep_job_directory(connection, entry, stale_before)
+
+    def _sweep_job_directory(
+        self, connection: sqlite3.Connection, directory: Path, stale_before: float
+    ) -> tuple[int, int]:
+        removed = 0
+        examined = 1
+        try:
+            children = list(itertools.islice(directory.iterdir(), _SWEEP_CHILD_LIMIT))
+        except OSError:
+            return 0, examined
+        for child in children:
+            examined += 1
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime > stale_before:
+                continue
+            if _TEMPORARY_ARTIFACT_NAME.fullmatch(child.name) is None:
+                stored = _ARTIFACT_FILE_NAME.fullmatch(child.name)
+                if stored is None or connection.execute(
+                    "SELECT 1 FROM execution_artifacts WHERE artifact_id = ?",
+                    (stored["artifact_id"],),
+                ).fetchone() is not None:
+                    continue
+            try:
+                child.unlink()
+            except OSError:
+                continue
+            removed += 1
+        named = connection.execute(
+            "SELECT 1 FROM execution_artifacts WHERE job_id = ? LIMIT 1", (directory.name,)
+        ).fetchone()
+        if named is None and self._remove_empty_directory(directory):
+            removed += 1
+        return removed, examined
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:

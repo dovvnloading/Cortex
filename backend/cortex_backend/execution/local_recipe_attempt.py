@@ -15,7 +15,6 @@ from typing import Any
 
 from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
 
-from .lifecycle import RuntimeHealth
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     _contain_worker,
@@ -41,9 +40,7 @@ def _recipe_worker_main(
 
     try:
         provider = RecipeImageProvider()
-        health = provider.start(
-            RuntimeHealth.ready("The local image worker dependency check passed.")
-        )
+        health = provider.start()
         if not health.available:
             connection.send({"ok": False, "code": _RECIPE_PROCESS_ERROR})
             return

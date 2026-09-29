@@ -217,10 +217,11 @@ class CodeExecutionRequest:
             or _SAFE_REQUEST_ID.fullmatch(self.thread_id) is None
         ):
             raise ValueError("thread_id is invalid")
-        validate_code_source(self.source)
+        # One parse serves both the validation and the capability scan.
+        tree = _parse_validated_source(self.source)
         if (
             self.capabilities.process
-            or capabilities_required_by_source(self.source).process
+            or capabilities_required_by_tree(tree).process
         ):
             # A normal Windows subprocess inherits the user's ambient file and
             # network authority. A Job Object bounds resources and descendants,
@@ -805,7 +806,9 @@ def _source_size(source: str) -> int:
         raise CodeExecutionError("syntax_invalid") from None
 
 
-def validate_code_source(source: str) -> str:
+def _parse_validated_source(source: str) -> ast.Module:
+    """Parse ``source`` once and return its tree if it is inside the allowed subset."""
+
     if not isinstance(source, str) or not source.strip():
         raise CodeExecutionError("source_empty")
     if _source_size(source) > MAX_CODE_SOURCE_BYTES:
@@ -824,14 +827,28 @@ def validate_code_source(source: str) -> str:
         # model-proposal path, instead of the fail-closed code both expect.
         raise CodeExecutionError("syntax_invalid") from None
     _CodeValidator().visit(tree)
+    return tree
+
+
+def validate_code_source(source: str) -> str:
+    _parse_validated_source(source)
     return source
 
 
 def capabilities_required_by_source(source: str) -> CodeCapabilities:
-    """Return broker namespaces referenced by an already validated program."""
+    """Validate ``source`` and return the broker namespaces it references."""
 
-    validate_code_source(source)
-    tree = ast.parse(source, mode="exec")
+    return capabilities_required_by_tree(_parse_validated_source(source))
+
+
+def capabilities_required_by_tree(tree: ast.AST) -> CodeCapabilities:
+    """Return the broker namespaces a validated program's tree references.
+
+    Takes the tree :func:`_parse_validated_source` already built, so a request
+    that has just validated its source does not parse it again: the same source
+    used to be parsed up to four times per request.
+    """
+
     namespaces: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute):
@@ -948,12 +965,22 @@ class _CapabilityRuntime:
         self.net = _NetworkCapability(capabilities.network, budget)
         self.network = self.net
 
+    # The broker objects are values the program can print or leave in
+    # ``result``, which reaches stdout, the durable result and the tray. The
+    # default repr names the module path and a heap address, so each class says
+    # only what it is. None of them shows the workspace path or the grants.
+    def __repr__(self) -> str:
+        return "<cortex>"
+
 
 class _FilesystemCapability:
     def __init__(self, enabled: bool, workspace: Path, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self.workspace = workspace
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.fs>"
 
     def _check(self) -> None:
         if not self.enabled:
@@ -1068,6 +1095,9 @@ class _ProcessCapability:
         self.enabled = enabled
         self.workspace = workspace
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.process>"
 
     def run(self, args: list[str] | tuple[str, ...], timeout: float = 5.0) -> dict[str, Any]:
         if not self.enabled:
@@ -1490,6 +1520,9 @@ class _NetworkCapability:
     def __init__(self, enabled: bool, budget: _CapabilityBudget) -> None:
         self.enabled = enabled
         self._budget = budget
+
+    def __repr__(self) -> str:
+        return "<cortex.net>"
 
     def get(self, url: str, timeout: float = 5.0) -> str:
         if not self.enabled:

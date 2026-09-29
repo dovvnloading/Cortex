@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import time
 from pathlib import Path
 from threading import Event
@@ -981,3 +982,171 @@ def test_a_complete_result_is_not_reported_as_truncated(value: object) -> None:
 
     assert truncated is False
     assert safe == value
+
+
+def _reveals_process_internals(text: str) -> bool:
+    return any(marker in text for marker in ("0x", "cortex_backend", "object at", str(Path.cwd())))
+
+
+def test_every_broker_object_has_a_fixed_repr(tmp_path: Path) -> None:
+    """The broker objects are values a program can print or leave in ``result``.
+
+    Their default repr named the module path and a heap address, and it reached
+    the program's stdout, the persisted result and the task tray.
+    """
+
+    runtime = code_execution._CapabilityRuntime(CodeCapabilities(), str(tmp_path))
+    rendered = {
+        repr(runtime): "<cortex>",
+        repr(runtime.fs): "<cortex.fs>",
+        repr(runtime.process): "<cortex.process>",
+        repr(runtime.net): "<cortex.net>",
+        repr(runtime.network): "<cortex.net>",
+    }
+    assert set(rendered) == set(rendered.values())
+    for value in (runtime, runtime.fs, runtime.process, runtime.net):
+        assert str(value) == repr(value)
+        assert not _reveals_process_internals(repr(value))
+        assert str(tmp_path) not in repr(value)
+
+
+@pytest.mark.parametrize("expression", ["cortex", "cortex.fs", "cortex.net", "cortex.network"])
+def test_a_broker_object_left_in_the_result_or_printed_reaches_no_output_with_an_address(
+    expression: str, tmp_path: Path
+) -> None:
+    source = f"print({expression})\n_result = {expression}"
+    result = run_code_in_worker(source, {}, str(tmp_path))
+    payload = result.as_payload()
+
+    assert result.stdout.strip() == result.value
+    for text in (result.stdout, str(result.value), str(payload)):
+        assert not _reveals_process_internals(text)
+
+
+def test_a_request_parses_its_source_once_and_the_capability_scan_accepts_a_tree(monkeypatch) -> None:
+    """The same source was parsed up to four times per request.
+
+    The request's own validation parsed it, and then the capability scan
+    validated it again and parsed it a second time.
+    """
+
+    source = "total = 0\nfor i in range(4):\n    total += i\n_result = total"
+    real_parse = ast.parse
+    parses: list[int] = []
+
+    def counting_parse(text, *args, **kwargs):
+        if text == source:
+            parses.append(1)
+        return real_parse(text, *args, **kwargs)
+
+    monkeypatch.setattr(code_execution.ast, "parse", counting_parse)
+
+    CodeExecutionRequest(
+        owner="owner-a",
+        request_id="request-a",
+        source=source,
+        intent_summary="Add up four numbers.",
+    )
+    assert len(parses) == 1
+
+    parses.clear()
+    code_execution.capabilities_required_by_source(source)
+    assert len(parses) == 1
+
+    parses.clear()
+    tree = real_parse(source)
+    assert code_execution.capabilities_required_by_tree(tree) == CodeCapabilities()
+    assert parses == []
+
+
+def test_the_capability_scan_finds_the_same_namespaces_from_a_tree_as_from_source() -> None:
+    source = "a = cortex.fs.listdir('.')\nb = cortex.net.get('https://example.com')"
+
+    from_source = code_execution.capabilities_required_by_source(source)
+    from_tree = code_execution.capabilities_required_by_tree(ast.parse(source))
+
+    assert from_source == from_tree == CodeCapabilities(filesystem=True, network=True)
+    assert code_execution.capabilities_required_by_tree(ast.parse("x = 1")) == CodeCapabilities()
+
+
+def _stale_workspace(repository, job_id: str) -> Path:
+    workspace = repository.artifact_root / ".code_workspaces" / job_id
+    workspace.mkdir(parents=True)
+    (workspace / "leftover.txt").write_text("left by the crashed run", encoding="utf-8")
+    return workspace
+
+
+def test_a_job_that_crashed_while_cancelling_does_not_leak_its_workspace(
+    coordinator, frozen_clock
+) -> None:
+    """Recovery moves such a job straight to cancelled, and nothing relaunches it.
+
+    The run's own cleanup therefore never happens, and its workspace stayed
+    under the artifact root for good.
+    """
+
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    job, _ = repository.create_job(
+        job_id="job-crashed-cancelling",
+        owner=owner,
+        request_id="request-crashed-cancelling",
+        profile="code.exec.v1",
+        payload={},
+    )
+    repository.claim_lease(job.job_id, lease_owner="dead-coordinator", ttl_seconds=30)
+    workspace = _stale_workspace(repository, job.job_id)
+    repository.request_cancel(job.job_id)
+    frozen_clock.advance(31)
+
+    recovered = coordinator.startup_recover()
+
+    assert job.job_id in recovered
+    assert repository.get_job(job.job_id).status == "cancelled"
+    assert not workspace.exists()
+
+
+def test_a_cancelling_job_relaunched_after_a_crash_does_not_leak_its_workspace(coordinator) -> None:
+    """The same leak on the path where the crashed run's lease has not expired yet.
+
+    The job is not recovered, it is relaunched into ``_run_code``, which sees it
+    cancelling and finishes it without ever taking a lease -- so the cleanup
+    that runs for a leased attempt never happened.
+    """
+
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    request = CodeExecutionRequest(
+        owner=owner,
+        request_id="code-cancelling-relaunch",
+        source="_result = 1",
+        intent_summary="Exercise a relaunch of a cancelling job.",
+    )
+    job, _ = repository.create_job(
+        job_id="job-cancelling-relaunch",
+        owner=owner,
+        request_id=request.request_id,
+        profile="code.exec.v1",
+        payload=request.payload(),
+    )
+    repository.request_approval(
+        job.job_id,
+        owner=owner,
+        scope_digest=request.approval_scope_digest,
+        reason=request.intent_summary,
+    )
+    repository.decide_approval(job.job_id, owner=owner, decision="approved")
+    repository.claim_lease(job.job_id, lease_owner="dead-coordinator", ttl_seconds=60)
+    workspace = _stale_workspace(repository, job.job_id)
+    repository.request_cancel(job.job_id)
+
+    assert coordinator.startup_recover() == []  # the lease is still live: nothing is recovered
+
+    wait_until(
+        lambda: repository.get_job(job.job_id).status == "cancelled" and not workspace.exists(),
+        timeout=5.0,
+        describe=lambda: (
+            f"the job to be cancelled with its workspace removed "
+            f"(status={repository.get_job(job.job_id).status}, workspace exists={workspace.exists()})"
+        ),
+    )

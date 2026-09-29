@@ -84,8 +84,9 @@ class ExecutionJob:
     result: Mapping[str, Any] | None = None
     payload: Mapping[str, Any] = field(default_factory=dict)
     approval_state: ExecutionApprovalState = "not_required"
-    lease_owner: str | None = None
-    lease_expires_at: str | None = None
+    # There is no lease field on purpose: a job row does not carry one, and a
+    # field that is never filled in reads as "this job holds no lease". The
+    # lease table is read with ExecutionRepository.lease_holder().
 
 
 @dataclass(frozen=True, slots=True)

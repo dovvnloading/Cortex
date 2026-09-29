@@ -3,9 +3,9 @@
 This module is a bounded transform core, not an execution route.  It accepts
 validated ``ImageTransformPlan`` objects and immutable bytes, never paths or
 model source, and returns a new encoded image only after decoding and
-re-validating the result. The provider starts only after a caller supplies a
-health result. The local runtime invokes it inside a short-lived worker
-process.
+re-validating the result. The provider starts only after its own dependency
+health passes. The local runtime invokes it inside a short-lived worker
+process, which the runtime -- not this module -- contains.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import warnings
 
 from .artifact_boundary import ArtifactBoundaryError, sniff_artifact_mime
 from .lifecycle import RuntimeHealth
-from .recipes import ImageTransformPlan
+from .recipes import MAX_IMAGE_DIMENSION, MAX_IMAGE_STEPS, ImageTransformPlan
 
 try:  # Keep the application importable when the optional imaging wheel is absent.
     import PIL
@@ -42,7 +42,8 @@ except ImportError:  # pragma: no cover - exercised by packaging/health probes.
 MAX_INPUT_BYTES = 100 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_PIXELS = 64 * 1024 * 1024
-MAX_DIMENSION = 16_384
+# One limit, owned by the plan parser: a plan the parser accepts must fit here.
+MAX_DIMENSION = MAX_IMAGE_DIMENSION
 MAX_DECODED_BYTES = 256 * 1024 * 1024
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FORMAT_BY_PLAN = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
@@ -73,7 +74,7 @@ class RecipeProviderLimits:
     max_pixels: int = MAX_PIXELS
     max_dimension: int = MAX_DIMENSION
     max_decoded_bytes: int = MAX_DECODED_BYTES
-    max_steps: int = 8
+    max_steps: int = MAX_IMAGE_STEPS
 
     def __post_init__(self) -> None:
         values = (
@@ -88,7 +89,7 @@ class RecipeProviderLimits:
             raise ValueError("recipe provider limits must be positive integers")
         if self.max_dimension > MAX_DIMENSION:
             raise ValueError("recipe provider dimension ceiling is too high")
-        if self.max_steps > 8:
+        if self.max_steps > MAX_IMAGE_STEPS:
             raise ValueError("recipe provider step ceiling is too high")
         if (
             self.max_input_bytes > MAX_INPUT_BYTES
@@ -410,12 +411,16 @@ class RecipeImageProvider:
         return self._health
 
     def health(self, sandbox_health: RuntimeHealth | None = None) -> RuntimeHealth:
-        if sandbox_health is None:
-            return RuntimeHealth.blocked(
-                code="sandbox_unverified",
-                message="The image provider sandbox has not been verified.",
-            )
-        if not sandbox_health.available:
+        """Dependency health, gated by a containment probe only when the caller ran one.
+
+        ``sandbox_health`` is the verdict of a probe that really executed. Both
+        callers used to hand in a verdict they had just made up themselves, so
+        the ``sandbox_unverified`` block for a missing verdict never stopped
+        anything and only made the health look checked. A missing verdict now
+        means no probe was run, and a failing one still blocks.
+        """
+
+        if sandbox_health is not None and not sandbox_health.available:
             return RuntimeHealth.blocked(
                 code="sandbox_unavailable",
                 message="The image provider sandbox is unavailable.",
@@ -423,8 +428,8 @@ class RecipeImageProvider:
         available, code, message = _pillow_health()
         return RuntimeHealth(available=available, code=code, message=message)
 
-    def start(self, sandbox_health: RuntimeHealth) -> RuntimeHealth:
-        """Enable only after the caller supplies a passing external sandbox probe."""
+    def start(self, sandbox_health: RuntimeHealth | None = None) -> RuntimeHealth:
+        """Enable only when dependency health, and any containment probe supplied, pass."""
 
         health = self.health(sandbox_health)
         self._health = health

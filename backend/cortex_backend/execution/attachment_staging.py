@@ -27,6 +27,14 @@ ATTACHMENT_PAYLOAD_SCHEMA = "attachment.stage.v1"
 ATTACHMENT_RESULT_SCHEMA = "attachment.result.v1"
 DEFAULT_ATTACHMENT_RETENTION_SECONDS = 86_400
 MAX_ATTACHMENT_RETENTION_SECONDS = 30 * 86_400
+# Staging one bounded payload takes milliseconds, so the lease that marks a job
+# as in flight is short. It exists so that recovery can see a stager that died
+# holding it; a job that has no live lease and has been silent for
+# ABANDONED_STAGE_SECONDS is treated as dead by the retry path.
+STAGING_LEASE_SECONDS = 60.0
+ABANDONED_STAGE_SECONDS = 120.0
+ATTACHMENT_INTERRUPTED = "attachment_interrupted"
+ATTACHMENT_INTERRUPTED_MESSAGE = "Attachment staging was interrupted."
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
@@ -125,6 +133,44 @@ class AttachmentStagingService:
         if not created:
             return self._existing(job, payload)
 
+        # A stager that dies between creating the job and finishing it leaves a
+        # queued job that recovery cannot see unless it holds a lease, and that
+        # nothing else ever retires -- its request id then answers "in
+        # progress" for good. Holding a short lease while the bytes are staged
+        # makes the job findable; it is released on every exit that runs code.
+        lease_owner = f"attachment-stager-{uuid4().hex}"
+        try:
+            self.repository.claim_lease(
+                job.job_id, lease_owner=lease_owner, ttl_seconds=STAGING_LEASE_SECONDS
+            )
+        except ExecutionRepositoryError:
+            self._fail(job.job_id, "attachment_persist_failed")
+            raise AttachmentStagingError("attachment_persist_failed") from None
+        try:
+            return self._stage_created(
+                job,
+                owner=owner,
+                content=content,
+                retention_seconds=retention_seconds,
+                digest=digest,
+                mime_type=mime_type,
+            )
+        finally:
+            try:
+                self.repository.release_lease(job.job_id, lease_owner=lease_owner)
+            except Exception:
+                pass  # It expires by itself; nothing here may replace the real outcome.
+
+    def _stage_created(
+        self,
+        job: ExecutionJob,
+        *,
+        owner: str,
+        content: bytes,
+        retention_seconds: int,
+        digest: str,
+        mime_type: str,
+    ) -> AttachmentStageResult:
         try:
             artifact = self.boundary.stage_bytes(
                 job.job_id,
@@ -154,6 +200,17 @@ class AttachmentStagingService:
                 raise AttachmentStagingError("attachment_cleanup_pending") from None
             self._fail(job.job_id, "attachment_persist_failed")
             raise AttachmentStagingError("attachment_persist_failed") from None
+        if completed.status != "succeeded":
+            # A finished job is immutable, so the write above changed nothing and
+            # only reported the job as it stands: a retry retired it as
+            # abandoned while this call was still holding its bytes. Reporting
+            # success for a job the store says failed would hand out an
+            # artifact no result refers to.
+            try:
+                self.repository.delete_artifact(artifact.artifact_id)
+            except Exception:
+                pass  # Retention reclaims it.
+            raise AttachmentStagingError("attachment_failed")
         return AttachmentStageResult(job=completed, artifact=artifact)
 
     def _existing(
@@ -167,6 +224,8 @@ class AttachmentStagingService:
             payload_matches = False
         if job.profile != ATTACHMENT_STAGE_PROFILE or not payload_matches:
             raise AttachmentStagingError("request_conflict")
+        if job.status in {"queued", "running"}:
+            job = self._retire_if_abandoned(job)
         if job.status != "succeeded":
             if job.status in {"queued", "running"}:
                 raise AttachmentStagingError("attachment_in_progress")
@@ -200,7 +259,7 @@ class AttachmentStagingService:
         ):
             raise AttachmentStagingError("attachment_result_invalid")
         try:
-            content = self.repository.read_artifact(artifact.artifact_id)
+            content = self.repository.read_artifact(artifact.artifact_id, owner=job.owner)
             if sha256(content).hexdigest() != artifact.sha256 or sniff_artifact_mime(content) != artifact.mime_type:
                 raise AttachmentStagingError("attachment_artifact_invalid")
         except AttachmentStagingError:
@@ -208,6 +267,27 @@ class AttachmentStagingService:
         except (ExecutionRepositoryError, ArtifactBoundaryError):
             raise AttachmentStagingError("attachment_artifact_unavailable") from None
         return AttachmentStageResult(job=job, artifact=artifact)
+
+    def _retire_if_abandoned(self, job: ExecutionJob) -> ExecutionJob:
+        """Fail a job whose stager died, and return the job as it now reads.
+
+        The store decides, atomically, that nothing is working on it: no live
+        lease and no write for ABANDONED_STAGE_SECONDS. A job that is merely
+        slow, or that finished in the meantime, comes back as it is. The
+        request id then answers ``attachment_failed`` like any other failed
+        staging, instead of "in progress" for good.
+        """
+
+        try:
+            current = self.repository.retire_abandoned_job(
+                job.job_id,
+                idle_seconds=ABANDONED_STAGE_SECONDS,
+                error=ATTACHMENT_INTERRUPTED,
+                message=ATTACHMENT_INTERRUPTED_MESSAGE,
+            )
+        except ExecutionRepositoryError:
+            return job
+        return job if current is None else current
 
     @staticmethod
     def _result_payload(
@@ -258,6 +338,9 @@ class AttachmentStagingService:
 
 
 __all__ = [
+    "ABANDONED_STAGE_SECONDS",
+    "ATTACHMENT_INTERRUPTED",
+    "ATTACHMENT_INTERRUPTED_MESSAGE",
     "ATTACHMENT_PAYLOAD_SCHEMA",
     "ATTACHMENT_RESULT_SCHEMA",
     "ATTACHMENT_STAGE_PROFILE",
@@ -266,4 +349,5 @@ __all__ = [
     "AttachmentStagingService",
     "DEFAULT_ATTACHMENT_RETENTION_SECONDS",
     "MAX_ATTACHMENT_RETENTION_SECONDS",
+    "STAGING_LEASE_SECONDS",
 ]

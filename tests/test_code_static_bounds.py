@@ -312,3 +312,44 @@ def test_every_new_refusal_can_be_explained_and_repaired() -> None:
     validate_code_source('x = 5\n_result = f"{x:>10}"')
     validate_code_source("_result = 2 ** 1000")
     validate_code_source("_result = [0] * 10000 + [1] * 10000")
+
+
+_PERCENT_ON_A_NON_STRING = {
+    "an integer modulo": "_result = 5 % 3",
+    "a negative modulo": "_result = -5 % 3",
+    "a float modulo": "_result = 1.5 % 2",
+    "a bool modulo": "_result = True % 3",
+    "a None left operand": "_result = None % 3",
+    "a modulo of a sum": "_result = (1 + 2) % 2",
+    "a modulo by a float": "_result = 7 % 0.5",
+    "a modulo by zero (a runtime error, not the validator's)": "_result = 7 % 0",
+    "an augmented modulo": "x = 10\nx %= 3\n_result = x",
+    "a modulo through a name": "x = 5\n_result = x % 2",
+    "an integer left of a template-looking right operand": '_result = 5 % "%99999999d"',
+    "a chained modulo": "_result = 100 % 7 % 3",
+}
+
+
+@pytest.mark.parametrize("source", list(_PERCENT_ON_A_NON_STRING.values()), ids=list(_PERCENT_ON_A_NON_STRING))
+def test_a_percent_with_a_non_string_left_operand_validates_without_crashing(source: str) -> None:
+    """Only a string left operand is a printf-style template and is scanned as one.
+
+    An earlier review asked whether ``5 % 3`` could crash the validator, which
+    reads ``left.value`` for a template. The template check is guarded by the
+    operand being a string, so a number, ``None`` or a bool is plain arithmetic.
+    None of these may raise anything, not even a validation error.
+    """
+
+    validate_code_source(source)
+
+
+def test_a_percent_on_a_bytes_literal_is_refused_by_the_constant_rule_not_by_a_crash() -> None:
+    with pytest.raises(CodeExecutionError) as refused:
+        validate_code_source('_result = b"%99999999d" % 1')
+    assert refused.value.code == "constant_not_allowed"
+
+
+def test_a_string_left_operand_is_still_scanned_as_a_template() -> None:
+    with pytest.raises(CodeExecutionError) as refused:
+        validate_code_source('_result = "%99999999d" % 1')
+    assert refused.value.code == "format_width_too_large"

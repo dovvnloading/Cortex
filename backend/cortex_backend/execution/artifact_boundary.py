@@ -27,6 +27,12 @@ from .repository import ExecutionRepository, ExecutionRepositoryError
 
 MAX_ARTIFACT_PATH_CHARS = 4096
 MAX_OUTPUT_COUNT = 16
+# Most entries -- files and directories together -- the output root may hold
+# before it is refused without being walked any further. The claim count is
+# capped at MAX_OUTPUT_COUNT, so a root with far more than that is not a
+# legitimate output, and a guest that writes 100,000 files must not be able to
+# make the boundary walk and move every one of them before it says no.
+MAX_OUTPUT_WALK_ENTRIES = 1024
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
@@ -308,12 +314,11 @@ class ArtifactBoundary:
         self.max_input_bytes = maximum
         self.max_output_count = max_output_count
         self.max_total_output_bytes = total
-        self.quarantine_root = repository.artifact_root / ".artifact_quarantine"
+        # Quarantine happens inside each output root (see _quarantine), so there
+        # is nothing to create here. A directory of that name used to be made
+        # under every artifact root and never read.
         try:
             if _is_reparse_point(repository.artifact_root) or _has_reparse_parent(repository.artifact_root):
-                raise ArtifactBoundaryError("artifact_root_unavailable")
-            self.quarantine_root.mkdir(parents=True, exist_ok=True)
-            if _is_reparse_point(self.quarantine_root):
                 raise ArtifactBoundaryError("artifact_root_unavailable")
         except ArtifactBoundaryError:
             raise
@@ -460,24 +465,44 @@ class ArtifactBoundary:
             raise ArtifactBoundaryError("artifact_cleanup_pending") from None
 
     def _output_files(self, root: Path) -> list[tuple[str, Path]]:
+        """List the regular files under ``root``, refusing a root that is too large to be a real output.
+
+        The walk stops as soon as it has seen more files than a claim list may
+        name, or more entries than ``MAX_OUTPUT_WALK_ENTRIES``, and it does not
+        descend into the boundary's own ``.quarantine`` directory.
+        """
+
         found: list[tuple[str, Path]] = []
+        pending = [root]
+        entries = 0
         try:
-            for path in root.rglob("*"):
-                relative = path.relative_to(root).as_posix()
-                if _is_reparse_point(path):
-                    raise ArtifactBoundaryError("artifact_reparse_point")
-                if relative == ".quarantine" or relative.startswith(".quarantine/"):
-                    continue
-                if path.is_dir():
-                    continue
-                if not path.is_file():
-                    raise ArtifactBoundaryError("artifact_not_regular_file")
-                found.append((relative, path))
+            while pending:
+                with os.scandir(pending.pop()) as scan:
+                    for entry in scan:
+                        entries += 1
+                        if entries > MAX_OUTPUT_WALK_ENTRIES:
+                            raise ArtifactBoundaryError("artifact_output_count_invalid")
+                        path = Path(entry.path)
+                        relative = path.relative_to(root).as_posix()
+                        if _is_reparse_point(path):
+                            raise ArtifactBoundaryError("artifact_reparse_point")
+                        if relative == ".quarantine":
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            raise ArtifactBoundaryError("artifact_not_regular_file")
+                        found.append((relative, path))
+                        if len(found) > self.max_output_count:
+                            raise ArtifactBoundaryError("artifact_output_count_invalid")
         except ArtifactBoundaryError:
             raise
         except OSError:
             raise ArtifactBoundaryError("artifact_output_unavailable") from None
-        return found
+        # A stable order, so which artifact comes first never depends on the
+        # filesystem's directory order.
+        return sorted(found)
 
     def collect_outputs(
         self,
@@ -503,11 +528,16 @@ class ArtifactBoundary:
             claim_map[claim.relative_path] = claim
         root = self._output_root(output_root)
         files = self._output_files(root)
-        if {relative for relative, _ in files} != set(claim_map):
+        found = {relative for relative, _ in files}
+        if found - set(claim_map):
             for relative, path in files:
                 if relative not in claim_map:
                     self._quarantine(root, path)
             raise ArtifactBoundaryError("artifact_unclaimed_output")
+        if set(claim_map) - found:
+            # Declared but never written. This used to be reported as an
+            # unclaimed output, which is the opposite problem.
+            raise ArtifactBoundaryError("artifact_output_missing")
         for claim in claims:
             self._claim_path(root, claim)
         prepared: list[tuple[OutputClaim, Path, bytes, str, str]] = []
@@ -516,6 +546,10 @@ class ArtifactBoundary:
             claim = claim_map[relative]
             try:
                 content = _read_stable(path, self.repository.max_artifact_bytes)
+                if not content:
+                    # copy_in and stage_bytes refuse empty content; publishing
+                    # a guest's zero-byte output is the same mistake.
+                    raise ArtifactBoundaryError("artifact_content_invalid")
                 mime_type = sniff_artifact_mime(content)
                 if claim.mime_type is not None and claim.mime_type != mime_type:
                     raise ArtifactBoundaryError("artifact_mime_mismatch")

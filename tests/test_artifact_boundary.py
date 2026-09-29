@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -337,3 +338,174 @@ def test_output_limits_and_invalid_claims_fail_before_publication(tmp_path: Path
 
     with pytest.raises(ValueError):
         OutputClaim("../escape.txt")
+
+
+# -- collect_outputs: missing vs unclaimed, empty output, and a bounded walk ---------------
+
+
+def _output_root(tmp_path: Path) -> Path:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    return output_root
+
+
+def _published_count(repository: ExecutionRepository) -> int:
+    with repository.connect() as connection:
+        return int(connection.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0])
+
+
+def test_a_declared_output_that_was_never_written_is_reported_as_missing(tmp_path: Path):
+    """A missing output used to be reported as an unclaimed one -- the opposite problem."""
+
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    (output_root / "written.txt").write_text("written", encoding="utf-8")
+    boundary = ArtifactBoundary(repository)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id,
+            "session-a",
+            output_root,
+            [OutputClaim("written.txt", "text/plain"), OutputClaim("never-written.txt", "text/plain")],
+        )
+
+    assert error.value.code == "artifact_output_missing"
+    assert _published_count(repository) == 0
+    # Nothing was unclaimed, so nothing was moved out of the way.
+    assert (output_root / "written.txt").exists()
+    assert not (output_root / ".quarantine").exists()
+
+
+def test_an_unclaimed_output_still_wins_over_a_missing_one(tmp_path: Path):
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    (output_root / "extra.txt").write_text("extra", encoding="utf-8")
+    boundary = ArtifactBoundary(repository)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id, "session-a", output_root, [OutputClaim("never-written.txt", "text/plain")]
+        )
+
+    assert error.value.code == "artifact_unclaimed_output"
+    assert not (output_root / "extra.txt").exists()
+    assert list((output_root / ".quarantine").iterdir())
+
+
+def test_a_zero_byte_output_is_refused_like_a_zero_byte_attachment(tmp_path: Path):
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    (output_root / "empty.txt").write_bytes(b"")
+    boundary = ArtifactBoundary(repository)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id, "session-a", output_root, [OutputClaim("empty.txt", "text/plain")]
+        )
+    assert error.value.code == "artifact_content_invalid"
+    assert _published_count(repository) == 0
+    assert list((output_root / ".quarantine").iterdir())
+
+    # The entry points that take bytes already refused it.
+    with pytest.raises(ArtifactBoundaryError) as staged:
+        boundary.stage_bytes(job_id, "session-a", b"")
+    assert staged.value.code == "artifact_content_invalid"
+
+
+def test_a_root_with_more_files_than_a_claim_list_may_name_is_refused_before_anything_is_moved(
+    tmp_path: Path, monkeypatch
+):
+    """A guest that wrote 100,000 files forced a full walk and 100,000 quarantine moves."""
+
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    boundary = ArtifactBoundary(repository)
+    for index in range(boundary.max_output_count + 184):
+        (output_root / f"f{index:03}.txt").write_text("x", encoding="utf-8")
+    real_scandir = os.scandir
+    visited: list[str] = []
+
+    class Counting:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def __iter__(self):
+            for entry in self._inner:
+                visited.append(entry.name)
+                yield entry
+
+    monkeypatch.setattr(os, "scandir", lambda path: Counting(real_scandir(path)))
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id, "session-a", output_root, [OutputClaim("f000.txt", "text/plain")]
+        )
+
+    assert error.value.code == "artifact_output_count_invalid"
+    assert len(visited) <= boundary.max_output_count + 1, "the walk went on after the limit"
+    assert not (output_root / ".quarantine").exists(), "files were moved before the refusal"
+    assert _published_count(repository) == 0
+
+
+def test_a_root_with_too_many_directories_is_refused_and_the_quarantine_is_not_walked(
+    tmp_path: Path, monkeypatch
+):
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    monkeypatch.setattr(boundary_module, "MAX_OUTPUT_WALK_ENTRIES", 30)
+    boundary = ArtifactBoundary(repository)
+    for index in range(40):
+        (output_root / f"d{index:02}").mkdir()
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id, "session-a", output_root, [OutputClaim("result.txt", "text/plain")]
+        )
+    assert error.value.code == "artifact_output_count_invalid"
+
+    # The boundary's own quarantine directory is never descended into, so what
+    # earlier failures put there cannot count against a later, legitimate output.
+    fresh = tmp_path / "second"
+    fresh.mkdir()
+    (fresh / ".quarantine").mkdir()
+    for index in range(40):
+        (fresh / ".quarantine" / f"old-{index}").write_bytes(b"x")
+    (fresh / "result.txt").write_text("fine", encoding="utf-8")
+    published = boundary.collect_outputs(
+        job_id, "session-a", fresh, [OutputClaim("result.txt", "text/plain")]
+    )
+    assert [item.relative_path for item in published] == ["result.txt"]
+
+
+def test_outputs_are_published_in_a_stable_order(tmp_path: Path):
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    for name in ("c.txt", "a.txt", "b.txt"):
+        (output_root / name).write_text(name, encoding="utf-8")
+    boundary = ArtifactBoundary(repository)
+
+    published = boundary.collect_outputs(
+        job_id,
+        "session-a",
+        output_root,
+        [OutputClaim("c.txt"), OutputClaim("a.txt"), OutputClaim("b.txt")],
+    )
+
+    assert [item.relative_path for item in published] == ["a.txt", "b.txt", "c.txt"]
+
+
+def test_the_boundary_no_longer_creates_a_quarantine_directory_nothing_reads(tmp_path: Path):
+    repository, _job_id = _repository(tmp_path)
+
+    ArtifactBoundary(repository)
+
+    assert not (repository.artifact_root / ".artifact_quarantine").exists()
+    assert repository.quarantine_root.is_dir()  # the one the repository actually uses

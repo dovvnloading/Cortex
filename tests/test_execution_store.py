@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import sqlite3
 import time
 
 import pytest
 
+from cortex_backend.execution.models import ExecutionJob
 from cortex_backend.execution.repository import (
     ArtifactLimitError,
+    ExecutionIntegrityError,
     ExecutionRepository,
     ExecutionRepositoryError,
     LeaseConflict,
@@ -892,3 +896,302 @@ def test_supervisor_lease_expiry_is_reclaimable(tmp_path, frozen_clock):
     frozen_clock.advance(31)
     repository.claim_supervisor_lease(lease_owner="new-supervisor", ttl_seconds=10)
     repository.release_supervisor_lease(lease_owner="new-supervisor")
+
+
+def test_a_store_failure_is_not_reported_as_a_duplicate_request(tmp_path, monkeypatch):
+    """Only a constraint failure may mean "this request already has a job".
+
+    ``connect()`` turns every ``sqlite3.Error`` into one repository error, and
+    ``create_job`` answered any of them by looking the request id up. With a job
+    already stored for that id, a database that merely could not write (locked,
+    disk error) was therefore reported as ``created=False`` -- success, with an
+    existing job -- so the caller was told its request was accepted when the
+    write had failed.
+    """
+
+    repository = _repository(tmp_path)
+    first, _ = repository.create_job(
+        job_id="job-1",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+    real_connect = sqlite3.connect
+
+    class RefusesJobInserts(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if "INSERT INTO execution_jobs" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *args, **kwargs: real_connect(*args, factory=RefusesJobInserts, **kwargs),
+    )
+    with pytest.raises(ExecutionRepositoryError) as failure:
+        repository.create_job(
+            job_id="job-2",
+            owner="session-a",
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+    assert not isinstance(failure.value, ExecutionIntegrityError)
+    monkeypatch.undo()
+
+    # A genuine duplicate is still answered with the job that already exists.
+    duplicate, created = repository.create_job(
+        job_id="job-3",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+    assert created is False
+    assert duplicate.job_id == first.job_id
+
+
+def test_a_job_id_collision_is_an_integrity_error_not_a_duplicate_request(tmp_path):
+    repository = _repository(tmp_path)
+    repository.create_job(
+        job_id="job-1",
+        owner="session-a",
+        request_id="request-1",
+        profile="fake.v1",
+        payload={},
+    )
+
+    # Same job id, different request: nothing is stored for request-2, so there
+    # is no existing job to hand back and the constraint failure must surface.
+    with pytest.raises(ExecutionIntegrityError):
+        repository.create_job(
+            job_id="job-1",
+            owner="session-a",
+            request_id="request-2",
+            profile="fake.v1",
+            payload={},
+        )
+
+
+def test_a_job_record_declares_no_lease_fields_it_never_fills(tmp_path):
+    """``ExecutionJob`` declared ``lease_owner`` and ``lease_expires_at`` and nothing filled them in.
+
+    They read as "this job holds no lease" when they meant "this was never
+    populated", which is how a snapshot was once misread as evidence about
+    lease state. The lease table is read through ``lease_holder``.
+    """
+
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-lease-fields",
+        owner="session-a",
+        request_id="request-lease-fields",
+        profile="fake.v1",
+        payload={},
+    )
+    repository.claim_lease(job.job_id, lease_owner="coordinator-a", ttl_seconds=30)
+
+    held = repository.get_job(job.job_id)
+
+    assert held is not None
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+    names = {field.name for field in dataclasses.fields(ExecutionJob)}
+    assert names.isdisjoint({"lease_owner", "lease_expires_at"})
+    assert not hasattr(held, "lease_owner")
+
+
+def _job(repository, job_id, *, profile="fake.v1"):
+    job, _ = repository.create_job(
+        job_id=job_id,
+        owner="session-a",
+        request_id=f"request-{job_id}",
+        profile=profile,
+        payload={},
+    )
+    return job
+
+
+def test_retire_abandoned_job_fails_only_a_job_nothing_is_working_on(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    idle = _job(repository, "job-idle")
+    leased = _job(repository, "job-leased")
+    awaiting = _job(repository, "job-awaiting", profile="code.exec.v1")
+    done = _job(repository, "job-done")
+    repository.transition(
+        done.job_id, status="succeeded", event="completed", phase="completed", data={}, result={"v": 1}
+    )
+    # Asked for while the clock is still at the start, so by the time it has
+    # moved on the job has been quiet for longer than the idle limit and only
+    # the pending approval keeps it from being retired.
+    repository.request_approval(awaiting.job_id, owner="session-a", scope_digest="digest", reason="run")
+    frozen_clock.advance(200)
+    young = _job(repository, "job-young")
+    repository.claim_lease(leased.job_id, lease_owner="worker", ttl_seconds=30)
+
+    def retire(job_id):
+        return repository.retire_abandoned_job(
+            job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+        )
+
+    retired = retire(idle.job_id)
+    assert retired is not None and (retired.status, retired.error) == ("failed", "interrupted")
+    assert repository.events(idle.job_id)[-1].event == "failed"
+    assert [job.status for job in map(retire, (leased.job_id, awaiting.job_id, young.job_id))] == [
+        "queued",
+        "queued",
+        "queued",
+    ]
+    assert retire(done.job_id).status == "succeeded"
+    assert retire("job-that-does-not-exist") is None
+
+    # Idempotent: a second call neither rewrites nor appends.
+    before = repository.events(idle.job_id)
+    assert retire(idle.job_id).status == "failed"
+    assert repository.events(idle.job_id) == before
+
+
+def test_retire_abandoned_job_takes_an_expired_lease_and_clears_it(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job = _job(repository, "job-dead-worker")
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=30)
+
+    frozen_clock.advance(60)  # the lease is expired, the job has been quiet for a minute
+    still_recent = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+    assert still_recent.status == "queued"
+
+    frozen_clock.advance(100)
+    retired = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+    assert retired.status == "failed"
+    assert repository.lease_holder(job.job_id) is None
+
+
+def test_retire_abandoned_job_honours_a_stop_and_rejects_a_bad_idle_time(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job = _job(repository, "job-cancelling")
+    repository.request_cancel(job.job_id)
+    frozen_clock.advance(500)
+
+    retired = repository.retire_abandoned_job(
+        job.job_id, idle_seconds=120, error="interrupted", message="Interrupted."
+    )
+
+    # The user already pressed Stop: an abandoned job ends as they asked.
+    assert (retired.status, retired.error) == ("cancelled", "cancelled")
+    assert repository.events(job.job_id)[-1].event == "cancelled"
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError):
+            repository.retire_abandoned_job(
+                job.job_id, idle_seconds=bad, error="interrupted", message="Interrupted."
+            )
+
+
+# -- job ids become directory names; artifact access is validated and can be owner-scoped ----
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    ["../escape", "..\\escape", "a/b", "a\\b", "", ".hidden", "x" * 201, "nul\x00byte", "C:evil"],
+)
+def test_create_job_refuses_a_job_id_that_could_leave_the_artifact_root(tmp_path, job_id):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="job_id"):
+        repository.create_job(
+            job_id=job_id,
+            owner="session-a",
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+
+    assert repository.list_jobs(owner="session-a", include_terminal=True) == []
+
+
+@pytest.mark.parametrize("owner", ["", "x" * 201, "line\nbreak", "nul\x00byte", None, 7])
+def test_create_job_refuses_an_owner_that_is_not_a_bounded_printable_string(tmp_path, owner):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="owner"):
+        repository.create_job(
+            job_id="job-1",
+            owner=owner,
+            request_id="request-1",
+            profile="fake.v1",
+            payload={},
+        )
+
+
+def test_publish_confines_the_job_directory_before_it_creates_anything(tmp_path):
+    """The confinement check used to run after the mkdir.
+
+    A job row that predates the id check and names a path outside the root
+    made its directories there and only then failed.
+    """
+
+    repository = _repository(tmp_path)
+    now = "2030-01-01T00:00:00+00:00"
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO execution_jobs
+            (job_id, owner, request_id, profile, status, sequence, payload_json, created_at, updated_at)
+            VALUES (?, 'session-a', 'request-old', 'fake.v1', 'queued', 0, '{}', ?, ?)
+            """,
+            ("../escaped-directory", now, now),
+        )
+
+    with pytest.raises(ExecutionRepositoryError):
+        repository.publish_artifact("../escaped-directory", name="out.txt", content=b"x")
+
+    assert not (tmp_path / "escaped-directory").exists()
+    assert not (tmp_path / "artifacts" / ".." / "escaped-directory").exists()
+
+
+def test_an_expired_artifact_is_absent_from_get_as_well_as_from_read(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-expiry", owner="session-a", request_id="r", profile="fake.v1", payload={}
+    )
+    artifact = repository.publish_artifact(
+        job.job_id, name="out.txt", content=b"synthetic", mime_type="text/plain", retention_seconds=60
+    )
+    assert repository.get_artifact(artifact.artifact_id, owner="session-a") is not None
+
+    frozen_clock.advance(61)
+
+    assert repository.get_artifact(artifact.artifact_id, owner="session-a") is None
+    with pytest.raises(ExecutionRepositoryError, match="expired"):
+        repository.read_artifact(artifact.artifact_id)
+
+
+def test_read_and_delete_can_be_scoped_to_an_owner_and_validate_the_artifact_id(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-scope", owner="session-a", request_id="r", profile="fake.v1", payload={}
+    )
+    artifact = repository.publish_artifact(
+        job.job_id, name="out.txt", content=b"synthetic", mime_type="text/plain"
+    )
+
+    # Another owner sees nothing, and cannot delete it.
+    with pytest.raises(ExecutionRepositoryError, match="does not exist"):
+        repository.read_artifact(artifact.artifact_id, owner="session-b")
+    repository.delete_artifact(artifact.artifact_id, owner="session-b")
+    assert repository.read_artifact(artifact.artifact_id, owner="session-a") == b"synthetic"
+    assert repository.read_artifact(artifact.artifact_id) == b"synthetic"
+
+    # A malformed id is refused up front, exactly as get_artifact already did.
+    for bad in ("../x", "", "a/b", "x" * 201, None):
+        assert repository.get_artifact(bad) is None
+        with pytest.raises(ExecutionRepositoryError, match="does not exist"):
+            repository.read_artifact(bad)
+        repository.delete_artifact(bad)
+
+    repository.delete_artifact(artifact.artifact_id, owner="session-a")
+    assert repository.get_artifact(artifact.artifact_id) is None

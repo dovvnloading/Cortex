@@ -20,6 +20,7 @@ from cortex_backend.execution.recipe_provider import (
     RecipeProviderError,
     RecipeProviderLimits,
 )
+import cortex_backend.execution.recipes as recipes_module
 from cortex_backend.execution.recipes import parse_image_transform
 
 
@@ -55,21 +56,46 @@ def _image_bytes(
 
 def _started_provider(limits: RecipeProviderLimits | None = None) -> RecipeImageProvider:
     provider = RecipeImageProvider(limits)
-    health = provider.start(RuntimeHealth.ready("test sandbox attestation"))
+    health = provider.start()
     assert health.available
     return provider
 
 
-def test_provider_is_disabled_until_external_sandbox_health_passes():
+def test_provider_is_disabled_until_started_and_a_failed_containment_probe_still_blocks_it():
     provider = RecipeImageProvider()
     assert provider.health_snapshot.code == "recipe_provider_disabled"
-    assert provider.health().code == "sandbox_unverified"
+    assert not provider.enabled
+    with pytest.raises(RecipeProviderError) as not_started:
+        provider.transform(_plan({"op": "grayscale"}), _image_bytes())
+    assert not_started.value.code == "provider_disabled"
+
+    # A probe that really ran and failed blocks the provider.
     blocked = provider.start(RuntimeHealth.blocked("sandbox_unavailable", "sandbox is unavailable"))
     assert not blocked.available
+    assert blocked.code == "sandbox_unavailable"
     assert not provider.enabled
     with pytest.raises(RecipeProviderError) as error:
         provider.transform(_plan({"op": "grayscale"}), _image_bytes())
     assert error.value.code == "provider_disabled"
+
+
+def test_provider_needs_no_self_issued_sandbox_attestation_to_start():
+    """Both callers used to hand in a verdict they had just made up.
+
+    The ``sandbox_unverified`` block for a missing verdict therefore never
+    stopped anything. A caller that ran no probe simply supplies none, and the
+    provider's own dependency health decides.
+    """
+
+    provider = RecipeImageProvider()
+    assert provider.health().available
+    assert provider.health().code != "sandbox_unverified"
+
+    started = provider.start()
+
+    assert started.available
+    assert provider.enabled
+    assert provider.transform(_plan({"op": "grayscale"}), _image_bytes()).format == "PNG"
 
 
 def test_provider_transforms_and_reencodes_without_metadata():
@@ -199,14 +225,14 @@ def test_provider_limits_cannot_raise_the_qualification_ceiling(field: str, valu
 def test_provider_health_blocks_missing_dependency_or_codec(monkeypatch):
     provider = RecipeImageProvider()
     monkeypatch.setattr(provider_module, "Image", None)
-    missing = provider.start(RuntimeHealth.ready("test sandbox attestation"))
+    missing = provider.start()
     assert not missing.available
     assert missing.code == "recipe_dependency_missing"
     assert not provider.enabled
 
     monkeypatch.undo()
     monkeypatch.setattr(provider_module.Image, "EXTENSION", {".png": "PNG"})
-    unavailable = provider.start(RuntimeHealth.ready("test sandbox attestation"))
+    unavailable = provider.start()
     assert not unavailable.available
     assert unavailable.code == "recipe_codec_unavailable"
     assert not provider.enabled
@@ -240,3 +266,23 @@ def test_provider_rejects_input_before_decoder_when_encoded_limit_is_exceeded():
     with pytest.raises(RecipeProviderError) as error:
         provider.transform(_plan({"op": "grayscale"}), _image_bytes())
     assert error.value.code == "input_too_large"
+
+
+def test_the_image_limits_have_one_owner_the_plan_parser():
+    """The dimension and step ceilings were typed again in the provider.
+
+    A ceiling the parser accepts must fit the provider, so the provider reads
+    the parser's constants instead of keeping copies that could drift apart.
+    """
+
+    assert MAX_DIMENSION == recipes_module.MAX_IMAGE_DIMENSION
+    assert RecipeProviderLimits().max_steps == recipes_module.MAX_IMAGE_STEPS
+    RecipeProviderLimits(max_steps=recipes_module.MAX_IMAGE_STEPS)
+    with pytest.raises(ValueError):
+        RecipeProviderLimits(max_steps=recipes_module.MAX_IMAGE_STEPS + 1)
+
+    # ...and the check is made against the constant, not a re-typed number.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(provider_module, "MAX_IMAGE_STEPS", 3)
+        with pytest.raises(ValueError):
+            RecipeProviderLimits(max_steps=4)
