@@ -923,7 +923,10 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .memory-list li { padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text-muted); font-size: 0.82rem; line-height: 1.45; }
 .memory-list-item { display: flex; align-items: center; gap: 7px; }
 .memory-list-item input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 4px; background: transparent; color: var(--text); }
-.memory-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.memory-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.memory-list-item-removed input { color: var(--text-faint); text-decoration: line-through; }
+.memory-undo { min-height: 30px; padding: 0 9px; font-size: var(--text-xs); }
+.memory-unsaved { color: var(--warning); font-size: var(--text-xs); font-weight: 650; }
 .models-panel { grid-column: 1 / -1; }
 .model-connection-row { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-bottom: 10px; }
 .connection-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
