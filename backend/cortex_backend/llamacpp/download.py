@@ -884,7 +884,11 @@ class _GGUFTransfer:
             if resume is not None and response.status_code == 416:
                 # "Range not satisfiable": either every byte is already stored
                 # (the connection dropped after the last one), or the file changed.
-                return _unsatisfied_range_length(response) == resume.offset
+                # It is only "all of it" if the server's length is what is stored
+                # and does not contradict the length the first response gave: a
+                # file that changed to exactly this size is a different file.
+                reported = _unsatisfied_range_length(response)
+                return reported == resume.offset and self.total in (None, reported)
             response.raise_for_status()
             if response.status_code == 206:
                 if resume is None:

@@ -1368,6 +1368,56 @@ def test_a_416_for_a_file_that_is_not_complete_restarts(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("small_reads")
+def test_a_416_that_matches_the_offset_but_not_the_recorded_total_restarts(tmp_path: Path) -> None:
+    """``bytes */96`` says the file is 96 bytes long. The first response said
+    256, and 96 bytes are stored: the file has changed since, so what is stored
+    is not "all of it" and must not be published as such."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": "bytes */96"})
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    assert _fetch(tmp_path, server).read_bytes() == content
+    assert server.range_starts() == [None, 96, None]  # asked once for the rest, then started over
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_416_for_bytes_already_stored_is_accepted_when_no_total_was_advertised(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without a Content-Length there is no recorded total to contradict, so a
+    ``bytes */N`` that matches what is stored still completes the download."""
+    monkeypatch.setattr(download_module, "_DOWNLOAD_READ_BYTES", 1)
+    content = _valid_gguf_content(tmp_path)
+    ranges: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ranges.append(request.headers.get("range"))
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"Content-Range": f"bytes */{len(content)}"})
+        # A chunked body (no Content-Length) that is cut after its last byte.
+        return httpx.Response(
+            200, headers={"ETag": '"v1"'}, content=_body_then_error(content, drop_after=len(content))
+        )
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert destination.read_bytes() == content
+    assert ranges == [None, f"bytes={len(content)}-"]  # completed by the 416; no restart
+
+
+@pytest.mark.usefixtures("small_reads")
 def test_a_partial_file_changed_on_disk_is_not_trusted(tmp_path: Path, monkeypatch) -> None:
     """The stored bytes are checked before they are built on: a staging file
     that no longer is what this transfer wrote is thrown away."""
