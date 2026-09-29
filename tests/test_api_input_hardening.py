@@ -12,6 +12,7 @@ import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -327,6 +328,42 @@ def test_a_job_that_does_not_exist_is_still_a_404_for_approval_and_cancel(tmp_pa
 
     assert decision.status_code == 404
     assert cancel.status_code == 404
+
+
+@pytest.mark.parametrize("blank", ["   ", "\t\n", "​", ""])
+def test_a_blank_model_pull_is_a_422_not_a_failed_job(
+    client: TestClient,
+    headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    blank: str,
+) -> None:
+    """It used to be accepted, then fail inside the job with a generic "Job
+    failed", after taking the models job slot."""
+    response = client.post("/api/v1/models/pulls", json={"model": blank}, headers=headers)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", "model"]
+    assert "job failed" not in caplog.text.lower()
+
+
+def test_a_padded_model_name_is_pulled_trimmed(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    accepted = client.post(
+        "/api/v1/models/pulls", json={"model": "  tiny-model:latest  "}, headers=headers
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    deadline = time.monotonic() + 10.0
+    body: dict = {}
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}", headers=headers).json()
+        if body["status"] in {"succeeded", "failed", "cancelled"}:
+            break
+        time.sleep(0.01)
+
+    assert body["status"] == "succeeded", body
+    assert body["result"]["model"] == "tiny-model:latest"
 
 
 def _assert_issues_carry_only_where_and_why(response: httpx.Response) -> list[dict]:

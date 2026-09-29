@@ -80,7 +80,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         deps: BackendDependenciesProtocol = Depends(dependencies),
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobAccepted:
-        model = payload.model.strip()
+        model = payload.model
 
         def runner(sink, cancel_event):
             sink.publish_progress(
