@@ -161,7 +161,7 @@ def test_a_v3_database_upgrades_in_place_without_losing_chats(tmp_path: Path) ->
 
     probe = sqlite3.connect(path)
     try:
-        assert probe.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == DatabaseManager.SCHEMA_VERSION
     finally:
         probe.close()
 
@@ -187,8 +187,8 @@ def test_upgrading_a_v3_database_keeps_a_pre_upgrade_snapshot(tmp_path: Path) ->
     finally:
         probe.close()
     # ... while the live database and its ordinary backup are on the new version.
-    assert _user_version(path) == 4
-    assert _user_version(f"{path}.bak") == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
+    assert _user_version(f"{path}.bak") == DatabaseManager.SCHEMA_VERSION
 
     # A second open sees a current database and leaves the snapshot alone.
     snapshot_before = snapshot.read_bytes()
@@ -237,7 +237,7 @@ def test_an_upgrade_that_fails_part_way_keeps_its_snapshot_and_the_retry_reuses_
     assert snapshot.read_bytes() == first_attempt
     assert snapshot.stat().st_mtime_ns == modified_before
     assert not list(tmp_path.glob("*.superseded-*"))
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
 
 
 def _in_write_ahead_mode(path: Path) -> None:
@@ -303,7 +303,7 @@ def test_a_second_upgrade_after_a_rollback_takes_a_fresh_snapshot_and_keeps_the_
     superseded = Path(f"{snapshot}.superseded-1")
     assert superseded.read_bytes() == first_snapshot
     assert _chat_ids(superseded) == {"old-1"}
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert _chat_ids(path) == {"old-1", "after-rollback"}
 
 
@@ -385,7 +385,7 @@ def test_a_pre_versioning_database_with_history_is_snapshotted(tmp_path: Path) -
     assert database.pre_upgrade_snapshot_path == str(snapshot)
     assert _user_version(snapshot) == 0
     assert "group_id" not in _column_names(snapshot, "threads")
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
 
 
 def test_a_new_or_current_database_gets_no_pre_upgrade_snapshot(tmp_path: Path) -> None:
@@ -463,7 +463,7 @@ def test_a_pre_upgrade_snapshot_that_cannot_be_kept_refuses_the_upgrade_and_the_
 
     assert database.pre_upgrade_snapshot_path == f"{path}.pre-v3.bak"
     assert _user_version(f"{path}.pre-v3.bak") == 3
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert _chat_ids(path) == {"old-1"}
 
 
@@ -543,7 +543,7 @@ def test_a_failing_migration_step_leaves_the_version_and_tables_untouched(
 
     # Nothing was half-applied, so the next launch upgrades from where it was.
     database = DatabaseManager(db_path=str(path))
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert database.list_groups() == []
     assert _chat_ids(path) == {"old-1"}
 
@@ -569,7 +569,7 @@ def test_every_step_commits_with_its_own_version(
     assert "generation_stats_json" not in _column_names(path, "messages")
 
     DatabaseManager(db_path=str(path))
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert "generation_stats_json" in _column_names(path, "messages")
 
 
@@ -580,7 +580,7 @@ def test_a_pre_versioning_database_with_no_user_version_upgrades(tmp_path: Path)
 
     database = DatabaseManager(db_path=str(path))
 
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert {"attachments", "generation_stats_json"} <= _column_names(path, "messages")
     assert "group_id" in _column_names(path, "threads")
     assert [item["id"] for item in database.get_all_chats_summary()] == ["old-1"]
@@ -602,7 +602,7 @@ def test_a_database_that_already_has_part_of_a_step_still_upgrades(tmp_path: Pat
 
     database = DatabaseManager(db_path=str(path))
 
-    assert _user_version(path) == 4
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert database.list_groups() == []
     assert _chat_ids(path) == {"old-1"}
 
@@ -740,13 +740,15 @@ def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, he
     assert chat_payload["title"] == "Project"
 
     thread_id = chat_payload["id"]
-    message = client.post(
-        f"/api/v1/chats/{thread_id}/messages",
-        json={"role": "user", "content": " hello "},
+    sent = client.post(
+        "/api/v1/generations",
+        json={"thread_id": thread_id, "user_input": " hello "},
         headers=headers,
     )
-    assert message.status_code == 200
-    assert message.json()["messages"][-1]["content"] == "hello"
+    assert sent.status_code == 202
+    # The user's turn is written before the job is accepted.
+    stored = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+    assert stored["messages"][0]["content"] == "hello"
     assert client.patch(
         f"/api/v1/chats/{thread_id}",
         json={"title": "\t\n"},
@@ -756,7 +758,7 @@ def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, he
         "/api/v1/chat-groups", json={"name": "\u200b"}, headers=headers
     ).status_code == 422
     assert client.post(
-        f"/api/v1/chats/{thread_id}/messages",
-        json={"role": "user", "content": " \n\t "},
+        "/api/v1/generations",
+        json={"thread_id": thread_id, "user_input": " \n\t "},
         headers=headers,
     ).status_code == 422

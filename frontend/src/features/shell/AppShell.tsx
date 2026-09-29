@@ -119,7 +119,7 @@ export function AppShell({
             onClick={onOpenSettings}
           >
             <Settings aria-hidden="true" size={17} />
-            <span className={`connection-indicator ${modelConnection?.success ? "connection-connected" : "connection-error"}`} aria-hidden="true" />
+            <span className={`connection-indicator ${connectionIndicatorClass(modelConnection)}`} aria-hidden="true" />
           </NavigationLink>
         </div>
       </header>
@@ -193,6 +193,12 @@ export function AppShell({
   );
 }
 
+/** No verdict yet (the inventory is still loading) is neither connected nor an error. */
+function connectionIndicatorClass(connection: ModelResponse["connection"]): string {
+  if (!connection) return "connection-pending";
+  return connection.success ? "connection-connected" : "connection-error";
+}
+
 function isCompactWindow(): boolean {
   return typeof window !== "undefined"
     && typeof window.matchMedia === "function"
@@ -233,18 +239,22 @@ function RenameDialog({ chat, onClose, onSave }: { chat: ChatSummary; onClose: (
   );
 }
 
+/**
+ * A plain confirmation, not a type-the-title gauntlet: the delete can be undone
+ * for a few seconds afterwards (see `deleteChat` in App), so the friction a
+ * production database deserves would be out of proportion to a chat.
+ */
 function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onClose: () => void; onConfirm: () => Promise<void | boolean> }) {
-  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const title = displayChatTitle(chat.title);
-  const confirmed = confirmation.trim() === title;
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!confirmed || busy) return;
+  const confirm = async () => {
+    if (busy) return;
     setBusy(true);
     try {
       await onConfirm();
+    } catch {
+      // Preserve the dialog on failure; the workspace callback reports it.
     } finally {
       setBusy(false);
     }
@@ -255,22 +265,14 @@ function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onC
       <DialogContent className="dialog delete-dialog">
         <div className="delete-dialog-heading">
           <div className="delete-dialog-icon" aria-hidden="true"><Trash2 size={18} /></div>
-          <div>
-            <p className="eyebrow">PERMANENT ACTION</p>
-            <AlertDialog.Title>Delete this chat?</AlertDialog.Title>
-          </div>
+          <AlertDialog.Title>Delete this chat?</AlertDialog.Title>
         </div>
-        <AlertDialog.Description className="delete-dialog-description">This permanently removes the conversation and all of its messages. Deleted chats cannot be recovered.</AlertDialog.Description>
+        <AlertDialog.Description className="delete-dialog-description">This removes the conversation and all of its messages. You can undo it for a few seconds afterwards.</AlertDialog.Description>
         <div className="delete-dialog-target"><span>Chat to delete</span><strong>{title}</strong></div>
-        <form onSubmit={submit} className="stack-lg">
-          <label className="field-label" htmlFor="delete-chat-confirmation">Type <span className="delete-confirm-title">{title}</span> to confirm
-            <input id="delete-chat-confirmation" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoFocus autoComplete="off" spellCheck={false} placeholder={title} disabled={busy} />
-          </label>
-          <div className="dialog-actions">
-            <button type="button" className="button button-secondary" onClick={onClose} disabled={busy}>Keep chat</button>
-            <button type="submit" className="button button-danger" disabled={!confirmed || busy}>{busy ? "Deleting…" : "Delete permanently"}</button>
-          </div>
-        </form>
+        <div className="dialog-actions">
+          <button type="button" className="button button-secondary" onClick={onClose} disabled={busy}>Keep chat</button>
+          <button type="button" className="button button-danger" onClick={() => void confirm()} disabled={busy}>{busy ? "Deleting…" : "Delete chat"}</button>
+        </div>
       </DialogContent>
     </AlertDialog.Root>
   );

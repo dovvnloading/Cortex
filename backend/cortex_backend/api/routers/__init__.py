@@ -26,6 +26,10 @@ from . import chats, execution, generations, models, session, settings, system
 # Registration order is the declaration order FastAPI matches on.
 _RESOURCES = (session, system, chats, settings, models, execution, generations)
 
+# What the OpenAPI document says about the tags a resource module puts on its
+# routes; each module that tags routes supplies the descriptions.
+OPENAPI_TAGS = [*generations.OPENAPI_TAGS]
+
 
 def build_router() -> APIRouter:
     router = APIRouter()

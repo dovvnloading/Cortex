@@ -136,7 +136,16 @@ class GGUFDownloadError(ValueError):
     ``user_message`` lets the job registry (``api/jobs.py``) relay it instead
     of its generic "Job failed. Please try again." fallback for any exception
     that doesn't carry one.
+
+    ``code`` names a failure the user can act on -- ``gated``, ``not_found``,
+    ``rate_limited``, ``network`` or ``unavailable`` -- so a screen can offer
+    the right next step without reading the sentence. It is ``None`` for every
+    other refusal, whose sentence is all there is to say.
     """
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
     @property
     def user_message(self) -> str:
@@ -473,6 +482,19 @@ def _explain_http_status(status_code: int, *, url: httpx.URL) -> str:
     return f"The download server answered with an unexpected error (HTTP {status_code})."
 
 
+def _status_failure_code(status_code: int) -> str | None:
+    """The actionable class of an unsuccessful HTTP response, if it has one."""
+    if status_code in (401, 403):
+        return "gated"
+    if status_code == 404:
+        return "not_found"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "unavailable"
+    return None
+
+
 _TLS_FAILURE_MESSAGE = (
     "The secure connection to the server could not be verified, so nothing was downloaded. "
     "Check the link and your computer's clock, and whether a proxy or security software "
@@ -512,11 +534,41 @@ def _explain_transport_error(exc: httpx.TransportError) -> str:
     return "The connection was interrupted before the download finished."
 
 
+@dataclass(frozen=True, slots=True)
+class HuggingFaceGGUFFile:
+    """One ``.gguf`` file of a repository: its path in the repo and, when known, its size in bytes."""
+
+    path: str
+    size: int | None = None
+
+
+def _sibling_size(entry: dict[str, Any]) -> int | None:
+    """The size Hugging Face reports for a listed file, or ``None`` when it reports none.
+
+    A plain file carries ``size``; a large-file-storage file also carries it
+    under ``lfs``. Anything that is not a non-negative integer is ignored
+    rather than shown, so a malformed entry cannot put a nonsense size on screen.
+    """
+    lfs = entry.get("lfs")
+    for candidate in (entry.get("size"), lfs.get("size") if isinstance(lfs, dict) else None):
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            return candidate
+    return None
+
+
 def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | None = None) -> tuple[str, ...]:
-    """List ``*.gguf`` files in a Hugging Face repo.
+    """The paths of the ``*.gguf`` files in a Hugging Face repo (see ``list_huggingface_gguf_entries``)."""
+    return tuple(entry.path for entry in list_huggingface_gguf_entries(repo_id, http_client=http_client))
+
+
+def list_huggingface_gguf_entries(
+    repo_id: str, *, http_client: httpx.Client | None = None
+) -> tuple[HuggingFaceGGUFFile, ...]:
+    """List ``*.gguf`` files in a Hugging Face repo, with their sizes, sorted by path.
 
     Sends the user's ``HF_TOKEN`` (if set) so a private repository can be
-    listed; without one only public repositories are visible.
+    listed; without one only public repositories are visible. Every failure is
+    a ``GGUFDownloadError`` whose ``code`` says which kind it was.
     """
     if (
         not isinstance(repo_id, str)
@@ -526,39 +578,38 @@ def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | Non
         raise GGUFDownloadError("A Hugging Face repo id must look like 'owner/name'.")
     client = http_client or httpx
     api_url = f"https://{_HF_HOST}/api/models/{repo_id}"
+    unreachable = "Could not reach Hugging Face to list this repo's files."
     try:
         response = client.get(
             api_url,
-            params={"full": "true"},
+            # ``blobs`` is what makes the listing carry each file's size.
+            params={"full": "true", "blobs": "true"},
             headers=_authorization_headers(api_url),
             timeout=_HF_API_TIMEOUT,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         raise GGUFDownloadError(
-            _explain_http_status(exc.response.status_code, url=exc.request.url)
+            _explain_http_status(exc.response.status_code, url=exc.request.url),
+            code=_status_failure_code(exc.response.status_code),
         ) from exc
     except httpx.TransportError as exc:
-        raise GGUFDownloadError(
-            "Could not reach Hugging Face to list this repo's files. "
-            + _explain_transport_error(exc)
-        ) from exc
+        raise GGUFDownloadError(f"{unreachable} {_explain_transport_error(exc)}", code="network") from exc
     except httpx.HTTPError as exc:
-        raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.") from exc
+        raise GGUFDownloadError(unreachable, code="network") from exc
     try:
         payload = response.json()
     except ValueError as exc:
-        raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.") from exc
+        raise GGUFDownloadError(unreachable, code="unavailable") from exc
     siblings = payload.get("siblings", []) if isinstance(payload, dict) else []
     if not isinstance(siblings, list):
-        raise GGUFDownloadError("Could not reach Hugging Face to list this repo's files.")
-    names = sorted(
-        entry["rfilename"]
+        raise GGUFDownloadError(unreachable, code="unavailable")
+    entries = [
+        HuggingFaceGGUFFile(path=entry["rfilename"], size=_sibling_size(entry))
         for entry in siblings
-        if isinstance(entry, dict)
-        and _repo_file_path(entry.get("rfilename")) is not None
-    )
-    return tuple(names)
+        if isinstance(entry, dict) and _repo_file_path(entry.get("rfilename")) is not None
+    ]
+    return tuple(sorted(entries, key=lambda entry: entry.path))
 
 
 def download_gguf(

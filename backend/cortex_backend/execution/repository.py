@@ -28,11 +28,22 @@ from .models import (
     ExecutionArtifact,
     ExecutionEvent,
     ExecutionJob,
+    ExecutionJobListing,
     ExecutionStatus,
     TerminalExecutionStatus,
 )
 
 
+# The schema ladder. 1-2: earlier builds. 3: every job is owned by the
+# installation principal. An artifact's path, and the paths of its cleanup
+# tombstone, may be stored relative to the artifact root so a moved data
+# directory keeps working. That is a change to what new rows hold, not to a
+# table or a column, so it is not a version step: the version stays 3, rows
+# written by an earlier build keep their absolute paths, and both forms are
+# read (see ``ExecutionRepository._stored_path``). Leaving the version alone is
+# what lets an earlier build open a store this one wrote: a build that only
+# knows an older version sets a newer store aside, jobs and all, instead of
+# reading it.
 SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
@@ -70,8 +81,13 @@ _STRAY_FILE_GRACE_SECONDS = 600.0
 _SWEEP_ENTRY_BUDGET = 2_000
 _SWEEP_CHILD_LIMIT = 64
 # A path-component-safe job id, and a printable owner. The job id becomes a
-# directory name under the artifact root, so it is held to the same shape as an
-# artifact name; the owner never reaches the filesystem.
+# directory name under the artifact root, so it is held to a stricter shape
+# than an artifact name: it may not end in a dot (Windows drops trailing dots
+# and spaces, so ``a.`` would share a directory with ``a``) and it may not be a
+# Windows device name, with or without an extension (``nul`` and ``nul.txt`` name
+# the NUL device, not a directory). The owner never reaches the filesystem.
+_SAFE_JOB_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9_-])?")
+_WINDOWS_DEVICE_NAME = re.compile(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", re.IGNORECASE)
 _SAFE_OWNER = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
@@ -92,6 +108,16 @@ def _is_reparse_point(path: Path) -> bool:
         return True
     is_junction = getattr(path, "is_junction", None)
     return bool(is_junction is not None and is_junction())
+
+
+def _is_safe_job_id(value: object) -> bool:
+    """Whether ``value`` can name a job directory on every platform Cortex runs on."""
+
+    return (
+        isinstance(value, str)
+        and _SAFE_JOB_ID.fullmatch(value) is not None
+        and _WINDOWS_DEVICE_NAME.fullmatch(value) is None
+    )
 
 
 def _has_reparse_parent(path: Path) -> bool:
@@ -673,7 +699,7 @@ class ExecutionRepository:
         # The job id names the job's artifact directory, so an id that could
         # lead out of the artifact root is refused when the job is created, not
         # only when its first artifact is published.
-        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+        if not _is_safe_job_id(job_id):
             raise ValueError("job_id must be a bounded path-safe identifier")
         if not isinstance(owner, str) or _SAFE_OWNER.fullmatch(owner) is None:
             raise ValueError("owner must be a bounded printable identifier")
@@ -831,14 +857,71 @@ class ExecutionRepository:
         limit: int = 50,
     ) -> list[ExecutionJob]:
         """List only one owner's jobs for the task tray and recovery supervisor."""
+        rows = self._list_job_rows(
+            owner=owner, include_terminal=include_terminal, limit=limit, detail=False
+        )
+        return [self._job_from_row(row) for row in rows]
+
+    def list_job_listings(
+        self,
+        *,
+        owner: str,
+        include_terminal: bool = False,
+        limit: int = 50,
+    ) -> list[ExecutionJobListing]:
+        """List one owner's jobs, each with its newest event and approval.
+
+        The same jobs in the same order as :meth:`list_jobs`, read in a single
+        query on a single connection instead of one more connection per job
+        for :meth:`events` and another for :meth:`get_approval`.
+        """
+        rows = self._list_job_rows(
+            owner=owner, include_terminal=include_terminal, limit=limit, detail=True
+        )
+        return [self._listing_from_row(row) for row in rows]
+
+    def _list_job_rows(
+        self, *, owner: str, include_terminal: bool, limit: int, detail: bool
+    ) -> list[sqlite3.Row]:
         if not owner:
             raise ValueError("owner must be non-empty")
         if not 1 <= limit <= 200:
             raise ValueError("limit must be between 1 and 200")
-        terminal_clause = "" if include_terminal else "AND status NOT IN ('succeeded', 'failed', 'cancelled')"
+        terminal_clause = (
+            "" if include_terminal else "AND j.status NOT IN ('succeeded', 'failed', 'cancelled')"
+        )
+        detail_columns = ""
+        detail_join = ""
+        if detail:
+            # The approval columns come from the join every listing already
+            # makes. The newest event is the one job_status reports: the
+            # highest sequence, and only when it is at or past the job's own
+            # sequence -- the same rule as events(after_sequence=sequence - 1).
+            detail_columns = """
+                       , a.job_id AS approval_job_id,
+                       a.reason AS approval_reason,
+                       a.created_at AS approval_created_at,
+                       a.decided_at AS approval_decided_at,
+                       a.expires_at AS approval_expires_at,
+                       e.sequence AS event_sequence,
+                       e.event AS event_name,
+                       e.status AS event_status,
+                       e.phase AS event_phase,
+                       e.data_json AS event_data_json,
+                       e.created_at AS event_created_at
+            """
+            detail_join = """
+                LEFT JOIN execution_events e
+                       ON e.job_id = j.job_id
+                      AND e.sequence = (
+                          SELECT MAX(x.sequence) FROM execution_events x
+                          WHERE x.job_id = j.job_id
+                      )
+                      AND e.sequence > MAX(0, j.sequence - 1)
+            """
         now = self._now()
         with self.connect() as connection:
-            rows = connection.execute(
+            rows: list[sqlite3.Row] = connection.execute(
                 f"""
                 SELECT j.*,
                        COALESCE(
@@ -848,9 +931,11 @@ class ExecutionRepository:
                            END,
                            'not_required'
                        ) AS approval_state
+                       {detail_columns}
                 FROM execution_jobs j
                 LEFT JOIN execution_approvals a ON a.job_id = j.job_id
-                WHERE j.owner = ? {terminal_clause.replace('status', 'j.status')}
+                {detail_join}
+                WHERE j.owner = ? {terminal_clause}
                 ORDER BY
                     CASE
                         WHEN a.state = 'pending' AND a.expires_at > ? THEN 0
@@ -862,7 +947,37 @@ class ExecutionRepository:
                 """,
                 (now, owner, now, limit),
             ).fetchall()
-        return [self._job_from_row(row) for row in rows]
+        return rows
+
+    @classmethod
+    def _listing_from_row(cls, row: sqlite3.Row) -> ExecutionJobListing:
+        job = cls._job_from_row(row)
+        event = (
+            ExecutionEvent(
+                job_id=job.job_id,
+                sequence=row["event_sequence"],
+                event=row["event_name"],
+                status=row["event_status"],
+                phase=row["event_phase"],
+                data=json.loads(row["event_data_json"]),
+                created_at=row["event_created_at"],
+            )
+            if row["event_sequence"] is not None
+            else None
+        )
+        approval = (
+            ExecutionApproval(
+                job_id=job.job_id,
+                state=job.approval_state,
+                reason=row["approval_reason"],
+                created_at=row["approval_created_at"],
+                decided_at=row["approval_decided_at"],
+                expires_at=row["approval_expires_at"],
+            )
+            if row["approval_job_id"] is not None
+            else None
+        )
+        return ExecutionJobListing(job=job, latest_event=event, approval=approval)
 
     def transition(
         self,
@@ -1667,7 +1782,7 @@ class ExecutionRepository:
             raise ArtifactLimitError("Artifact exceeds the configured size limit.")
         if retention_seconds <= 0:
             raise ValueError("retention_seconds must be positive")
-        if not isinstance(job_id, str) or _SAFE_NAME.fullmatch(job_id) is None:
+        if not _is_safe_job_id(job_id):
             raise ExecutionRepositoryError("Execution job does not exist.")
         if self.get_job(job_id) is None:
             raise ExecutionRepositoryError("Execution job does not exist.")
@@ -1691,13 +1806,21 @@ class ExecutionRepository:
         stream: Any = None
         try:
             with self._directory_lock:
-                job_root.mkdir(parents=True, exist_ok=True)
-                resolved_job_root = job_root.resolve(strict=True)
+                # An OSError from either of these carries the absolute path,
+                # so it is reported as this repository's own error instead.
+                try:
+                    job_root.mkdir(parents=True, exist_ok=True)
+                    resolved_job_root = job_root.resolve(strict=True)
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact directory is unavailable.") from None
                 if not resolved_job_root.is_relative_to(root) or _is_reparse_point(resolved_job_root):
                     raise ExecutionRepositoryError("Artifact path escaped the artifact root.")
                 # The temporary file exists before the lock is released, so the
                 # directory is never empty for a sweep to remove.
-                stream = temporary.open("xb")
+                try:
+                    stream = temporary.open("xb")
+                except OSError:
+                    raise ExecutionRepositoryError("Artifact file could not be created.") from None
             with stream:
                 stream.write(content)
                 stream.flush()
@@ -1728,7 +1851,7 @@ class ExecutionRepository:
                         mime_type,
                         len(content),
                         digest,
-                        str(target),
+                        self._stored_text(target),
                         now.isoformat(),
                         expires.isoformat(),
                     ),
@@ -1736,8 +1859,13 @@ class ExecutionRepository:
         except Exception:
             if stream is not None:
                 stream.close()
-            target.unlink(missing_ok=True)
-            temporary.unlink(missing_ok=True)
+            for leftover in (target, temporary):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    # Never replaces the error being raised. What stays is a
+                    # file no row names, which the artifact-root sweep reclaims.
+                    pass
             # The directory this call created (or found empty) is not left behind.
             self._remove_empty_artifact_directory(job_root)
             raise
@@ -1786,7 +1914,7 @@ class ExecutionRepository:
             mime_type=row["mime_type"],
             size=int(row["size"]),
             sha256=row["sha256"],
-            path=row["path"],
+            path=str(self._stored_path(row["path"])),
             created_at=row["created_at"],
             expires_at=row["expires_at"],
         )
@@ -1816,7 +1944,7 @@ class ExecutionRepository:
             ).fetchone()
             if row is None:
                 return
-            path = self._validated_cleanup_path(Path(row["path"]))
+            path = self._validated_cleanup_path(self._stored_path(row["path"]))
             connection.execute(
                 "DELETE FROM execution_artifacts WHERE artifact_id = ?",
                 (artifact_id,),
@@ -1851,7 +1979,7 @@ class ExecutionRepository:
             raise ExecutionRepositoryError("Artifact integrity check failed.") from None
         if not 0 <= expected_size <= self.max_artifact_bytes:
             raise ExecutionRepositoryError("Artifact integrity check failed.")
-        original_path = Path(row["path"])
+        original_path = self._stored_path(row["path"])
         if _is_reparse_point(original_path):
             raise ExecutionRepositoryError("Artifact path is unavailable.")
         try:
@@ -1931,7 +2059,7 @@ class ExecutionRepository:
                 artifact_id = str(artifact_row["artifact_id"])
                 quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
                 try:
-                    path = self._validated_cleanup_path(Path(artifact_row["path"]))
+                    path = self._validated_cleanup_path(self._stored_path(artifact_row["path"]))
                     self._validated_quarantine_path(quarantine)
                     self._record_artifact_cleanup(artifact_id, path, quarantine)
                 except ArtifactCleanupRejected as exc:
@@ -1993,6 +2121,31 @@ class ExecutionRepository:
             skipped=skipped,
         )
 
+    def _stored_path(self, text: str) -> Path:
+        """The location a row's path column names, under this build's artifact root.
+
+        New rows record a path relative to the artifact root, so moving the
+        data directory does not orphan them; rows written by an earlier build
+        hold an absolute path, and that is returned as written. Nothing here
+        decides whether the location is acceptable: an absolute path, a
+        relative one that climbs out with ``..`` and a drive-relative one all
+        come back as they resolve, and the validators that follow
+        (:meth:`_validated_cleanup_path`, :meth:`_validated_quarantine_path`
+        and the containment check in :meth:`read_artifact`) refuse any that
+        does not end up inside the root.
+        """
+
+        path = Path(text)
+        return path if path.is_absolute() else self.artifact_root / path
+
+    def _stored_text(self, path: Path) -> str:
+        """How a row records ``path``: relative to the artifact root when it lies under it."""
+
+        try:
+            return path.relative_to(self.artifact_root).as_posix()
+        except ValueError:
+            return str(path)
+
     def _validated_cleanup_path(self, path: Path) -> Path:
         """Validate a source path without following an untrusted reparse hop.
 
@@ -2049,7 +2202,7 @@ class ExecutionRepository:
                 VALUES (?, ?, ?, 'pending', ?)
                 ON CONFLICT(artifact_id) DO NOTHING
                 """,
-                (artifact_id, str(path), str(quarantine), self._now()),
+                (artifact_id, self._stored_text(path), self._stored_text(quarantine), self._now()),
             )
 
     def _resume_artifact_cleanup(self, *, limit: int) -> tuple[int, int]:
@@ -2128,7 +2281,7 @@ class ExecutionRepository:
         """
 
         try:
-            quarantine = self._validated_quarantine_path(Path(quarantine_text))
+            quarantine = self._validated_quarantine_path(self._stored_path(quarantine_text))
         except ArtifactCleanupBlocked:
             return False
         except ArtifactCleanupRejected:
@@ -2193,8 +2346,8 @@ class ExecutionRepository:
     def _advance_artifact_cleanup(
         self, artifact_id: str, path_text: str, quarantine_text: str, state: str
     ) -> int:
-        path = self._validated_cleanup_path(Path(path_text))
-        quarantine = self._validated_quarantine_path(Path(quarantine_text))
+        path = self._validated_cleanup_path(self._stored_path(path_text))
+        quarantine = self._validated_quarantine_path(self._stored_path(quarantine_text))
         if state not in {"pending", "quarantined", "finalized"}:
             raise ArtifactCleanupRejected("Artifact cleanup state is invalid.")
         removed = 0
@@ -2312,9 +2465,18 @@ class ExecutionRepository:
           job; and
         * a link, a reparse point or anything of another name is never touched.
 
-        The pass is bounded: it removes at most ``limit`` things and looks at
-        at most ``_SWEEP_ENTRY_BUDGET`` entries, resuming where it stopped on
-        the next call. Best effort: a failure on one entry never stops the pass.
+        The pass is bounded, and the bounds are exact where they matter. It
+        removes at most ``limit`` things, counting every file, every job
+        directory and every staging directory as one; a job directory that
+        would need more than what is left is worked on until the limit is
+        reached and picked up again by the next call, at that same directory.
+        It stops taking on new top-level entries once it has looked at
+        ``_SWEEP_ENTRY_BUDGET`` entries (a directory counts as itself plus the
+        children it reads). That check runs between top-level entries, so a
+        pass can look at up to ``_SWEEP_CHILD_LIMIT`` + 1 entries more than the
+        budget; it never removes more than ``limit``. The next call resumes
+        where this one stopped. Best effort: a failure on one entry never
+        stops the pass.
         """
 
         if isinstance(limit, bool) or not 1 <= limit <= 10_000:
@@ -2337,55 +2499,76 @@ class ExecutionRepository:
                 if removed >= limit or examined >= _SWEEP_ENTRY_BUDGET:
                     finished = False
                     break
-                gone, looked_at = self._sweep_entry(connection, self.artifact_root / name, stale_before)
+                gone, looked_at, complete = self._sweep_entry(
+                    connection, self.artifact_root / name, stale_before, limit - removed
+                )
                 removed += gone
                 examined += looked_at
+                if not complete:
+                    # The limit ran out inside this entry. What it removed is
+                    # gone for good, so the next pass starts here and finishes it.
+                    finished = False
+                    break
                 self._sweep_cursor = name
         if finished:
             self._sweep_cursor = ""
         return removed
 
     def _sweep_entry(
-        self, connection: sqlite3.Connection, entry: Path, stale_before: float
-    ) -> tuple[int, int]:
-        """Sweep one entry directly under the artifact root; return (removed, examined)."""
+        self,
+        connection: sqlite3.Connection,
+        entry: Path,
+        stale_before: float,
+        allowance: int,
+    ) -> tuple[int, int, bool]:
+        """Sweep one entry directly under the artifact root.
+
+        Returns ``(removed, examined, complete)``. ``removed`` never exceeds
+        ``allowance``; ``complete`` is false only when the allowance ran out
+        with more of this entry left to remove, so the caller must come back
+        to it instead of moving on.
+        """
 
         name = entry.name
         try:
             if _is_reparse_point(entry) or not stat.S_ISDIR(entry.lstat().st_mode):
-                return 0, 1
+                return 0, 1, True
         except OSError:
-            return 0, 1
+            return 0, 1, True
         if name == _LEGACY_QUARANTINE_NAME:
-            return int(self._remove_empty_directory(entry)), 1
+            return int(self._remove_empty_directory(entry)), 1, True
         staging = _RECIPE_STAGING_NAME.fullmatch(name)
         if staging is not None:
             job_id = staging["job_id"]
             if _SAFE_NAME.fullmatch(job_id) is None:
-                return 0, 1
+                return 0, 1, True
             job = connection.execute(
                 "SELECT status FROM execution_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
             if job is not None and job["status"] not in TerminalExecutionStatus:
-                return 0, 1  # its worker may still be writing here
+                return 0, 1, True  # its worker may still be writing here
             try:
                 shutil.rmtree(entry)
             except OSError:
-                return 0, 1
-            return 1, 1
+                return 0, 1, True
+            return 1, 1, True
         if name.startswith(".") or _SAFE_NAME.fullmatch(name) is None:
-            return 0, 1
-        return self._sweep_job_directory(connection, entry, stale_before)
+            return 0, 1, True
+        return self._sweep_job_directory(connection, entry, stale_before, allowance)
 
     def _sweep_job_directory(
-        self, connection: sqlite3.Connection, directory: Path, stale_before: float
-    ) -> tuple[int, int]:
+        self,
+        connection: sqlite3.Connection,
+        directory: Path,
+        stale_before: float,
+        allowance: int,
+    ) -> tuple[int, int, bool]:
         removed = 0
         examined = 1
         try:
             children = list(itertools.islice(directory.iterdir(), _SWEEP_CHILD_LIMIT))
         except OSError:
-            return 0, examined
+            return 0, examined, True
         for child in children:
             examined += 1
             try:
@@ -2401,6 +2584,8 @@ class ExecutionRepository:
                     (stored["artifact_id"],),
                 ).fetchone() is not None:
                     continue
+            if removed >= allowance:
+                return removed, examined, False
             try:
                 child.unlink()
             except OSError:
@@ -2409,9 +2594,13 @@ class ExecutionRepository:
         named = connection.execute(
             "SELECT 1 FROM execution_artifacts WHERE job_id = ? LIMIT 1", (directory.name,)
         ).fetchone()
-        if named is None and self._remove_empty_directory(directory):
-            removed += 1
-        return removed, examined
+        if named is None:
+            if removed >= allowance:
+                # The directory may be empty now, and taking it is one more removal.
+                return removed, examined, False
+            if self._remove_empty_directory(directory):
+                removed += 1
+        return removed, examined, True
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:

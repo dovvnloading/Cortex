@@ -78,7 +78,7 @@ class _FakeEngine:
         self.memory_inputs = list(memories)
         return list(memories)
 
-    def fit_history_to_context(
+    def fit_history(
         self,
         messages: list[dict],
         *,
@@ -92,13 +92,10 @@ class _FakeEngine:
         host_observations=(),
         attachments=(),
         model: str | None = None,
-    ) -> str:
+    ) -> tuple[str, list[dict]]:
         del code_execution_eligible, bypass_system_prompt, host_observations, attachments, model
         self.history_messages = messages
-        return "formatted history"
-
-    def fit_history(self, messages, **kwargs):
-        return self.fit_history_to_context(messages, **kwargs), list(messages)
+        return "formatted history", list(messages)
 
     def fit_attachments_to_context(self, attachments, **kwargs):
         del kwargs
@@ -124,7 +121,10 @@ class _FakeEngine:
         stats = GenerationStats(eval_count=10, eval_duration_ms=100.0, tokens_per_second=100.0)
         return "response", "thoughts", MemoryCommand(("remember tea",), False), stats
 
-    def translate_text(self, text: str, target_language: str) -> TranslationResult:
+    def translate_text(
+        self, text: str, target_language: str, *, options=None, cancellation_event=None
+    ) -> TranslationResult:
+        del text, target_language, options, cancellation_event
         return self.translation
 
     def generate_chat_title(self, chat_history: str, *, options=None) -> str | None:
@@ -144,11 +144,9 @@ class _StatusReportingEngine(_FakeEngine):
 
 
 class _CrashingDuringTranslationEngine(_FakeEngine):
-    """An engine whose translate_text accepts the modern ``options`` kwarg
-    (so the call is never a signature mismatch) but hits a genuine bug --
-    e.g. an unexpected response shape -- after it has already started real
-    work. Used to prove such a TypeError is not mistaken for a "this engine
-    doesn't take options" probe failure and silently retried."""
+    """An engine whose translate_text hits a genuine bug -- e.g. an unexpected
+    response shape -- after it has already started real work. Used to prove
+    such a TypeError is not retried: a retry would call a real model twice."""
 
     def __init__(self):
         super().__init__()
@@ -156,9 +154,9 @@ class _CrashingDuringTranslationEngine(_FakeEngine):
         self.started_real_work = False
 
     def translate_text(
-        self, text: str, target_language: str, options: dict | None = None
+        self, text: str, target_language: str, *, options=None, cancellation_event=None
     ) -> TranslationResult:
-        del text, target_language, options
+        del text, target_language, options, cancellation_event
         self.translate_calls += 1
         self.started_real_work = True
         raise TypeError("boom: bad response shape mid-translation")
@@ -669,12 +667,81 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(result.response, "response")
         self.assertIsNotNone(result.translation_error)
 
+    def test_history_uses_the_untranslated_answer_when_translation_is_on(self):
+        """The model is shown its own words, not the translation the user read.
+
+        Fed its answers back in the target language, a small model starts
+        answering in it, after which the translation model is asked to translate
+        a language into itself.
+        """
+        engine = _FakeEngine()
+        stored = [
+            {"role": "user", "content": "Bonjour"},
+            {
+                "role": "assistant",
+                "content": "Bonjour, comment allez-vous ?",
+                "original_content": "Hello, how are you?",
+            },
+            {"role": "user", "content": "hello"},
+        ]
+        service = GenerationService(
+            history_loader=lambda thread_id: stored,
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        service.generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in engine.history_messages],
+            [("user", "Bonjour"), ("assistant", "Hello, how are you?")],
+        )
+        # What was stored -- what the user reads -- is not touched.
+        self.assertEqual(stored[1]["content"], "Bonjour, comment allez-vous ?")
+
+        # The API hands the service the history it read; the rule is the same.
+        engine.history_messages = None
+        service.generate(_snapshot(), progress_sink=_ProgressRecorder(), history_messages=stored)
+        self.assertEqual(engine.history_messages[1]["content"], "Hello, how are you?")
+
+    def test_a_blank_or_malformed_original_leaves_the_stored_answer_in_history(self):
+        engine = _FakeEngine()
+        for original in ("", "   ", None, 7, ["nested"]):
+            stored = [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "original_content": original},
+                {"role": "user", "content": "next"},
+            ]
+            GenerationService(
+                history_loader=lambda thread_id, stored=stored: stored,
+                memory_loader=lambda: [],
+                engine_factory=lambda snapshot: engine,
+            ).generate(_snapshot(), progress_sink=_ProgressRecorder())
+
+            self.assertEqual(engine.history_messages[1]["content"], "a", original)
+
+    def test_the_untranslated_answer_is_reported_only_when_a_translation_replaced_it(self):
+        def run(engine, **snapshot_overrides):
+            return GenerationService(
+                history_loader=lambda thread_id: [],
+                memory_loader=lambda: [],
+                engine_factory=lambda snapshot: engine,
+            ).generate(_snapshot(**snapshot_overrides), progress_sink=_ProgressRecorder())
+
+        translated = run(_FakeEngine())
+        self.assertEqual((translated.response, translated.original_response), ("translated", "response"))
+
+        untranslated = run(_FakeEngine(), translation_enabled=False)
+        self.assertEqual((untranslated.response, untranslated.original_response), ("response", None))
+
+        failed = run(_FakeEngine(translation=TranslationResult.failed("no", error_details="x")))
+        self.assertEqual((failed.response, failed.original_response), ("response", None))
+
     def test_translation_type_error_from_inside_the_call_is_not_retried(self):
         """Regression guard: a TypeError raised by translate_text() itself,
-        once it has already started real work, must propagate rather than
-        being mistaken for a "this engine doesn't accept options" signature
-        probe and silently retried -- a retry here would call a real model
-        a second, unwanted time.
+        once it has already started real work, must propagate and not be
+        retried -- a retry here would call a real model a second, unwanted
+        time.
         """
         engine = _CrashingDuringTranslationEngine()
         service = GenerationService(

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from cortex_backend.api.schemas import AddMessageRequest, ChatMessage
+from cortex_backend.api.schemas import ChatMessage
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.core.generation import GenerationAttachment
@@ -32,9 +32,7 @@ class _CapturingClient:
 class ChatCorrectnessTests(unittest.TestCase):
     def test_reasoning_metadata_is_scoped_to_assistant_messages(self):
         user_response = ChatMessage(role="user", content="Question", thoughts="must not leak")
-        user_request = AddMessageRequest(role="user", content="Question", thoughts="must not persist")
         self.assertIsNone(user_response.thoughts)
-        self.assertIsNone(user_request.thoughts)
 
         repository = InMemoryChatRepository(
             [{
@@ -110,14 +108,14 @@ class ChatCorrectnessTests(unittest.TestCase):
                 ]
             )
 
-        history = SynthesisAgent.fit_history_to_context(
+        history = SynthesisAgent.fit_history(
             messages,
             query="latest question",
             permanent_memories=["User likes concise answers."],
             memories_enabled=True,
             user_system_instructions="Be helpful.",
             num_ctx=4096,
-        )
+        )[0]
 
         self.assertIn("old-7", history)
         self.assertNotIn("old-0", history)
@@ -147,7 +145,7 @@ class ChatCorrectnessTests(unittest.TestCase):
             messages.append({"role": "assistant", "content": f"{reply} (turn {index})"})
 
         default_num_ctx = CortexSettings().generation.num_ctx
-        history = SynthesisAgent.fit_history_to_context(
+        history = SynthesisAgent.fit_history(
             messages,
             query="Given all that, what should I change first?",
             permanent_memories=[
@@ -161,7 +159,7 @@ class ChatCorrectnessTests(unittest.TestCase):
             user_system_instructions="Always include a code example when relevant, and be concise.",
             num_ctx=default_num_ctx,
             code_execution_eligible=True,
-        )
+        )[0]
 
         kept_exchanges = history.count("User: ")
         self.assertGreaterEqual(
@@ -190,14 +188,14 @@ class ChatCorrectnessTests(unittest.TestCase):
         messages.append({"role": "user", "content": "Please write the full module"})
         messages.append({"role": "assistant", "content": "X" * 35_000})
 
-        history = SynthesisAgent.fit_history_to_context(
+        history = SynthesisAgent.fit_history(
             messages,
             query="now explain what you just did",
             permanent_memories=[],
             memories_enabled=True,
             user_system_instructions=None,
             num_ctx=8192,
-        )
+        )[0]
 
         self.assertNotEqual(history, "No history available.")
         # All ten older exchanges and the newest one, which is kept.
@@ -390,10 +388,10 @@ class TokenEstimateTests(unittest.TestCase):
     def test_a_calibrated_model_fits_less_history_than_an_unknown_one(self):
         messages = _exchanges(40, size=400)
         budget = {"query": "next", "num_ctx": 8192, **_NO_MEMORY}
-        unknown = SynthesisAgent.select_history_messages(list(messages), **budget, model="dense-model")
+        unknown = SynthesisAgent.fit_history(list(messages), **budget, model="dense-model")[1]
 
         token_budget.TOKEN_RATIOS.observe("dense-model", ["x" * 4000], 4000 // 2 + 4)
-        calibrated = SynthesisAgent.select_history_messages(list(messages), **budget, model="dense-model")
+        calibrated = SynthesisAgent.fit_history(list(messages), **budget, model="dense-model")[1]
 
         self.assertLess(len(calibrated), len(unknown))
 
@@ -492,7 +490,7 @@ class TokenEstimateTests(unittest.TestCase):
 
     def test_history_selection_leaves_the_safety_margin_free(self):
         budget = {"query": "next", "num_ctx": 4096, **_NO_MEMORY}
-        transcript = SynthesisAgent.fit_history_to_context(_exchanges(40, size=300), **budget)
+        transcript = SynthesisAgent.fit_history(_exchanges(40, size=300), **budget)[0]
         self.assertLess(transcript.count("User: "), 40, "the budget must actually bite")
 
         prompt = PromptTemplate.build_synthesis_prompt(
@@ -735,16 +733,16 @@ class ImageBudgetTests(unittest.TestCase):
 
     def test_history_leaves_room_for_an_attached_image(self):
         messages = _exchanges(60, size=400)
-        without = SynthesisAgent.select_history_messages(list(messages), **self.BUDGET)
-        with_image = SynthesisAgent.select_history_messages(
+        without = SynthesisAgent.fit_history(list(messages), **self.BUDGET)[1]
+        with_image = SynthesisAgent.fit_history(
             list(messages), **self.BUDGET, attachments=(self._image(),)
-        )
+        )[1]
 
         self.assertLess(len(with_image), len(without))
         # And what remains, picture included, fits the limit the way any prompt does.
-        transcript = SynthesisAgent.fit_history_to_context(
+        transcript = SynthesisAgent.fit_history(
             list(messages), **self.BUDGET, attachments=(self._image(),)
-        )
+        )[0]
         prompt = PromptTemplate.build_synthesis_prompt(
             "next", transcript, [], False, None, (self._image(),), code_execution_eligible=False
         )
@@ -825,8 +823,9 @@ class HistoryRetentionTests(unittest.TestCase):
     def test_retained_history_is_contiguous_and_marks_omitted_turns(self):
         # One large exchange in the middle: the walk used to skip it and keep
         # the older, smaller ones, so the model saw 0-4 and 6-11 with a hole
-        # where the largest answer had been.
-        messages = _exchanges(12, oversized={5: 20_000})
+        # where the largest answer had been. Big enough to overflow the window
+        # by itself, whatever the fixed prompt around it costs.
+        messages = _exchanges(12, oversized={5: 40_000})
 
         transcript, structured = SynthesisAgent.fit_history(list(messages), **self.BUDGET)
 

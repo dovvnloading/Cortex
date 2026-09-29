@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
@@ -87,7 +87,7 @@ describe("AppShell", () => {
     expect(window.location.pathname).toBe("/settings");
   });
 
-  it("requires the exact chat title before permanent deletion", async () => {
+  it("confirms a chat delete in one step, without typing the title", async () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
     const onDeleteChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue();
@@ -96,18 +96,29 @@ describe("AppShell", () => {
 
     await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
 
-    expect(screen.getByRole("alertdialog")).toHaveTextContent("Deleted chats cannot be recovered.");
-    const confirm = screen.getByRole("button", { name: "Delete permanently" });
-    const verifier = screen.getByRole("textbox", { name: /Quarterly planning/ });
-    expect(confirm).toBeDisabled();
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent("You can undo it for a few seconds afterwards.");
+    expect(dialog).toHaveTextContent("Quarterly planning");
+    expect(dialog).not.toHaveTextContent("cannot be recovered");
+    expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(onDeleteChat).not.toHaveBeenCalled();
 
-    await user.type(verifier, "Quarterly plan");
-    expect(confirm).toBeDisabled();
-    await user.type(verifier, "ning");
-    expect(confirm).toBeEnabled();
-    await user.click(confirm);
+    await user.click(within(dialog).getByRole("button", { name: "Delete chat" }));
 
-    expect(onDeleteChat).toHaveBeenCalledWith(chat.id);
+    expect(onDeleteChat).toHaveBeenCalledExactlyOnceWith(chat.id);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("leaves the chat alone when the delete is cancelled", async () => {
+    const user = userEvent.setup();
+    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
+    const onDeleteChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue();
+
+    renderShell({ chats: [chat], onDeleteChat, onOpenSettings: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
+    await user.click(screen.getByRole("button", { name: "Keep chat" }));
+
+    expect(onDeleteChat).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
@@ -128,20 +139,31 @@ describe("AppShell", () => {
     expect(field).toHaveValue("Updated planning");
   });
 
-  it("keeps the delete dialog and confirmation when deletion fails", async () => {
+  it("keeps the delete dialog open when deletion is refused", async () => {
     const user = userEvent.setup();
     const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
     const onDeleteChat = vi.fn<(id: string) => Promise<boolean>>().mockResolvedValue(false);
 
     renderShell({ chats: [chat], onDeleteChat, onOpenSettings: vi.fn() });
     await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
-    const verifier = screen.getByRole("textbox", { name: /Quarterly planning/ });
-    await user.type(verifier, "Quarterly planning");
-    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    await user.click(screen.getByRole("button", { name: "Delete chat" }));
 
     expect(onDeleteChat).toHaveBeenCalledWith(chat.id);
     expect(screen.getByRole("alertdialog")).toBeVisible();
-    expect(verifier).toHaveValue("Quarterly planning");
+    expect(screen.getByRole("button", { name: "Delete chat" })).toBeEnabled();
+  });
+
+  it("keeps the delete dialog open when the delete callback rejects", async () => {
+    const user = userEvent.setup();
+    const chat: ChatSummary = { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" };
+    const onDeleteChat = vi.fn<(id: string) => Promise<void>>().mockRejectedValue(new Error("offline"));
+
+    renderShell({ chats: [chat], onDeleteChat, onOpenSettings: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Delete Quarterly planning" }));
+    await user.click(screen.getByRole("button", { name: "Delete chat" }));
+
+    expect(screen.getByRole("alertdialog")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Delete chat" })).toBeEnabled();
   });
 
   it("filters the thread list by title as the user types a search query", async () => {

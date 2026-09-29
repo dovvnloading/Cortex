@@ -227,11 +227,28 @@ def _migrate_to_v4(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(group_id)")
 
 
+def _migrate_to_v5(connection: sqlite3.Connection) -> None:
+    """The answer as the model wrote it, beside the text a message displays.
+
+    With translation on, ``content`` holds the translation the user reads and
+    ``original_content`` the untranslated answer. The model is shown the
+    original as its own earlier turn, and titles are made from it, so the
+    conversation it continues stays in one language. NULL means there is no
+    separate original, so ``content`` is shown to the model as it stands. That
+    is right for an answer that was never translated. It is not for one
+    translated before this column existed: its original was not kept and is not
+    reconstructed, so the model keeps seeing that answer in the target language
+    and only turns translated from now on get the benefit.
+    """
+    add_column_if_missing(connection, "messages", "original_content", "TEXT")
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }
 
 
@@ -278,7 +295,7 @@ def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(
         self,
@@ -1224,12 +1241,13 @@ class DatabaseManager:
                         msg.get('thoughts'),
                         json.dumps(msg.get('attachments')) if msg.get('attachments') else None,
                         json.dumps(msg.get('stats')) if msg.get('stats') else None,
+                        msg.get('original_content'),
                         msg_timestamp
                     ))
                 
                 conn.executemany("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, messages_to_insert)
                 logging.info("Successfully created forked chat with %s messages.", len(messages))
         except PersistenceError as exc:
@@ -1250,12 +1268,18 @@ class DatabaseManager:
         stats: dict | None = None,
         thread_title: str | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ):
-        """Adds a new message to a specific chat thread."""
+        """Adds a new message to a specific chat thread.
+
+        ``original_content`` is an assistant answer as the model wrote it, when
+        ``content`` holds a translation of it (see ``_migrate_to_v5``).
+        """
         try:
             if role != "assistant":
                 thoughts = None
                 stats = None
+                original_content = None
             with self.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if thread_title is not None:
@@ -1265,8 +1289,8 @@ class DatabaseManager:
                     )
                 self._check_chat_revision(conn, thread_id, expected_revision)
                 conn.execute("""
-                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     thread_id,
                     role,
@@ -1275,6 +1299,7 @@ class DatabaseManager:
                     thoughts,
                     json.dumps(attachments) if attachments else None,
                     json.dumps(stats) if stats else None,
+                    original_content,
                     _utc_now_iso()
                 ))
                 # Update the thread's main timestamp to reflect recent activity
@@ -1365,7 +1390,7 @@ class DatabaseManager:
                     chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
                 
                 cursor.execute(
-                    "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, timestamp FROM messages "
+                    "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp FROM messages "
                     "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
@@ -1441,8 +1466,14 @@ class DatabaseManager:
         attachments: list | None = None,
         stats: dict | None = None,
         expected_revision: int | None = None,
+        original_content: str | None = None,
     ) -> None:
-        """Replace one assistant response without disturbing its user turn."""
+        """Replace one assistant response without disturbing its user turn.
+
+        ``original_content`` always replaces the stored one, so a regenerated
+        answer that was not translated does not keep the previous answer's
+        untranslated text.
+        """
         try:
             with self.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -1458,6 +1489,7 @@ class DatabaseManager:
                     "sources = ?",
                     "thoughts = ?",
                     "generation_stats_json = ?",
+                    "original_content = ?",
                     "timestamp = ?",
                 ]
                 params: list = [
@@ -1465,6 +1497,7 @@ class DatabaseManager:
                     json.dumps(sources) if sources else None,
                     thoughts,
                     json.dumps(stats) if stats else None,
+                    original_content,
                     _utc_now_iso(),
                 ]
                 if attachments is not None:

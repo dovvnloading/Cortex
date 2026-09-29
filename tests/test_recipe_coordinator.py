@@ -200,6 +200,27 @@ def test_coordinator_rejects_request_conflict_and_wrong_owner_artifact(tmp_path:
     assert missing.value.code == "input_artifact_unavailable"
 
 
+def test_the_source_artifact_is_read_as_its_owner_never_unscoped(tmp_path: Path, monkeypatch):
+    repository, _source_job_id, source_artifact_id = _repository(tmp_path)
+    coordinator = RecipeExecutionCoordinator(repository, lambda _job: _FakeAttempt(_output()))
+    real_read = repository.read_artifact
+    owners: list[str | None] = []
+
+    def recording(artifact_id, *, owner=None):
+        owners.append(owner)
+        return real_read(artifact_id, owner=owner)
+
+    monkeypatch.setattr(repository, "read_artifact", recording)
+
+    assert coordinator._load_input(OWNER, source_artifact_id) == _image_bytes()
+    assert owners == [OWNER]
+
+    with pytest.raises(RecipeExecutionError) as foreign:
+        coordinator._load_input("b" * 64, source_artifact_id)
+    assert foreign.value.code == "input_artifact_unavailable"
+    assert owners == [OWNER], "another owner's artifact was read before it was refused"
+
+
 def test_coordinator_failure_is_redacted_and_does_not_publish(tmp_path: Path):
     repository, _source_job_id, source_artifact_id = _repository(tmp_path)
     attempt = _FakeAttempt(error="provider_failed")

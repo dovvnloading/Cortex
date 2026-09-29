@@ -17,83 +17,6 @@
         "title": "AddMemoryRequest",
         "type": "object"
       },
-      "AddMessageRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "attachments": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ChatAttachment"
-                },
-                "maxItems": 8,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Attachments"
-          },
-          "base_revision": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Base Revision"
-          },
-          "content": {
-            "maxLength": 100000,
-            "minLength": 1,
-            "title": "Content",
-            "type": "string"
-          },
-          "role": {
-            "enum": [
-              "user",
-              "assistant",
-              "system"
-            ],
-            "title": "Role",
-            "type": "string"
-          },
-          "sources": {
-            "anyOf": [
-              {
-                "items": {},
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sources"
-          },
-          "thoughts": {
-            "anyOf": [
-              {
-                "maxLength": 100000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Thoughts"
-          }
-        },
-        "required": [
-          "role",
-          "content"
-        ],
-        "title": "AddMessageRequest",
-        "type": "object"
-      },
       "AppearanceSettings": {
         "additionalProperties": false,
         "properties": {
@@ -1802,6 +1725,13 @@
             "title": "Bypass System Prompt",
             "type": "boolean"
           },
+          "keep_alive_minutes": {
+            "default": 0,
+            "maximum": 1440.0,
+            "minimum": -1.0,
+            "title": "Keep Alive Minutes",
+            "type": "integer"
+          },
           "num_ctx": {
             "default": 8192,
             "maximum": 65536.0,
@@ -2009,9 +1939,44 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HuggingFaceFileEntry": {
+        "additionalProperties": false,
+        "description": "One ``.gguf`` file in a repository; ``size`` is in bytes, absent when Hugging Face did not report it.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "HuggingFaceFileEntry",
+        "type": "object"
+      },
       "HuggingFaceFileListResponse": {
         "additionalProperties": false,
         "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/HuggingFaceFileEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
           "files": {
             "default": [],
             "items": {
@@ -2279,6 +2244,11 @@
       "JobStatusResponse": {
         "additionalProperties": false,
         "properties": {
+          "can_cancel": {
+            "default": false,
+            "title": "Can Cancel",
+            "type": "boolean"
+          },
           "error": {
             "anyOf": [
               {
@@ -3990,60 +3960,6 @@
         "summary": "Move Chat To Group"
       }
     },
-    "/api/v1/chats/{thread_id}/messages": {
-      "post": {
-        "operationId": "add_message_api_v1_chats__thread_id__messages_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "thread_id",
-            "required": true,
-            "schema": {
-              "title": "Thread Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddMessageRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChatResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "CortexSession": []
-          }
-        ],
-        "summary": "Add Message"
-      }
-    },
     "/api/v1/chats/{thread_id}/regenerations": {
       "post": {
         "operationId": "regenerate_chat_api_v1_chats__thread_id__regenerations_post",
@@ -4700,7 +4616,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Create Generation"
+        "summary": "Create Generation",
+        "tags": [
+          "generations"
+        ]
       }
     },
     "/api/v1/generations/{job_id}": {
@@ -4744,7 +4663,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Generation Status"
+        "summary": "Generation Status",
+        "tags": [
+          "generations"
+        ]
       }
     },
     "/api/v1/generations/{job_id}/cancel": {
@@ -4788,7 +4710,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Cancel Generation"
+        "summary": "Cancel Generation",
+        "tags": [
+          "generations"
+        ]
       }
     },
     "/api/v1/generations/{job_id}/events": {
@@ -4850,7 +4775,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Generation Events"
+        "summary": "Generation Events",
+        "tags": [
+          "generations"
+        ]
       }
     },
     "/api/v1/health": {
@@ -4971,7 +4899,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Get Job"
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/cancel": {
@@ -5015,7 +4946,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Cancel Job"
+        "summary": "Cancel Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/events": {
@@ -5059,7 +4993,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "Job Events"
+        "summary": "Job Events",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/memories": {
@@ -5559,5 +5496,15 @@
         "summary": "Shutdown"
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "description": "Chat turns. Status, cancel and events answer only for a job of kind generation; the id of any other kind of job is a 404 here.",
+      "name": "generations"
+    },
+    {
+      "description": "The generic job family: status, cancel and events for a job of any kind (generation, models, gguf_download). Model and GGUF download progress is read here; chat clients use /generations.",
+      "name": "jobs"
+    }
+  ]
 }

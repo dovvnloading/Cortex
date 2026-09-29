@@ -96,3 +96,54 @@ describe("llamacppPollInterval", () => {
     }
   });
 });
+
+describe("resolveRuntimeAvailability while the model inventory is loading", () => {
+  const loading = (selectedModel: string | null, overrides: Partial<Parameters<typeof resolveRuntimeAvailability>[0]> = {}) =>
+    resolveRuntimeAvailability({
+      selectedModel,
+      // What the app computes from the empty stand-in inventory.
+      selectedModelAvailable: false,
+      inventoryLoading: true,
+      ollamaConnected: true,
+      llamacppStatus: { state: "idle" },
+      ...overrides,
+    });
+
+  it("reports a neutral checking message instead of calling the model unavailable", () => {
+    expect(loading("qwen3:8b")).toEqual({ ready: false, reason: "inventory-loading", message: "Checking local models…" });
+    expect(loading("gguf:demo.gguf").reason).toBe("inventory-loading");
+  });
+
+  it("does not let a stale runtime verdict speak for the inventory that has not answered", () => {
+    expect(loading("gguf:demo.gguf", { llamacppStatus: { state: "failed", last_error: "Vulkan device lost." } }).reason).toBe("inventory-loading");
+    expect(loading("qwen3:8b", { ollamaConnected: false, ollamaMessage: "Ollama is not running." }).reason).toBe("inventory-loading");
+  });
+
+  it("still asks for a model when none is selected", () => {
+    expect(loading(null).reason).toBe("no-model-selected");
+  });
+
+  it("reports a real unavailable model once the inventory has answered", () => {
+    const answered = resolveRuntimeAvailability({
+      selectedModel: "qwen3:8b",
+      selectedModelAvailable: false,
+      inventoryLoading: false,
+      ollamaConnected: true,
+      llamacppStatus: { state: "idle" },
+    });
+
+    expect(answered.reason).toBe("model-unavailable");
+    expect(answered.message).toContain("unavailable");
+  });
+
+  it("is off by default, so existing callers keep their behaviour", () => {
+    const result = resolveRuntimeAvailability({
+      selectedModel: "qwen3:8b",
+      selectedModelAvailable: true,
+      ollamaConnected: true,
+      llamacppStatus: { state: "idle" },
+    });
+
+    expect(result).toEqual({ ready: true, reason: null, message: null });
+  });
+});

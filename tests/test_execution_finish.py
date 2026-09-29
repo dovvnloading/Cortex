@@ -5,7 +5,11 @@ from __future__ import annotations
 from threading import Event
 
 from cortex_backend.execution.finish import UnsuccessfulJobWording, finish_unsuccessful_job
-from cortex_backend.execution.repository import ExecutionRepository, ExecutionTransitionConflict
+from cortex_backend.execution.repository import (
+    ExecutionRepository,
+    ExecutionRepositoryError,
+    ExecutionTransitionConflict,
+)
 
 WORDING = UnsuccessfulJobWording(
     cancelled_event="cancelled",
@@ -176,6 +180,60 @@ def test_an_unexpected_store_error_is_contained(execution_repository, monkeypatc
 
     assert any("RuntimeError" in record.getMessage() for record in caplog.records)
     assert "simulated persistence outage" not in caplog.text
+
+
+def test_a_job_that_cannot_be_read_is_contained_like_a_job_that_cannot_be_written(
+    execution_repository, monkeypatch, caplog
+):
+    """``get_job`` sat outside the ``try``, so a store failure escaped a function that says nothing raises.
+
+    This runs in a worker's error path; an exception here replaces the outcome
+    the caller was about to report.
+    """
+
+    job = _running_job(execution_repository)
+
+    def unreadable(job_id, **kwargs):
+        raise ExecutionRepositoryError("SQLite execution operation failed.")
+
+    monkeypatch.setattr(execution_repository, "get_job", unreadable)
+
+    with caplog.at_level("WARNING", logger="cortex.execution.finish"):
+        finish_unsuccessful_job(
+            execution_repository,
+            job.job_id,
+            failure_code="worker_failed",
+            cancel_requested=Event().is_set,
+            wording=WORDING,
+        )
+
+    monkeypatch.undo()
+    assert execution_repository.get_job(job.job_id).status == "running"  # nothing was written
+    assert any("ExecutionRepositoryError" in record.getMessage() for record in caplog.records)
+    assert "SQLite execution operation failed" not in caplog.text
+    assert job.job_id not in caplog.text
+
+
+def test_a_cancel_probe_that_raises_is_contained_and_logged_by_type_only(
+    execution_repository, caplog
+):
+    job = _running_job(execution_repository)
+
+    def probe() -> bool:
+        raise RuntimeError("simulated probe failure")
+
+    with caplog.at_level("WARNING", logger="cortex.execution.finish"):
+        finish_unsuccessful_job(
+            execution_repository,
+            job.job_id,
+            failure_code="worker_failed",
+            cancel_requested=probe,
+            wording=WORDING,
+        )
+
+    assert execution_repository.get_job(job.job_id).status == "running"
+    assert any("RuntimeError" in record.getMessage() for record in caplog.records)
+    assert "simulated probe failure" not in caplog.text
 
 
 def test_the_scratch_profile_does_not_overwrite_a_stop_with_a_failure(
