@@ -316,8 +316,9 @@ class FakeGenerationEngine:
         chat_history: str,
         *,
         options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
-        del chat_history, options
+        del chat_history, options, cancellation_event
         return self.state.title_response
 
 

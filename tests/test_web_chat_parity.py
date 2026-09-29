@@ -8,6 +8,7 @@ from threading import Event
 import time
 
 from fastapi.testclient import TestClient
+import pytest
 
 import cortex_backend.api.routes as api_routes
 from cortex_backend.api import create_app
@@ -363,8 +364,8 @@ def test_cancellation_after_commit_does_not_downgrade_the_persisted_response():
     title_started = Event()
     release_title = Event()
 
-    def delayed_title(snapshot, response):
-        del snapshot, response
+    def delayed_title(snapshot, response, cancellation_event=None):
+        del snapshot, response, cancellation_event
         title_started.set()
         release_title.wait(timeout=1)
         return "Late title"
@@ -422,16 +423,28 @@ def test_hung_title_generation_times_out_and_falls_back_without_blocking_complet
     no cancel_event and no bound from JobRegistry.shutdown (see
     CHAT_TITLE_TIMEOUT_SECONDS in api/routes.py). A hung title model must not
     stall the job -- it should time out quickly and fall back to the same
-    default title an outright title-generation failure already produces."""
+    default title an outright title-generation failure already produces.
+
+    The abandoned call must also be *stopped*, not just left behind: on a
+    single-slot runtime a title nobody will read keeps generating and the
+    user's next message queues behind it. The fake model here is cooperative --
+    it gives up as soon as the cancellation event it was handed is set -- so
+    the assertion is that the API hands one over and sets it when the time
+    limit runs out."""
     monkeypatch.setattr(api_routes, "CHAT_TITLE_TIMEOUT_SECONDS", 0.2)
     dependencies = build_demo_dependencies()
     title_started = Event()
     never_release = Event()
+    title_saw_cancellation = Event()
 
-    def hanging_title(snapshot, response):
+    def hanging_title(snapshot, response, cancellation_event=None):
         del snapshot, response
         title_started.set()
-        never_release.wait()  # simulates a hung local model; never returns
+        # Simulates a hung local model that still honours a request to stop.
+        if cancellation_event is not None and cancellation_event.wait(timeout=10):
+            title_saw_cancellation.set()
+            return "This title must never be used"
+        never_release.wait()  # no event handed over: hung for good
         return "This title must never be used"
 
     dependencies.generation.generate_chat_title = hanging_title
@@ -455,6 +468,9 @@ def test_hung_title_generation_times_out_and_falls_back_without_blocking_complet
             assert title_started.wait(timeout=1), "title generator did not start"
             assert elapsed < 5, "a hung title call must not block job completion"
             assert events[-1]["event"] == "generation.completed"
+            assert title_saw_cancellation.wait(timeout=5), (
+                "the timed-out title call was abandoned without being cancelled"
+            )
 
             chat = client.get(
                 f"/api/v1/chats/{accepted['thread_id']}", headers=headers
@@ -466,6 +482,41 @@ def test_hung_title_generation_times_out_and_falls_back_without_blocking_complet
             ]
     finally:
         never_release.set()  # let the abandoned daemon thread unblock and exit
+
+
+def test_call_with_timeout_cancels_only_the_call_it_gave_up_on():
+    """``cancel`` is a request to stop, so it must fire when the wait runs out
+    and only then -- a call that finished, or failed, must not be told to stop
+    afterwards, and a caller that passes no event keeps the old behaviour."""
+    finished_cancel = Event()
+    assert api_routes._call_with_timeout(
+        lambda: "done", timeout=2, cancel=finished_cancel
+    ) == "done"
+    assert not finished_cancel.is_set()
+
+    failed_cancel = Event()
+
+    def failing() -> None:
+        raise ValueError("synthetic failure")
+
+    with pytest.raises(ValueError, match="synthetic failure"):
+        api_routes._call_with_timeout(failing, timeout=2, cancel=failed_cancel)
+    assert not failed_cancel.is_set()
+
+    slow_cancel = Event()
+    observed = Event()
+
+    def slow(cancellation_event: Event) -> None:
+        if cancellation_event.wait(timeout=5):
+            observed.set()
+
+    with pytest.raises(TimeoutError):
+        api_routes._call_with_timeout(slow, slow_cancel, timeout=0.1, cancel=slow_cancel)
+    assert slow_cancel.is_set()
+    assert observed.wait(timeout=5), "the abandoned call never saw the cancellation"
+
+    with pytest.raises(TimeoutError):
+        api_routes._call_with_timeout(lambda: Event().wait(timeout=1), timeout=0.05)
 
 
 def test_regeneration_fills_in_a_reply_for_a_dangling_user_turn_without_duplicating_it():

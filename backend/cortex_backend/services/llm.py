@@ -1564,7 +1564,11 @@ class SynthesisAgent:
         return MemoryCommand(tuple(validated), clear_requested)
 
     def generate_chat_title(
-        self, chat_history: str, *, options: dict | None = None
+        self,
+        chat_history: str,
+        *,
+        options: dict | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
         """
         Generates a concise title for a chat conversation.
@@ -1574,6 +1578,11 @@ class SynthesisAgent:
             options (dict | None): Runtime options to carry over from the turn
                 that produced the chat -- above all ``num_ctx``. See
                 :meth:`_auxiliary_options` for why omitting it is harmful.
+            cancellation_event (Event | None): When given, lets the caller
+                stop the model call early. The API sets it once its time
+                limit for the (optional) title has run out, so a title nobody
+                will use does not keep a single-slot runtime busy while the
+                user's next message waits behind it.
 
         Returns:
             A string containing the generated title, or None if an error occurs
@@ -1585,11 +1594,16 @@ class SynthesisAgent:
         prompt_messages = PromptTemplate.build_chat_title_prompt(chat_history)
         logging.info(f"Generating chat title using model '{self.title_model}'...")
         try:
-            response = self.chat_client.chat(
-                model=self.title_model,
-                messages=prompt_messages,
-                options=self._auxiliary_options(options, temperature=0.2),
-            )
+            chat_kwargs: dict[str, Any] = {
+                "model": self.title_model,
+                "messages": prompt_messages,
+                "options": self._auxiliary_options(options, temperature=0.2),
+            }
+            # Forwarded only when set, like every other call here, so a
+            # ChatClient double written against the original call keeps working.
+            if cancellation_event is not None:
+                chat_kwargs["cancellation_event"] = cancellation_event
+            response = self.chat_client.chat(**chat_kwargs)
             title = self.normalize_title(response['message']['content'])
             logging.info("Generated chat title with %s characters.", len(title))
             return title

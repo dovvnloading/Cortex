@@ -304,6 +304,84 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertEqual(seen["model"], "translategemma:4b")
         self.assertIs(seen["cancellation_event"], event)
 
+    def test_the_title_call_carries_the_event_its_caller_abandons_it_with(self):
+        """A title that ran out of time has to be stoppable all the way down.
+
+        The API sets an event when its limit for the optional title runs out.
+        The service must hand it to the engine and the engine to the chat
+        client -- a link dropped anywhere leaves the model generating a title
+        nobody reads while the user's next turn waits for the runtime.
+        """
+        seen: dict = {}
+
+        class _TitleEngine(_FakeEngine):
+            def generate_chat_title(
+                self, chat_history, *, options=None, cancellation_event=None
+            ):
+                del chat_history, options
+                seen["engine"] = cancellation_event
+                return "A title"
+
+        event = Event()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _TitleEngine(),
+        )
+
+        self.assertEqual(
+            service.generate_chat_title(_snapshot(), "an answer", cancellation_event=event),
+            "A title",
+        )
+        self.assertIs(seen["engine"], event)
+
+        class _Client:
+            def chat(self, *, model, messages, options, cancellation_event=None):
+                del messages, options
+                seen["client_model"] = model
+                seen["client"] = cancellation_event
+                return {"message": {"content": "A title"}}
+
+        agent = SynthesisAgent("qwen3:8b", "granite4:tiny-h", "translategemma:4b", _Client())
+        self.assertEqual(
+            agent.generate_chat_title("User: hi\nAssistant: hello", cancellation_event=event),
+            "A title",
+        )
+        self.assertEqual(seen["client_model"], "granite4:tiny-h")
+        self.assertIs(seen["client"], event)
+
+    def test_a_title_without_an_event_keeps_the_original_call_shape(self):
+        """Callers that never cancel a title (and engines or chat clients written
+        before the event existed) must not be handed a keyword they lack."""
+
+        class _NarrowEngine(_FakeEngine):
+            def generate_chat_title(self, chat_history, *, options=None):
+                del chat_history, options
+                return "Narrow title"
+
+        class _RecordingClient:
+            def __init__(self) -> None:
+                self.extra: dict = {}
+
+            def chat(self, *, model, messages, options, **extra):
+                del model, messages, options
+                self.extra = extra
+                return {"message": {"content": "Narrow title"}}
+
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _NarrowEngine(),
+        )
+        self.assertEqual(service.generate_chat_title(_snapshot(), "an answer"), "Narrow title")
+
+        client = _RecordingClient()
+        agent = SynthesisAgent("qwen3:8b", "granite4:tiny-h", "translategemma:4b", client)
+        self.assertEqual(
+            agent.generate_chat_title("User: hi\nAssistant: hello"), "Narrow title"
+        )
+        self.assertNotIn("cancellation_event", client.extra)
+
     def test_the_status_callback_does_not_outlive_its_turn(self):
         """A per-turn callback must not stay on the process-wide chat client.
 

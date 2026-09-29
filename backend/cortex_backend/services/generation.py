@@ -146,8 +146,14 @@ class GenerationEngine(Protocol):
         chat_history: str,
         *,
         options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
-        """Title a thread using the chat model's own context sizing."""
+        """Title a thread using the chat model's own context sizing.
+
+        ``cancellation_event`` matters as much here as it does for ``generate``:
+        a title the caller has given up on must stop generating, or it keeps
+        the model runtime busy while the user's next turn waits behind it.
+        """
 
     def fit_attachments_to_context(
         self,
@@ -513,6 +519,8 @@ class GenerationService:
         self,
         snapshot: GenerationSnapshot,
         response: str,
+        *,
+        cancellation_event: Event | None = None,
     ) -> str | None:
         """Generate an optional title after response content is available.
 
@@ -520,16 +528,27 @@ class GenerationService:
         publish the answer deltas and persist the assistant turn before the
         lightweight title model runs.  A title-model outage therefore cannot
         stall or invalidate an otherwise successful response.
+
+        ``cancellation_event`` is how the caller abandons a title that is
+        taking too long: the API sets it when its own time limit runs out, and
+        the engine stops the model call instead of letting it run to the end.
         """
         engine = self._engine_factory(snapshot)
+        title_kwargs: dict[str, Any] = {
+            # The title reuses the chat model, so it must also reuse the
+            # chat's context sizing -- otherwise the runtime is asked for
+            # a differently-configured copy of a model it already has
+            # loaded, and reloads it.
+            "options": dict(snapshot.model_options),
+        }
+        # Forwarded only when set, the same way ``generate`` does it, so an
+        # engine that has no use for it keeps its narrower signature.
+        if cancellation_event is not None:
+            title_kwargs["cancellation_event"] = cancellation_event
         try:
             return engine.generate_chat_title(
                 self._title_history(snapshot.user_input, response),
-                # The title reuses the chat model, so it must also reuse the
-                # chat's context sizing -- otherwise the runtime is asked for
-                # a differently-configured copy of a model it already has
-                # loaded, and reloads it.
-                options=dict(snapshot.model_options),
+                **title_kwargs,
             )
         except Exception as exc:  # defensive boundary for optional work
             logging.warning(
