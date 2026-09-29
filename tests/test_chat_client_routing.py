@@ -1832,11 +1832,12 @@ def test_routing_tokenize_asks_only_the_llamacpp_client() -> None:
     )
 
 
-def test_the_adapter_reports_the_whole_prompt_beside_the_part_the_server_evaluated() -> None:
-    """A cached prefix makes ``prompt_n`` a fraction of the prompt.
+def test_adapt_prefers_total_prompt_tokens_over_processed_count() -> None:
+    """A cached prefix makes ``timings.prompt_n`` a fraction of the prompt.
 
-    ``prompt_eval_count`` keeps its meaning (what was evaluated); calibrating
-    the token estimate needs the whole prompt, which only ``usage`` carries.
+    ``prompt_eval_count`` is what is saved with the message and what says a
+    prompt filled the window, so it has to be the whole prompt; the evaluated
+    count is only the fallback for a server that sends no usage.
     """
     adapted = _adapt_to_ollama_shape(
         {
@@ -1846,15 +1847,49 @@ def test_the_adapter_reports_the_whole_prompt_beside_the_part_the_server_evaluat
         },
         elapsed_seconds=1.0,
     )
-    assert adapted["prompt_eval_count"] == 7
+    assert adapted["prompt_eval_count"] == 120
     assert adapted["prompt_token_count"] == 120
+    # The time is the time spent on what was evaluated, and stays that.
+    assert adapted["prompt_eval_duration"] == 5_000_000
 
-    # No usage block, or a malformed one: the key is simply absent.
+    # No usage block, or a malformed one: the evaluated count is all there is,
+    # and the key that promises the whole prompt is simply absent.
     for usage in (None, {}, {"prompt_tokens": "many"}, {"prompt_tokens": True}):
         adapted = _adapt_to_ollama_shape(
-            {"choices": [{"message": {"content": "hi"}}], "usage": usage}, elapsed_seconds=1.0
+            {
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": usage,
+                "timings": {"prompt_n": 7, "prompt_ms": 5.0},
+            },
+            elapsed_seconds=1.0,
         )
+        assert adapted["prompt_eval_count"] == 7
         assert "prompt_token_count" not in adapted
+
+    # Nothing at all is reported as nothing, not as a made-up number.
+    adapted = _adapt_to_ollama_shape(
+        {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": "many"}},
+        elapsed_seconds=1.0,
+    )
+    assert adapted["prompt_eval_count"] is None
+
+
+def test_a_cached_prompt_that_filled_the_window_is_still_reported_as_full() -> None:
+    """The saved figure feeds the "context is full" notice; a cache hit must not hide it."""
+    from cortex_backend.services.llm import _extract_stats
+
+    adapted = _adapt_to_ollama_shape(
+        {
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 8000, "completion_tokens": 3},
+            "timings": {"prompt_n": 40, "predicted_n": 3, "prompt_ms": 5.0, "predicted_ms": 30.0},
+        },
+        elapsed_seconds=1.0,
+    )
+
+    stats = _extract_stats(adapted)
+
+    assert stats is not None and stats.prompt_eval_count == 8000
 
 
 def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -> None:
@@ -1879,5 +1914,5 @@ def test_the_streamed_reply_carries_the_whole_prompt_count_too(tmp_path: Path) -
         cancellation_event=Event(),
     )
 
-    assert response["prompt_eval_count"] == 9
+    assert response["prompt_eval_count"] == 321
     assert response["prompt_token_count"] == 321
