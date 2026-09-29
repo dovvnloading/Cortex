@@ -29,7 +29,6 @@ from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.models import ExecutionJob
 from cortex_backend.execution.repository import (
     APPROVAL_GRANT_SECONDS,
-    SCHEMA_VERSION,
     ApprovalExpiredError,
     ApprovalTransitionError,
     ExecutionRepository,
@@ -356,7 +355,7 @@ def test_the_use_record_is_additive_and_is_removed_with_its_job(tmp_path: Path) 
     with reopened.connect() as connection:
         assert connection.execute(
             "SELECT version FROM execution_schema WHERE id = 1"
-        ).fetchone()[0] == SCHEMA_VERSION
+        ).fetchone()[0] == 3
 
     job, _ = _approved_job(reopened)
     reopened.claim_approved_lease(job.job_id, lease_owner="worker", ttl_seconds=30)

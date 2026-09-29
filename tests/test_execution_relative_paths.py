@@ -2,10 +2,15 @@
 
 A row used to record the absolute path it was written with, so moving the data
 directory made every existing row point at nothing: live attachments stopped
-reading and expired ones were never reclaimed. Schema version 4 lets new rows
-record their path relative to the artifact root. Nothing is rewritten on
-upgrade -- rows written before that keep their absolute path -- and both forms
-are read.
+reading and expired ones were never reclaimed. New rows record their path
+relative to the artifact root. This adds no table and no column, so the schema
+version does not move: it stays 3, nothing is rewritten on upgrade -- rows an
+earlier build wrote keep their absolute path -- and both forms are read.
+
+Leaving the version alone is what makes going back safe. A build that only
+knows version 3 opens the same store, keeps every job, fails closed on reading
+an artifact whose path it cannot resolve, and discards only the expired rows
+it cannot reclaim; a version bump would have made it set the whole store aside.
 """
 
 from __future__ import annotations
@@ -21,6 +26,10 @@ from cortex_backend.execution.repository import (
     ExecutionRepository,
     ExecutionRepositoryError,
 )
+
+# The version the previous release build reads. It is spelled out, not taken from
+# SCHEMA_VERSION, so that moving the constant fails these tests instead of following it.
+_PREVIOUS_BUILDS_VERSION = 3
 
 _LONG_AGO = "2000-01-01T00:00:00+00:00"
 
@@ -82,8 +91,14 @@ def _tombstones(repository: ExecutionRepository) -> list[tuple[str, str, str]]:
         ]
 
 
-def _leave_a_pending_tombstone(repository: ExecutionRepository, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run a cleanup whose move into quarantine is refused, so the tombstone stays pending."""
+def _leave_a_pending_tombstone(
+    repository: ExecutionRepository, monkeypatch: pytest.MonkeyPatch, *, stuck: int = 1
+) -> None:
+    """Run a cleanup whose move into quarantine is refused, so the tombstone stays pending.
+
+    ``stuck`` is how many tombstones the pass is expected to be unable to move: the
+    new one and any that an earlier call left behind.
+    """
 
     def refused(*_args: object, **_kwargs: object) -> Path:
         raise PermissionError(13, "held open by a scanner")
@@ -91,11 +106,11 @@ def _leave_a_pending_tombstone(repository: ExecutionRepository, monkeypatch: pyt
     with monkeypatch.context() as blocked:
         blocked.setattr(Path, "replace", refused)
         result = _cleanup(repository)
-    assert (result.artifacts, result.skipped) == (0, 1)
+    assert (result.artifacts, result.skipped) == (0, stuck)
 
 
-def _as_version_3_wrote_it(repository: ExecutionRepository) -> None:
-    """Rewrite every path the way the previous build recorded it: absolute, at version 3."""
+def _as_the_previous_build_wrote_it(repository: ExecutionRepository) -> None:
+    """Rewrite every path that is still relative the way the previous build recorded it: absolute."""
 
     root = repository.artifact_root
     with repository.connect() as connection:
@@ -111,7 +126,6 @@ def _as_version_3_wrote_it(repository: ExecutionRepository) -> None:
                 "UPDATE execution_artifact_cleanup SET path = ?, quarantine_path = ? WHERE artifact_id = ?",
                 (str(root / row["path"]), str(root / row["quarantine_path"]), row["artifact_id"]),
             )
-        connection.execute("UPDATE execution_schema SET version = 3 WHERE id = 1")
 
 
 def _version(repository: ExecutionRepository) -> int:
@@ -188,14 +202,14 @@ def test_a_moved_data_directory_keeps_live_and_expiring_artifacts_working(tmp_pa
 # -- A store written by the previous build ------------------------------------------------------
 
 
-def test_a_store_written_before_version_4_is_read_as_it_was_and_is_not_rewritten(tmp_path, monkeypatch):
+def test_a_store_the_previous_build_wrote_is_read_as_it_was_and_is_not_rewritten(tmp_path, monkeypatch):
     data = tmp_path / "data"
     repository = _open(data)
     live = _publish(repository, "job-live", "live.txt")
     stuck = _publish(repository, "job-stuck", "stuck.txt", expired=True)
     _leave_a_pending_tombstone(repository, monkeypatch)
-    _as_version_3_wrote_it(repository)
-    assert _version(repository) == 3
+    _as_the_previous_build_wrote_it(repository)
+    assert _version(repository) == _PREVIOUS_BUILDS_VERSION
     before = {
         "artifacts": sorted(
             (row["artifact_id"], row["path"])
@@ -207,7 +221,7 @@ def test_a_store_written_before_version_4_is_read_as_it_was_and_is_not_rewritten
 
     upgraded = _open(data)
 
-    assert _version(upgraded) == SCHEMA_VERSION == 4
+    assert _version(upgraded) == _PREVIOUS_BUILDS_VERSION
     after = {
         "artifacts": sorted(
             (row["artifact_id"], row["path"])
@@ -225,32 +239,89 @@ def test_a_store_written_before_version_4_is_read_as_it_was_and_is_not_rewritten
     assert upgraded.get_artifact(stuck.artifact_id) is None
     assert not Path(stuck.path).exists()
     assert _tombstones(upgraded) == []
-    # A row written after the upgrade is relative, next to the absolute one.
+    # A row written by this build is relative, next to the absolute one.
     fresh = _publish(upgraded, "job-fresh", "fresh.txt")
     assert not os.path.isabs(_artifact_row(upgraded, fresh.artifact_id)["path"])
     assert os.path.isabs(_artifact_row(upgraded, live.artifact_id)["path"])
 
 
-def test_reopening_a_version_4_store_changes_nothing(tmp_path):
+def test_a_store_holding_absolute_and_relative_rows_opens_and_serves_and_reclaims_both(tmp_path, monkeypatch):
+    """The store a rollback and a second upgrade leave: rows of both forms, live and expired,
+    and tombstones of both forms waiting in the same queue."""
+
+    data = tmp_path / "data"
+    repository = _open(data)
+    old_live = _publish(repository, "job-old-live", "old-live.txt")
+    old_expired = _publish(repository, "job-old-expired", "old-expired.txt", expired=True)
+    _leave_a_pending_tombstone(repository, monkeypatch)
+    _as_the_previous_build_wrote_it(repository)  # everything so far is absolute
+    new_live = _publish(repository, "job-new-live", "new-live.txt")
+    new_expired = _publish(repository, "job-new-expired", "new-expired.txt", expired=True)
+    _leave_a_pending_tombstone(repository, monkeypatch, stuck=2)  # the old tombstone is retried too
+    old, new = (old_live, old_expired), (new_live, new_expired)
+    assert all(os.path.isabs(_artifact_row(repository, a.artifact_id)["path"]) for a in old)
+    assert not any(os.path.isabs(_artifact_row(repository, a.artifact_id)["path"]) for a in new)
+    forms = sorted(os.path.isabs(path) for path, _quarantine, _state in _tombstones(repository))
+    assert forms == [False, True], "one tombstone of each form is waiting"
+    before = sorted(
+        (row["artifact_id"], row["path"])
+        for row in _rows(repository, "SELECT artifact_id, path FROM execution_artifacts")
+    )
+
+    reopened = _open(data)
+
+    assert _version(reopened) == _PREVIOUS_BUILDS_VERSION
+    assert (
+        sorted(
+            (row["artifact_id"], row["path"])
+            for row in _rows(reopened, "SELECT artifact_id, path FROM execution_artifacts")
+        )
+        == before
+    )
+    for live in (old_live, new_live):
+        assert reopened.read_artifact(live.artifact_id) == b"synthetic"
+    result = _cleanup(reopened)
+    assert (result.artifacts, result.skipped) == (2, 0)
+    for gone in (old_expired, new_expired):
+        assert reopened.get_artifact(gone.artifact_id) is None
+        assert not Path(gone.path).exists()
+    assert _tombstones(reopened) == []
+    for live in (old_live, new_live):
+        assert reopened.read_artifact(live.artifact_id) == b"synthetic"
+
+
+def test_new_rows_leave_the_schema_version_where_the_previous_build_reads_it(tmp_path):
+    """Going back must not cost the store: a build that knows only version 3 keeps a version-3 store.
+
+    A store stamped with a version an older build does not know is set aside whole,
+    jobs and installation principal included, so writing relative paths may not
+    move the stamp.
+    """
+
+    assert SCHEMA_VERSION == _PREVIOUS_BUILDS_VERSION
     data = tmp_path / "data"
     repository = _open(data)
     artifact = _publish(repository, "job-1")
     before = _artifact_row(repository, artifact.artifact_id)["path"]
+    assert not os.path.isabs(before)
+    assert _version(repository) == _PREVIOUS_BUILDS_VERSION
 
     again = _open(data)
 
-    assert _version(again) == SCHEMA_VERSION
+    assert _version(again) == _PREVIOUS_BUILDS_VERSION
     assert _artifact_row(again, artifact.artifact_id)["path"] == before
     assert again.read_artifact(artifact.artifact_id) == b"synthetic"
+    assert again.get_job("job-1") is not None
+    assert again.installation_principal_id == repository.installation_principal_id
 
 
 def test_an_absolute_row_in_a_moved_data_directory_is_contained_as_it_always_was(tmp_path):
-    """The limitation is only for rows written before version 4: they are refused, not followed."""
+    """The limitation is only for rows an earlier build wrote: they are refused, not followed."""
 
     first = tmp_path / "data"
     repository = _open(first)
     artifact = _publish(repository, "job-1", expired=True)
-    _as_version_3_wrote_it(repository)
+    _as_the_previous_build_wrote_it(repository)
     moved = tmp_path / "moved"
     shutil.move(str(first), str(moved))
     reopened = _open(moved)

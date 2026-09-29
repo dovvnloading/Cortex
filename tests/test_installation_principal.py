@@ -11,11 +11,7 @@ from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.security import SessionManager
 from cortex_backend.testing import DurableFakeCoordinator
-from cortex_backend.execution.repository import (
-    SCHEMA_VERSION,
-    ExecutionRepository,
-    ExecutionRepositoryError,
-)
+from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
 from support import session_headers as _session
 
 
@@ -41,7 +37,7 @@ def test_installation_principal_is_atomic_persistent_and_migrates_additively(tmp
     with first.connect() as connection:
         assert connection.execute(
             "SELECT version FROM execution_schema WHERE id = 1"
-        ).fetchone()[0] == SCHEMA_VERSION
+        ).fetchone()[0] == 3
         assert connection.execute(
             "SELECT principal_id FROM execution_installation_principal WHERE id = 1"
         ).fetchone()[0] == principal
@@ -57,7 +53,7 @@ def test_installation_principal_is_atomic_persistent_and_migrates_additively(tmp
     with migrated.connect() as connection:
         assert connection.execute(
             "SELECT version FROM execution_schema WHERE id = 1"
-        ).fetchone()[0] == SCHEMA_VERSION
+        ).fetchone()[0] == 3
 
 
 def test_installation_principal_creation_is_singleton_across_repository_instances(tmp_path):
@@ -116,6 +112,45 @@ def test_ambiguous_legacy_owner_migration_fails_closed_without_rewriting_jobs(tm
             ).fetchall()
         }
     assert owners == {"session-a", "session-b"}
+
+
+def test_a_current_store_is_not_put_through_the_owner_migration_again(tmp_path):
+    """Two owners sharing a request id is legal at version 3; only a version-2 store is ambiguous.
+
+    The step that folds every owner into the installation principal runs for a
+    store older than the current version and for no other. If it ran on every
+    open, this store would be refused as ambiguous, or its owners rewritten.
+    """
+
+    database = tmp_path / "execution.sqlite"
+    artifacts = tmp_path / "artifacts"
+    repository = ExecutionRepository(database, artifacts)
+    principal = repository.installation_principal_id
+    for job_id, owner in (("current-a", "session-a"), ("current-b", "session-b")):
+        repository.create_job(
+            job_id=job_id,
+            owner=owner,
+            request_id="same-request",
+            profile="fake.v1",
+            payload={"provider": "fake-v1"},
+        )
+    with repository.connect() as connection:
+        assert connection.execute(
+            "SELECT version FROM execution_schema WHERE id = 1"
+        ).fetchone()[0] == 3
+
+    reopened = ExecutionRepository(database, artifacts)  # must not raise "ambiguous"
+
+    assert reopened.installation_principal_id == principal
+    with reopened.connect() as connection:
+        owners = {
+            row["job_id"]: row["owner"]
+            for row in connection.execute("SELECT job_id, owner FROM execution_jobs").fetchall()
+        }
+        assert connection.execute(
+            "SELECT version FROM execution_schema WHERE id = 1"
+        ).fetchone()[0] == 3
+    assert owners == {"current-a": "session-a", "current-b": "session-b"}
 
 
 def test_restart_reattaches_execution_to_same_installation_principal(tmp_path):

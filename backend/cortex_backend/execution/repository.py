@@ -34,13 +34,16 @@ from .models import (
 
 
 # The schema ladder. 1-2: earlier builds. 3: every job is owned by the
-# installation principal. 4: an artifact's path, and the paths of its cleanup
+# installation principal. An artifact's path, and the paths of its cleanup
 # tombstone, may be stored relative to the artifact root so a moved data
-# directory keeps working; rows written before that keep their absolute paths
-# and both forms are read (see ``ExecutionRepository._stored_path``). A build
-# that only knows an earlier version sets a newer store aside instead of
-# misreading it.
-SCHEMA_VERSION = 4
+# directory keeps working. That is a change to what new rows hold, not to a
+# table or a column, so it is not a version step: the version stays 3, rows
+# written by an earlier build keep their absolute paths, and both forms are
+# read (see ``ExecutionRepository._stored_path``). Leaving the version alone is
+# what lets an earlier build open a store this one wrote: a build that only
+# knows an older version sets a newer store aside, jobs and all, instead of
+# reading it.
+SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
 # How long after the user's decision an approval can still be spent. The click
@@ -621,7 +624,7 @@ class ExecutionRepository:
                 # the file between that check and now. Refuse rather than
                 # migrate it backwards.
                 raise ExecutionRepositoryError("Execution schema is newer than this build.")
-            if current_version < 3:
+            if current_version < SCHEMA_VERSION:
                 principal = self._ensure_installation_principal_connection(connection)
                 ambiguous = connection.execute(
                     """
@@ -640,10 +643,6 @@ class ExecutionRepository:
                     "UPDATE execution_jobs SET owner = ? WHERE owner <> ?",
                     (principal, principal),
                 )
-            # Version 4 changes what new rows may hold, not the tables and not
-            # the rows already there: nothing is rewritten, and a row that
-            # names its file by absolute path keeps working exactly as before.
-            if current_version < SCHEMA_VERSION:
                 connection.execute(
                     "UPDATE execution_schema SET version = ? WHERE id = 1",
                     (SCHEMA_VERSION,),
@@ -2036,7 +2035,7 @@ class ExecutionRepository:
         """The location a row's path column names, under this build's artifact root.
 
         New rows record a path relative to the artifact root, so moving the
-        data directory does not orphan them; rows from before schema version 4
+        data directory does not orphan them; rows written by an earlier build
         hold an absolute path, and that is returned as written. Nothing here
         decides whether the location is acceptable: an absolute path, a
         relative one that climbs out with ``..`` and a drive-relative one all
