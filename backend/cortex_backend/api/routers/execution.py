@@ -528,7 +528,12 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         principal: SessionPrincipal = Depends(require_session),
     ) -> StreamingResponse:
         repository = _execution_repository(request)
-        if repository.get_job(job_id, owner=_durable_owner(principal)) is None:
+        # A synchronous SQLite read: off the loop that serves every other
+        # request and the live streams.
+        opened = await asyncio.to_thread(
+            repository.get_job, job_id, owner=_durable_owner(principal)
+        )
+        if opened is None:
             raise HTTPException(status_code=404, detail="Execution job not found.")
         cursor = _last_event_cursor(request, last_event_id)
 

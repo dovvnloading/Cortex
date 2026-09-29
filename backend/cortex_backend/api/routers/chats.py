@@ -6,6 +6,8 @@ in cortex_backend.api.routes.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
 from cortex_backend.api.jobs import (
@@ -60,6 +62,10 @@ from fastapi import (
     status,
 )
 from uuid import uuid4
+
+
+# The fields of a chat's overview that make up its sidebar summary.
+_SUMMARY_FIELDS = ("id", "title", "timestamp", "group_id")
 
 
 def register(router: APIRouter, *, require_session, dependencies) -> None:
@@ -125,7 +131,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            if deps.chats.get_chat(thread_id) is None:
+            if deps.chats.get_chat_overview(thread_id) is None:
                 raise HTTPException(status_code=404, detail="Chat not found.")
             deps.chats.rename_chat(thread_id, payload.title.strip())
             chat = deps.chats.get_chat(thread_id)
@@ -238,9 +244,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             moved = deps.chats.set_chat_group(thread_id, payload.group_id)
             if not moved:
                 raise HTTPException(status_code=404, detail="Chat not found.")
-            summary = next(
-                (item for item in deps.chats.list_summaries() if item["id"] == thread_id),
-                None,
+            overview = deps.chats.get_chat_overview(thread_id)
+            summary = (
+                {key: overview[key] for key in _SUMMARY_FIELDS}
+                if overview is not None
+                else None
             )
         except HTTPException:
             raise
@@ -262,7 +270,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         principal: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            existing = deps.chats.get_chat(thread_id)
+            existing = deps.chats.get_chat_overview(thread_id)
             if existing is None:
                 _reject_invalid_new_chat_thread_id(thread_id)
             attachment_refs = _validate_chat_attachment_refs(
@@ -360,7 +368,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 )
             else:
                 try:
-                    chat = deps.chats.get_chat(thread_id)
+                    chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
                     if chat is None:
                         raise HTTPException(status_code=404, detail="Chat not found.")
                     messages = list(chat.get("messages", ()))
@@ -405,7 +413,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         request_fingerprint=request_fingerprint,
                         reservation=reservation,
                         target_message_id=payload.message_id,
-                        history_messages=messages[:position],
+                        transcript=messages,
                     )
                 finally:
                     request.app.state.jobs.abort_reservation(

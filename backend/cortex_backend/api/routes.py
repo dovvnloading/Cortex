@@ -300,9 +300,18 @@ async def _start_generation_job(
     request_fingerprint: str,
     reservation: JobReservation | None = None,
     target_message_id: str | None = None,
-    history_messages: list[Mapping[str, Any]] | None = None,
+    transcript: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[JobSnapshot, str | None]:
-    """Atomically admit, prepare, and run one authoritative generation job."""
+    """Atomically admit, prepare, and run one authoritative generation job.
+
+    A regeneration passes ``transcript``, the messages its route already read to
+    validate the target, so the chat is not read again. A new turn passes
+    nothing: admission needs only the chat's overview, and preparation reads
+    the transcript once, because the model needs it as history. Either way the
+    generation service is handed its history and never loads it itself.
+    """
+    if (target_message_id is None) != (transcript is None):
+        raise ValueError("a regeneration needs its transcript and a new turn has none")
     jobs = request.app.state.jobs
     candidate_thread_id = payload.thread_id or uuid4().hex
     if reservation is None:
@@ -326,17 +335,29 @@ async def _start_generation_job(
     thread_id = reservation.snapshot.thread_id or candidate_thread_id
     started = False
     try:
-        chat = await asyncio.to_thread(deps.chats.get_chat, thread_id)
-        if chat is None:
-            # No chat exists yet, so `thread_id` (a client-supplied
-            # payload.thread_id, or else uuid4().hex from above -- which
-            # always matches) is about to become a new chat's primary key.
-            _reject_invalid_new_chat_thread_id(thread_id)
-        current_revision = chat_revision(chat) if chat is not None else 0
-        admission_revision = current_revision
+        target_position = -1
+        target_role = ""
+        if transcript is not None and target_message_id is not None:
+            # The route read the chat and answered 404 if it was missing.
+            target_position, target_role = _regeneration_target(
+                transcript, target_message_id
+            )
+            admission_revision = len(transcript)
+        else:
+            # Only the revision is needed to admit a new turn, so read the
+            # overview rather than every message of what may be a long thread.
+            overview = await asyncio.to_thread(
+                deps.chats.get_chat_overview, thread_id
+            )
+            if overview is None:
+                # No chat exists yet, so `thread_id` (a client-supplied
+                # payload.thread_id, or else uuid4().hex from above -- which
+                # always matches) is about to become a new chat's primary key.
+                _reject_invalid_new_chat_thread_id(thread_id)
+            admission_revision = int(overview["revision"]) if overview is not None else 0
         if (
             payload.base_revision is not None
-            and current_revision != payload.base_revision
+            and admission_revision != payload.base_revision
         ):
             raise ChatDomainError(
                 "This chat changed. Reload it before generating again.",
@@ -345,24 +366,18 @@ async def _start_generation_job(
 
         settings = await asyncio.to_thread(_load_settings, deps)
         attachment_refs = list(payload.attachments)
-        if target_message_id is not None and not attachment_refs and chat is not None:
-            messages = list(chat.get("messages", ()))
-            try:
-                target_position = message_position(chat, target_message_id)
-            except ChatDomainError:
-                target_position = -1
-            if 0 <= target_position < len(messages):
-                # A dangling user turn's own attachments are the ones to
-                # resend; an assistant reply being regenerated has none of
-                # its own, so fall back to the user turn before it instead.
-                target_is_user = messages[target_position].get("role") == "user"
-                source_position = target_position if target_is_user else target_position - 1
-                if source_position >= 0:
-                    source_message = messages[source_position]
-                    attachment_refs = [
-                        ChatAttachment.model_validate(item)
-                        for item in (source_message.get("attachments") or [])
-                    ]
+        if transcript is not None and not attachment_refs:
+            # A dangling user turn's own attachments are the ones to resend; an
+            # assistant reply being regenerated has none of its own, so fall
+            # back to the user turn before it instead.
+            source_position = (
+                target_position if target_role == "user" else target_position - 1
+            )
+            if source_position >= 0:
+                attachment_refs = [
+                    ChatAttachment.model_validate(item)
+                    for item in (transcript[source_position].get("attachments") or [])
+                ]
         generation_payload = payload.model_copy(
             update={"thread_id": thread_id, "attachments": attachment_refs}
         )
@@ -409,53 +424,70 @@ async def _start_generation_job(
 
         user_message_id: str | None = None
         prepared_revision: int | None = None
-        prepared_history = history_messages
+        # The transcript the model answers from, ending with the turn being
+        # answered, which the generation service drops. A regeneration already
+        # has it; a new turn fills it in during prepare().
+        prepared_history: Sequence[Mapping[str, Any]] | None = (
+            transcript[:target_position] if transcript is not None else None
+        )
         # True when target_message_id names the thread's last message and it
         # is a user turn with no reply yet -- a prior generation attempt
         # admitted this message, then failed before persisting an assistant
         # reply. Retrying that turn must add a new assistant message, not
         # replace one that was never created (see runner() below).
-        target_is_dangling_user_turn = False
+        target_is_dangling_user_turn = target_role == "user"
 
         def prepare() -> Mapping[str, Any]:
-            nonlocal prepared_history, prepared_revision, user_message_id, target_is_dangling_user_turn
+            nonlocal prepared_history, prepared_revision, user_message_id
+            if target_message_id is not None:
+                # The route validated this target against the transcript it
+                # read. That still holds as long as nothing was appended since:
+                # a chat only grows, and this reserved job is the only writer
+                # that replaces a reply. The message count is the revision, so
+                # the overview answers it without reading the transcript again.
+                overview = deps.chats.get_chat_overview(thread_id)
+                if overview is None:
+                    raise ChatDomainError("Chat not found.", code="not_found")
+                if int(overview["revision"]) != admission_revision:
+                    raise ChatDomainError(
+                        "This chat changed. Reload it before generating again.",
+                        code="stale_revision",
+                    )
+                prepared_revision = admission_revision
+                return {"user_message_id": None}
+            # The one full read of a new turn: the model needs the transcript
+            # as history, so it is taken here rather than by the generation
+            # service afterwards. It is read before the user turn is written,
+            # and that write is guarded by the revision it was read at.
             current_chat = deps.chats.get_chat(thread_id)
-            current_revision = (
-                chat_revision(current_chat) if current_chat is not None else 0
-            )
-            if current_revision != admission_revision:
+            existing = list(current_chat.get("messages", ())) if current_chat else []
+            if len(existing) != admission_revision:
                 raise ChatDomainError(
                     "This chat changed. Reload it before generating again.",
                     code="stale_revision",
                 )
-            if target_message_id is not None:
-                if current_chat is None:
-                    raise ChatDomainError("Chat not found.", code="not_found")
-                current_messages = list(current_chat.get("messages", ()))
-                target_position, current_target_role = _regeneration_target(
-                    current_messages, target_message_id
-                )
-                target_is_dangling_user_turn = current_target_role == "user"
-                prepared_history = current_messages[:target_position]
-                prepared_revision = current_revision
-            else:
-                user_message_id = deps.chats.add_message(
-                    thread_id,
-                    "user",
-                    payload.user_input,
-                    attachments=[
-                        attachment.model_dump(mode="json")
-                        for attachment in attachment_refs
-                    ],
-                    thread_title="New Chat" if current_chat is None else None,
-                    expected_revision=admission_revision,
-                )
-                # Only the revision is needed here, so read the overview
-                # rather than every message of what may be a long thread.
-                overview = deps.chats.get_chat_overview(thread_id)
-                if overview is None:
-                    raise ChatRepositoryError("Chat did not persist the user message.")
-                prepared_revision = int(overview["revision"])
+            user_message_id = deps.chats.add_message(
+                thread_id,
+                "user",
+                payload.user_input,
+                attachments=[
+                    attachment.model_dump(mode="json")
+                    for attachment in attachment_refs
+                ],
+                thread_title="New Chat" if current_chat is None else None,
+                expected_revision=admission_revision,
+            )
+            # Only the revision is needed here, so read the overview
+            # rather than every message of what may be a long thread.
+            overview = deps.chats.get_chat_overview(thread_id)
+            if overview is None:
+                raise ChatRepositoryError("Chat did not persist the user message.")
+            prepared_revision = int(overview["revision"])
+            # The service pops a trailing user turn as the one being answered,
+            # which is what it did when it re-read the transcript after this
+            # write. Ending on a stand-in for that turn keeps an earlier
+            # unanswered user message in the history instead of dropping it.
+            prepared_history = [*existing, {"role": "user", "content": payload.user_input}]
             return {"user_message_id": user_message_id}
 
         def keep_stopped_answer(shown: _ShownAnswer) -> dict[str, Any]:

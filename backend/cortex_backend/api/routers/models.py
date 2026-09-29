@@ -6,6 +6,8 @@ in cortex_backend.api.routes.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
 from cortex_backend.api.jobs import (
@@ -134,7 +136,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         deps: BackendDependenciesProtocol = Depends(dependencies),
         principal: SessionPrincipal = Depends(require_session),
     ) -> JobAccepted:
-        settings = _load_settings(deps)
+        settings = await asyncio.to_thread(_load_settings, deps)
         required, optional = _model_sets(settings)
 
         def runner(sink, cancel_event):
@@ -206,8 +208,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         # A new job kind, not "models": a multi-minute HF/URL download must
         # not block Ollama rescans/pulls for its duration (JobRegistry allows
         # only one active job per kind).
-        settings = _load_settings(deps)
-        directory = _gguf_directory(settings, request)
+        settings = await asyncio.to_thread(_load_settings, deps)
+        directory = await asyncio.to_thread(_gguf_directory, settings, request)
         try:
             url, filename = resolve_download_url(
                 DownloadSource(
