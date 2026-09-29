@@ -9,7 +9,10 @@ apart from any one capability so all three answer cancellation the same way.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
+
+from cortex_backend.core.win_jobs import KillOnCloseJob
 
 DEFAULT_CANCEL_GRACE_SECONDS = 0.35
 
@@ -21,6 +24,31 @@ def _process_is_alive(process: Any) -> bool:
         return bool(process.is_alive())
     except Exception:
         return False
+
+
+def _contain_worker(process: Any) -> KillOnCloseJob | None:
+    """Put a freshly started worker in a job that ends with this process.
+
+    Without it a worker outlives a Cortex that dies -- Task Manager, a crash --
+    and keeps its resources until its own limits run out. The caller closes the
+    returned job once the worker is finished with. Raises ``JobObjectError`` if
+    the worker cannot be contained, and the caller must not let it carry on
+    uncontained. Windows only: elsewhere there is nothing to do and ``None`` is
+    returned.
+
+    The worker has been running since ``start()`` returned, so anything it
+    spawned in that instant is outside the job; the workers spawn nothing.
+    """
+
+    if os.name != "nt":
+        return None
+    job = KillOnCloseJob()
+    try:
+        job.assign(int(process.pid))
+    except BaseException:
+        job.close()
+        raise
+    return job
 
 
 def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS) -> None:

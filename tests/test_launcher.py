@@ -1932,6 +1932,161 @@ def test_activate_process_window_reports_what_actually_happened(
         assert user32.calls == [("ShowWindowAsync", 9), ("SetForegroundWindow", 777)]
 
 
+_SLEEP_FOREVER = [sys.executable, "-c", "import time; time.sleep(120)"]
+windows_only = pytest.mark.skipif(os.name != "nt", reason="uses Windows job objects and process APIs")
+
+
+def _recording_job(*, fail_assign: bool = False):
+    from cortex_backend.core.win_jobs import JobObjectError
+
+    class RecordingJob:
+        assigned: list[int] = []
+        closed = 0
+
+        def assign(self, pid: int) -> None:
+            type(self).assigned.append(pid)
+            if fail_assign:
+                raise JobObjectError("could not assign the process to containment")
+
+        def close(self) -> None:
+            type(self).closed += 1
+
+    return RecordingJob
+
+
+def _wait_until_gone(pid: int, *, describe: str) -> None:
+    from support import wait_until
+
+    wait_until(lambda: not desktop_module.process_is_alive(pid), timeout=30, describe=describe)
+
+
+def _kill_tree(pid: int) -> None:
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+
+
+@windows_only
+def test_child_process_supervisor_assigns_a_kill_on_close_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Vite is started in a job that dies with the launcher.
+
+    ``taskkill`` at an orderly stop was the only thing ending the Node and
+    esbuild tree, so a launcher that was killed or crashed left it holding the
+    dev port and a CPU.
+    """
+    job = _recording_job()
+    monkeypatch.setattr(supervisor_module, "KillOnCloseJob", job)
+    supervisor = supervisor_module.ChildProcessSupervisor(_SLEEP_FOREVER, cwd=tmp_path)
+
+    supervisor.start()
+    try:
+        assert supervisor.process is not None
+        assert job.assigned == [supervisor.process.pid]
+        assert job.closed == 0, "the job must stay open while the child runs"
+    finally:
+        supervisor.stop()
+
+    assert job.closed == 1
+    assert supervisor.running is False
+
+
+@windows_only
+def test_child_process_supervisor_fails_closed_when_the_child_cannot_be_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    job = _recording_job(fail_assign=True)
+    monkeypatch.setattr(supervisor_module, "KillOnCloseJob", job)
+    supervisor = supervisor_module.ChildProcessSupervisor(_SLEEP_FOREVER, cwd=tmp_path)
+
+    with pytest.raises(RuntimeError, match="contain"):
+        supervisor.start()
+
+    (pid,) = job.assigned
+    assert supervisor.process is not None and supervisor.process.pid == pid
+    _wait_until_gone(pid, describe="the uncontained child to be stopped")
+    assert job.closed == 1
+
+
+@windows_only
+def test_child_process_supervisor_stop_terminates_the_tree(tmp_path: Path):
+    grandchild_pid_file = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open(r'{grandchild_pid_file}', 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    supervisor = supervisor_module.ChildProcessSupervisor([sys.executable, "-c", script], cwd=tmp_path)
+    from support import wait_until
+
+    supervisor.start()
+    grandchild = 0
+    try:
+        wait_until(
+            lambda: grandchild_pid_file.exists() and grandchild_pid_file.read_text().strip(),
+            timeout=30,
+            describe="the child to start its own child",
+        )
+        grandchild = int(grandchild_pid_file.read_text().strip())
+        assert desktop_module.process_is_alive(grandchild)
+        assert supervisor.process is not None
+        child = supervisor.process.pid
+
+        supervisor.stop()
+
+        _wait_until_gone(child, describe="the supervised child to end")
+        _wait_until_gone(grandchild, describe="the supervised child's own child to end")
+    finally:
+        if supervisor.process is not None:
+            _kill_tree(supervisor.process.pid)
+        if grandchild:
+            _kill_tree(grandchild)
+
+
+@windows_only
+def test_a_launcher_killed_outright_takes_its_supervised_child_with_it(tmp_path: Path):
+    """The point of the job: no ``stop()`` runs, and the child still ends."""
+    from support import wait_until
+
+    backend_dir = Path(supervisor_module.__file__).resolve().parents[2]
+    pid_file = tmp_path / "child.pid"
+    launcher_script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from cortex_backend.launcher.supervisor import ChildProcessSupervisor\n"
+        "supervisor = ChildProcessSupervisor(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'], cwd=Path.cwd()\n"
+        ")\n"
+        "supervisor.start()\n"
+        f"Path(r'{pid_file}').write_text(str(supervisor.process.pid))\n"
+        "time.sleep(120)\n"
+    )
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", launcher_script],
+        env={**os.environ, "PYTHONPATH": str(backend_dir)},
+    )
+    child = 0
+    try:
+        wait_until(
+            lambda: pid_file.exists() and pid_file.read_text().strip(),
+            timeout=30,
+            describe="the launcher to start its child",
+        )
+        child = int(pid_file.read_text().strip())
+        assert desktop_module.process_is_alive(child)
+
+        launcher.kill()  # TerminateProcess: nothing in the launcher gets to run
+        launcher.wait(timeout=20)
+
+        _wait_until_gone(child, describe="the child of a killed launcher to end")
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=10)
+        if child:
+            _kill_tree(child)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="uses the Windows process APIs")
 def test_process_is_alive_tells_a_running_process_from_an_exited_one():
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
