@@ -25,6 +25,7 @@ this manager solves only the first one.
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 from contextlib import contextmanager
 import json
 import logging
@@ -67,6 +68,7 @@ from .launch_failure import (
     LaunchFailureCode,
     classify_child_exit,
     crash_loop_message,
+    echoes_model_text,
     launch_failure_message,
 )
 
@@ -132,10 +134,40 @@ _IDLE_CHECK_INTERVAL_SECONDS = 30.0
 # model load holds it for minutes, and answering "busy" is the honest reply.
 _UNLOAD_LOCK_TIMEOUT_SECONDS = 2.0
 _UNLOADED_AT_REQUEST = "the model was unloaded at your request"
+_NO_VULKAN_LOADER_NOTE = (
+    "No Vulkan graphics loader was found on this computer, so the GPU build was "
+    "not downloaded and the CPU build is used. Install or update the graphics "
+    "driver to use the GPU."
+)
 
 
 def _idle_unload_reason(minutes: int) -> str:
     return f"the model was unloaded after {minutes} minute{'' if minutes == 1 else 's'} without use"
+
+
+def _vulkan_loader_present(
+    *,
+    platform: str = sys.platform,
+    environ: Mapping[str, str] = os.environ,
+    find_library: Callable[[str], str | None] = ctypes.util.find_library,
+) -> bool:
+    """Whether this machine has a Vulkan loader the GPU build could load.
+
+    The Vulkan build of llama.cpp links the loader (``vulkan-1.dll``, installed
+    with a graphics driver or the Vulkan runtime). Without it the roughly
+    100 MB archive would be downloaded, launched, and only then found unusable.
+    Off Windows there is no such build to choose between, so the answer is yes
+    and behaviour is unchanged.
+    """
+    if platform != "win32":
+        return True
+    system_root = environ.get("SystemRoot") or environ.get("WINDIR")
+    if system_root and (Path(system_root) / "System32" / "vulkan-1.dll").is_file():
+        return True
+    try:
+        return find_library("vulkan-1") is not None
+    except OSError:
+        return False
 
 
 def _safe_restart_reason(reason: str) -> str:
@@ -239,6 +271,16 @@ class LlamaCppRuntimeStatus:
     # said. None when nothing failed, when the cause was not identified, and
     # again once a server reaches ready.
     last_failure_code: LaunchFailureCode | None = None
+    # How many of the model's layers the running server put on the GPU, and how
+    # many it has, as the server itself reported them while loading. Both None
+    # when nothing is ready or when the server said nothing Cortex recognises:
+    # the build that launched (``active_backend``) does not say whether the GPU
+    # is in use, this does. 0 offloaded means the GPU build is running on the CPU.
+    gpu_layers_offloaded: int | None = None
+    gpu_layers_total: int | None = None
+    # Fixed text saying why the GPU build was not used when it would have been
+    # the default (no Vulkan loader on this machine). Never carries child text.
+    backend_note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +457,28 @@ default_launcher: ProcessLauncher = _JobObjectLauncher()
 
 
 _LISTENING_PORT_RE = re.compile(r"\blistening on http://127\.0\.0\.1:(\d+)\b", re.IGNORECASE)
+# The line llama.cpp prints once the model's layers are placed, for example
+# "load_tensors: offloaded 24/33 layers to GPU". Only the two counts are kept.
+# Anchored to the loader's own tag and to the end of the line, and never
+# applied to a line that echoes the model file's text (see echoes_model_text).
+_OFFLOADED_LAYERS_RE = re.compile(
+    r"\b(?:llm_)?load_tensors:\s*offloaded\s+(\d{1,5})\s*/\s*(\d{1,5})\s+layers?\s+to\s+GPU\s*$",
+    re.IGNORECASE,
+)
+_MAX_PARSED_LINE_CHARS = 512
+
+
+def _offloaded_layers(line: str) -> tuple[int, int] | None:
+    """The ``(offloaded, total)`` layer counts a loader line reports, or None."""
+    if len(line) > _MAX_PARSED_LINE_CHARS or echoes_model_text(line):
+        return None
+    match = _OFFLOADED_LAYERS_RE.search(line)
+    if match is None:
+        return None
+    offloaded, total = int(match.group(1)), int(match.group(2))
+    if total <= 0 or offloaded > total:
+        return None
+    return offloaded, total
 
 # llama-server gives every option an environment alias (LLAMA_ARG_*), and an
 # explicit argument only wins for the options Cortex actually passes. Anything
@@ -545,6 +609,7 @@ class LlamaServerManager:
         idle_unload_minutes: Callable[[], int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         idle_check_interval_seconds: float = _IDLE_CHECK_INTERVAL_SECONDS,
+        vulkan_loader_probe: Callable[[], bool] = _vulkan_loader_present,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._fetcher = fetcher
@@ -577,6 +642,7 @@ class LlamaServerManager:
         # keeps using time.monotonic directly. A test moves it by hand.
         self._clock = clock
         self._idle_check_interval_seconds = idle_check_interval_seconds
+        self._vulkan_loader_probe = vulkan_loader_probe
 
         self._ensure_lock = threading.Lock()
         self._state_lock = threading.RLock()
@@ -624,6 +690,9 @@ class LlamaServerManager:
         self._last_used = self._clock()
         self._idle_stop = threading.Event()
         self._idle_thread: threading.Thread | None = None
+        # The layer counts the running server reported (see _offloaded_layers).
+        self._gpu_layers: tuple[int, int] | None = None
+        self._backend_note: str | None = None
 
     def close(self) -> None:
         """Stop the managed process and close an HTTP client owned here."""
@@ -807,6 +876,8 @@ class LlamaServerManager:
             last_restart_reason = self._last_restart_reason
             active_backend = self._active_backend
             loaded_context = self._loaded_context if state == "ready" else None
+            gpu_layers = self._gpu_layers if state == "ready" else None
+            backend_note = self._backend_note
         # The expensive parts -- hashing the cached binary directory and a
         # settings read for the models folder -- run outside every lock, so
         # a status poll never stalls behind (or holds up) a model load.
@@ -822,6 +893,9 @@ class LlamaServerManager:
             last_restart_reason=last_restart_reason,
             loaded_context=loaded_context,
             last_failure_code=last_failure_code,
+            gpu_layers_offloaded=gpu_layers[0] if gpu_layers is not None else None,
+            gpu_layers_total=gpu_layers[1] if gpu_layers is not None else None,
+            backend_note=backend_note,
         )
 
     @contextmanager
@@ -1352,6 +1426,10 @@ class LlamaServerManager:
                 self._last_error = "The local GGUF runtime is not yet configured."
             raise LlamaCppError("The local GGUF runtime is not yet configured.")
 
+        with self._state_lock:
+            # What was decided about the GPU build for this launch (see
+            # _backend_order) describes the launch that is starting now.
+            self._backend_note = None
         requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
         vulkan_launch_failed = False
@@ -1447,7 +1525,17 @@ class LlamaServerManager:
         if requested == "cpu":
             return ["cpu"]
         if requested == "vulkan":
+            # An explicit choice is honoured as it always was, including on a
+            # machine where the probe finds no loader: the probe can be wrong
+            # about an unusual install, and the user asked for this build.
             return ["vulkan"]
+        if not self._vulkan_loader_probe():
+            # Nothing the GPU build can load is on this machine, so downloading
+            # and launching it would only end in a fallback to the CPU build
+            # after the larger download. Go straight there and say why.
+            with self._state_lock:
+                self._backend_note = _NO_VULKAN_LOADER_NOTE
+            return ["cpu"]
         if self._known_bad_backend(model_path, num_ctx) == "vulkan":
             return ["cpu"]
         return ["vulkan", "cpu"]
@@ -1605,6 +1693,9 @@ class LlamaServerManager:
             self._starting_process = process
         stderr_tail: list[str] = []
         listening_port: list[int] = []
+        # The counts from the loader's offload line; the last one wins, so a
+        # build that prints one per attempt reports the load that was kept.
+        offloaded: list[tuple[int, int]] = []
         listening_event = threading.Event()
         # When the child last wrote anything at all (see _drain_output).
         last_output = [time.monotonic()]
@@ -1615,6 +1706,10 @@ class LlamaServerManager:
             if match is not None and not listening_port:
                 listening_port.append(int(match.group(1)))
                 listening_event.set()
+            layers = _offloaded_layers(line)
+            if layers is not None and not listening_port:
+                # Only the load before "listening" describes this server.
+                offloaded.append(layers)
 
         def on_activity() -> None:
             last_output[0] = time.monotonic()
@@ -1702,6 +1797,7 @@ class LlamaServerManager:
                         self._last_error = None
                         self._last_failure_code = None
                         self._active_backend = backend
+                        self._gpu_layers = offloaded[-1] if offloaded else None
                         self._last_health_check = time.monotonic()
                         self._stderr_tail = stderr_tail
                     ready = True

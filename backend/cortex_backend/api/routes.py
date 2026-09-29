@@ -1122,6 +1122,9 @@ def _llamacpp_status(request: Request) -> LlamaCppRuntimeStatus:
         last_restart_reason=live.last_restart_reason,
         loaded_context=live.loaded_context,
         last_failure_code=live.last_failure_code,
+        gpu_layers_offloaded=live.gpu_layers_offloaded,
+        gpu_layers_total=live.gpu_layers_total,
+        backend_note=live.backend_note,
     )
 
 

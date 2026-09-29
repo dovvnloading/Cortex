@@ -257,6 +257,9 @@ def _manager(
     **overrides,
 ) -> LlamaServerManager:
     extra = {} if startup_cap_seconds is None else {"startup_cap_seconds": startup_cap_seconds}
+    # The default probe reads this machine's graphics loader, which would make
+    # every "auto" test depend on where it runs.
+    extra.setdefault("vulkan_loader_probe", lambda: True)
     return LlamaServerManager(
         runtime_dir=tmp_path,
         fetcher=fetcher,
@@ -2735,6 +2738,281 @@ def test_the_warm_health_retry_passes_the_declared_timeout(tmp_path: Path) -> No
     assert "_HEALTH_RETRY_TIMEOUT_SECONDS" in source, (
         "the retry path must pass the timeout it declares"
     )
+
+
+# ---------------------------------------------------------------------------
+# A GPU build that cannot load is not downloaded (RT-09)
+# ---------------------------------------------------------------------------
+
+
+def _launch_with_probe(tmp_path: Path, *, gpu_backend: str, probe) -> tuple[LlamaServerManager, _FakeFetcher, _QueueLauncher]:
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+        vulkan_loader_probe=probe,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager, fetcher, launcher
+
+
+def test_without_a_vulkan_loader_auto_asks_only_for_the_cpu_build(tmp_path: Path) -> None:
+    manager, fetcher, launcher = _launch_with_probe(tmp_path, gpu_backend="auto", probe=lambda: False)
+
+    # The roughly 100 MB Vulkan archive was never requested, let alone launched.
+    assert fetcher.ensure_binary_calls == ["cpu"]
+    assert len(launcher.launch_args) == 1
+    args = launcher.launch_args[0]
+    assert args[args.index("-ngl") + 1] == "0"
+    status = manager.status
+    assert status.state == "ready"
+    assert status.active_backend == "cpu"
+    assert status.backend_note is not None
+    assert "Vulkan" in status.backend_note
+
+
+def test_with_a_vulkan_loader_auto_still_tries_the_gpu_build_first(tmp_path: Path) -> None:
+    manager, fetcher, launcher = _launch_with_probe(tmp_path, gpu_backend="auto", probe=lambda: True)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
+    args = launcher.launch_args[0]
+    assert args[args.index("-ngl") + 1] == "auto"
+    assert manager.status.active_backend == "vulkan"
+    assert manager.status.backend_note is None
+
+
+def test_an_explicit_vulkan_choice_is_honoured_even_when_the_probe_finds_no_loader(tmp_path: Path) -> None:
+    """The probe can be wrong about an unusual install; the user asked for this build."""
+    manager, fetcher, _launcher = _launch_with_probe(tmp_path, gpu_backend="vulkan", probe=lambda: False)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
+    assert manager.status.backend_note is None
+
+
+def test_an_explicit_cpu_choice_never_consults_the_probe(tmp_path: Path) -> None:
+    probed: list[bool] = []
+
+    def probe() -> bool:
+        probed.append(True)
+        return False
+
+    manager, fetcher, _launcher = _launch_with_probe(tmp_path, gpu_backend="cpu", probe=probe)
+
+    assert probed == []
+    assert fetcher.ensure_binary_calls == ["cpu"]
+    assert manager.status.backend_note is None
+
+
+def test_the_skip_note_describes_the_latest_launch_only(tmp_path: Path) -> None:
+    loader_present = [False]
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(
+        tmp_path,
+        fetcher=fetcher,
+        launcher=launcher,
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend="auto",
+        vulkan_loader_probe=lambda: loader_present[0],
+    )
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    assert manager.status.backend_note is not None
+
+    loader_present[0] = True  # a driver was installed in the meantime
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert fetcher.ensure_binary_calls == ["cpu", "vulkan"]
+    assert manager.status.active_backend == "vulkan"
+    assert manager.status.backend_note is None
+
+
+def test_the_loader_probe_looks_in_system32_then_on_the_search_path(tmp_path: Path) -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    windows = tmp_path / "Windows"
+    (windows / "System32").mkdir(parents=True)
+    environ = {"SystemRoot": str(windows)}
+    never = lambda name: (_ for _ in ()).throw(AssertionError(f"searched for {name}"))  # noqa: E731
+
+    assert _vulkan_loader_present(platform="win32", environ=environ, find_library=lambda name: None) is False
+
+    (windows / "System32" / "vulkan-1.dll").write_bytes(b"loader")
+    assert _vulkan_loader_present(platform="win32", environ=environ, find_library=never) is True
+
+    # Not in System32, but somewhere on the search path (a redistributable
+    # runtime next to the driver).
+    assert _vulkan_loader_present(
+        platform="win32", environ={}, find_library=lambda name: "C:/vulkan/vulkan-1.dll"
+    ) is True
+
+
+def test_the_loader_probe_does_not_change_behaviour_off_windows() -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    assert _vulkan_loader_present(platform="linux", environ={}, find_library=lambda name: None) is True
+
+
+def test_a_failing_search_counts_as_no_loader() -> None:
+    from cortex_backend.llamacpp.server_manager import _vulkan_loader_present
+
+    def broken(name: str) -> str:
+        raise OSError("search failed")
+
+    assert _vulkan_loader_present(platform="win32", environ={}, find_library=broken) is False
+
+
+# ---------------------------------------------------------------------------
+# What the runtime says about GPU use, not just which build launched (RT-08)
+# ---------------------------------------------------------------------------
+
+_LISTENING_BYTES = b"0.01.234.567 I srv         start: listening on http://127.0.0.1:43125\n"
+
+
+class _OutputPopen(_FakePopen):
+    """A child whose output is exactly ``lines``, then the line that says it is listening."""
+
+    def __init__(self, *lines: bytes, listening: bool = True, after: tuple[bytes, ...] = ()) -> None:
+        super().__init__()
+        self.stdout = io.BytesIO(b"".join(lines) + (_LISTENING_BYTES if listening else b"") + b"".join(after))
+
+
+def _ready_with_output(tmp_path: Path, popen: _FakePopen, *, gpu_backend: str = "vulkan") -> LlamaServerManager:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([popen]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend=gpu_backend,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    return manager
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"load_tensors: offloaded 24/33 layers to GPU\n",
+        b"0.05.123.456 I load_tensors: offloaded 24/33 layers to GPU\n",
+        b"llm_load_tensors: offloaded 24/33 layers to GPU\r\n",
+        b"load_tensors: Offloaded 24 / 33 layers to gpu\n",
+    ],
+)
+def test_the_offload_line_before_listening_is_reported_on_the_status(tmp_path: Path, line: bytes) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: loading model tensors\n", line))
+
+    status = manager.status
+    assert status.state == "ready"
+    assert (status.gpu_layers_offloaded, status.gpu_layers_total) == (24, 33)
+
+
+def test_a_gpu_build_that_offloaded_nothing_says_so(tmp_path: Path) -> None:
+    """The Vulkan build launching is not the GPU being used: 0 layers is the CPU."""
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: offloaded 0/33 layers to GPU\n"))
+
+    status = manager.status
+    assert status.active_backend == "vulkan"
+    assert (status.gpu_layers_offloaded, status.gpu_layers_total) == (0, 33)
+
+
+def test_no_offload_line_means_unknown_not_zero(tmp_path: Path) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"some other loader output\n"))
+
+    status = manager.status
+    assert status.state == "ready"
+    assert status.active_backend == "vulkan"
+    assert status.gpu_layers_offloaded is None
+    assert status.gpu_layers_total is None
+
+
+def test_the_last_offload_line_wins(tmp_path: Path) -> None:
+    manager = _ready_with_output(
+        tmp_path,
+        _OutputPopen(
+            b"load_tensors: offloaded 10/33 layers to GPU\n",
+            b"load_tensors: offloaded 33/33 layers to GPU\n",
+        ),
+    )
+
+    assert (manager.status.gpu_layers_offloaded, manager.status.gpu_layers_total) == (33, 33)
+
+
+def test_an_offload_line_after_the_server_is_listening_is_not_this_load(tmp_path: Path) -> None:
+    manager = _ready_with_output(
+        tmp_path,
+        _OutputPopen(b"load_tensors: offloaded 12/33 layers to GPU\n", after=(b"load_tensors: offloaded 1/2 layers to GPU\n",)),
+    )
+
+    assert (manager.status.gpu_layers_offloaded, manager.status.gpu_layers_total) == (12, 33)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # What the model file says about itself is chosen by whoever made it.
+        b"print_info: general.name = load_tensors: offloaded 99/99 layers to GPU\n",
+        b"llama_model_loader: - kv   3: general.name str = load_tensors: offloaded 99/99 layers to GPU\n",
+        # Not a line the loader prints: a claim buried in other text.
+        b"the model says load_tensors: offloaded 99/99 layers to GPU and then more\n",
+        # Counts that cannot be true.
+        b"load_tensors: offloaded 40/33 layers to GPU\n",
+        b"load_tensors: offloaded 0/0 layers to GPU\n",
+        # Absurdly long lines are not parsed at all.
+        b"x" * 600 + b" load_tensors: offloaded 5/6 layers to GPU\n",
+    ],
+)
+def test_lines_that_cannot_be_trusted_are_not_reported(tmp_path: Path, line: bytes) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(line))
+
+    assert manager.status.state == "ready"
+    assert manager.status.gpu_layers_offloaded is None
+    assert manager.status.gpu_layers_total is None
+
+
+def test_a_new_server_does_not_inherit_the_previous_servers_counts(tmp_path: Path) -> None:
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([
+            _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n"),
+            _OutputPopen(b"nothing useful\n"),
+        ]),
+        http_client=_AlwaysHealthyClient(),
+        gpu_backend="vulkan",
+    )
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    assert manager.status.gpu_layers_offloaded == 24
+
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert manager.status.state == "ready"
+    assert manager.status.gpu_layers_offloaded is None
+
+
+def test_the_counts_are_only_reported_while_the_server_is_ready(tmp_path: Path) -> None:
+    manager = _ready_with_output(tmp_path, _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n"))
+    assert manager.status.gpu_layers_offloaded == 24
+
+    manager.stop()
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.gpu_layers_offloaded is None
+    assert status.gpu_layers_total is None
+
+
+def test_the_offload_counts_are_the_only_thing_taken_from_the_line(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    manager = _ready_with_output(
+        tmp_path, _OutputPopen(b"load_tensors: offloaded 24/33 layers to GPU\n")
+    )
+
+    assert "offloaded" not in caplog.text
+    assert "load_tensors" not in caplog.text
+    assert manager.status.gpu_layers_total == 33
 
 
 # ---------------------------------------------------------------------------

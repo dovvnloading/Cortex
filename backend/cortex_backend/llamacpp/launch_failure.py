@@ -207,6 +207,15 @@ _OUTPUT_RULES: Final[tuple[tuple[LaunchFailureCode, re.Pattern[str]], ...]] = (
 # made the file, so it must not be able to pick a cause.
 _ECHOED_MODEL_TEXT: Final = re.compile(r"\bkv\s+\d+\s*:|\bprint_info\s*:|\bgeneral\.[a-z_.]+\s*=", re.IGNORECASE)
 
+
+def echoes_model_text(line: str) -> bool:
+    """Whether ``line`` prints what the model file says about itself.
+
+    Anything read from such a line is chosen by whoever made the file, so it
+    must not be used to report how the runtime behaved.
+    """
+    return _ECHOED_MODEL_TEXT.search(line) is not None
+
 # Windows exit codes (NTSTATUS) that identify the cause without any output,
 # which is how a process that cannot even load its libraries ends. Keys are the
 # unsigned 32-bit values; a signed exit code is masked to match.

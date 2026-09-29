@@ -2334,10 +2334,43 @@
             ],
             "title": "Active Backend"
           },
+          "backend_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Note"
+          },
           "binary_present": {
             "default": false,
             "title": "Binary Present",
             "type": "boolean"
+          },
+          "gpu_layers_offloaded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Layers Offloaded"
+          },
+          "gpu_layers_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Layers Total"
           },
           "last_error": {
             "anyOf": [

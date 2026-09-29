@@ -49,6 +49,23 @@ type Props = {
   runtime?: RuntimeControls;
 };
 
+/**
+ * What the status can honestly say about which processor is doing the work.
+ * The build that launched is not the same as the GPU being used: with automatic
+ * layer offload only some (or none) of the model may be on it, so the layer
+ * counts the runtime reported win over the name of the build.
+ */
+function describeRuntimeBackend(status: LlamaCppRuntimeStatus): string {
+  if (status.active_backend !== "vulkan") return "CPU";
+  const { gpu_layers_offloaded: onGpu, gpu_layers_total: total } = status;
+  if (status.state !== "ready") return "GPU (Vulkan)";
+  if (typeof onGpu !== "number" || typeof total !== "number") {
+    return "GPU (Vulkan) — how much of the model is on the GPU was not reported";
+  }
+  if (onGpu === 0) return `CPU — the GPU build is running, but none of the ${total} layers are on the GPU`;
+  return `GPU (Vulkan) · ${onGpu}/${total} layers on the GPU`;
+}
+
 export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
@@ -142,7 +159,7 @@ function GGUFRuntimeSection({ llamacppStatus, gguf, runtime }: { llamacppStatus:
       </p>
       {llamacppStatus.active_backend && (
         <p className="gguf-runtime-backend">
-          Local runtime: <strong>{llamacppStatus.active_backend === "vulkan" ? "GPU (Vulkan)" : "CPU"}</strong>
+          Local runtime: <strong>{describeRuntimeBackend(llamacppStatus)}</strong>
           {llamacppStatus.state === "ready" && llamacppStatus.loaded_model
             ? ` — currently running ${displayModelName(llamacppStatus.loaded_model)}`
             : llamacppStatus.state === "starting" || llamacppStatus.state === "downloading_binary"
@@ -150,6 +167,7 @@ function GGUFRuntimeSection({ llamacppStatus, gguf, runtime }: { llamacppStatus:
               : ""}
         </p>
       )}
+      {llamacppStatus.backend_note && <p className="muted-note" role="status">{llamacppStatus.backend_note}</p>}
       {runtime && <RuntimeMemoryControls status={llamacppStatus} runtime={runtime} />}
       <div className="gguf-runtime-directory">
         <FolderOpen aria-hidden="true" size={15} />

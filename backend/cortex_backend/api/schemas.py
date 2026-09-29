@@ -112,6 +112,16 @@ class LlamaCppRuntimeStatus(APIModel):
     # produced. Null when nothing failed, when the cause was not identified,
     # and once a server is ready.
     last_failure_code: LaunchFailureCode | None = None
+    # How many of the model's layers the running server put on the GPU, and how
+    # many it has, as the server reported them while loading. Null while
+    # nothing is ready and when the server said nothing Cortex recognises --
+    # unknown, not zero. ``active_backend`` says which build launched; these say
+    # whether the GPU is actually in use (0 offloaded means it is not).
+    gpu_layers_offloaded: int | None = None
+    gpu_layers_total: int | None = None
+    # Fixed text on why the GPU build was not used when it would have been the
+    # default (no Vulkan loader on this machine). Null otherwise.
+    backend_note: str | None = None
 
 
 class SystemResponse(APIModel):

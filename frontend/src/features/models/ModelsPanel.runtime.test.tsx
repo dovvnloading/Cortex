@@ -59,6 +59,65 @@ function renderPanel(status: LlamaCppRuntimeStatus, runtime?: RuntimeControls) {
   };
 }
 
+describe("ModelsPanel local runtime line", () => {
+  it("says how many layers are on the GPU when the runtime reported them", () => {
+    renderPanel({ ...readyStatus, gpu_layers_offloaded: 24, gpu_layers_total: 33 });
+
+    expect(screen.getByText(/Local runtime:/)).toHaveTextContent("GPU (Vulkan) · 24/33 layers on the GPU");
+  });
+
+  it("does not call a GPU build that offloaded nothing a GPU", () => {
+    renderPanel({ ...readyStatus, gpu_layers_offloaded: 0, gpu_layers_total: 33 });
+
+    const line = screen.getByText(/Local runtime:/);
+    expect(line).toHaveTextContent("none of the 33 layers are on the GPU");
+    expect(line).not.toHaveTextContent("GPU (Vulkan)");
+  });
+
+  it("admits it when the runtime did not say how much is on the GPU", () => {
+    renderPanel(readyStatus);
+
+    const line = screen.getByText(/Local runtime:/);
+    expect(line).toHaveTextContent("GPU (Vulkan)");
+    expect(line).toHaveTextContent("was not reported");
+    expect(line).not.toHaveTextContent("layers on the GPU");
+  });
+
+  it("names the build only, with no layer claim, while the model is still loading", () => {
+    renderPanel({ ...readyStatus, state: "starting", gpu_layers_offloaded: 24, gpu_layers_total: 33 });
+
+    const line = screen.getByText(/Local runtime:/);
+    expect(line).toHaveTextContent("GPU (Vulkan)");
+    expect(line).not.toHaveTextContent("layers");
+  });
+
+  it("reports the CPU build as the CPU", () => {
+    renderPanel({ ...readyStatus, active_backend: "cpu", gpu_layers_offloaded: 0, gpu_layers_total: 33 });
+
+    expect(screen.getByText(/Local runtime:/)).toHaveTextContent(/Local runtime:\s*CPU\b/);
+  });
+
+});
+
+describe("ModelsPanel GPU skip note", () => {
+  it("shows why the GPU build was skipped", () => {
+    renderPanel({
+      ...readyStatus,
+      active_backend: "cpu",
+      backend_note: "No Vulkan graphics loader was found on this computer.",
+    });
+
+    expect(screen.getByText("No Vulkan graphics loader was found on this computer.")).toBeVisible();
+  });
+
+  it("shows no skip note when the GPU build was not skipped", () => {
+    renderPanel(readyStatus);
+
+    expect(screen.queryByText(/No Vulkan graphics loader/)).not.toBeInTheDocument();
+  });
+
+});
+
 describe("ModelsPanel unload control", () => {
   it("unloads the loaded model when asked", async () => {
     const user = userEvent.setup();
