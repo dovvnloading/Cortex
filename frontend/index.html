@@ -3,7 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#2d2d2d" />
+    <meta name="theme-color" content="#101112" />
+    <script>
+      // Paint the cached theme before the first frame. A classic inline script
+      // in <head> blocks rendering, so the page never shows the dark default to
+      // a light-theme user while /settings is still loading. It mirrors
+      // applyStoredTheme() in src/lib/theme.ts (same key, same colours, same
+      // resolution of "system"), and theme.test.ts runs this exact text against
+      // that function so the two cannot drift. Dark is the fallback for a first
+      // launch or blocked storage, matching the backend's default.
+      (function () {
+        var theme = "dark";
+        try {
+          var stored = window.localStorage.getItem("cortex.theme");
+          if (stored === "light" || stored === "dark" || stored === "system") theme = stored;
+        } catch (error) {
+          // Storage can be blocked; keep the fallback.
+        }
+        if (theme === "system") {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", theme === "light" ? "#f3f1ec" : "#101112");
+      })();
+    </script>
     <meta name="description" content="Cortex local AI workspace" />
     <link rel="icon" type="image/svg+xml" href="/cortex.svg" />
     <link rel="alternate icon" href="/cortex.svg" />
