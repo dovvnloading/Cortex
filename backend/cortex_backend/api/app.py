@@ -9,8 +9,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from collections.abc import Callable
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -63,10 +62,20 @@ def redact_validation_errors(errors: Iterable[Any]) -> list[dict[str, Any]]:
     ]
 
 
-# The largest legitimate request body is a base64 attachment: the 10 MiB file
-# limit is a little under 14 MB once encoded (see MAX_CHAT_ATTACHMENT_BYTES and
-# MAX_ATTACHMENT_BASE64_LENGTH in schemas). Everything else is far smaller.
-MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
+# Two ceilings, because the bytes a request may carry are not the memory it may
+# cost. Validating a body of nothing but unknown keys builds one error per key
+# before the handler clips the report to _MAX_VALIDATION_ISSUES, so the cost of a
+# rejected body is many times its size and grows with it.
+#
+# Only an attachment upload has a reason to be large: the 10 MiB file limit is a
+# little under 14 MB once base64 encoded (see MAX_CHAT_ATTACHMENT_BYTES and
+# MAX_ATTACHMENT_BASE64_LENGTH in schemas). Those two routes keep 16 MiB.
+# Everything else is small: the largest is a 100,000-character message, about
+# 0.4 MB as a browser encodes it and 0.6 MB if every character were a control
+# character written out as an escape, so 1 MiB leaves room and no more.
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
+MAX_ATTACHMENT_BODY_BYTES = 16 * 1024 * 1024
+ATTACHMENT_STAGING_PATHS = ("/api/v1/attachments", "/api/v1/execution/attachments")
 
 
 class RequestBodyLimitMiddleware:
@@ -81,6 +90,8 @@ class RequestBodyLimitMiddleware:
     the bytes received pass the ceiling.
 
     Only API paths are limited; the static frontend takes no request bodies.
+    ``larger_bodies`` names the exact paths that accept a ``POST`` bigger than
+    ``max_body_bytes``, and how much bigger; everything else gets the default.
     """
 
     def __init__(
@@ -89,10 +100,12 @@ class RequestBodyLimitMiddleware:
         *,
         max_body_bytes: int = MAX_REQUEST_BODY_BYTES,
         path_prefix: str = "/api/",
+        larger_bodies: Mapping[str, int] | None = None,
     ) -> None:
         self.app = app
         self._max_body_bytes = max_body_bytes
         self._path_prefix = path_prefix
+        self._larger_bodies = dict(larger_bodies or {})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not str(scope.get("path", "")).startswith(
@@ -100,8 +113,9 @@ class RequestBodyLimitMiddleware:
         ):
             await self.app(scope, receive, send)
             return
+        ceiling = self._ceiling(scope)
         declared = self._declared_length(scope)
-        if declared is not None and declared > self._max_body_bytes:
+        if declared is not None and declared > ceiling:
             await self._refuse(send)
             return
 
@@ -117,7 +131,7 @@ class RequestBodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self._max_body_bytes:
+                if received > ceiling:
                     overflowed = True
                     if not app_response_started:
                         refused = True
@@ -136,6 +150,11 @@ class RequestBodyLimitMiddleware:
             await send(message)
 
         await self.app(scope, limited_receive, guarded_send)
+
+    def _ceiling(self, scope: Scope) -> int:
+        if scope.get("method") == "POST":
+            return self._larger_bodies.get(str(scope.get("path", "")), self._max_body_bytes)
+        return self._max_body_bytes
 
     @staticmethod
     def _declared_length(scope: Scope) -> int | None:
@@ -411,7 +430,10 @@ def create_app(
     # Added first, so it sits innermost of the three: the host check and CORS
     # run around it, and a refusal still carries the CORS headers a browser
     # needs in order to read the status.
-    app.add_middleware(RequestBodyLimitMiddleware)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        larger_bodies=dict.fromkeys(ATTACHMENT_STAGING_PATHS, MAX_ATTACHMENT_BODY_BYTES),
+    )
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=middleware_allowed_hosts,
