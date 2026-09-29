@@ -35,6 +35,17 @@ SCHEMA_VERSION = 3
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APPROVAL_TTL_SECONDS = 300.0
 DEFAULT_TERMINAL_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+# How long a database set aside as damaged, or as written by a newer build, is
+# kept for inspection before the startup sweep reclaims it.
+ASIDE_COPY_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_CONNECT_TIMEOUT_SECONDS = 10.0
+# SQLite primary result codes that say the file's *contents* are bad
+# (SQLITE_CORRUPT, SQLITE_NOTADB). Everything else -- busy, locked, cannot
+# open, I/O error, disk full, read-only, permission -- says only that the file
+# could not be read *right now*, which is no reason to touch it.
+_SQLITE_CORRUPTION_CODES = frozenset({11, 26})
+# Python 3.10 does not expose sqlite_errorcode, so fall back to the message.
+_SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
@@ -68,6 +79,15 @@ def _has_reparse_parent(path: Path) -> bool:
 
 class ExecutionRepositoryError(RuntimeError):
     """Safe repository boundary error."""
+
+
+class ExecutionStoreUnavailable(ExecutionRepositoryError):
+    """The store could not be read right now; nothing on disk was changed.
+
+    Retrying later is safe. It is raised instead of treating an unreadable
+    file as a damaged one, because "locked by a scanner" and "corrupt" need
+    opposite answers.
+    """
 
 
 class LeaseConflict(ExecutionRepositoryError):
@@ -130,14 +150,24 @@ class ExecutionRepository:
             self._installation_principal_id = self._load_or_create_installation_principal()
         return self._installation_principal_id
 
+    def _new_connection(self) -> sqlite3.Connection:
+        """Open a connection with the settings every reader of this store uses."""
+
+        connection = sqlite3.connect(self.db_path, timeout=_CONNECT_TIMEOUT_SECONDS)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {int(_CONNECT_TIMEOUT_SECONDS * 1000)}")
+            connection.execute("PRAGMA foreign_keys = ON")
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(self.db_path, timeout=10.0)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA busy_timeout = 10000")
-            connection.execute("PRAGMA foreign_keys = ON")
+            connection = self._new_connection()
             yield connection
             connection.commit()
         except sqlite3.Error as exc:
@@ -161,12 +191,15 @@ class ExecutionRepository:
         self.quarantine_root.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(self.quarantine_root) or _has_reparse_parent(self.quarantine_root):
             raise ExecutionRepositoryError("Artifact quarantine is unavailable.")
-        self._rebuild_if_damaged()
         with _SCHEMA_LOCK:
+            # One lock across the check and the DDL, so two repositories built
+            # in the same process cannot both decide to set the file aside.
+            self._rebuild_if_damaged()
+            self._sweep_aside_copies()
             self._ensure_schema_locked()
 
     def _rebuild_if_damaged(self) -> None:
-        """Replace an unreadable execution store instead of refusing to start.
+        """Replace an execution store this build cannot use, without losing it.
 
         This database holds only transient bookkeeping -- jobs, events, leases
         and artifact rows -- and it is written on every job, every event and
@@ -174,32 +207,40 @@ class ExecutionRepository:
         shutdown. It is also the first dependency the app builds, and unlike
         the chat and settings stores it has no backup and no recovery. A torn
         page therefore took the whole application down: no chat, no settings,
-        nothing, over disposable state.
+        nothing, over disposable state. A profile copied back from a newer
+        build did the same, and the DDL had already been written to it by the
+        time the version was checked.
 
         Nothing here is authored by the user, so rebuilding is both the
-        cheapest and the most correct answer. The damaged file is kept beside
-        the new one for inspection rather than deleted.
+        cheapest and the most correct answer -- but only for a file that is
+        positively known to be unusable: corrupt, or written by a newer
+        schema. A file that merely could not be read this time (locked by a
+        scanner or a backup agent, briefly unreadable, disk full) is left
+        exactly as it is and reported as retryable, because renaming it would
+        turn a healthy store into an empty one. The set-aside file is kept
+        beside the new one for inspection rather than deleted.
         """
         if not self.db_path.exists():
             return
-        try:
-            connection = sqlite3.connect(self.db_path)
-            try:
-                result = connection.execute("PRAGMA integrity_check").fetchone()
-            finally:
-                connection.close()
-            if result is not None and str(result[0]).lower() == "ok":
-                return
-        except sqlite3.Error:
-            pass  # Unreadable at all: the same answer.
+        verdict = self._inspect_store()
+        if verdict == "ok":
+            return
 
-        damaged = self.db_path.with_name(f"{self.db_path.name}.damaged-{uuid4().hex}")
+        aside = self.db_path.with_name(f"{self.db_path.name}.{verdict}-{uuid4().hex}")
         try:
-            os.replace(self.db_path, damaged)
+            os.replace(self.db_path, aside)
         except OSError as exc:
             raise ExecutionRepositoryError(
                 "The execution store is damaged and could not be replaced."
+                if verdict == "damaged"
+                else "The execution store was written by a newer version of Cortex "
+                "and could not be set aside."
             ) from exc
+        try:
+            # The retention window runs from now, not from the last write.
+            os.utime(aside)
+        except OSError:
+            pass
         for suffix in ("-wal", "-shm"):
             # They describe the file just moved aside, so SQLite must not
             # replay them onto the empty replacement.
@@ -207,10 +248,92 @@ class ExecutionRepository:
                 self.db_path.with_name(f"{self.db_path.name}{suffix}").unlink(missing_ok=True)
             except OSError:
                 pass
-        _LOGGER.error(
-            "The execution store was unreadable and has been rebuilt. "
-            "In-flight job state was lost; the damaged file was kept for inspection."
+        if verdict == "damaged":
+            _LOGGER.error(
+                "The execution store was unreadable and has been rebuilt. "
+                "In-flight job state was lost; the damaged file was kept for inspection."
+            )
+        else:
+            _LOGGER.warning(
+                "The execution store was written by a newer version of Cortex and "
+                "has been set aside. In-flight job state was not carried over."
+            )
+
+    def _inspect_store(self) -> Literal["ok", "damaged", "newer"]:
+        """Classify the existing database file without writing to it.
+
+        Only positive evidence returns ``damaged`` (corruption) or ``newer``
+        (a schema version this build does not know). Anything else that stops
+        the file being read raises :class:`ExecutionStoreUnavailable` and
+        leaves it alone. This runs before any DDL, so a newer store is never
+        modified on its way to being refused.
+        """
+
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._new_connection()
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if result is None or str(result[0]).lower() != "ok":
+                return "damaged"
+            try:
+                row = connection.execute(
+                    "SELECT version FROM execution_schema WHERE id = 1"
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
+                return "ok"  # A fresh or pre-versioning file: the DDL creates it.
+            try:
+                version = int(row["version"]) if row is not None else 0
+            except (TypeError, ValueError):
+                return "damaged"
+            return "newer" if version > SCHEMA_VERSION else "ok"
+        except sqlite3.Error as exc:
+            if self._is_corruption(exc):
+                return "damaged"
+            raise ExecutionStoreUnavailable(
+                "The execution store could not be opened right now and was left "
+                "untouched. Try again shortly."
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _is_corruption(exc: sqlite3.Error) -> bool:
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int):
+            return (code & 0xFF) in _SQLITE_CORRUPTION_CODES
+        message = str(exc).lower()
+        return any(marker in message for marker in _SQLITE_CORRUPTION_MESSAGES)
+
+    def _sweep_aside_copies(self) -> None:
+        """Reclaim set-aside stores older than the retention window.
+
+        Nothing else ever removed them, and the artifact files their rows
+        named are unreachable anyway, so each one was a permanent copy of a
+        store nobody could open. Best effort: a failure here never stops
+        startup, and only regular files with the exact set-aside name are
+        touched.
+        """
+
+        pattern = re.compile(
+            rf"^{re.escape(self.db_path.name)}\.(?:damaged|newer)-[0-9a-f]{{32}}$"
         )
+        cutoff = datetime.now(timezone.utc).timestamp() - ASIDE_COPY_RETENTION_SECONDS
+        try:
+            candidates = [
+                entry for entry in self.db_path.parent.iterdir() if pattern.fullmatch(entry.name)
+            ]
+        except OSError:
+            return
+        for entry in candidates:
+            try:
+                info = entry.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                continue
 
     def _ensure_schema_locked(self) -> None:
         with self.connect() as connection:
@@ -306,6 +429,10 @@ class ExecutionRepository:
                 raise ExecutionRepositoryError("Execution schema version is missing.")
             current_version = int(row["version"])
             if current_version > SCHEMA_VERSION:
+                # _rebuild_if_damaged() already sets a newer store aside before
+                # any DDL runs; reaching this means another process upgraded
+                # the file between that check and now. Refuse rather than
+                # migrate it backwards.
                 raise ExecutionRepositoryError("Execution schema is newer than this build.")
             if current_version < SCHEMA_VERSION:
                 principal = self._ensure_installation_principal_connection(connection)
