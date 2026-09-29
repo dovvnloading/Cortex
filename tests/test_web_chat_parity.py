@@ -387,6 +387,7 @@ def test_cancellation_after_commit_does_not_downgrade_the_persisted_response():
             )
             assert cancelled.status_code == 200
             assert cancelled.json()["status"] == "running"
+            assert cancelled.json()["can_cancel"] is False
             blocked = client.post(
                 "/api/v1/generations",
                 json={"thread_id": accepted["thread_id"], "user_input": "must wait"},

@@ -723,6 +723,7 @@ class JobStatusResponse(APIModel):
     thread_id: str | None = None
     status: JobStatus
     sequence: int
+    can_cancel: bool = False
     error: str | None = None
     result: dict[str, Any] | None = None
 

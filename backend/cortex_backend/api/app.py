@@ -33,7 +33,7 @@ from cortex_backend.execution.lifecycle import ExecutionLifecycle, LifecycleCoor
 from cortex_backend.execution.repository import ExecutionRepository
 from cortex_backend.llamacpp.server_manager import LlamaServerManager
 from .jobs import JobRegistry
-from .routers import build_router
+from .routers import OPENAPI_TAGS, build_router
 from .security import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -341,6 +341,7 @@ def create_app(
         version=__version__,
         description="Loopback-only versioned backend contract for the Cortex web migration.",
         lifespan=lifespan,
+        openapi_tags=OPENAPI_TAGS,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

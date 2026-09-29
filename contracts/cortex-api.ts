@@ -367,6 +367,7 @@ export interface JobStatusResponse {
   thread_id?: string | null;
   status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   sequence: number;
+  can_cancel?: boolean;
   error?: string | null;
   result?: Record<string, unknown> | null;
 }

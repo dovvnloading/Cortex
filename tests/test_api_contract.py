@@ -642,6 +642,155 @@ def test_generation_conflict_and_cancellation_are_explicit():
         ]
 
 
+def test_generation_routes_refuse_non_generation_jobs():
+    """``/generations`` is the chat family; a model job is not its to read or stop.
+
+    ``/jobs`` is the generic family and answers for every kind. Reading a
+    ``models`` job through ``/generations`` used to succeed, and cancelling it
+    there stopped it, so the two families were interchangeable by accident.
+    """
+
+    dependencies = build_demo_dependencies()
+    pull_started = Event()
+    pull_saw_cancel = Event()
+
+    def blocked_pull(model, *, progress_callback=None, cancellation_event=None, verify=True):
+        del model, progress_callback, verify
+        pull_started.set()
+        # Bounded: a cancel that never arrives ends the job instead of hanging it.
+        if cancellation_event is not None and cancellation_event.wait(timeout=5.0):
+            pull_saw_cancel.set()
+        return False
+
+    dependencies.models.pull_model = blocked_pull
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        pull = client.post("/api/v1/models/pulls", json={"model": "tiny:latest"}, headers=headers)
+        assert pull.status_code == 202
+        model_job = pull.json()["job_id"]
+        assert pull_started.wait(timeout=5.0), "the model job did not start"
+
+        unknown = client.get("/api/v1/generations/no-such-job", headers=headers)
+        assert unknown.status_code == 404
+        for method, path in (
+            ("GET", f"/api/v1/generations/{model_job}"),
+            ("POST", f"/api/v1/generations/{model_job}/cancel"),
+            ("GET", f"/api/v1/generations/{model_job}/events"),
+        ):
+            refused = client.request(method, path, headers=headers)
+            assert refused.status_code == 404, (method, path)
+            # Indistinguishable from an id that does not exist.
+            assert refused.json() == unknown.json(), (method, path)
+
+        # The refused cancel changed nothing: the job is untouched ...
+        still = client.get(f"/api/v1/jobs/{model_job}", headers=headers)
+        assert still.status_code == 200
+        assert still.json()["kind"] == "models"
+        assert still.json()["status"] == "running"
+        assert not pull_saw_cancel.is_set()
+
+        # ... and the generic family still stops it.
+        stopped = client.post(f"/api/v1/jobs/{model_job}/cancel", headers=headers)
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "cancelling"
+        wait_until(pull_saw_cancel.is_set, timeout=5.0, describe="the pull to see the cancel")
+
+        # A generation job is served by both families.
+        generation = client.post(
+            "/api/v1/generations",
+            json={"thread_id": "kind-check", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        for family in ("generations", "jobs"):
+            served = client.get(f"/api/v1/{family}/{generation['job_id']}", headers=headers)
+            assert served.status_code == 200, family
+            assert served.json()["kind"] == "generation"
+
+    tags = {tag["name"]: tag["description"] for tag in app.openapi()["tags"]}
+    assert "generic job family" in tags["jobs"]
+    assert "kind generation" in tags["generations"]
+
+
+def test_cancel_after_commit_reports_it_cannot_cancel():
+    """A Stop that arrives after the commit point says it was not honoured.
+
+    The status stays ``running`` because the answer is being saved, which is
+    also what a job that simply has not noticed the Stop yet looks like. The
+    ``can_cancel`` flag is what tells the two apart.
+    """
+
+    dependencies = build_demo_dependencies(
+        ollama_state=FakeOllamaState(generation_delay_seconds=0.3)
+    )
+    past_commit = Event()
+    release_title = Event()
+
+    def title_after_commit(snapshot, response, cancellation_event=None):
+        del snapshot, response, cancellation_event
+        past_commit.set()
+        release_title.wait(timeout=10.0)
+        return "Committed title"
+
+    dependencies.generation.generate_chat_title = title_after_commit
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            before = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-early", "thread_id": "early", "user_input": "slow"},
+                headers=headers,
+            ).json()
+            early = client.get(f"/api/v1/generations/{before['job_id']}", headers=headers).json()
+            assert early["status"] in {"queued", "running"}
+            assert early["can_cancel"] is True
+            honoured = client.post(
+                f"/api/v1/generations/{before['job_id']}/cancel", headers=headers
+            ).json()
+            assert honoured["status"] == "cancelling"
+            assert honoured["can_cancel"] is False  # nothing further to cancel
+            wait_until(
+                lambda: client.get(
+                    f"/api/v1/generations/{before['job_id']}", headers=headers
+                ).json()["status"]
+                == "cancelled",
+                describe="the early Stop to finish",
+            )
+
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "stop-late", "thread_id": "late", "user_input": "hello"},
+                headers=headers,
+            ).json()
+            assert past_commit.wait(timeout=10.0), "the job did not reach its commit point"
+
+            refused = client.post(
+                f"/api/v1/generations/{accepted['job_id']}/cancel", headers=headers
+            )
+            assert refused.status_code == 200
+            assert refused.json()["status"] == "running"
+            assert refused.json()["can_cancel"] is False
+            polled = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert polled.json()["can_cancel"] is False
+            # The generic family reports the same thing.
+            assert client.get(
+                f"/api/v1/jobs/{accepted['job_id']}", headers=headers
+            ).json()["can_cancel"] is False
+
+            release_title.set()
+            with client.stream(
+                "GET", f"/api/v1/generations/{accepted['job_id']}/events", headers=headers
+            ) as response:
+                events = _events("".join(response.iter_text()))
+            assert events[-1]["event"] == "generation.completed"
+            finished = client.get(f"/api/v1/generations/{accepted['job_id']}", headers=headers)
+            assert finished.json()["status"] == "succeeded"
+            assert finished.json()["can_cancel"] is False
+    finally:
+        release_title.set()
+
+
 def test_fake_ollama_server_and_model_failures_are_deterministic():
     fake = create_fake_ollama_app(FakeOllamaState(malformed_list=True))
     with TestClient(fake) as client:

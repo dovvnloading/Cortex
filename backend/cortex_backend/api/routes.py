@@ -78,6 +78,7 @@ from cortex_backend.execution.scratch_compute import (
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import (
+    JobKind,
     JobNotFound,
     JobOwnershipError,
     JobReservation,
@@ -1383,18 +1384,34 @@ def _job_response(snapshot: JobSnapshot) -> JobStatusResponse:
         thread_id=snapshot.thread_id,
         status=snapshot.status,
         sequence=snapshot.sequence,
+        can_cancel=snapshot.can_cancel,
         error=snapshot.error,
         result=dict(snapshot.result) if snapshot.result is not None else None,
     )
 
 
 def _job_status(
-    request: Request, job_id: str, principal: SessionPrincipal
+    request: Request,
+    job_id: str,
+    principal: SessionPrincipal,
+    *,
+    kind: JobKind | None = None,
 ) -> JobSnapshot:
+    """Read one of this owner's jobs; with ``kind``, only if it is of that kind.
+
+    A job of another kind reads as unknown -- the same 404 as an id that does
+    not exist -- so the ``/generations`` family cannot be used to read, follow
+    or stop a model or download job.
+    """
     try:
-        return request.app.state.jobs.status(job_id, owner=_durable_owner(principal))
+        snapshot: JobSnapshot = request.app.state.jobs.status(
+            job_id, owner=_durable_owner(principal)
+        )
     except (JobNotFound, JobOwnershipError) as exc:
         _raise_job_error(exc)
+    if kind is not None and snapshot.kind != kind:
+        _raise_job_error(JobNotFound(job_id))
+    return snapshot
 
 
 # What each ChatDomainError code means to an HTTP client. A client decides from
