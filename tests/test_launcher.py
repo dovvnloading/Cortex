@@ -38,6 +38,23 @@ from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
 
 
+_REAL_CONFIRM = runtime_module._confirm
+
+
+@pytest.fixture(autouse=True)
+def _no_real_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that reaches the WebView2 prompt must say what it answers.
+
+    The real prompt is a modal native message box: on a developer's machine it
+    would sit on the screen until someone clicked it.
+    """
+
+    def refuse(_title: str, _text: str) -> bool:
+        raise AssertionError("this test must pass confirm= or patch runtime_module._confirm")
+
+    monkeypatch.setattr(runtime_module, "_confirm", refuse)
+
+
 @pytest.fixture(autouse=True)
 def _restore_logging_state() -> Iterator[None]:
     """Undo what a launch does to the process-wide logging configuration.
@@ -1194,7 +1211,10 @@ def test_webview2_bootstrap_installs_and_rechecks_runtime(
 
     monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
 
-    assert runtime_module.ensure_webview2_runtime(tmp_path) == "150.0.1.2"
+    assert (
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+        == "150.0.1.2"
+    )
     assert calls[0][0] == [str(bootstrapper), "/silent", "/install"]
     assert calls[0][1]["timeout"] == 600
 
@@ -1225,6 +1245,275 @@ def test_webview2_bootstrap_rejects_an_invalid_runtime_signature(
 
     with pytest.raises(WebViewRuntimeError, match="signature verification"):
         runtime_module.ensure_webview2_runtime(tmp_path)
+
+
+def _webview2_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, versions: list[str | None]) -> Path:
+    """A bundled installer, a signature that checks out, and scripted registry answers."""
+    bootstrapper = tmp_path / "webview2" / runtime_module.WEBVIEW2_BOOTSTRAPPER
+    bootstrapper.parent.mkdir()
+    bootstrapper.write_bytes(b"signed-at-build-time")
+    answers = iter(versions)
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", lambda _path: None)
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: next(answers))
+    return bootstrapper
+
+
+def test_webview2_bootstrap_asks_before_installing_and_explains_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The install used to start with no question, no window and no explanation.
+
+    A first launch without WebView2 sat invisible for as long as the download
+    took, and offline it ended in a message about a log path.
+    """
+    _webview2_bundle(tmp_path, monkeypatch, [None, None])
+    questions: list[tuple[str, str]] = []
+    notes: list[str] = []
+    installer_runs: list[list[str]] = []
+
+    def offline_installer(command, **_kwargs):
+        installer_runs.append(command)
+        return SimpleNamespace(returncode=0x80072EE7)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", offline_installer)
+
+    def agree(title: str, text: str) -> bool:
+        questions.append((title, text))
+        return True
+
+    with pytest.raises(WebViewRuntimeError) as failure:
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, packaged=True, confirm=agree, report=notes.append
+        )
+
+    # It asked first, in plain words, before anything was installed.
+    assert len(questions) == 1
+    assert "one-time download from Microsoft" in questions[0][1]
+    assert "Install now?" in questions[0][1]
+    assert len(installer_runs) == 1
+    # The failure says what happened and what to do, with the real link.
+    message = str(failure.value)
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in message
+    assert "start Cortex again" in message
+    assert "offline" in message
+    assert str(0x80072EE7) in message
+    # The installer's exit code reaches the startup log as well.
+    assert notes == [f"WebView2 bootstrapper exit code {0x80072EE7} (0x80072EE7)"]
+
+
+def test_declining_the_webview2_install_installs_nothing_and_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+    notes: list[str] = []
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("the installer must not run without consent"),
+    )
+
+    with pytest.raises(runtime_module.WebViewInstallDeclined):
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, confirm=lambda _title, _text: False, report=notes.append
+        )
+
+    assert notes == ["WebView2 install declined"]
+    assert not issubclass(runtime_module.WebViewInstallDeclined, WebViewRuntimeError)
+
+
+def test_webview2_is_not_offered_when_it_is_already_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: "150.0.1.2")
+
+    def never(_title: str, _text: str) -> bool:
+        raise AssertionError("nothing to ask")
+
+    assert runtime_module.ensure_webview2_runtime(tmp_path, confirm=never) == "150.0.1.2"
+
+
+@pytest.mark.parametrize(
+    ("packaged", "mentions", "omits"),
+    [
+        (True, [], [runtime_module.WEBVIEW2_PREPARE_SCRIPT, "build_windows.ps1"]),
+        (False, [runtime_module.WEBVIEW2_PREPARE_SCRIPT], ["build_windows.ps1"]),
+    ],
+)
+def test_a_missing_bootstrapper_gives_advice_that_fits_how_cortex_was_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    packaged: bool,
+    mentions: list[str],
+    omits: list[str],
+):
+    """A source run pointed at "rebuild the package", which is not what a developer needs."""
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "webview2_version", lambda: None)
+
+    with pytest.raises(WebViewRuntimeError, match="bootstrapper is missing") as failure:
+        runtime_module.ensure_webview2_runtime(tmp_path, packaged=packaged)
+
+    message = str(failure.value)
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in message
+    assert "start Cortex again" in message
+    assert all(text in message for text in mentions)
+    assert not any(text in message for text in omits)
+
+
+def test_webview2_install_timeout_is_explained_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+    notes: list[str] = []
+
+    def slow(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", slow)
+
+    with pytest.raises(WebViewRuntimeError, match="did not finish within 10 minutes") as timed_out:
+        runtime_module.ensure_webview2_runtime(
+            tmp_path, confirm=lambda _title, _text: True, report=notes.append
+        )
+
+    assert "start Cortex again" in str(timed_out.value)
+    assert notes == ["WebView2 bootstrapper timed out after 600 seconds"]
+
+
+def test_webview2_installer_that_cannot_start_is_explained_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+
+    def blocked(*_args, **_kwargs):
+        raise PermissionError("blocked by policy")
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", blocked)
+
+    with pytest.raises(WebViewRuntimeError, match="could not start the WebView2 Runtime installer") as refused:
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in str(refused.value)
+
+
+def test_webview2_signature_failure_still_fails_closed_and_gives_the_manual_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _webview2_bundle(tmp_path, monkeypatch, [None])
+
+    def reject(_path: Path) -> None:
+        raise WebViewRuntimeError("signature verification failed")
+
+    monkeypatch.setattr(runtime_module, "_verify_microsoft_signature", reject)
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("an unverified installer must never run"),
+    )
+
+    with pytest.raises(WebViewRuntimeError, match="signature verification failed") as failure:
+        runtime_module.ensure_webview2_runtime(tmp_path, confirm=lambda _title, _text: True)
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in str(failure.value)
+
+
+@pytest.mark.parametrize(("answer", "expected"), [(1, True), (2, False), (0, False)])
+def test_the_webview2_prompt_is_a_native_ok_cancel_box_and_only_ok_is_a_yes(
+    monkeypatch: pytest.MonkeyPatch, answer: int, expected: bool
+):
+    shown: list[tuple[object, str, str, int]] = []
+
+    def message_box(hwnd, text, title, flags):
+        shown.append((hwnd, text, title, flags))
+        return answer
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(MessageBoxW=message_box)), raising=False)
+
+    assert _REAL_CONFIRM("Title", "Body") is expected
+
+    (_hwnd, text, title, flags), = shown
+    assert (text, title) == ("Body", "Title")
+    assert flags & 0x1, "an OK/Cancel box, so Cancel is an answer"
+    assert flags & 0x10000, "brought to the foreground: no window exists to sit in front of"
+
+
+def test_the_webview2_prompt_fails_closed_when_no_box_can_be_shown(monkeypatch: pytest.MonkeyPatch):
+    def broken(*_args):
+        raise OSError("no desktop")
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(MessageBoxW=broken)), raising=False)
+
+    assert _REAL_CONFIRM("Title", "Body") is False
+
+
+def test_the_advertised_webview2_download_link_is_the_one_the_prepare_script_uses():
+    script = Path(launcher_main.ROOT / runtime_module.WEBVIEW2_PREPARE_SCRIPT).read_text(encoding="utf-8")
+
+    assert runtime_module.WEBVIEW2_DOWNLOAD_URL in script
+
+
+def test_a_declined_webview2_install_closes_cortex_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def declined(_root, **_kwargs):
+        raise runtime_module.WebViewInstallDeclined()
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", declined)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert shown == []
+    assert fakes.calls == [], "no window may open without the runtime"
+    startup_log = tmp_path / launcher_main.STARTUP_LOG_NAME
+    recorded = startup_log.read_text(encoding="utf-8") if startup_log.exists() else ""
+    assert "stage=desktop" not in recorded, "declining is not a startup failure"
+    assert "not installed" in capsys.readouterr().out
+
+
+def test_a_webview2_failure_shows_its_own_advice_in_the_startup_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+    advice = f"Download it from {runtime_module.WEBVIEW2_DOWNLOAD_URL}, then start Cortex again."
+
+    def failing(_root, **_kwargs):
+        raise WebViewRuntimeError(advice)
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", failing)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 1
+
+    (dialog,) = shown
+    assert advice in dialog
+    assert "diagnostic log" in dialog
+    assert "stage=desktop startup/runtime" in (tmp_path / launcher_main.STARTUP_LOG_NAME).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_installer_exit_code_reaches_the_startup_log_from_a_real_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def installing(_root, *, packaged, report, **_kwargs):
+        assert packaged is False
+        report("WebView2 bootstrapper exit code 0 (0x00000000)")
+        return "150.0.1.2"
+
+    monkeypatch.setattr(launcher_main, "ensure_webview2_runtime", installing)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert "stage=webview2 detail=WebView2 bootstrapper exit code 0" in (
+        tmp_path / launcher_main.STARTUP_LOG_NAME
+    ).read_text(encoding="utf-8")
 
 
 def test_webview2_signature_check_uses_noninteractive_powershell(
@@ -1335,7 +1624,7 @@ def test_default_runtime_starts_backend_then_native_window(
     monkeypatch.setattr(
         launcher_main,
         "ensure_webview2_runtime",
-        lambda root: calls.append(("runtime", root)),
+        lambda root, **_kwargs: calls.append(("runtime", root)),
     )
     monkeypatch.setattr(
         launcher_main,
@@ -2130,7 +2419,9 @@ class _LaunchFakes:
         monkeypatch.setattr(launcher_main, "ServerSupervisor", FakeBackend)
         monkeypatch.setattr(launcher_main, "wait_for_http", lambda *_a, **_k: True)
         monkeypatch.setattr(
-            launcher_main, "ensure_webview2_runtime", lambda _root: self.calls.append("runtime")
+            launcher_main,
+            "ensure_webview2_runtime",
+            lambda _root, **_kwargs: self.calls.append("runtime"),
         )
         monkeypatch.setattr(launcher_main, "run_desktop_window", window)
 

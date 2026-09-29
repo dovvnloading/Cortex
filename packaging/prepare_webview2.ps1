@@ -30,7 +30,14 @@ if (Test-MicrosoftSignature $destinationPath) {
 
 $temporaryPath = Join-Path $destinationDirectory ("webview2-" + [guid]::NewGuid().ToString("N") + ".download")
 try {
-    Invoke-WebRequest -UseBasicParsing -Uri $BootstrapperUri -OutFile $temporaryPath
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $BootstrapperUri -OutFile $temporaryPath
+    }
+    catch {
+        throw ("Could not download the WebView2 bootstrapper from $BootstrapperUri " +
+            "($($_.Exception.Message)). Check the internet connection and run this script " +
+            "again, or download the installer yourself and save it as $destinationPath.")
+    }
     if (-not (Test-MicrosoftSignature $temporaryPath)) {
         throw "The downloaded WebView2 bootstrapper does not have a valid Microsoft Authenticode signature."
     }

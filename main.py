@@ -33,6 +33,7 @@ from cortex_backend.launcher import (  # noqa: E402
     FrontendBuildError,
     InstanceLock,
     InstanceRecord,
+    WebViewInstallDeclined,
     WebViewRuntimeError,
     WindowActivation,
     activate_process_window,
@@ -328,6 +329,20 @@ def _write_startup_diagnostic(
         return None
 
 
+def _record_startup_note(*, stage: str, detail: str, data_dir: Path | None) -> None:
+    """Add one bounded, redacted line to the startup log; never raises."""
+
+    entry = (
+        f"{datetime.now(timezone.utc).isoformat()} "
+        f"stage={_redact_startup_detail(stage)} "
+        f"detail={_redact_startup_detail(detail)}\n"
+    )
+    try:
+        _append_startup_log(_startup_log_path(data_dir), entry)
+    except (OSError, UnicodeError):
+        pass
+
+
 def _record_startup_success(*, data_dir: Path | None, port: int) -> None:
     """Add one line to the startup log saying this launch reached a working backend.
 
@@ -336,16 +351,11 @@ def _record_startup_success(*, data_dir: Path | None, port: int) -> None:
     crash after startup, not a launch that never worked.
     """
 
-    entry = (
-        f"{datetime.now(timezone.utc).isoformat()} "
-        f"stage=started detail=ok "
-        f"version={_redact_startup_detail(CORTEX_VERSION)} "
-        f"pid={os.getpid()} port={port}\n"
+    _record_startup_note(
+        stage="started",
+        detail=f"ok version={CORTEX_VERSION} pid={os.getpid()} port={port}",
+        data_dir=data_dir,
     )
-    try:
-        _append_startup_log(_startup_log_path(data_dir), entry)
-    except (OSError, UnicodeError):
-        pass
 
 
 class _RedactingFilter(logging.Filter):
@@ -709,9 +719,10 @@ def _acquire_or_hand_off(
 
 def _run_web(args: argparse.Namespace) -> int:
     """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
-    global _backend_abandoned_at_exit, _backend_stop_failed
+    global _backend_abandoned_at_exit, _backend_stop_failed, _startup_dialog_hint
     _backend_abandoned_at_exit = False
     _backend_stop_failed = False
+    _startup_dialog_hint = None
     try:
         result = _launch(args)
     finally:
@@ -723,7 +734,7 @@ def _run_web(args: argparse.Namespace) -> int:
 
 
 def _launch(args: argparse.Namespace) -> int:
-    global _backend_stop_failed
+    global _backend_stop_failed, _startup_dialog_hint
     packaged = _is_packaged()
     frontend_root = _frontend_root()
 
@@ -867,7 +878,13 @@ def _launch(args: argparse.Namespace) -> int:
                 if args.headless:
                     return _run_headless(backend=backend, frontend=frontend, server=server)
 
-                ensure_webview2_runtime(_resource_root())
+                ensure_webview2_runtime(
+                    _resource_root(),
+                    packaged=packaged,
+                    report=lambda note: _record_startup_note(
+                        stage="webview2", detail=note, data_dir=args.data_dir
+                    ),
+                )
                 # The token is good for five minutes from the moment it is
                 # issued, and everything above -- the readiness gate, the Vite
                 # gate, a WebView2 install that can run for ten minutes -- may
@@ -898,6 +915,11 @@ def _launch(args: argparse.Namespace) -> int:
             except KeyboardInterrupt:
                 print("Stopping Cortex…")
                 return 0
+            except WebViewInstallDeclined:
+                # The person said no to the one thing Cortex cannot run
+                # without. That is an answer, not an error: no dialog, exit 0.
+                print("The WebView2 Runtime was not installed; Cortex is closing.")
+                return 0
             except (
                 DesktopWindowError,
                 OSError,
@@ -910,6 +932,9 @@ def _launch(args: argparse.Namespace) -> int:
                     error=exc,
                     data_dir=args.data_dir,
                 )
+                if isinstance(exc, WebViewRuntimeError):
+                    # Fixed text that says what to do next, so show it.
+                    _startup_dialog_hint = str(exc)
                 print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
                 return 1
             finally:
@@ -939,7 +964,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_args(args, parser)
-    _startup_dialog_hint = None
     try:
         result = _run_web(args)
     except AppPathError as exc:

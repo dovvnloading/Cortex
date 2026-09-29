@@ -11,15 +11,22 @@ from .desktop import (
 )
 from .frontend import FrontendBuildError, ensure_frontend
 from .instance import InstanceLock, InstanceRecord
-from .webview_runtime import WebViewRuntimeError, ensure_webview2_runtime
+from .webview_runtime import (
+    WEBVIEW2_DOWNLOAD_URL,
+    WebViewInstallDeclined,
+    WebViewRuntimeError,
+    ensure_webview2_runtime,
+)
 
 __all__ = [
+    "WEBVIEW2_DOWNLOAD_URL",
     "WINDOW_TITLE",
     "DesktopWindowConfig",
     "DesktopWindowError",
     "FrontendBuildError",
     "InstanceLock",
     "InstanceRecord",
+    "WebViewInstallDeclined",
     "WebViewRuntimeError",
     "WindowActivation",
     "activate_process_window",
