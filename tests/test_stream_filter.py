@@ -73,11 +73,10 @@ def test_prose_containing_an_angle_bracket_is_not_withheld() -> None:
 
 
 def test_an_unterminated_envelope_is_dropped_rather_than_revealed() -> None:
-    """Under-showing is the safe failure.
+    """A reply that ends mid-envelope shows none of the half-written block.
 
-    The cleaner leaves an unclosed block in the answer, so the user still sees
-    it -- once, in the completed message, instead of watching raw JSON type
-    itself out and then change.
+    The cleaner removes an unterminated block too, so neither the live stream
+    nor the finished answer carries half a JSON object.
     """
     assert _stream(['Working. <memory_command>{"add":["hal']) == "Working. "
 
@@ -111,7 +110,20 @@ _CLEANED_REPLIES = [
     "Cleared.<clear_memory/> Done.",
     "Cleared.<clear_memory /> Done.",
     "Cleared.<clear_memory> Done.",
+    "<think>\nthe user seems annoyed; I will not say so.\n</think>\nThe answer is 42.",
+    "\n <THINK>weigh it up</Think>\nThe answer is 42.",
+    "<think>\n\n</think>\n\nThe answer is 42.",
+    "<think>never got as far as an answer",
+    "<think>hmm</think>Noted.<memory_command>{\"add\":[\"x\"],\"clear\":false}</memory_command> Done.",
+    # Only a block that opens the reply is reasoning; further in, it is text.
+    "Use the <think>tag</think> sparingly.",
+    "Noted.<memory_command>{\"add\":[\"x\"],\"clear\":false}</memory_command><think>x</think> Done.",
+    # The terminal format is ordinary text now, and stays visible in both.
     "Thinking...\nthe user seems annoyed; I will not say so.\n...done thinking.\nThe answer is 42.",
+    # A reply cut off inside an envelope loses the half-written block in both.
+    'Working. <memory_command>{"add":["hal',
+    'Working. <code_execution_request>{"language":"py',
+    'Working. <MEMORY_COMMAND>{"add":["a < b"',
     "if a < b and c > d then",
     "List<int> values",
 ]
@@ -136,16 +148,33 @@ def test_what_streams_is_what_the_cleaned_answer_will_contain(reply: str, chunki
     )
 
 
+def test_a_quoted_tag_can_only_under_show_never_over_show() -> None:
+    """The filter does not track backticks, so a quoted tag holds the stream.
+
+    The cleaner keeps a tag quoted in code as prose, but the filter cannot know
+    a span is quoted until it has seen the closing backtick. It therefore
+    withholds the rest of the stream, which is the safe direction: what was
+    shown is always a prefix of the finished answer, and the completed message
+    supplies the rest.
+    """
+    reply = "I use the `<memory_command>` tag to propose facts, and I ask first."
+
+    shown = _stream(list(reply))
+
+    assert _cleaned(reply) == reply
+    assert reply.startswith(shown)
+
+
 def test_an_inline_reasoning_trace_never_reaches_the_answer_bubble() -> None:
     """The worst leak of the set, so it gets its own name.
 
-    The cleaner lifts an inline Thinking... block out of the answer and into
+    The cleaner lifts an inline <think> block out of the answer and into
     the reasoning pane. Streaming it raw would type the model's private
     reasoning into the answer bubble and then replace it.
     """
     reply = (
-        "Thinking...\nthey are wrong but I will be gentle."
-        "\n...done thinking.\nHere is the answer."
+        "<think>they are wrong but I will be gentle."
+        "</think>\nHere is the answer."
     )
     assert "gentle" not in _stream(list(reply))
     assert _stream(list(reply)).strip() == "Here is the answer."
@@ -201,8 +230,8 @@ def test_the_filter_is_actually_wired_into_the_agent(reply: str) -> None:
 def test_a_reasoning_trace_streamed_as_content_never_reaches_the_answer() -> None:
     """The worst case, end to end through the agent rather than the filter alone."""
     reply = (
-        "Thinking...\nthey are wrong but I will be gentle."
-        "\n...done thinking.\nHere is the answer."
+        "<think>they are wrong but I will be gentle."
+        "</think>\nHere is the answer."
     )
     seen: list[tuple[str, str]] = []
     agent = SynthesisAgent("chat", "title", "translate", OllamaChatClient(_ChunkedOllama(reply)))

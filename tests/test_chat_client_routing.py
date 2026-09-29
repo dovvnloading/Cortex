@@ -792,6 +792,102 @@ def test_generation_failure_message_is_backend_aware() -> None:
     assert llamacpp_details == "runtime_unavailable"
 
 
+# The installed ollama client raises a builtin ConnectionError when nothing is
+# listening, and httpx raises its own timeout and protocol errors. None of them
+# carries an ``.error`` attribute, so text-only classification never saw them.
+_SYNTHETIC_DETAIL = "synthetic-request-text-must-not-surface"
+
+
+@pytest.mark.parametrize(
+    ("exc", "code", "fragment"),
+    [
+        (ConnectionError(_SYNTHETIC_DETAIL), "runtime_unavailable", "lost its connection"),
+        (ConnectionRefusedError(_SYNTHETIC_DETAIL), "runtime_unavailable", "lost its connection"),
+        (httpx.ConnectError(_SYNTHETIC_DETAIL), "runtime_unavailable", "lost its connection"),
+        (httpx.RemoteProtocolError(_SYNTHETIC_DETAIL), "runtime_unavailable", "lost its connection"),
+        (httpx.ReadError(_SYNTHETIC_DETAIL), "runtime_unavailable", "lost its connection"),
+        (httpx.ReadTimeout(_SYNTHETIC_DETAIL), "model_timeout", "did not respond in time"),
+        (httpx.ConnectTimeout(_SYNTHETIC_DETAIL), "model_timeout", "did not respond in time"),
+        (httpx.ReadTimeout(""), "model_timeout", "did not respond in time"),
+        (TimeoutError(_SYNTHETIC_DETAIL), "model_timeout", "did not respond in time"),
+    ],
+)
+def test_connection_and_timeout_failures_get_runtime_specific_guidance(
+    exc: Exception, code: str, fragment: str
+) -> None:
+    from cortex_backend.services.llm import _generation_failure_message
+
+    message, details = _generation_failure_message(exc)
+
+    assert details == code
+    assert fragment in message
+    assert "Ollama" in message
+    # Exception text can be request-derived; it is classified on, never surfaced.
+    assert _SYNTHETIC_DETAIL not in message
+
+
+def test_a_refused_connection_names_the_local_runtime_for_a_llamacpp_backend() -> None:
+    from cortex_backend.services.llm import _generation_failure_message
+
+    class _LlamaCppConnectionError(ConnectionError):
+        backend = "llamacpp"
+
+    message, details = _generation_failure_message(_LlamaCppConnectionError(_SYNTHETIC_DETAIL))
+
+    assert details == "runtime_unavailable"
+    assert "Ollama" not in message
+    assert "local model runtime" in message
+
+
+def test_type_based_classification_never_overrides_guidance_cortex_wrote() -> None:
+    """Cortex's own actionable text is already specific and must reach the user intact."""
+    from cortex_backend.services.llm import _generation_failure_message
+
+    class _GuidedTimeout(TimeoutError):
+        is_user_guidance = True
+        guidance_code = "crash_loop"
+        error = "Lower the context window in Settings, then retry."
+
+    message, details = _generation_failure_message(_GuidedTimeout())
+
+    assert message == "Lower the context window in Settings, then retry."
+    assert details == "crash_loop"
+
+
+def test_unrelated_exceptions_still_get_the_generic_message() -> None:
+    """Only the transport failures are reclassified; a bug is not blamed on Ollama."""
+    from cortex_backend.services.llm import _generation_failure_message
+
+    message, details = _generation_failure_message(KeyError("model not found"))
+
+    assert details == "KeyError"
+    assert message.startswith("The local model could not complete this request.")
+
+
+def test_a_refused_connection_reaches_the_user_as_an_actionable_generation_error() -> None:
+    """End to end through the agent: the wrapped error carries the specific copy."""
+    from cortex_backend.core.generation import ModelOperationError
+
+    class _Refused:
+        def chat(self, **kwargs):
+            raise ConnectionError(_SYNTHETIC_DETAIL)
+
+    agent = SynthesisAgent("chat", "title", "translate", _Refused())
+
+    with pytest.raises(ModelOperationError) as excinfo:
+        agent.generate(
+            query="hi",
+            chat_history="No history available.",
+            permanent_memories=[],
+            memories_enabled=False,
+            user_system_instructions=None,
+        )
+
+    assert excinfo.value.error_details == "runtime_unavailable"
+    assert "Start or restart Ollama" in excinfo.value.user_message
+    assert _SYNTHETIC_DETAIL not in excinfo.value.user_message
+
+
 class _FakeExc(Exception):
     def __init__(self, *, status_code, error):
         super().__init__(error)
