@@ -46,16 +46,90 @@ import type {
 } from "../../../contracts/cortex-api";
 import { normalizeApiBaseUrl } from "./baseUrl";
 
+/**
+ * What kind of failure an {@link ApiError} is, so callers stop inferring it
+ * from a status code that some of them do not have:
+ * - `http`: the backend answered with an error status.
+ * - `validation`: it answered 422 -- the request itself is wrong, so sending
+ *   the same request again cannot succeed.
+ * - `auth`: it answered 401 -- the session is missing or expired.
+ * - `network`: no answer at all (status 0). The backend may still have acted
+ *   on the request, so an idempotent replay is the only safe retry.
+ * - `aborted`: the caller cancelled the request (status 0). Not a failure.
+ */
+export type ApiErrorKind = "http" | "validation" | "auth" | "network" | "aborted";
+
+const NETWORK_ERROR_DETAIL = "Cortex could not reach the local backend. Check that it is still running, then try again.";
+const ABORTED_ERROR_DETAIL = "The request was cancelled.";
+
+function kindForStatus(status: number): ApiErrorKind {
+  if (status === 401) return "auth";
+  if (status === 422) return "validation";
+  return "http";
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
+  readonly kind: ApiErrorKind;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, kind: ApiErrorKind = kindForStatus(status)) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.kind = kind;
   }
+}
+
+/**
+ * The text to show for a failed call: the backend's own sentence for an
+ * {@link ApiError}, the caller's `fallback` for anything else. Replaces the
+ * `error instanceof ApiError ? error.detail : "..."` ternary each call site
+ * used to carry.
+ */
+export function describeApiError(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.detail : fallback;
+}
+
+/** True when the caller cancelled the request, which is never worth reporting. */
+export function isAbortedError(error: unknown): boolean {
+  return error instanceof ApiError && error.kind === "aborted";
+}
+
+/**
+ * True when the backend answered with a client-side rejection, so the request
+ * definitely did not take effect and its idempotency key is spent. A network
+ * failure or a 5xx is not: the backend may have acted before the answer was
+ * lost, and only replaying the same request id is safe.
+ */
+export function isDefinitiveRejection(error: unknown): boolean {
+  return error instanceof ApiError
+    && error.kind !== "network"
+    && error.kind !== "aborted"
+    && error.status >= 400
+    && error.status < 500;
+}
+
+/**
+ * Give a transport failure a kind. fetch rejects with a bare `TypeError` when
+ * the backend cannot be reached and with an `AbortError` when a signal aborts;
+ * neither says which it was in a way call sites can rely on, and both used to
+ * reach the UI as an unclassified exception. Anything else is not a transport
+ * failure and passes through unchanged.
+ *
+ * A request is `aborted` only when the caller's own signal is the one that
+ * aborted. An AbortError with that signal still live, or with no signal at all,
+ * came from somewhere else and left the request unanswered, which is a
+ * `network` failure: reporting it as a cancellation would tell the caller to
+ * stop work it never asked to stop.
+ */
+function transportError(error: unknown, signal?: AbortSignal | null): unknown {
+  if (error instanceof ApiError) return error;
+  if (signal?.aborted) return new ApiError(0, ABORTED_ERROR_DETAIL, "aborted");
+  const name = typeof error === "object" && error !== null ? (error as { name?: unknown }).name : undefined;
+  if (error instanceof TypeError || name === "AbortError") return new ApiError(0, NETWORK_ERROR_DETAIL, "network");
+  return error;
 }
 
 type FetchLike = typeof fetch;
@@ -332,8 +406,11 @@ export class CortexApi {
     );
   }
 
-  generationStatus(jobId: string): Promise<JobStatusResponse> {
-    return this.request<JobStatusResponse>(`/generations/${encodeURIComponent(jobId)}`);
+  generationStatus(jobId: string, options: { signal?: AbortSignal } = {}): Promise<JobStatusResponse> {
+    return this.request<JobStatusResponse>(
+      `/generations/${encodeURIComponent(jobId)}`,
+      { signal: options.signal },
+    );
   }
 
   cancelGeneration(jobId: string): Promise<JobStatusResponse> {
@@ -397,7 +474,15 @@ export class CortexApi {
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
-      const chunk = await reader.read();
+      // A connection that drops mid-stream rejects the read with a bare
+      // TypeError; classify it like a failed connect. Only the read is
+      // wrapped: an error from onEvent is the caller's and must pass through.
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        throw transportError(error, options.signal);
+      }
       buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
       const frames = buffer.split("\n\n");
       buffer = frames.pop() ?? "";
@@ -614,7 +699,7 @@ export class CortexApi {
     const init = { ...requestInit, headers };
     const response = authenticated
       ? await this.fetchWithSession(url, init)
-      : await this.fetcher(url, init);
+      : await this.send(url, init);
     if (!response.ok) {
       const detail = await this.errorDetail(response);
       throw new ApiError(
@@ -649,7 +734,7 @@ export class CortexApi {
     let replayed = false;
     while (true) {
       const tokenSent = this.sessionToken;
-      const response = await this.fetcher(url, { ...init, headers: this.authHeaders(init.headers) });
+      const response = await this.send(url, { ...init, headers: this.authHeaders(init.headers) });
       if (response.status !== 401) return response;
       if (!replayed && tokenSent !== null && (await this.sessionAfterRejection(tokenSent))) {
         replayed = true;
@@ -657,6 +742,15 @@ export class CortexApi {
       }
       if (this.sessionToken === tokenSent) this.clearSession();
       return response;
+    }
+  }
+
+  /** The one place fetch is called, so every transport failure is classified. */
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    try {
+      return await this.fetcher(url, init);
+    } catch (error) {
+      throw transportError(error, init.signal);
     }
   }
 
