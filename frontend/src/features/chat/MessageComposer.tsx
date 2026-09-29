@@ -7,12 +7,15 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
   type FocusEvent,
   type FormEvent,
   type KeyboardEvent,
 } from "react";
 import type { ChatAttachment, GenerationOptionsOverride, GenerationSettings } from "../../../../contracts/cortex-api";
-import { isGGUFModel } from "../../lib/localModels";
+import { useFileDropZone } from "../../hooks/useFileDropZone";
+import { ATTACHMENT_ACCEPT, filesFromTransfer } from "../../lib/attachments";
+import { formatModelSize, isGGUFModel } from "../../lib/localModels";
 import { GENERATION_DEFAULTS } from "../../lib/generationParams";
 import { useModelStore } from "../../stores/useModelStore";
 import { GenerationParamsPopover } from "./GenerationParamsPopover";
@@ -61,6 +64,8 @@ export type MessageComposerProps = {
   onDismissError?: () => void;
   attachments?: readonly ChatAttachment[];
   attachmentsBusy?: boolean;
+  /** Object URLs for image thumbnails, by attachment id; absent ids show an icon. */
+  attachmentPreviews?: Readonly<Record<string, string>>;
   attachmentError?: string | null;
   imageInputBlocked?: string | null;
   onAddAttachments?: (files: File[]) => Promise<void> | void;
@@ -92,6 +97,7 @@ export function MessageComposer({
   onDismissError,
   attachments = [],
   attachmentsBusy = false,
+  attachmentPreviews,
   attachmentError = null,
   imageInputBlocked = null,
   onAddAttachments,
@@ -204,11 +210,31 @@ export function MessageComposer({
     if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
   };
 
+  const stageFiles = (files: File[]) => {
+    if (files.length && onAddAttachments) void onAddAttachments(files);
+  };
+
   const handleAttachmentChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
-    if (files.length && onAddAttachments) void onAddAttachments(files);
+    stageFiles(files);
   };
+
+  // Win+Shift+S then Ctrl+V is how most screenshots arrive. Only a paste that
+  // carries files is taken over; a plain-text paste is left to the textarea.
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!onAddAttachments) return;
+    const files = filesFromTransfer(event.clipboardData);
+    if (!files.length) return;
+    // Copying cells from a spreadsheet or a passage from a document also puts a
+    // picture of the selection on the clipboard. The text is what was meant, and
+    // taking the paste over would leave no way to paste it.
+    if (event.clipboardData.getData("text/plain")) return;
+    event.preventDefault();
+    stageFiles(files);
+  };
+
+  const drop = useFileDropZone({ disabled: !onAddAttachments, onFiles: stageFiles });
 
   const status = phase === "starting"
     ? "Starting response…"
@@ -249,26 +275,39 @@ export function MessageComposer({
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) textareaRef.current?.focus();
           }}
+          {...drop.handlers}
         >
+          {drop.active && (
+            <div className="drop-overlay composer-drop-overlay" aria-hidden="true">
+              <Paperclip size={16} /> Drop to attach
+            </div>
+          )}
           <label className="sr-only" htmlFor="chat-composer">Message Cortex</label>
           {attachments.length > 0 && (
             <div className="composer-attachments" aria-label="Attached files">
-              {attachments.map((attachment) => (
-                <div className="composer-attachment" key={attachment.attachment_id}>
-                  {attachment.kind === "image" ? <ImageIcon size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
-                  <span className="composer-attachment-name" title={attachment.filename}>{attachment.filename}</span>
-                  <button
-                    className="composer-attachment-remove"
-                    type="button"
-                    aria-label={`Remove ${attachment.filename}`}
-                    title={`Remove ${attachment.filename}`}
-                    onClick={() => onRemoveAttachment?.(attachment.attachment_id)}
-                    disabled={attachmentsBusy}
-                  >
-                    <X size={13} aria-hidden="true" />
-                  </button>
-                </div>
-              ))}
+              {attachments.map((attachment) => {
+                const preview = attachment.kind === "image" ? attachmentPreviews?.[attachment.attachment_id] : undefined;
+                const size = formatModelSize(attachment.size);
+                return (
+                  <div className="composer-attachment" key={attachment.attachment_id}>
+                    {preview
+                      ? <img className="composer-attachment-thumb" src={preview} alt="" />
+                      : attachment.kind === "image" ? <ImageIcon size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
+                    <span className="composer-attachment-name" title={attachment.filename}>{attachment.filename}</span>
+                    {size && <span className="composer-attachment-size">{size}</span>}
+                    <button
+                      className="composer-attachment-remove"
+                      type="button"
+                      aria-label={`Remove ${attachment.filename}`}
+                      title={`Remove ${attachment.filename}`}
+                      onClick={() => onRemoveAttachment?.(attachment.attachment_id)}
+                      disabled={attachmentsBusy}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -284,6 +323,7 @@ export function MessageComposer({
               placeholder={phase === "unavailable" ? "Write a message while the local runtime reconnects" : "Message Cortex"}
               onChange={(event) => onValueChange(event.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               onCompositionStart={() => { composingRef.current = true; }}
               onCompositionEnd={() => { composingRef.current = false; }}
             />
@@ -305,7 +345,7 @@ export function MessageComposer({
                   className="sr-only"
                   type="file"
                   multiple
-                  accept="image/*,text/*,.md,.markdown,.rst,.adoc,.org,.text,.csv,.tsv,.json,.jsonl,.ndjson,.yaml,.yml,.toml,.ini,.conf,.cfg,.env,.editorconfig,.log,.lock,.diff,.patch,.rtf,.proto,.graphql,.gql,.tf,.hcl,.srt,.vtt,.plist,.xhtml,.map,.py,.js,.jsx,.ts,.tsx,.java,.c,.cc,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.sql,.sh,.bash,.bat,.ps1,.html,.xml,.css,.scss,.less,.vue,.swift,.kt,.kts,.tex,.ipynb"
+                  accept={ATTACHMENT_ACCEPT}
                   onChange={handleAttachmentChange}
                   disabled={attachmentsBusy || !onAddAttachments}
                 />

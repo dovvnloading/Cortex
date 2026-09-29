@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
@@ -1412,5 +1412,178 @@ describe("ChatPage reload failure recovery", () => {
     await waitFor(() => {
       expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("ChatPage attachments from paste and drop", () => {
+  const stagedAs = (filename: string, kind: "image" | "document" = "document"): ChatAttachment => ({
+    attachment_id: `id-${filename}`,
+    filename,
+    mime_type: kind === "image" ? "image/png" : "text/markdown",
+    size: 2048,
+    sha256: "d".repeat(64),
+    kind,
+    expires_at: "2099-01-01T00:00:00Z",
+  });
+  const fileDrag = (files: File[]) => ({ files, items: [], types: ["Files"], dropEffect: "none" });
+  const clipboardOf = (files: File[]) => ({ files, items: [], types: ["Files"], getData: () => "" });
+  const composerSurface = (container: HTMLElement) => container.querySelector(".composer-surface") as HTMLElement;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    useChatStore.setState({ generationOptionsByThread: {} });
+    delete (URL as { createObjectURL?: unknown }).createObjectURL;
+    delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+  });
+
+  it("stages both files when a second batch arrives while the first is still uploading", async () => {
+    // A second paste or drop while an upload was running used to be ignored
+    // without a word, so the file the user had just dropped never attached.
+    let calls = 0;
+    const gates = [0, 1].map(() => {
+      let resolve!: (attachment: ChatAttachment) => void;
+      const promise = new Promise<ChatAttachment>((done) => { resolve = done; });
+      return { resolve, promise };
+    });
+    const api = chatApi({ stageChatAttachment: vi.fn(() => gates[calls++].promise) });
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+
+    fireEvent.drop(composerSurface(container), { dataTransfer: fileDrag([new File(["one"], "first.md", { type: "text/markdown" })]) });
+    await waitFor(() => expect(api.stageChatAttachment).toHaveBeenCalledTimes(1));
+    fireEvent.paste(screen.getByLabelText("Message Cortex"), {
+      clipboardData: clipboardOf([new File(["two"], "second.md", { type: "text/markdown" })]),
+    });
+
+    // The second batch waits its turn instead of running alongside or vanishing.
+    expect(api.stageChatAttachment).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+
+    await act(async () => { gates[0].resolve(stagedAs("first.md")); });
+    await waitFor(() => expect(api.stageChatAttachment).toHaveBeenCalledTimes(2));
+    await act(async () => { gates[1].resolve(stagedAs("second.md")); });
+
+    expect(await screen.findByRole("button", { name: "Remove first.md" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Remove second.md" })).toBeInTheDocument();
+  });
+
+  it("keeps working after a queued batch fails", async () => {
+    const api = chatApi({
+      stageChatAttachment: vi.fn()
+        .mockRejectedValueOnce(new Error("first batch failed"))
+        .mockResolvedValueOnce(stagedAs("later.md")),
+    });
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+
+    fireEvent.drop(composerSurface(container), { dataTransfer: fileDrag([new File(["a"], "broken.md", { type: "text/markdown" })]) });
+    fireEvent.drop(composerSurface(container), { dataTransfer: fileDrag([new File(["b"], "later.md", { type: "text/markdown" })]) });
+
+    expect(await screen.findByRole("button", { name: "Remove later.md" })).toBeInTheDocument();
+    expect(api.stageChatAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it("turns away unsupported dropped files without uploading them and still stages the rest", async () => {
+    const api = chatApi({ stageChatAttachment: vi.fn().mockResolvedValue(stagedAs("notes.md")) });
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+
+    fireEvent.drop(composerSurface(container), {
+      dataTransfer: fileDrag([
+        new File(["MZ"], "setup.exe", { type: "application/x-msdownload" }),
+        new File(["notes"], "notes.md", { type: "text/markdown" }),
+      ]),
+    });
+
+    expect(await screen.findByRole("button", { name: "Remove notes.md" })).toBeInTheDocument();
+    expect(api.stageChatAttachment).toHaveBeenCalledTimes(1);
+    expect(api.stageChatAttachment).toHaveBeenCalledWith(expect.objectContaining({ filename: "notes.md" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("setup.exe is not a supported attachment");
+  });
+
+  it("uploads nothing when every dropped file is unsupported", async () => {
+    const api = chatApi();
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+
+    fireEvent.drop(composerSurface(container), { dataTransfer: fileDrag([new File(["MZ"], "setup.exe")]) });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("setup.exe is not a supported attachment");
+    expect(api.stageChatAttachment).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("attaches a file dropped anywhere on the page, not only on the composer", async () => {
+    const api = chatApi({ stageChatAttachment: vi.fn().mockResolvedValue(stagedAs("notes.md")) });
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+    const page = container.querySelector(".chat-page") as HTMLElement;
+    const file = new File(["notes"], "notes.md", { type: "text/markdown" });
+
+    fireEvent.dragEnter(page, { dataTransfer: fileDrag([file]) });
+    expect(screen.getByText("Drop to attach")).toBeInTheDocument();
+    const notPrevented = fireEvent.drop(page, { dataTransfer: fileDrag([file]) });
+
+    expect(notPrevented).toBe(false);
+    expect(await screen.findByRole("button", { name: "Remove notes.md" })).toBeInTheDocument();
+    expect(screen.queryByText("Drop to attach")).not.toBeInTheDocument();
+  });
+
+  it("shows only one drop target when the file is over the composer", async () => {
+    const { container } = renderChat(chatApi());
+    await screen.findByLabelText("Message Cortex");
+    const page = container.querySelector(".chat-page") as HTMLElement;
+    const dataTransfer = fileDrag([]);
+
+    fireEvent.dragEnter(page, { dataTransfer });
+    expect(container.querySelectorAll(".drop-overlay")).toHaveLength(1);
+    expect(container.querySelector(".chat-drop-overlay")).not.toBeNull();
+
+    // Moving onto the composer hands the target over to it.
+    fireEvent.dragLeave(page, { dataTransfer });
+    fireEvent.dragEnter(composerSurface(container), { dataTransfer });
+    expect(container.querySelectorAll(".drop-overlay")).toHaveLength(1);
+    expect(container.querySelector(".composer-drop-overlay")).not.toBeNull();
+  });
+
+  it("shows a thumbnail for a staged image and releases it once the image is removed", async () => {
+    const user = userEvent.setup();
+    const createObjectURL = vi.fn(() => "blob:thumbnail-1");
+    const revokeObjectURL = vi.fn();
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    const api = chatApi({ stageChatAttachment: vi.fn().mockResolvedValue(stagedAs("shot.png", "image")) });
+    const { container } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+
+    fireEvent.paste(screen.getByLabelText("Message Cortex"), {
+      clipboardData: clipboardOf([new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" })]),
+    });
+
+    await screen.findByRole("button", { name: "Remove shot.png" });
+    expect(container.querySelector("img.composer-attachment-thumb")).toHaveAttribute("src", "blob:thumbnail-1");
+    expect(screen.getByText("2.0 KB")).toBeVisible();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Remove shot.png" }));
+
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1"));
+    expect(container.querySelector("img.composer-attachment-thumb")).toBeNull();
+  });
+
+  it("releases every thumbnail when the page goes away", async () => {
+    const revokeObjectURL = vi.fn();
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:thumbnail-2"), revokeObjectURL });
+    const api = chatApi({ stageChatAttachment: vi.fn().mockResolvedValue(stagedAs("shot.png", "image")) });
+    const { unmount } = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+    fireEvent.paste(screen.getByLabelText("Message Cortex"), {
+      clipboardData: clipboardOf([new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" })]),
+    });
+    await screen.findByRole("button", { name: "Remove shot.png" });
+
+    unmount();
+
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-2");
   });
 });

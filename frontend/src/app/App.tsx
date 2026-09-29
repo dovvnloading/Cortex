@@ -16,6 +16,7 @@ import { Onboarding } from "../features/shell/Onboarding";
 const SettingsPanel = lazy(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
+import { blockStrayFileDrops } from "../lib/attachments";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
@@ -126,6 +127,11 @@ export function App({ api: providedApi }: Props) {
     api.setHandoffSecret(launcherCredentials.handoffSecret);
     scrubLauncherCredentials();
   }, [api, launcherCredentials.handoffSecret]);
+  // A file dropped outside an attachment target must never navigate the window
+  // to it: in the native window that would replace Cortex with the file and
+  // leave no way back. Registered here so it covers every screen, onboarding
+  // and error states included.
+  useEffect(() => blockStrayFileDrops(), []);
   const [bootstrapToken, setBootstrapToken] = useState(launcherCredentials.bootstrapToken);
   const handoffSecret = launcherCredentials.handoffSecret;
   const [onboardingError, setOnboardingError] = useState<string | null>(null);

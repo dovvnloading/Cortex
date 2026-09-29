@@ -1,9 +1,12 @@
+import { Paperclip } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
+import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { useFileDropZone } from "../../hooks/useFileDropZone";
 import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
@@ -122,6 +125,10 @@ export function ChatPage({
   const [forkingMessage, setForkingMessage] = useState<string | null>(null);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  // Thumbnails are object URLs of the files as they were picked, by attachment
+  // id. They exist only for this page's lifetime: a draft restored after a
+  // reload has none and shows the file icon instead.
+  const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [memoryClearPromptOpen, setMemoryClearPromptOpen] = useState(false);
   const startingRef = useRef(false);
@@ -137,6 +144,11 @@ export function ChatPage({
   const draftsRef = useRef(drafts);
   const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
+  // Batches are staged one after another, so a second drop or paste while the
+  // first is still uploading is queued rather than lost.
+  const attachmentQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingAttachmentBatchesRef = useRef(0);
+  const attachmentPreviewsRef = useRef(attachmentPreviews);
   // A POST can be admitted before its response reaches the browser. Keep its
   // idempotency key across that ambiguous failure so Retry can replay the
   // admission instead of creating a second job (or a second new-chat thread).
@@ -692,18 +704,14 @@ export function ChatPage({
     writeComposerDraft(threadId, nextDraft);
   };
 
-  const addAttachments = async (files: File[]): Promise<void> => {
-    if (attachmentsBusy || !files.length) return;
-    const target: AttachmentDraftTarget = { scope: attachmentScope, threadId };
-    attachmentDraftTargetsRef.current.add(target);
-    setAttachmentsBusy(true);
-    setAttachmentError(null);
+  const stageAttachmentBatch = async (target: AttachmentDraftTarget, files: File[]): Promise<void> => {
     // Each staged file is already uploaded and already holding backend
     // retention, so it belongs in the composer whether or not a later file in
     // the same batch fails. Committing only after the whole loop meant one bad
     // file discarded every good one before it -- leaving those artifacts
     // orphaned on the backend and making the user re-add the rest by hand.
     const staged: ChatAttachment[] = [];
+    const previews: Record<string, string> = {};
     const commitStaged = () => {
       if (!staged.length) return;
       // The generation request and attachment staging can finish in either
@@ -721,11 +729,15 @@ export function ChatPage({
       attachmentDraftsRef.current = nextAttachments;
       setAttachmentDrafts(nextAttachments);
       writeComposerAttachments(target.threadId, next);
+      if (Object.keys(previews).length) setAttachmentPreviews((current) => ({ ...current, ...previews }));
     };
     try {
-      const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - attachments.length);
+      // Measured when this batch starts, not when it was queued: an earlier
+      // batch may have added files, and a message may have been sent since.
+      const current = attachmentDraftsRef.current[target.scope] ?? readComposerAttachments(target.threadId);
+      const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - current.length);
       if (!remaining) throw new Error(`A message can include at most ${MAX_CHAT_ATTACHMENTS} attachments.`);
-      let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+      let totalBytes = current.reduce((total, attachment) => total + attachment.size, 0);
       const accepted = files.slice(0, remaining);
       for (const file of accepted) {
         if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
@@ -741,6 +753,9 @@ export function ChatPage({
           content_base64: contentBase64,
         });
         staged.push(attachment);
+        if (attachment.kind === "image" && typeof URL.createObjectURL === "function") {
+          previews[attachment.attachment_id] = URL.createObjectURL(file);
+        }
         totalBytes += attachment.size;
       }
       commitStaged();
@@ -756,9 +771,50 @@ export function ChatPage({
       setAttachmentError(staged.length ? `${detail} Files attached before it were kept.` : detail);
     } finally {
       attachmentDraftTargetsRef.current.delete(target);
-      setAttachmentsBusy(false);
     }
   };
+
+  const addAttachments = (files: File[]): Promise<void> => {
+    if (!files.length) return Promise.resolve();
+    // Files the backend would refuse are turned away before they are uploaded.
+    // The rest still go through if some were refused.
+    const { supported, rejected } = splitSupportedFiles(files);
+    setAttachmentError(rejected.length ? describeUnsupportedFiles(rejected) : null);
+    if (!supported.length) return Promise.resolve();
+    // The destination is fixed now: a batch queued in one chat stays in that
+    // chat even if the user has switched threads by the time it runs.
+    const target: AttachmentDraftTarget = { scope: attachmentScope, threadId };
+    attachmentDraftTargetsRef.current.add(target);
+    pendingAttachmentBatchesRef.current += 1;
+    setAttachmentsBusy(true);
+    const batch = attachmentQueueRef.current
+      .then(() => stageAttachmentBatch(target, supported))
+      .finally(() => {
+        pendingAttachmentBatchesRef.current -= 1;
+        if (pendingAttachmentBatchesRef.current === 0) setAttachmentsBusy(false);
+      });
+    // A failure in one batch must not stop the ones queued behind it.
+    attachmentQueueRef.current = batch.catch(() => undefined);
+    return batch;
+  };
+
+  useEffect(() => {
+    attachmentPreviewsRef.current = attachmentPreviews;
+  }, [attachmentPreviews]);
+
+  // Release a thumbnail once its attachment is no longer staged anywhere, and
+  // all of them when the page goes away. The state keeps the (now dead) string,
+  // but the composer only ever asks for the ids it is showing, and revoking
+  // twice is harmless.
+  useEffect(() => {
+    const staged = new Set(Object.values(attachmentDrafts).flat().map((attachment) => attachment.attachment_id));
+    for (const [id, url] of Object.entries(attachmentPreviews)) {
+      if (!staged.has(id)) URL.revokeObjectURL(url);
+    }
+  }, [attachmentDrafts, attachmentPreviews]);
+  useEffect(() => () => {
+    for (const url of Object.values(attachmentPreviewsRef.current)) URL.revokeObjectURL(url);
+  }, []);
 
   const removeAttachment = (attachmentId: string) => {
     const next = attachments.filter((attachment) => attachment.attachment_id !== attachmentId);
@@ -768,6 +824,10 @@ export function ChatPage({
     writeComposerAttachments(threadId, next);
     setAttachmentError(null);
   };
+
+  // Dropping a file anywhere on the page attaches it; the composer, when it is
+  // the target, handles the drop first.
+  const pageDrop = useFileDropZone({ onFiles: (files) => void addAttachments(files) });
 
   const imageInputBlocked = attachments.some((attachment) => attachment.kind === "image")
     && selectedModelSupportsVision === false
@@ -789,7 +849,12 @@ export function ChatPage({
   if (chatLoad.error) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{chatLoad.error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
 
   return (
-    <section className="chat-page" aria-labelledby="chat-title">
+    <section className="chat-page" aria-labelledby="chat-title" {...pageDrop.handlers}>
+      {pageDrop.active && (
+        <div className="drop-overlay chat-drop-overlay" aria-hidden="true">
+          <Paperclip size={20} /> Drop to attach
+        </div>
+      )}
       <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
       <MessageList
         ref={messageListRef}
@@ -835,6 +900,7 @@ export function ChatPage({
           selectedModel={selectedModel}
           attachments={attachments}
           attachmentsBusy={attachmentsBusy}
+          attachmentPreviews={attachmentPreviews}
           attachmentError={attachmentError}
           imageInputBlocked={imageInputBlocked}
           onAddAttachments={addAttachments}

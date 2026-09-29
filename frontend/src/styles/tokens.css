@@ -523,6 +523,12 @@ a { color: inherit; text-decoration: none; }
 .composer-attachment-remove { display: inline-grid; flex: 0 0 auto; place-items: center; width: 21px; height: 21px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); }
 .composer-attachment-remove:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .composer-attachment-remove:focus-visible { background: var(--surface-hover); color: var(--text); outline: 0; box-shadow: 0 0 0 2px var(--accent); }
+.composer-attachment-thumb { flex: 0 0 auto; width: 21px; height: 21px; margin-left: -3px; border-radius: 4px; object-fit: cover; }
+.composer-attachment-size { flex: 0 0 auto; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* Shown while a file is dragged over a drop target. It never takes the pointer,
+   so the drag keeps hitting the element underneath. */
+.drop-overlay { position: absolute; z-index: 5; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--accent); border-radius: inherit; background: color-mix(in srgb, var(--surface-elevated) 88%, var(--accent)); color: var(--accent); font-size: 0.86rem; font-weight: 650; pointer-events: none; }
+.chat-drop-overlay { inset: 10px; border-radius: var(--radius-md); }
 .composer-inline-alert { display: flex; align-items: flex-start; min-width: 0; margin: 0 2px 4px; padding: 7px 9px; border: 1px solid color-mix(in srgb, var(--danger) 27%, var(--line)); border-left: 2px solid var(--danger); border-radius: 7px; background: var(--danger-soft); color: var(--danger); font-size: 0.72rem; line-height: 1.4; }
 .composer-inline-alert > span { min-width: 0; overflow-wrap: anywhere; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; min-width: 0; gap: 10px; padding: 2px 0 0; border-top: 0; }
