@@ -956,7 +956,9 @@ def test_hf_token_is_used_for_the_file_listing(monkeypatch) -> None:
     assert seen == [f"Bearer {_SYNTHETIC_TOKEN}"]
 
 
-@pytest.mark.parametrize("value", ["hf_bad\ntoken", "hf token", "hf_tökén", "   "])
+@pytest.mark.parametrize(
+    "value", ["hf_bad\ntoken", "hf token", "hf_tökén", "   ", "hf_\x7ftoken", "hf_\x1btoken"]
+)
 def test_a_malformed_hf_token_is_ignored(tmp_path: Path, monkeypatch, value: str) -> None:
     monkeypatch.setenv("HF_TOKEN", value)
     seen: list[tuple[str, str | None]] = []
@@ -1690,6 +1692,88 @@ def test_a_resumed_download_still_checks_free_space(tmp_path: Path, monkeypatch)
     with pytest.raises(GGUFDownloadError, match="free disk space"):
         _fetch(tmp_path, server, min_free_space_bytes=1)
     assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_resumed_download_needs_room_only_for_the_rest(tmp_path: Path, monkeypatch) -> None:
+    """The bytes already stored are already off the free-space figure, so a
+    resume must ask for room for what is left, not for the whole file again."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    free = {"bytes": 10**9}
+    monkeypatch.setattr(
+        download_module.shutil, "disk_usage", lambda directory: SimpleNamespace(free=free["bytes"])
+    )
+    monkeypatch.setattr(
+        download_module._GGUFTransfer,
+        "_wait",
+        lambda self, seconds: free.update(bytes=200),  # room for the 160 bytes to come, not for all 256
+    )
+
+    assert _fetch(tmp_path, server, min_free_space_bytes=1).read_bytes() == content
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_free_space_is_rechecked_as_the_body_arrives(tmp_path: Path, monkeypatch) -> None:
+    """With no Content-Length there is no up-front check; the disk filling up
+    partway through must still stop the download."""
+    content = _valid_gguf_content(tmp_path)
+    lookups = 0
+
+    def disk_usage(directory):
+        nonlocal lookups
+        lookups += 1
+        return SimpleNamespace(free=10**9 if lookups <= 3 else 8)
+
+    monkeypatch.setattr(download_module.shutil, "disk_usage", disk_usage)
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=iter([content])))
+    )
+
+    with pytest.raises(GGUFDownloadError, match="free disk space"):
+        download_gguf(
+            "https://example.com/model.gguf", "model.gguf", tmp_path, min_free_space_bytes=1, http_client=client
+        )
+    assert lookups > 3
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_body_without_a_content_length_is_still_bounded_by_the_ceiling(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=iter([content])))
+    )
+
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            max_download_bytes=len(content) - 1,
+            http_client=client,
+        )
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_download_cancelled_before_it_starts_makes_no_request(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=b"GGUF")
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            cancellation_event=cancel,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 0
 
 
 def test_transport_failures_mid_body_name_the_cause_when_retries_run_out(tmp_path: Path) -> None:
