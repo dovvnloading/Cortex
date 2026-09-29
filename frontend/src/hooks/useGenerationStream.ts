@@ -209,12 +209,22 @@ function createRafBatchedFlusher(flush: (buffered: string) => void) {
 }
 
 /**
+ * Begin tracking a generation the backend just accepted: remember it for a
+ * reload and put the store in its starting state. GenerationStreamHost sees the
+ * store change and attaches the consumer, so a page never has to own one.
+ */
+export function trackGeneration(jobId: string, threadId: string): void {
+  persistActiveJob({ jobId, threadId, lastEventId: 0 });
+  useChatStore.getState().beginGeneration(jobId, threadId);
+}
+
+/**
  * Owns the SSE reconnect loop for a single global generation job and writes
  * tokens/status into useChatStore. sessionStorage remains the durability
- * side-channel that survives a full ChatPage unmount (e.g. a Settings
- * round-trip) or a page reload; the store is the fast in-memory view of it.
- * Error handling stays with the caller (ChatPage) via onFailed, since it's
- * displayed scoped to whichever thread is currently being viewed.
+ * side-channel that survives a page reload; the store is the fast in-memory
+ * view of it. Used by GenerationStreamHost, which lives above the routes so
+ * that leaving the chat page does not stop the stream. How a job ended is
+ * reported through onCompleted / onFailed.
  */
 export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionExpired) {
   const consumingRef = useRef<string | null>(null);
@@ -233,6 +243,11 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       let terminal = false;
       let sessionExpired = false;
       let rejectionNotified = false;
+      // A consumer that takes over a job the store already knows has a hole
+      // in its text (a new one after the workspace remounted) must not start
+      // appending again behind it.
+      const known = useChatStore.getState().generation;
+      let gap = known.jobId === job.jobId && known.gap;
       // Set alongside `terminal`, never awaited until the finally block below
       // -- endGeneration() must not clear the store's jobId (and unmount the
       // pending bubble) before the reload it triggers has actually put the
@@ -256,12 +271,26 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 // even though every intervening connection worked fine.
                 reconnectAttempt = 0;
                 if (event.event_id <= cursor || event.thread_id !== job.threadId) return;
+                // A job's events are numbered 1, 2, 3... with no gaps, but the
+                // backend keeps only a bounded tail of them. A reader that was
+                // away for a while (Settings left open, a long stall) is served
+                // from the oldest event it still has, so the ids jump. Text
+                // appended after a jump would sit behind a hole and read as a
+                // complete answer, so stop appending and say the saved answer
+                // is the one to trust. The cursor still advances, so the
+                // reconnect and terminal handling below are unaffected.
+                if (event.event_id > cursor + 1 && !gap) {
+                  gap = true;
+                  contentFlusher.flushNow();
+                  thoughtsFlusher.flushNow();
+                  useChatStore.getState().markGenerationGap(job.jobId);
+                }
                 cursor = event.event_id;
                 const isTokenDelta = event.event === "generation.content_delta"
                   || event.event === "generation.thinking_delta";
                 // Storage is the cold-start side channel; the store holds the
                 // live cursor. A cold start deliberately replays the job from
-                // event 0 (see ChatPage's resume effect), so the persisted
+                // event 0 (see GenerationStreamHost's resume), so the persisted
                 // cursor is never what a resume reads back -- only the job and
                 // thread identity are. Skipping the write on token deltas
                 // therefore costs nothing and takes a JSON.stringify plus a
@@ -271,12 +300,12 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 if (!isTokenDelta) persistActiveJob({ ...job, lastEventId: cursor });
                 useChatStore.getState().setGenerationCursor(job.jobId, cursor);
                 const data = event.data ?? {};
-                if (typeof data.message === "string") useChatStore.getState().setStatusText(job.jobId, data.message);
+                if (typeof data.message === "string" && !gap) useChatStore.getState().setStatusText(job.jobId, data.message);
                 if (event.event === "generation.cancelling") useChatStore.getState().markStopping(job.jobId);
-                if (event.event === "generation.thinking_delta" && typeof data.delta === "string") {
+                if (event.event === "generation.thinking_delta" && typeof data.delta === "string" && !gap) {
                   thoughtsFlusher.push(data.delta);
                 }
-                if (event.event === "generation.content_delta" && typeof data.delta === "string") {
+                if (event.event === "generation.content_delta" && typeof data.delta === "string" && !gap) {
                   contentFlusher.push(data.delta);
                 }
                 if (event.event === "generation.persisting") {
@@ -336,13 +365,17 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               reconnectAttempt += 1;
             }
           } catch (streamError) {
+            // Only this consumer's own signal means "stop". An abort from
+            // anywhere else is a dropped connection like any other: returning
+            // here would leave the job tracked with nothing reading it, and the
+            // host will not attach to a job it already attached to.
             if (controller.signal.aborted) return;
-            if (streamError instanceof ApiError && streamError.status === 401) {
+            if (streamError instanceof ApiError && streamError.kind === "auth") {
               sessionExpired = true;
               break;
             }
             try {
-              const snapshot = await api.generationStatus(job.jobId);
+              const snapshot = await api.generationStatus(job.jobId, { signal: controller.signal });
               if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
                 terminal = true;
                 if (snapshot.status !== "succeeded") {
@@ -369,11 +402,12 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               // the pending message bubble reporting "Generating" forever
               // with no live connection left to correct it. Treat it like
               // any other dropped connection instead: keep retrying.
-              if (statusError instanceof ApiError && statusError.status === 401) {
+              if (controller.signal.aborted) return;
+              if (statusError instanceof ApiError && statusError.kind === "auth") {
                 sessionExpired = true;
                 break;
               }
-              if (statusError instanceof ApiError && (statusError.status === 403 || statusError.status === 404)) {
+              if (statusError instanceof ApiError && statusError.kind === "http" && (statusError.status === 403 || statusError.status === 404)) {
                 terminal = true;
                 onFailed(job.threadId, statusError.detail || "Generation is no longer available.");
                 break;
@@ -421,7 +455,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
         // finishing late (its terminal reload is awaited above) must not
         // clear the marker a newer job has since installed, which would let
         // a second consumer attach to that newer job in parallel. On a 401
-        // this release is what lets the resume effect attach again.
+        // the job is left tracked and this release lets the next consumer
+        // (the host, remounted once the session is renewed) attach to it.
         if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }
@@ -431,10 +466,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
 
   const start = useCallback(
     (jobId: string, threadId: string, onCompleted: OnCompleted, onFailed: OnFailed) => {
-      const job: PersistedJob = { jobId, threadId, lastEventId: 0 };
-      persistActiveJob(job);
-      useChatStore.getState().beginGeneration(jobId, threadId);
-      void consume(job, onCompleted, onFailed);
+      trackGeneration(jobId, threadId);
+      void consume({ jobId, threadId, lastEventId: 0 }, onCompleted, onFailed);
     },
     [consume],
   );

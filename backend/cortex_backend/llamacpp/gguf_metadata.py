@@ -255,7 +255,9 @@ def read_gguf_metadata(path: Path) -> GGUFMetadata | None:
 def _coerce_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is what int() raises for an infinite float, which a
+        # FLOAT32/FLOAT64 value in a key that should be an integer can be.
         return None
 
 

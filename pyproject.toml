@@ -25,6 +25,7 @@ dependencies = [
 dev = [
     "pytest>=8,<10",
     "pytest-timeout>=2.3,<3",
+    "hypothesis>=6.100,<7",
     "coverage[toml]>=7.10,<8",
     "ruff==0.16.5",
     "mypy==2.3.1",
@@ -82,7 +83,12 @@ no_implicit_optional = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-pythonpath = ["backend"]
+# `backend` is the package under test; `.` (the repository root) is what makes
+# the top-level modules the tests import -- `main`, `app_factory`, `tools` --
+# importable however pytest is started. `python -m pytest` puts the working
+# directory on sys.path by itself, but a bare `pytest` (an IDE runner, a
+# console script) does not, and collection then fails on those imports.
+pythonpath = ["backend", "."]
 addopts = "-ra"
 # Hang protection. A test that stops making progress fails after two minutes
 # with every thread's stack, instead of holding a CI job until its 30-minute

@@ -142,6 +142,24 @@ The other Python versions the project supports are covered by the separate
 `Python compatibility` workflow, which runs on every push to `main`, weekly,
 and on demand rather than on every pull request.
 
+### Property-based tests and running the suite
+
+`tests/property/` holds Hypothesis tests for the code the outside world can feed
+arbitrary text or bytes: the restricted-Python validator, the GGUF readers, Host
+header parsing and download-URL resolution. They run with the rest of the suite,
+under a derandomised `ci` profile (`tests/conftest.py`): every run draws the same
+100 examples per test, so a failure reproduces. To hunt for new failures, run
+them with `HYPOTHESIS_PROFILE=explore` set, which is random, much larger, and
+keeps what it finds in the git-ignored `.hypothesis` directory. When a property
+finds a real bug, fix it and pin the smallest input as a plain test next to it
+(see `tests/property/test_code_validator_counterexamples.py`).
+
+`python -m pytest` and a bare `pytest` (an IDE runner) both work: `pyproject.toml`
+puts the repository root on the path. The suite runs serially on purpose. CI
+measures coverage with `coverage run -m pytest`, which does not follow
+`pytest-xdist` workers, so a parallel run would report a fraction of the real
+coverage and fail the floor.
+
 ### Workflow and dependency checks
 
 The GitHub Actions workflows are part of the code and get the same treatment:

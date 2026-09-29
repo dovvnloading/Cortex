@@ -4,6 +4,7 @@ import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionAppr
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
 import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
+import { InlineBoundary } from "../../app/ErrorBoundary";
 import { ExecutionTaskTray, type ExecutionArtifactResult } from "./ExecutionTaskTray";
 import { ChatLibrary } from "./ChatLibrary";
 import { NavigationLink } from "./NavigationLink";
@@ -151,21 +152,23 @@ export function AppShell({
               />
             </div>
           )}
-          <ChatLibrary
-            chats={chats}
-            groups={groups}
-            activeChatId={activeChatId}
-            activeRowVisible={!isSettings}
-            query={chatQuery}
-            onSelectChat={selectChat}
-            onRenameChat={setRenameTarget}
-            onDeleteChat={setDeleteTarget}
-            onCreateGroup={onCreateGroup}
-            onRenameGroup={onRenameGroup}
-            onDeleteGroup={onDeleteGroup}
-            onToggleGroup={onToggleGroup}
-            onMoveChat={onMoveChat}
-          />
+          <InlineBoundary scope="chat-library" label="The chat list">
+            <ChatLibrary
+              chats={chats}
+              groups={groups}
+              activeChatId={activeChatId}
+              activeRowVisible={!isSettings}
+              query={chatQuery}
+              onSelectChat={selectChat}
+              onRenameChat={setRenameTarget}
+              onDeleteChat={setDeleteTarget}
+              onCreateGroup={onCreateGroup}
+              onRenameGroup={onRenameGroup}
+              onDeleteGroup={onDeleteGroup}
+              onToggleGroup={onToggleGroup}
+              onMoveChat={onMoveChat}
+            />
+          </InlineBoundary>
         </aside>
 
         <main className={`main-content ${isSettings ? "settings-content" : "chat-content"}`}>{children}</main>
@@ -177,13 +180,15 @@ export function AppShell({
         if (result !== false) setDeleteTarget(null);
         return result;
       }} />}
-      <ExecutionTaskTray
-        tasks={executionTasks}
-        onCancel={onCancelExecution}
-        onDecideApproval={onDecideExecutionApproval}
-        onLoadCodeSource={onLoadCodeSource}
-        onDownloadArtifact={onDownloadArtifact}
-      />
+      <InlineBoundary scope="execution-tray" label="The background task list" floating>
+        <ExecutionTaskTray
+          tasks={executionTasks}
+          onCancel={onCancelExecution}
+          onDecideApproval={onDecideExecutionApproval}
+          onLoadCodeSource={onLoadCodeSource}
+          onDownloadArtifact={onDownloadArtifact}
+        />
+      </InlineBoundary>
     </div>
   );
 }

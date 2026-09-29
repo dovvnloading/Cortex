@@ -1,13 +1,32 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
+import { trackGeneration } from "../../hooks/useGenerationStream";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
+import { GenerationStreamHost } from "./GenerationStreamHost";
+
+const ignoreSessionExpiry = () => undefined;
+
+/**
+ * The page with the host that consumes its stream, as AuthenticatedWorkspace
+ * renders them. ChatPage no longer follows a generation itself, so every test
+ * that sends a message needs the host beside it. Both sit in one fragment so a
+ * rerender keeps the same instances.
+ */
+function ChatWithHost(props: ComponentProps<typeof ChatPage>) {
+  return (
+    <>
+      <GenerationStreamHost api={props.api} onSessionExpired={ignoreSessionExpiry} />
+      <ChatPage {...props} />
+    </>
+  );
+}
 
 describe("humanizeGenerationStatus", () => {
   it("never exposes an internal all-caps control marker", () => {
@@ -43,9 +62,9 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
   } as unknown as CortexApi;
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
-  return render(
-    <ChatPage
+function chatElement(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+  return (
+    <ChatWithHost
       api={api}
       threadId={threadId}
       runtimeReady
@@ -57,12 +76,14 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onSelectModel={async () => true}
       onRescanModels={async () => undefined}
       onThreadCreated={vi.fn()}
-      onChatChanged={vi.fn()}
       onForked={vi.fn()}
       onClearMemory={onClearMemory}
-      onSessionExpired={vi.fn()}
-    />,
+    />
   );
+}
+
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+  return render(chatElement(api, threadId, selectedModelSupportsVision, onClearMemory));
 }
 
 describe("ChatPage composer integration", () => {
@@ -367,7 +388,7 @@ describe("ChatPage composer integration", () => {
     expect(await screen.findByText("Alpha answer")).toBeInTheDocument();
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -378,9 +399,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
 
@@ -403,7 +422,7 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-a"));
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -414,14 +433,12 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -432,9 +449,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledTimes(3));
@@ -457,7 +472,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -468,9 +483,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -504,7 +517,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -515,9 +528,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -565,7 +576,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -576,9 +587,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -620,7 +629,7 @@ describe("ChatPage composer integration", () => {
     function RoutedChat() {
       const [threadId, setThreadId] = useState<string | null>(null);
       return (
-        <ChatPage
+        <ChatWithHost
           api={api}
           threadId={threadId}
           runtimeReady
@@ -631,9 +640,7 @@ describe("ChatPage composer integration", () => {
           onSelectModel={async () => true}
           onRescanModels={async () => undefined}
           onThreadCreated={setThreadId}
-          onChatChanged={vi.fn()}
           onForked={vi.fn()}
-          onSessionExpired={vi.fn()}
         />
       );
     }
@@ -666,14 +673,14 @@ describe("ChatPage composer integration", () => {
     expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-inverse") ?? "[]")).toEqual([stagedAttachment]);
   });
 
-  it("replays from the beginning on a cold start, then resumes without duplicating after a route remount", async () => {
-    // Two different situations that both reach this mount effect:
+  it("replays from the beginning on a cold start, then resumes without duplicating after a remount", async () => {
+    // Two different situations that both reach the stream host's resume:
     //
     //   Cold start (page reload): sessionStorage remembers the job but the
     //   module-level store was wiped, so the transcript must be rebuilt by
     //   replaying every event from 0.
     //
-    //   Route remount (Settings and back): the page unmounts but the store
+    //   Remount (the workspace is rebuilt): the host unmounts but the store
     //   survives with its accumulated text intact. Replaying from 0 here
     //   appends the whole answer onto itself -- the regression this pins.
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-replay", threadId: "thread-a", lastEventId: 7 }));
@@ -681,7 +688,7 @@ describe("ChatPage composer integration", () => {
     const api = chatApi({
       streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
         streamCalls.push({ afterEventId: options.afterEventId });
-        onEvent({ event_id: 8, event: "generation.content_delta", job_id: "job-replay", thread_id: "thread-a", data: { delta: "replayed" } });
+        onEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-replay", thread_id: "thread-a", data: { delta: "replayed" } });
         return new Promise<void>((_resolve, reject) => options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
       }),
     });
@@ -696,7 +703,7 @@ describe("ChatPage composer integration", () => {
     // Cold start replayed from 0; the remount resumed from the persisted
     // cursor instead of rewinding.
     expect(streamCalls[0].afterEventId).toBe(0);
-    expect(streamCalls[1].afterEventId).toBe(8);
+    expect(streamCalls[1].afterEventId).toBe(1);
 
     // And the answer is not printed twice.
     await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("replayed"));
@@ -896,7 +903,7 @@ describe("ChatPage composer integration", () => {
     revision = 9;
     useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.8 });
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -907,14 +914,12 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => expect(api.chat).toHaveBeenCalledWith("thread-b"));
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -925,9 +930,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await screen.findByRole("button", { name: "Retry last message" });
@@ -988,7 +991,7 @@ describe("ChatPage composer integration", () => {
     await user.type(composer, "Draft for A");
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -999,9 +1002,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     const composerB = await screen.findByLabelText("Message Cortex");
@@ -1009,7 +1010,7 @@ describe("ChatPage composer integration", () => {
     await user.type(composerB, "Draft for B");
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-a"
         runtimeReady
@@ -1020,9 +1021,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     await waitFor(() => {
@@ -1044,7 +1043,7 @@ describe("ChatPage composer integration", () => {
     await screen.findByRole("button", { name: "Stop generating" });
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -1055,9 +1054,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
 
@@ -1162,7 +1159,7 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(window.sessionStorage.getItem("cortex.active.generation")).toBeNull());
 
     view.rerender(
-      <ChatPage
+      <ChatWithHost
         api={api}
         threadId="thread-b"
         runtimeReady
@@ -1173,9 +1170,7 @@ describe("ChatPage composer integration", () => {
         onSelectModel={async () => true}
         onRescanModels={async () => undefined}
         onThreadCreated={vi.fn()}
-        onChatChanged={vi.fn()}
         onForked={vi.fn()}
-        onSessionExpired={vi.fn()}
       />,
     );
     expect(await screen.findByText("Answer from B")).toBeInTheDocument();
@@ -1446,6 +1441,68 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("Actually, something else");
   });
 
+  it("replays the same request id after the backend could not be reached", async () => {
+    // No answer at all is ambiguous: the backend may have admitted the job
+    // before the connection died, so Retry must reuse the idempotency key.
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(0, "Cortex could not reach the local backend.", "network"))
+      .mockResolvedValueOnce({
+        job_id: "job-replay",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+        user_message_id: "message-user-replay",
+      });
+    const api = chatApi({
+      generate,
+      chat: vi.fn(async (id: string) => emptyChat(id)),
+      streamGeneration: vi.fn(() => new Promise<void>(() => undefined)),
+    });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Did that land");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cortex could not reach the local backend.");
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).toBe(generate.mock.calls[0][0].request_id);
+  });
+
+  it("does not offer Retry for a rejection that resending the same message cannot fix", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn().mockRejectedValue(new ApiError(422, "user_input: String should have at most 100000 characters"));
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "Far too long");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("user_input: String should have at most 100000 characters");
+    expect(screen.queryByRole("button", { name: "Retry last message" })).not.toBeInTheDocument();
+    // The draft stays, so the fix is an edit rather than retyping.
+    expect(composer).toHaveValue("Far too long");
+  });
+
+  it("spends the request id after a definitive rejection so the next send starts a new turn", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "This chat changed. Reload it and try again."))
+      .mockRejectedValueOnce(new ApiError(503, "Local runtime is unavailable."));
+    const api = chatApi({ generate });
+    renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Again");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+  });
+
   it("explains the image capability mismatch before a generation request is made", async () => {
     const user = userEvent.setup();
     const attachment: ChatAttachment = {
@@ -1526,6 +1583,122 @@ describe("ChatPage reload failure recovery", () => {
     await waitFor(() => {
       expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("ChatPage stream outcomes published by the host", () => {
+  const transcriptOf = (id: string, text: string): ChatResponse => ({
+    ...emptyChat(id),
+    title: id,
+    revision: 1,
+    messages: [{ id: `answer-${id}`, role: "assistant", content: text }],
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    useChatStore.setState({ generationOptionsByThread: {} });
+    const { generation, endGeneration } = useChatStore.getState();
+    if (generation.jobId) endGeneration(generation.jobId);
+  });
+
+  it("does not apply a completion that predates the page mount: the mount load decides what shows", async () => {
+    // A generation ended while the user was in Settings; the host published
+    // the outcome with the chat as it was reloaded then. The page mounting now
+    // fetches the current chat itself, which may already be newer, so the
+    // older copy must never be put on screen, not even for a moment.
+    useChatStore.getState().recordCompletion({
+      jobId: "job-while-away",
+      threadId: "thread-a",
+      chat: transcriptOf("thread-a", "Copy published while the page was away"),
+      clearRequested: false,
+    });
+    const api = chatApi({ chat: vi.fn(async (id: string) => transcriptOf(id, "Current copy from the mount load")) });
+
+    renderChat(api, "thread-a");
+
+    // Nothing has been fetched yet. An applied completion would already be
+    // showing here, ahead of the load.
+    expect(screen.queryByText("Copy published while the page was away")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading conversation...")).toBeVisible();
+    expect(await screen.findByText("Current copy from the mount load")).toBeVisible();
+    expect(screen.queryByText("Copy published while the page was away")).not.toBeInTheDocument();
+    // The outcome was still taken: it is not left for the next mount.
+    expect(useChatStore.getState().lastCompletion).toBeNull();
+  });
+
+  it("applies a completion that arrives after the page mounted", async () => {
+    // The other side of the check above: the id only excludes what was already
+    // there at mount, never what the running page is waiting for.
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    let reloadAfterAnswer = false;
+    trackGeneration("job-live", "thread-a");
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => transcriptOf(id, reloadAfterAnswer ? "The saved answer" : "Before the answer")),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a");
+    expect(await screen.findByText("Before the answer")).toBeVisible();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    reloadAfterAnswer = true;
+    await act(async () => {
+      emit!({ event_id: 1, event: "generation.completed", job_id: "job-live", thread_id: "thread-a", data: {} });
+      resolveStream?.();
+    });
+
+    expect(await screen.findByText("The saved answer")).toBeVisible();
+    expect(screen.queryByText("Before the answer")).not.toBeInTheDocument();
+  });
+
+  it("keeps the chat being viewed when another chat's generation finishes", async () => {
+    // Switching chats does not stop a running generation, so its completion can
+    // arrive while another chat is open. That chat's transcript must stay: the
+    // completion belongs to the chat that was generating, and putting it into
+    // the page's load state would leave this one waiting for a load that has
+    // already finished.
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    trackGeneration("job-elsewhere", "thread-a");
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => transcriptOf(id, `Transcript of ${id}`)),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    const view = renderChat(api, "thread-a");
+    expect(await screen.findByText("Transcript of thread-a")).toBeVisible();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    view.rerender(chatElement(api, "thread-b"));
+    expect(await screen.findByText("Transcript of thread-b")).toBeVisible();
+
+    await act(async () => {
+      emit!({ event_id: 1, event: "generation.completed", job_id: "job-elsewhere", thread_id: "thread-a", data: {} });
+      resolveStream?.();
+    });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    // The host reloaded the chat that was generating, not the one on screen.
+    expect(api.chat).toHaveBeenCalledWith("thread-a");
+
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+    expect(screen.getByText("Transcript of thread-b")).toBeVisible();
+    expect(screen.queryByText("Transcript of thread-a")).not.toBeInTheDocument();
+
+    // And the chat that was generating shows its saved answer when opened.
+    view.rerender(chatElement(api, "thread-a"));
+    expect(await screen.findByText("Transcript of thread-a")).toBeVisible();
   });
 });
 

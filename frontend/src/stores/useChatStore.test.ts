@@ -10,6 +10,7 @@ const idleGeneration = {
   partialThoughts: "",
   statusText: "",
   contentReady: false,
+  gap: false,
 };
 
 describe("useChatStore", () => {
@@ -184,6 +185,56 @@ describe("useChatStore", () => {
 
     useChatStore.getState().endGeneration("job-reset-cursor");
     expect(useChatStore.getState().generationCursor).toBe(0);
+  });
+
+  it("markGenerationGap flags only the matching job, once, and says why in the status line", () => {
+    useChatStore.getState().beginGeneration("job-gap", "thread-gap");
+    useChatStore.getState().appendContentToken("job-gap", "kept");
+
+    useChatStore.getState().markGenerationGap("some-other-job");
+    expect(useChatStore.getState().generation.gap).toBe(false);
+
+    useChatStore.getState().markGenerationGap("job-gap");
+    const flagged = useChatStore.getState().generation;
+    expect(flagged).toMatchObject({ gap: true, partialContent: "kept" });
+    expect(flagged.statusText).toMatch(/full answer will appear when it is saved/i);
+
+    // Flagging again is a no-op, so a reconnect does not rebuild the slice.
+    useChatStore.getState().markGenerationGap("job-gap");
+    expect(useChatStore.getState().generation).toBe(flagged);
+
+    // A new job starts without it.
+    useChatStore.getState().endGeneration("job-gap");
+    useChatStore.getState().beginGeneration("job-next", "thread-next");
+    expect(useChatStore.getState().generation.gap).toBe(false);
+  });
+
+  it("holds the newest outcome until someone acknowledges it, and only that one", () => {
+    const { recordCompletion, acknowledgeCompletion, recordFailure, acknowledgeFailure } = useChatStore.getState();
+
+    recordCompletion({ jobId: "job-1", threadId: "thread-1", chat: null, clearRequested: false });
+    const first = useChatStore.getState().lastCompletion;
+    expect(first).toMatchObject({ jobId: "job-1", threadId: "thread-1", chat: null, clearRequested: false });
+
+    // A newer outcome replaces it and gets a larger id, so a reader can tell
+    // a new outcome from one it has already handled.
+    recordCompletion({ jobId: "job-2", threadId: "thread-2", chat: null, clearRequested: true });
+    const second = useChatStore.getState().lastCompletion;
+    expect(second?.id).toBeGreaterThan(first?.id ?? 0);
+
+    // Acknowledging a superseded outcome must not discard the newer one.
+    acknowledgeCompletion(first?.id ?? -1);
+    expect(useChatStore.getState().lastCompletion).toBe(second);
+    acknowledgeCompletion(second?.id ?? -1);
+    expect(useChatStore.getState().lastCompletion).toBeNull();
+
+    recordFailure({ threadId: "thread-1", message: "Generation did not complete." });
+    const failure = useChatStore.getState().lastFailure;
+    expect(failure).toMatchObject({ threadId: "thread-1", message: "Generation did not complete." });
+    acknowledgeFailure((failure?.id ?? 0) + 1);
+    expect(useChatStore.getState().lastFailure).toBe(failure);
+    acknowledgeFailure(failure?.id ?? -1);
+    expect(useChatStore.getState().lastFailure).toBeNull();
   });
 
   it("setThreadOptions replaces (not merges) an existing entry for the same key", () => {
