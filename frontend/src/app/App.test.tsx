@@ -517,7 +517,7 @@ describe("App", () => {
 
       const user = userEvent.setup();
       await user.keyboard("{Control>}k{/Control}");
-      await user.click(await screen.findByText("Toggle theme"));
+      await user.click(await screen.findByText("Change theme"));
       expect(await screen.findByText("Settings saved.")).toBeVisible();
       expect(callsTo(fetcher, "/session/handoff")).toHaveLength(1);
 
@@ -901,7 +901,7 @@ describe("App", () => {
 
     const user = userEvent.setup();
     await user.keyboard("{Control>}k{/Control}");
-    await user.click(await screen.findByText("Toggle theme"));
+    await user.click(await screen.findByText("Change theme"));
 
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
     expect(window.localStorage.getItem("cortex.theme")).toBe("light");

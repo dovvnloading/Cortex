@@ -21,7 +21,7 @@ import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
-import { applyStoredTheme, DEFAULT_THEME_PREFERENCE } from "../lib/theme";
+import { applyStoredTheme, DEFAULT_THEME_PREFERENCE, nextThemePreference } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
@@ -871,7 +871,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     navigate("/settings");
   };
   const toggleTheme = () => {
-    const next = theme === "dark" ? "light" : "dark";
+    // System, light, dark, and round again: "system" is a choice of its own,
+    // and used to be turned into "dark" by the first press.
+    const next = nextThemePreference(theme);
     void saveSettings({ ...settings, appearance: { ...settings.appearance, theme: next } });
   };
 
@@ -890,6 +892,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         chats={chats}
         localModels={localModels}
         selectedModel={selectedModel}
+        theme={theme}
         onNewChat={() => navigate("/chat/new")}
         onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}
