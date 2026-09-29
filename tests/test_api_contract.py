@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -1691,3 +1693,163 @@ def test_proposed_memories_ignore_a_value_that_is_not_a_memory_command(command):
     from cortex_backend.api.routes import _proposed_memories
 
     assert _proposed_memories(_stub_deps(), command) == []
+
+
+# --- request ids and failure logging ----------------------------------------
+
+
+def _error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_repository_failures_log_frames_and_request_id_but_not_the_message(
+    app, client, headers, caplog, monkeypatch
+):
+    """A failure is findable from what the caller was told, and says nothing anyone typed.
+
+    Repository errors quote the content that failed to save, so the log gets the
+    exception class and the source locations it passed through -- never its text.
+    """
+
+    def list_summaries():
+        try:
+            raise ValueError("SECRET cause: the user's private prompt")
+        except ValueError as cause:
+            raise RuntimeError("SECRET: the user's private prompt") from cause
+
+    monkeypatch.setattr(app.state.dependencies.chats, "list_summaries", list_summaries)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.get("/api/v1/chats", headers=headers)
+
+    assert response.status_code == 500
+    request_id = response.headers["X-Request-ID"]
+    assert re.fullmatch(r"[0-9a-f]{12}", request_id)
+    # The caller can quote it: it is in the body the UI shows, not only a header.
+    assert response.json()["detail"] == f"Could not list chats. (Request ID: {request_id})"
+
+    (record,) = _error_records(caplog)
+    text = record.getMessage()
+    assert record.name == "cortex_backend.api.routes"
+    assert record.request_id == request_id
+    assert f"request={request_id}" in text
+    assert "RuntimeError" in text and "caused by ValueError" in text
+    # Frames: where the route caught it and where the repository raised it.
+    assert "cortex_backend/api/routers/chats.py" in text
+    assert "in list_summaries" in text
+    assert "SECRET" not in caplog.text and "private prompt" not in caplog.text
+    assert record.exc_info is None
+
+
+def test_every_response_carries_a_fresh_request_id_and_ignores_the_callers(client, headers):
+    first = client.get("/api/v1/chats", headers=headers)
+    second = client.get("/api/v1/chats", headers=headers)
+    forged = client.get(
+        "/api/v1/chats", headers={**headers, "X-Request-ID": "attacker-chosen-id"}
+    )
+    refused = client.get("/api/v1/chats")
+    unknown = client.get("/api/v1/chats/does-not-exist", headers=headers)
+
+    ids = [response.headers["X-Request-ID"] for response in (first, second, forged, refused, unknown)]
+    assert refused.status_code == 401 and unknown.status_code == 404
+    assert all(re.fullmatch(r"[0-9a-f]{12}", request_id) for request_id in ids)
+    assert len(set(ids)) == len(ids)
+
+
+def test_a_streamed_response_carries_the_request_id_too(client, headers):
+    accepted = client.post(
+        "/api/v1/generations",
+        json={"request_id": "stream-id-1", "user_input": "hello"},
+        headers=headers,
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    with client.stream(
+        "GET", f"/api/v1/generations/{accepted.json()['job_id']}/events", headers=headers
+    ) as stream:
+        streamed_id = stream.headers["X-Request-ID"]
+        "".join(stream.iter_text())
+
+    assert re.fullmatch(r"[0-9a-f]{12}", streamed_id)
+    assert streamed_id != accepted.headers["X-Request-ID"]
+
+
+def test_a_worker_thread_failure_logs_the_job_and_the_request_that_started_it(
+    app, client, headers, caplog, monkeypatch
+):
+    def generate(*args, **kwargs):
+        raise RuntimeError("SECRET: text from the user's message")
+
+    monkeypatch.setattr(app.state.dependencies.generation, "generate", generate)
+
+    with caplog.at_level(logging.ERROR):
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "worker-failure-1", "user_input": "hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["job_id"]
+        wait_until(
+            lambda: client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["status"] == "failed",
+            describe="the generation job to fail",
+        )
+
+    (record,) = _error_records(caplog)
+    text = record.getMessage()
+    assert record.name == "cortex_backend.api.jobs"
+    assert record.request_id == accepted.headers["X-Request-ID"]
+    assert f"request={accepted.headers['X-Request-ID']}" in text
+    assert f"job={job_id}" in text
+    assert "RuntimeError" in text
+    assert "SECRET" not in caplog.text and "user's message" not in caplog.text
+
+
+def test_failure_descriptions_hold_only_class_and_source_locations():
+    from cortex_backend.api.observability import describe_failure
+
+    def inner():
+        raise KeyError("SECRET-KEY")
+
+    def outer():
+        try:
+            inner()
+        except KeyError as cause:
+            raise OSError("SECRET-PATH C:/Users/someone/private.txt") from cause
+
+    try:
+        outer()
+    except OSError as exc:
+        description = describe_failure(exc)
+
+    lines = description.splitlines()
+    assert lines[0] == "OSError"
+    assert "caused by KeyError" in lines
+    assert any(line.endswith("in inner") for line in lines)
+    assert "SECRET" not in description and "someone" not in description
+    # Locations are file:line in function, with no directory above the package or the file name.
+    assert all(re.fullmatch(r"  [\w./-]+\.py:\d+ in [\w<>]+", line) for line in lines if line.startswith("  "))
+
+
+def test_failure_descriptions_are_bounded():
+    from cortex_backend.api.observability import describe_failure
+
+    def recurse(depth: int):
+        if depth == 0:
+            raise RuntimeError("bottom")
+        recurse(depth - 1)
+
+    try:
+        recurse(200)
+    except RuntimeError as exc:
+        description = describe_failure(exc)
+
+    assert len(description.splitlines()) <= 1 + 30
+    # The innermost frames are the ones kept.
+    assert "in recurse" in description
+
+
+def test_the_request_id_is_not_visible_outside_a_request():
+    from cortex_backend.api.observability import current_request_id
+
+    assert current_request_id() is None

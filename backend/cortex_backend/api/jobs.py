@@ -15,6 +15,9 @@ from uuid import uuid4
 
 from cortex_backend.services.progress import ProgressEvent
 
+from .observability import current_request_id, log_failure
+
+logger = logging.getLogger(__name__)
 
 JobKind = Literal["generation", "models", "gguf_download"]
 JobStatus = Literal[
@@ -115,6 +118,10 @@ class _JobRecord:
     request_id: str | None = None
     request_fingerprint: str | None = None
     reservation_token: str | None = None
+    # The id of the HTTP request that reserved this job (see observability), so a
+    # failure on the worker thread, long after that request has been answered,
+    # can still be matched to the response the caller was given.
+    trace_id: str | None = None
     acceptance: Mapping[str, Any] = field(default_factory=dict)
     # A start_reserved call has claimed this reservation and is running its
     # preparation off the event loop.  No worker task exists yet, but one is
@@ -378,6 +385,7 @@ class JobRegistry:
                 request_id=request_id,
                 request_fingerprint=request_fingerprint,
                 reservation_token=reservation_token,
+                trace_id=current_request_id(),
             )
             self._records[record.job_id] = record
             self._active[kind] = record.job_id
@@ -739,7 +747,7 @@ class JobRegistry:
             ]
         abandoned = len(still_pending) - len(committed_still_pending)
         if abandoned:
-            logging.warning(
+            logger.warning(
                 "Cortex shutdown: %d job worker(s) did not observe cancellation within "
                 "%.0fs and were abandoned so shutdown could proceed.",
                 abandoned,
@@ -812,8 +820,14 @@ class JobRegistry:
                 ):
                     self._finalize_cancellation(record)
                     return
-                logging.error(
-                    "Cortex %s job failed (%s).", record.kind, type(exc).__name__
+                # The class and frames only (see observability): a job's
+                # exception can quote the prompt or the file that failed.
+                log_failure(
+                    logger,
+                    f"Cortex {record.kind} job failed",
+                    exc,
+                    request_id=record.trace_id,
+                    job=record.job_id,
                 )
                 message = (
                     getattr(exc, "user_message", None)

@@ -103,8 +103,10 @@ from .schemas import (
     InstalledModel,
     SettingsMigrationReport as SettingsMigrationReportResponse,
 )
+from .observability import current_request_id, log_failure
 from .security import SessionPrincipal
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
 # The most memory suggestions one answer can put in front of the user, and the
@@ -528,7 +530,7 @@ async def _start_generation_job(
             except Exception as exc:
                 # Keeping a partial answer is a courtesy; a chat that moved on
                 # underneath it must not turn Stop into a failure.
-                logging.warning(
+                logger.warning(
                     "Cortex could not keep a stopped answer (%s).", type(exc).__name__
                 )
                 return {"cancelled": True}
@@ -616,7 +618,7 @@ async def _start_generation_job(
                     thread_id=thread_id,
                 )
             except Exception as exc:
-                logging.warning(
+                logger.warning(
                     "Cortex code proposal queueing failed (%s).", type(exc).__name__
                 )
             if code_execution_job_id:
@@ -685,7 +687,7 @@ async def _start_generation_job(
                             cancellation_event=title_cancel,
                         )
                     except Exception as exc:  # optional title work must not fail a chat
-                        logging.warning(
+                        logger.warning(
                             "Cortex chat title generation failed (%s).",
                             type(exc).__name__,
                         )
@@ -700,7 +702,7 @@ async def _start_generation_job(
                         deps.chats.rename_chat(thread_id, generated_title)
                         title = generated_title
                     except Exception as exc:
-                        logging.warning(
+                        logger.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
                         )
             # rename_chat above may have moved the title, and the assistant
@@ -974,7 +976,7 @@ def _proposed_memories(deps: BackendDependenciesProtocol, command: Any) -> list[
     except Exception as exc:
         # Showing a suggestion the store already holds is harmless: the user
         # decides, and saving a duplicate is a no-op.
-        logging.warning(
+        logger.warning(
             "Cortex could not compare memory suggestions with saved memories (%s).",
             type(exc).__name__,
         )
@@ -1434,10 +1436,15 @@ def _raise_job_error(exc: Exception) -> NoReturn:
 def _raise_repository_error(operation: str, exc: Exception) -> NoReturn:
     if isinstance(exc, HTTPException):
         raise exc
-    logging.error("Cortex API %s failed (%s).", operation, type(exc).__name__)
+    # The class and the frames it passed through, never its text: a repository
+    # error can quote the very content that failed to save. The request id ties
+    # this line to the caller's response, which carries it too, so a person who
+    # reports "Could not list chats" can be matched to the failure.
+    request_id = current_request_id()
+    log_failure(logger, f"Cortex API {operation} failed", exc, request_id=request_id)
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail=f"Could not {operation}.",
+        detail=f"Could not {operation}." + (f" (Request ID: {request_id})" if request_id else ""),
     ) from exc
 
 
