@@ -240,19 +240,27 @@ def test_an_upgrade_that_fails_part_way_keeps_its_snapshot_and_the_retry_reuses_
     assert _user_version(path) == 4
 
 
-def test_a_second_upgrade_after_a_rollback_takes_a_fresh_snapshot_and_keeps_the_first(
-    tmp_path: Path,
-) -> None:
-    """The documented rollback copies the snapshot over the database and runs
-    the older release. Whatever that release then writes is in no snapshot, so
-    the next upgrade must not leave the old one standing as the file the README
-    tells people to restore: that would drop those chats on the next rollback."""
-    path = tmp_path / "legacy.sqlite"
-    _write_old_schema_database(path)
-    DatabaseManager(db_path=str(path))  # first upgrade; the snapshot holds only 'old-1'
-    snapshot = Path(f"{path}.pre-v3.bak")
-    first_snapshot = snapshot.read_bytes()
+def _in_write_ahead_mode(path: Path) -> None:
+    """Every install that ran a release from before the ladder is already in WAL
+    mode, and so is a snapshot taken of it: the mode is part of the file header."""
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    finally:
+        connection.close()
 
+
+def _sidecars_beside(path: Path) -> list[str]:
+    return sorted(
+        entry.name
+        for entry in path.parent.iterdir()
+        if entry.name.startswith(f"{path.name}-") and entry.name.endswith(("-wal", "-shm"))
+    )
+
+
+def _roll_back_and_chat_on_the_older_release(tmp_path: Path, path: Path, snapshot: Path) -> None:
+    """The documented rollback: move the database aside, copy the snapshot over it,
+    and let the older release write one more chat."""
     aside = tmp_path / "moved-aside"
     aside.mkdir()
     for suffix in ("", "-wal", "-shm"):
@@ -271,6 +279,22 @@ def test_a_second_upgrade_after_a_rollback_takes_a_fresh_snapshot_and_keeps_the_
         older_release.close()
     assert _user_version(path) == 3
 
+
+def test_a_second_upgrade_after_a_rollback_takes_a_fresh_snapshot_and_keeps_the_first(
+    tmp_path: Path,
+) -> None:
+    """The documented rollback copies the snapshot over the database and runs
+    the older release. Whatever that release then writes is in no snapshot, so
+    the next upgrade must not leave the old one standing as the file the README
+    tells people to restore: that would drop those chats on the next rollback."""
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+    DatabaseManager(db_path=str(path))  # first upgrade; the snapshot holds only 'old-1'
+    snapshot = Path(f"{path}.pre-v3.bak")
+    first_snapshot = snapshot.read_bytes()
+
+    _roll_back_and_chat_on_the_older_release(tmp_path, path, snapshot)
+
     database = DatabaseManager(db_path=str(path))  # the second upgrade
 
     assert database.pre_upgrade_snapshot_path == str(snapshot)
@@ -281,6 +305,55 @@ def test_a_second_upgrade_after_a_rollback_takes_a_fresh_snapshot_and_keeps_the_
     assert _chat_ids(superseded) == {"old-1"}
     assert _user_version(path) == 4
     assert _chat_ids(path) == {"old-1", "after-rollback"}
+
+
+def test_reusing_a_pre_upgrade_snapshot_leaves_no_sidecars_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deciding whether the snapshot still matches means reading it. Reading a
+    file whose header says write-ahead logging made SQLite create a -wal and a
+    -shm beside it, and nothing ever removed them."""
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+    _in_write_ahead_mode(path)
+    real_step = storage._MIGRATIONS[4]
+
+    def failing_step(connection: sqlite3.Connection) -> None:
+        real_step(connection)
+        raise sqlite3.OperationalError("simulated failure after the step's own changes")
+
+    monkeypatch.setitem(storage._MIGRATIONS, 4, failing_step)
+    with pytest.raises(PersistenceError):
+        DatabaseManager(db_path=str(path))
+    monkeypatch.undo()
+    snapshot = Path(f"{path}.pre-v3.bak")
+    first_attempt = snapshot.read_bytes()
+    assert first_attempt[18:20] == b"", "the snapshot is flagged as write-ahead-log mode"
+
+    database = DatabaseManager(db_path=str(path))  # the retry reads the snapshot
+
+    assert database.pre_upgrade_snapshot_path == str(snapshot)
+    assert snapshot.read_bytes() == first_attempt
+    assert _sidecars_beside(snapshot) == []
+
+
+def test_a_superseded_snapshot_leaves_no_stale_sidecars_beside_the_new_one(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+    _in_write_ahead_mode(path)
+    DatabaseManager(db_path=str(path))  # first upgrade
+    snapshot = Path(f"{path}.pre-v3.bak")
+    _roll_back_and_chat_on_the_older_release(tmp_path, path, snapshot)
+
+    DatabaseManager(db_path=str(path))  # the second upgrade supersedes the snapshot
+
+    superseded = Path(f"{snapshot}.superseded-1")
+    assert superseded.exists()
+    assert _sidecars_beside(snapshot) == []
+    assert _sidecars_beside(superseded) == []
+    assert _chat_ids(snapshot) == {"old-1", "after-rollback"}
 
 
 def test_a_snapshot_that_is_not_a_database_is_kept_aside_never_trusted_or_overwritten(

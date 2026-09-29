@@ -35,6 +35,7 @@ from cortex_backend.repositories.sqlite_backup import (
     failure_detail,
     find_interrupted_recovery,
     move_sidecars,
+    open_at_rest,
     put_sidecars_back,
     quick_check_at_rest,
     snapshot_database,
@@ -234,17 +235,27 @@ _MIGRATIONS: dict[int, Migration] = {
 }
 
 
-def _content_digest(path: str) -> str | None:
+def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
     """A hash of every row in every table, or None if the file cannot be read that way.
 
     Two databases of the same schema version hold the same chats exactly when
     their digests match, regardless of how the bytes are laid out on disk. It
     reads the whole file, so it is only for the rare check that decides whether
     an existing pre-upgrade snapshot still describes the database.
+
+    ``at_rest`` is for a snapshot that nothing is writing: it is read through
+    ``open_at_rest``, which leaves no ``-wal`` or ``-shm`` beside it. The live
+    database must not be read that way, because its write-ahead log is part of
+    what it holds.
     """
     connection: sqlite3.Connection | None = None
     try:
-        connection = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", timeout=10.0, uri=True)
+        if at_rest:
+            connection = open_at_rest(path)
+        else:
+            connection = sqlite3.connect(
+                f"{Path(path).resolve().as_uri()}?mode=ro", timeout=10.0, uri=True
+            )
         digest = hashlib.sha256()
         tables = [
             row[0]
@@ -849,7 +860,7 @@ class DatabaseManager:
 
     def _snapshot_is_current(self, snapshot_path: str) -> bool:
         """Whether an existing pre-upgrade snapshot holds exactly what the primary holds now."""
-        digest = _content_digest(snapshot_path)
+        digest = _content_digest(snapshot_path, at_rest=True)
         return digest is not None and digest == _content_digest(self.db_path)
 
     def _snapshot_before_upgrade(self) -> None:
