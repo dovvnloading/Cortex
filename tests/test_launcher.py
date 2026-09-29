@@ -2633,6 +2633,54 @@ def test_closing_the_window_while_starting_abandons_the_launch_quietly(
     assert not startup_log.exists(), "closing the window is not a startup failure"
 
 
+def test_teardown_waits_for_a_startup_still_in_flight_before_stopping_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Closing the window mid-startup must not stop a backend the worker is still building."""
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    startup_returned = threading.Event()
+    stop_saw_startup_returned: list[bool] = []
+    worker_threads: list[threading.Thread] = []
+
+    def blocking_probe(url, **_kwargs):
+        if not url.endswith("/health/ready"):
+            return True
+        entered.set()
+        threading.Timer(0.3, release.set).start()
+        assert release.wait(10)
+        startup_returned.set()
+        return False
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", blocking_probe)
+    fake_backend = launcher_main.ServerSupervisor
+
+    class RecordingBackend(fake_backend):  # type: ignore[misc, valid-type]
+        def stop(self):
+            stop_saw_startup_returned.append(startup_returned.is_set())
+            super().stop()
+
+    monkeypatch.setattr(launcher_main, "ServerSupervisor", RecordingBackend)
+
+    def close_the_window_mid_startup(_config, worker):
+        window = fakes.windows[-1]
+        thread = threading.Thread(target=worker, args=(window,), name="cortex-test-window-worker")
+        worker_threads.append(thread)
+        thread.start()
+        assert entered.wait(10), "startup never reached the readiness gate"
+        window.events.closed.set()  # the person closes the window; the GUI loop ends
+
+    fakes.on_window = close_the_window_mid_startup
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    worker_threads[0].join(timeout=10)
+    assert not worker_threads[0].is_alive()
+    assert stop_saw_startup_returned == [True], "the backend was stopped under the worker"
+    assert fakes.windows[0].loaded_urls == []
+
+
 def test_an_interrupt_while_starting_closes_the_window_and_is_not_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
