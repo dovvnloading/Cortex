@@ -337,6 +337,106 @@ def test_transition_to_terminal_status_reports_real_approval_state_on_first_call
     assert finished.approval_state == "approved"
 
 
+def _advancing_get_job(repository, monkeypatch):
+    """Make every get_job() call move the job on, as a racing worker would."""
+    original = repository.get_job
+    calls: list[str] = []
+
+    def advancing(job_id, *, owner=None):
+        calls.append(job_id)
+        with repository.connect() as connection:
+            connection.execute(
+                "UPDATE execution_jobs SET status = 'running' WHERE job_id = ?",
+                (job_id,),
+            )
+        return original(job_id, owner=owner)
+
+    monkeypatch.setattr(repository, "get_job", advancing)
+    return calls
+
+
+def test_request_cancel_returns_the_cancelling_row_it_committed(tmp_path, monkeypatch):
+    """transition() must answer from its own transaction, not a later read.
+
+    It used to commit and then re-read through get_job(), so the return value
+    was "whatever the row says now". A worker advancing the job in that gap
+    made the 202 body -- and every coordinator decision built on the result --
+    describe a state this call never wrote: a stop the user had just been told
+    about came back as ``running``.
+    """
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-snapshot",
+        owner="session-a",
+        request_id="request-snapshot",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    repository.request_approval(
+        job.job_id, owner="session-a", scope_digest="scope", reason="test", ttl_seconds=10
+    )
+    repository.decide_approval(job.job_id, owner="session-a", decision="approved")
+    calls = _advancing_get_job(repository, monkeypatch)
+
+    cancelling = repository.request_cancel(job.job_id)
+
+    assert cancelling.status == "cancelling"
+    # The snapshot carries the same approval join get_job() reports.
+    assert cancelling.approval_state == "approved"
+    # request_cancel reads once to see whether the job is already terminal;
+    # transition() itself must not read again after committing.
+    assert calls == [job.job_id]
+
+
+def test_transition_snapshot_matches_the_committed_event(tmp_path):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-snapshot-event",
+        owner="session-a",
+        request_id="request-snapshot-event",
+        profile="fake.v1",
+        payload={},
+    )
+
+    running = repository.transition(
+        job.job_id,
+        status="running",
+        event="started",
+        phase="run",
+        data={"step": 1},
+        result={"partial": True},
+    )
+
+    events = repository.events(job.job_id)
+    assert running.status == "running"
+    assert running.sequence == events[-1].sequence
+    assert running.result == {"partial": True}
+    assert running.approval_state == "not_required"
+    assert running == repository.get_job(job.job_id)
+
+
+def test_terminal_transition_race_reports_the_settled_job_without_a_second_read(
+    tmp_path, monkeypatch
+):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-snapshot-terminal",
+        owner="session-a",
+        request_id="request-snapshot-terminal",
+        profile="fake.v1",
+        payload={},
+    )
+    finished = repository.transition(
+        job.job_id, status="succeeded", event="completed", result={"value": 1}
+    )
+    calls = _advancing_get_job(repository, monkeypatch)
+
+    late = repository.transition(job.job_id, status="failed", event="failed", error="late")
+
+    assert late == finished
+    assert calls == []
+
+
 def test_fake_coordinator_success_failure_and_replay(tmp_path):
     repository = _repository(tmp_path)
     coordinator = DurableFakeCoordinator(repository)

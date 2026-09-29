@@ -423,27 +423,41 @@ class ExecutionRepository:
             return job, False
 
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
-        now = self._now()
         with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT j.*,
-                       COALESCE(
-                           CASE
-                               WHEN a.state = 'pending' AND a.expires_at <= ? THEN 'expired'
-                               ELSE a.state
-                           END,
-                           'not_required'
-                       ) AS approval_state
-                FROM execution_jobs j
-                LEFT JOIN execution_approvals a ON a.job_id = j.job_id
-                WHERE j.job_id = ?
-                """,
-                (now, job_id),
-            ).fetchone()
+            row = self._read_job(connection, job_id, self._now())
         if row is None or (owner is not None and row["owner"] != owner):
             return None
         return self._job_from_row(row)
+
+    @staticmethod
+    def _read_job(
+        connection: sqlite3.Connection, job_id: str, now: str
+    ) -> sqlite3.Row | None:
+        """Read one job with its effective approval state on ``connection``.
+
+        A pending approval past its expiry reads as ``expired`` even before
+        the sweeper has persisted that, and a job with no approval row reads
+        as ``not_required``. Every reader that reports a job goes through
+        here so they cannot disagree about it.
+        """
+
+        row: sqlite3.Row | None = connection.execute(
+            """
+            SELECT j.*,
+                   COALESCE(
+                       CASE
+                           WHEN a.state = 'pending' AND a.expires_at <= ? THEN 'expired'
+                           ELSE a.state
+                       END,
+                       'not_required'
+                   ) AS approval_state
+            FROM execution_jobs j
+            LEFT JOIN execution_approvals a ON a.job_id = j.job_id
+            WHERE j.job_id = ?
+            """,
+            (now, job_id),
+        ).fetchone()
+        return row
 
     def replace_job_payload(
         self,
@@ -559,9 +573,6 @@ class ExecutionRepository:
         expected_status: ExecutionStatus | None = None,
     ) -> ExecutionJob:
         now = self._now()
-        terminal_owner: str | None = None
-        updated: sqlite3.Row | None = None
-        updated_owner: str | None = None
         with self.connect() as connection:
             # Serialize lifecycle transitions before reading the current
             # sequence. Workers and cancellation requests may transition the
@@ -574,19 +585,7 @@ class ExecutionRepository:
             ).fetchone()
             if row is None:
                 raise ExecutionRepositoryError("Execution job does not exist.")
-            if row["status"] in TerminalExecutionStatus:
-                # A worker can race with cancellation or recovery. Terminal
-                # state is immutable; late callbacks must not append a second
-                # terminal event or overwrite the validated result. Record the
-                # owner and re-derive the job via get_job() below, once this
-                # connection is closed: this row comes from a bare
-                # `SELECT * FROM execution_jobs` with no execution_approvals
-                # join, so it has no approval_state column, and
-                # _job_from_row() would silently default it to
-                # "not_required" even when the job was actually approved or
-                # denied before it reached its terminal status.
-                terminal_owner = row["owner"]
-            else:
+            if row["status"] not in TerminalExecutionStatus:
                 if expected_status is not None and row["status"] != expected_status:
                     raise ExecutionTransitionConflict(
                         f"Execution job is {row['status']}, not {expected_status}."
@@ -634,45 +633,22 @@ class ExecutionRepository:
                     """,
                     (job_id, sequence, event, status, phase, encoded_data, now),
                 )
-                updated = connection.execute(
-                    "SELECT * FROM execution_jobs WHERE job_id = ?", (job_id,)
-                ).fetchone()
-                if updated is None:
-                    raise ExecutionRepositoryError("job row vanished after update")
-                # Defer approval-state computation until this connection
-                # closes, for the same reason as the terminal race guard
-                # above: this row comes from a bare
-                # `SELECT * FROM execution_jobs` with no execution_approvals
-                # join, so it has no approval_state column, and
-                # _job_from_row() would silently default it to
-                # "not_required" even when the job was actually approved or
-                # denied on its way to this (possibly terminal) status.
-                # self.get_job() below re-derives the real value via the
-                # join once the transaction has committed.
-                updated_owner = row["owner"]
-        if terminal_owner is not None:
-            # Delegate to the already-correct get_job() instead of
-            # maintaining a second copy of the approval-join query (the same
-            # pattern used for create_job()'s duplicate-request fallback).
-            # The connection above is already closed, so this cannot collide
-            # with the transaction we just held.
-            job = self.get_job(job_id, owner=terminal_owner)
-            if job is not None:
-                return job
-            # The job vanished between the terminal check and this re-read
-            # (e.g. a concurrent purge) -- fall back to the original row so
-            # the race guard still returns a job rather than raising.
-            return self._job_from_row(row)
-        if updated is None:
-            raise ExecutionRepositoryError("job row vanished after update")
-        job = self.get_job(job_id, owner=updated_owner)
-        if job is not None:
-            return job
-        # The job vanished between the update above and this re-read (e.g. a
-        # concurrent purge) -- fall back to the freshly updated row so the
-        # caller still gets the status/result it just wrote, rather than
-        # raising.
-        return self._job_from_row(updated)
+            # Terminal state is immutable: a worker can race with cancellation
+            # or recovery, and a late callback must neither append a second
+            # terminal event nor overwrite the validated result, so that case
+            # writes nothing and reports the job as it stands.
+            #
+            # Either way the answer is read here, inside the transaction that
+            # holds the write lock, with the approval join get_job() uses.
+            # Reading it back after the commit made the return value "whatever
+            # the row says now" rather than "what this call committed": a
+            # concurrent actor could advance the job in between, and the HTTP
+            # 202 body and every coordinator decision built on the result
+            # would describe a state this call never wrote.
+            snapshot = self._read_job(connection, job_id, now)
+            if snapshot is None:
+                raise ExecutionRepositoryError("job row vanished after update")
+            return self._job_from_row(snapshot)
 
     def request_cancel(self, job_id: str) -> ExecutionJob:
         job = self.get_job(job_id)
