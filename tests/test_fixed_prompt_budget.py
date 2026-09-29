@@ -9,23 +9,30 @@ then drops the front of an over-long prompt -- the system prompt first -- and
 nothing reports it. These tests hold the three answers to that: drop what is
 optional and say so, refuse what cannot be made to fit, and never call the
 runtime with a prompt known to overflow.
+
+The last section is the wiring that keeps every one of those decisions on the
+same estimate: the ratio learned for the model has to reach history, memory and
+attachment sizing, and what the service tells the user was cut has to be what
+the engine sends.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from fastapi.testclient import TestClient
 import pytest
 
 from cortex_backend.api import create_app
-from cortex_backend.core.generation import GenerationSnapshot, ModelOperationError
+from cortex_backend.core.generation import GenerationAttachment, GenerationSnapshot, ModelOperationError
+from cortex_backend.services import token_budget
 from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.llm import PromptTemplate, SynthesisAgent
 from cortex_backend.services.progress import ProgressEvent
 from cortex_backend.testing import build_demo_dependencies
-from cortex_backend.testing.fake_ollama import FakeOllamaState
+from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
 from support import parse_sse_events, session_headers
 
 MODEL = "qwen3:8b"
@@ -392,3 +399,125 @@ def test_an_oversized_message_is_rejected_at_admission_and_leaves_no_trace() -> 
             events = parse_sse_events("".join(response.iter_text()))
         assert events[-1]["event"] == "generation.completed", events[-1]
     assert client.prompts, "the message that fits reached the model"
+
+
+# --- the wiring: one estimate, the model's own ratio, the text the user was told about
+
+
+def _dense_model() -> None:
+    """Teach the registry that this model needs 2.0 characters per token, well under the default."""
+    token_budget.TOKEN_RATIOS.observe(MODEL, ["x" * 4000], 4000 // 2 + 4)
+
+
+def test_the_service_sizes_history_with_the_ratio_learned_for_the_model() -> None:
+    def assistant_turns_sent() -> int:
+        client = _RecordingClient()
+        _service(client).generate(_snapshot(num_ctx=8192), history_messages=_history(40, 400))
+        (prompt,) = client.prompts
+        return sum(message["role"] == "assistant" for message in prompt)
+
+    unknown = assistant_turns_sent()
+    _dense_model()
+    dense = assistant_turns_sent()
+
+    assert 0 < dense < unknown < 40
+
+
+def test_the_engine_sizes_attachments_with_the_ratio_learned_for_the_model() -> None:
+    document = GenerationAttachment(
+        attachment_id="doc",
+        filename="doc.md",
+        mime_type="text/markdown",
+        kind="document",
+        text_content="important text. " * 10_000,
+    )
+
+    def document_chars_sent() -> int:
+        client = _RecordingClient()
+        _agent(client).generate(
+            "summarise", "No history available.", [], False, None,
+            options={"num_ctx": 8192}, attachments=(document,),
+        )
+        return len(client.prompts[0][-1]["content"])
+
+    unknown = document_chars_sent()
+    _dense_model()
+    dense = document_chars_sent()
+
+    assert 0 < dense < unknown
+
+
+@pytest.mark.parametrize("prefix", ["wide", "ordinary"])
+def test_a_cut_of_text_always_fits_the_tokens_it_was_cut_for(prefix: str) -> None:
+    """The cut is a straight-line guess; text that is not uniform makes it overshoot, so it steps down.
+
+    A head of wide characters costs more per character than the tail that follows
+    it, so scaling the whole text by the budget lands well over it.
+    """
+    wide = chr(0x65E5) * 1000
+    ordinary = "a" * 9000
+    text = wide + ordinary if prefix == "wide" else ordinary + wide
+    tokens = 1200
+
+    count = SynthesisAgent._chars_within(text, tokens, 3.5)
+
+    assert count > 0
+    assert token_budget.with_safety_margin(token_budget.estimate_tokens(text[:count], 3.5)) <= tokens
+    if prefix == "wide":
+        # The guess overshoots here and is walked down, not abandoned: it stops
+        # within a step of the most that fits, so a tenth more text does not.
+        bigger = min(len(text), int(count * 1.1) + 1)
+        assert token_budget.with_safety_margin(token_budget.estimate_tokens(text[:bigger], 3.5)) > tokens
+
+
+class _RecordingEngine(FakeGenerationEngine):
+    """The shipped double, noting what the service asks of it, and cutting every document to a stub."""
+
+    STUB = "cut to fit"
+
+    def __init__(self) -> None:
+        super().__init__(FakeOllamaState())
+        self.calls: dict[str, dict[str, Any]] = {}
+
+    def fit_memories_to_context(self, memories, **kwargs):
+        self.calls["memories"] = kwargs
+        return super().fit_memories_to_context(memories, **kwargs)
+
+    def fit_history(self, messages, **kwargs):
+        self.calls["history"] = kwargs
+        return super().fit_history(messages, **kwargs)
+
+    def fit_attachments_to_context(self, attachments, **kwargs):
+        self.calls["attachments"] = kwargs
+        return tuple(replace(item, text_content=self.STUB) for item in attachments)
+
+    def generate(self, **kwargs):
+        self.calls["generate"] = kwargs
+        return super().generate(**kwargs)
+
+
+def test_the_service_names_the_model_to_every_fit_and_hands_the_engine_the_text_it_reported_cut() -> None:
+    document = GenerationAttachment(
+        attachment_id="doc",
+        filename="doc.md",
+        mime_type="text/markdown",
+        kind="document",
+        text_content="a document far longer than the stub " * 50,
+    )
+    engine = _RecordingEngine()
+    service = GenerationService(
+        history_loader=lambda thread_id: [],
+        memory_loader=lambda: ["prefers tea"],
+        engine_factory=lambda snapshot: engine,
+    )
+
+    service.generate(
+        _snapshot(num_ctx=8192, memories_enabled=True, attachments=(document,)),
+        history_messages=_history(2),
+    )
+
+    # The learned ratio is keyed by model; a fit that is not told which one falls back to the default.
+    for name in ("memories", "history", "attachments"):
+        assert engine.calls[name]["model"] == MODEL, name
+    # The user was told which documents were cut from the fitted copies, so those copies are what the model reads.
+    assert [item.text_content for item in engine.calls["generate"]["attachments"]] == [engine.STUB]

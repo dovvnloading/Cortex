@@ -181,6 +181,28 @@ def test_the_mixed_text_cases_include_boundaries_where_the_budget_bites() -> Non
     assert partial >= 20
 
 
+def test_rendering_strips_only_what_the_running_count_is_corrected_for() -> None:
+    """Rendering strips the end of the joined history; the running wide count must agree with that.
+
+    An ideographic space is wide and is whitespace, so it is counted when a chunk
+    joins and has to be taken back if it ends up stripped from the end. The
+    walk cannot afford to rescan the rendered text to find out, so this holds
+    the correction to the rendering itself.
+    """
+    rng = random.Random(11)
+    tails = ["", " ", "\n", chr(0x3000), chr(0x3000) * 3, chr(0x3000) + "\n \t", "end"]
+    for _ in range(300):
+        chunks = tuple(
+            "User: " + "".join(rng.choices(_SCRIPTS, k=rng.randint(0, 3))) + rng.choice(tails)
+            for _ in range(rng.randint(0, 5))
+        )
+        counted = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
+
+        rendered = SynthesisAgent._join_history_chunks(chunks)
+
+        assert SynthesisAgent._rendered_wide(chunks, counted) == token_budget.count_wide_characters(rendered)
+
+
 def test_the_wide_count_of_a_concatenation_is_the_sum_of_its_parts() -> None:
     """The additivity the incremental count rests on, against the plain definition."""
     rng = random.Random(7)
