@@ -2,7 +2,7 @@
 
 A model's reply carries more than the answer: a ``<memory_command>`` proposal,
 a ``<code_execution_request>`` block, a legacy ``<memo>`` or ``<clear_memory/>``
-tag, or an inline ``Thinking... ...done thinking.`` trace.
+tag, or an inline ``<think>`` reasoning block that opens the reply.
 :meth:`SynthesisAgent._parse_and_clean_response` removes all of them, once,
 from the complete reply.
 
@@ -41,11 +41,6 @@ from collections.abc import Callable
 # cleaner accepts (``<clear_memory/>``, ``<clear_memory />``, ``<clear_memory>``)
 # are all covered by one entry.
 #
-# ``Thinking...`` is not a tag but behaves identically: the cleaner lifts
-# everything up to ``...done thinking.`` out of the answer and into the
-# reasoning pane, so streaming it raw would type a private trace into the
-# answer bubble.
-#
 # tests/test_stream_filter.py holds this table to the cleaner's actual
 # behaviour -- it compares what streams against what _parse_and_clean_response
 # returns, so a pattern added there and forgotten here fails a test instead of
@@ -55,13 +50,19 @@ _ENVELOPES: tuple[tuple[str, str], ...] = (
     ("<code_execution_request>", "</code_execution_request>"),
     ("<memo>", "</memo>"),
     ("<clear_memory", ">"),
-    ("Thinking...", "...done thinking."),
 )
 
-_MAX_OPENING = max(len(opening) for opening, _ in _ENVELOPES)
+# Reasoning the cleaner lifts into the reasoning pane, but only when it opens
+# the reply: ``<think>`` after nothing except whitespace. A ``<think>`` further
+# into an answer is left in it, so the filter must show that one too. Streaming
+# a leading block raw would type a private trace into the answer bubble, and
+# withholding a later one would make the text blink in when the reply ends.
+_LEADING_ENVELOPES: tuple[tuple[str, str], ...] = (("<think>", "</think>"),)
+
+_MAX_OPENING = max(len(opening) for opening, _ in (*_ENVELOPES, *_LEADING_ENVELOPES))
 
 
-def _longest_partial_opening(text: str) -> int:
+def _longest_partial_opening(text: str, envelopes: tuple[tuple[str, str], ...]) -> int:
     """Length of the trailing run that could still become an opening.
 
     ``"...and then <memory_com"`` must not be emitted: three more tokens may
@@ -73,7 +74,7 @@ def _longest_partial_opening(text: str) -> int:
     folded = text.lower()
     for start in range(max(0, len(folded) - _MAX_OPENING + 1), len(folded)):
         candidate = folded[start:]
-        if any(opening.lower().startswith(candidate) for opening, _ in _ENVELOPES):
+        if any(opening.lower().startswith(candidate) for opening, _ in envelopes):
             return len(folded) - start
     return 0
 
@@ -89,6 +90,9 @@ class EnvelopeStreamFilter:
         self._emit = emit
         self._pending = ""
         self._closing: str | None = None
+        # Whether any real answer text has been shown or consumed yet. Until
+        # then a ``<think>`` block is still the reply's leading reasoning.
+        self._answer_started = False
 
     def feed(self, text: str) -> None:
         """Accept one chunk of raw model output."""
@@ -101,14 +105,19 @@ class EnvelopeStreamFilter:
         """Release whatever is still safe once the model has finished.
 
         Text held inside a block the model never closed is dropped rather than
-        shown. The cleaner leaves such a block in the answer, so the user does
-        see it -- once, in the completed message, instead of watching raw JSON
-        type itself out and then change.
+        shown, which is also what the cleaner does with it: the reply ended
+        mid-envelope, and the half-written block belongs in neither the live
+        stream nor the finished answer.
         """
         if self._closing is None and self._pending:
-            self._emit(self._pending)
+            self._show(self._pending)
         self._pending = ""
         self._closing = None
+
+    def _show(self, text: str) -> None:
+        self._emit(text)
+        if text.strip():
+            self._answer_started = True
 
     def _drain(self) -> None:
         while True:
@@ -124,21 +133,31 @@ class EnvelopeStreamFilter:
             opening_at, opening, closing = self._next_opening()
             if opening is not None and closing is not None:
                 if opening_at > 0:
-                    self._emit(self._pending[:opening_at])
+                    self._show(self._pending[:opening_at])
                 self._pending = self._pending[opening_at + len(opening):]
                 self._closing = closing
+                self._answer_started = True
                 continue
 
-            held = _longest_partial_opening(self._pending)
+            held = self._held_suffix()
             if held:
                 safe = self._pending[: len(self._pending) - held]
                 if safe:
-                    self._emit(safe)
+                    self._show(safe)
                 self._pending = self._pending[len(self._pending) - held:]
             elif self._pending:
-                self._emit(self._pending)
+                self._show(self._pending)
                 self._pending = ""
             return
+
+    def _held_suffix(self) -> int:
+        """Length of the trailing run to hold back because it may become an opening."""
+        held = _longest_partial_opening(self._pending, _ENVELOPES)
+        if not self._answer_started:
+            leading = _longest_partial_opening(self._pending, _LEADING_ENVELOPES)
+            if leading and not self._pending[: len(self._pending) - leading].strip():
+                held = max(held, leading)
+        return held
 
     def _next_opening(self) -> tuple[int, str | None, str | None]:
         """Find the earliest opening in the pending buffer, if any."""
@@ -149,6 +168,12 @@ class EnvelopeStreamFilter:
             at = folded.find(opening.lower())
             if at != -1 and (best_at == -1 or at < best_at):
                 best_at, best = at, (opening, closing)
+        if not self._answer_started:
+            for opening, closing in _LEADING_ENVELOPES:
+                at = folded.find(opening.lower())
+                # Leading means nothing but whitespace before it.
+                if at != -1 and not folded[:at].strip() and (best_at == -1 or at < best_at):
+                    best_at, best = at, (opening, closing)
         if best is None:
             return -1, None, None
         return best_at, best[0], best[1]

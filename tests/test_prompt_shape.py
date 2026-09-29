@@ -205,6 +205,23 @@ def test_memory_usage_rules_live_in_the_system_role_only_once() -> None:
     assert "Be Subtle" not in user
 
 
+def test_the_memory_prompt_shows_command_blocks_as_live_plain_text() -> None:
+    """A model copies the shape it is shown, so the examples must be live ones.
+
+    The response parser treats a tag inside backticks or a code fence as a
+    quoted example. If the prompt's own examples were written that way, a model
+    imitating them would have every genuine proposal ignored.
+    """
+    from cortex_backend.services.reply_blocks import extract_tag_blocks
+
+    prompt = PromptTemplate._load_memory_prompt()
+    blocks, remainder = extract_tag_blocks(prompt, "memory_command")
+
+    assert prompt.count("<memory_command>") == len(blocks) > 0
+    assert all(block.closed for block in blocks)
+    assert "<memory_command>" not in remainder
+
+
 def test_memory_usage_rules_are_absent_when_memory_is_off() -> None:
     messages = _prompt(history_messages=_HISTORY, memories_enabled=False)
 

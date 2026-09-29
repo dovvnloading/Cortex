@@ -42,6 +42,7 @@ from cortex_backend.services.code_feedback import (
     describe_rejection,
     repair_prompt,
 )
+from cortex_backend.services.reply_blocks import extract_tag_blocks, split_leading_reasoning
 from cortex_backend.services.stream_filter import EnvelopeStreamFilter
 from cortex_backend.services.code_prompt import should_offer_code_execution
 
@@ -236,8 +237,10 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return result
 
 
-# One compiled pattern shared by the first parse and the repair turn, so both
-# agree on exactly what counts as an envelope.
+# Reads a corrected envelope out of the repair turn's reply. The first parse of
+# a reply goes through ``reply_blocks.extract_tag_blocks`` instead, which also
+# copes with a block cut off mid-way and with a tag quoted as an example; the
+# repair turn asks for nothing but the block, so neither arises there.
 _CODE_REQUEST_RE = re.compile(
     r"<code_execution_request>\s*(.*?)\s*</code_execution_request>",
     re.DOTALL | re.IGNORECASE,
@@ -1393,17 +1396,33 @@ class SynthesisAgent:
         thoughts = thoughts_text
         text_to_clean = response_text
 
-        code_matches = _CODE_REQUEST_RE.findall(text_to_clean)
-        if code_matches:
+        # Reasoning first, so a block quoted inside it is never read as a
+        # proposal. The runtime's own ``thinking`` field wins when it sent one;
+        # the inline form is only a fallback for templates it does not know.
+        if not thoughts:
+            inline_reasoning, text_to_clean = split_leading_reasoning(text_to_clean)
+            if inline_reasoning:
+                thoughts = inline_reasoning
+                logging.info("Found and extracted inline '<think>' block (fallback mode).")
+        else:
+            logging.info("Used explicit 'thinking' field from API response.")
+
+        code_blocks, text_to_clean = extract_tag_blocks(text_to_clean, "code_execution_request")
+        if code_blocks:
             if not self.code_execution_eligible:
                 # Fail closed: an envelope on a turn the backend never admitted
                 # can only be reported, never executed.
                 self.last_code_rejection = describe_rejection("not_offered")
-            elif len(code_matches) > 1:
+            elif len(code_blocks) > 1:
                 logging.warning("Ignoring multiple code execution request blocks in one response.")
                 self.last_code_rejection = describe_rejection("multiple_requests")
+            elif not code_blocks[0].closed:
+                # The reply ended inside the envelope, typically at the context
+                # ceiling. There is no complete request to read, and the user
+                # should hear that rather than watch a request quietly vanish.
+                self.last_code_rejection = describe_rejection("invalid_json")
             else:
-                proposal, rejection = self._parse_code_execution_proposal(code_matches[0])
+                proposal, rejection = self._parse_code_execution_proposal(code_blocks[0].payload)
                 self.last_code_proposal = proposal
                 self.last_code_rejection = rejection
             # Every envelope leaves the visible answer, accepted or not. A
@@ -1412,33 +1431,25 @@ class SynthesisAgent:
             # the next turn's history then shows the model its own malformed
             # format as if it were an example to follow. The reason now travels
             # separately as ``last_code_rejection`` and is surfaced by the API.
-            text_to_clean = _CODE_REQUEST_RE.sub("", text_to_clean)
+            # That holds for an unterminated envelope too, which is removed to
+            # the end of the reply.
 
-        if not thoughts:
-            think_pattern = re.compile(r'Thinking\.\.\.\s*(.*?)\s*\.\.\.done thinking\.', re.DOTALL)
-            think_match = think_pattern.search(text_to_clean)
-            if think_match:
-                thoughts = think_match.group(1).strip()
-                text_to_clean = re.sub(think_pattern, '', text_to_clean)
-                logging.info("Found and extracted inline 'Thinking...' block (fallback mode).")
-        else:
-            logging.info("Used explicit 'thinking' field from API response.")
-
-        command_pattern = re.compile(r'<memory_command>\s*(.*?)\s*</memory_command>', re.DOTALL | re.IGNORECASE)
-        command_matches = command_pattern.findall(text_to_clean)
-        if command_matches:
-            if len(command_matches) == 1:
-                command = self._parse_memory_command(command_matches[0])
-            else:
-                logging.warning("Ignoring multiple memory command blocks in one response.")
+        memory_blocks, text_to_clean = extract_tag_blocks(text_to_clean, "memory_command")
+        # A small model repeating itself is a common tic. Identical payloads are
+        # one intent, not an ambiguity; only differing ones are ignored. An
+        # unterminated block is never acted on -- it is removed, nothing more.
+        memory_payloads = list(dict.fromkeys(block.payload for block in memory_blocks if block.closed))
+        if len(memory_payloads) == 1:
+            command = self._parse_memory_command(memory_payloads[0])
+        elif len(memory_payloads) > 1:
+            logging.warning("Ignoring multiple memory command blocks in one response.")
 
         # Legacy tags are removed from the visible response, but never executed.
         legacy_pattern = re.compile(r'<memo>.*?</memo>|<clear_memory\s*/?>', re.DOTALL | re.IGNORECASE)
-        cleaned_text = re.sub(command_pattern, '', text_to_clean)
-        cleaned_text = re.sub(legacy_pattern, '', cleaned_text)
-        
+        cleaned_text = re.sub(legacy_pattern, '', text_to_clean)
+
         final_answer = cleaned_text.strip()
-        
+
         return final_answer, thoughts, command
 
     @staticmethod

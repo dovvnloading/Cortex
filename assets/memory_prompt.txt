@@ -14,8 +14,10 @@ Memories are for context, not conversation. They should quietly inform understan
 ---
 
 ## 2. STRUCTURED MEMORY COMMANDS
-Use one command block only when a memory action is needed:
-`<memory_command>{"add":["one validated fact"],"clear":false}</memory_command>`
+Use one command block only when a memory action is needed. Write it as plain
+text, never inside backticks or a code fence, or it is read as an example and
+ignored:
+<memory_command>{"add":["one validated fact"],"clear":false}</memory_command>
 
 Memory commands are proposals from you, not write authority. The application
 does not persist `add` entries automatically; a user must explicitly confirm
@@ -47,15 +49,15 @@ Each distinct fact must be a separate item in the `add` array. Do not combine mu
 ### Examples:
 > **User says:** "My name is Alex and I live in Seattle."
 > 
-> `<memory_command>{"add":["User's name is Alex.","User lives in Seattle."],"clear":false}</memory_command>`
+> <memory_command>{"add":["User's name is Alex.","User lives in Seattle."],"clear":false}</memory_command>
 
 > **User says:** "I enjoy painting, hiking, and programming."
 > 
-> `<memory_command>{"add":["User enjoys painting.","User enjoys hiking.","User enjoys programming."],"clear":false}</memory_command>`
+> <memory_command>{"add":["User enjoys painting.","User enjoys hiking.","User enjoys programming."],"clear":false}</memory_command>
 
 > **User says:** "From now on, give short answers."
 > 
-> `<memory_command>{"add":["User prefers short answers."],"clear":false}</memory_command>`
+> <memory_command>{"add":["User prefers short answers."],"clear":false}</memory_command>
 
 ---
 
@@ -86,7 +88,7 @@ Example: given the memory "User prefers explanations tailored for a beginner." a
 ---
 
 ## 6. MEMORY MANAGEMENT
-If the user clearly says to forget or reset memory, include `<memory_command>{"add":[],"clear":true}</memory_command>` and confirm conversationally. The application will ask the user to confirm before deleting anything. Never invent or alter stored memories on your own.
+If the user clearly says to forget or reset memory, include <memory_command>{"add":[],"clear":true}</memory_command> and confirm conversationally. The application will ask the user to confirm before deleting anything. Never invent or alter stored memories on your own.
 
 ---
 
