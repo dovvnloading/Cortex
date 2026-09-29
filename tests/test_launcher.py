@@ -427,6 +427,27 @@ def test_runtime_log_never_records_prompts_responses_memories_or_credentials(
     assert max(len(line) for line in text.splitlines()) < 5000
 
 
+def test_runtime_log_messages_survive_escaped_quotes_and_embedded_newlines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The two shapes a line-bound, quote-naive redactor let through."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+    launcher_main._configure_logging(tmp_path, "debug")
+    logger = logging.getLogger("cortex_backend.shapes")
+    # Built from a label so the fixture is one JSON document, escaped as one.
+    label = "password"
+    escaped_quote = json.dumps({label: 'pa"ss zescaped-tail SECRET'})
+
+    logger.warning("client settings %s", escaped_quote)
+    logger.warning("rejected turn prompt=zfirst\nzsecond-line-of-a-prompt\nzthird")
+
+    text = _runtime_log_text(tmp_path)
+    for private in ("zescaped-tail", "SECRET", "zsecond-line-of-a-prompt", "zthird", "zfirst"):
+        assert private not in text, private
+    assert "client settings" in text
+    assert "rejected turn" in text
+
+
 def _failing_with_a_newline_in_the_message() -> None:
     raise RuntimeError("bad prompt=a\nzprivate-second-line")
 
@@ -752,6 +773,32 @@ def test_a_launch_that_hands_off_does_not_touch_the_runtime_log(
         ("prompt=say something private here", "private here"),
         ("input_value='a private sentence', input_type=str", "a private sentence"),
         ("memories: [1, 2, 3] more text", "more text"),
+        # A key name is often a compound: the value after ``session_token`` is as
+        # private as the one after ``token``.
+        ("'input': {'session_token': 'sess-X'}", "sess-X"),
+        ("access_token=zaccess-1234", "zaccess-1234"),
+        ('{"refresh_token": "zrefresh.abc.def"}', "zrefresh.abc.def"),
+        ("client_secret: zclient-secret-1", "zclient-secret-1"),
+        ("HF_TOKEN=hf_abcdefghijkl", "hf_abcdefghijkl"),
+        ("LLAMA_API_KEY=zllama-key-9", "zllama-key-9"),
+        ("X-Api-Key: zheader-key-7", "zheader-key-7"),
+        ("secret_key=zsecret-key-3", "zsecret-key-3"),
+        ("user_prompt=tell me about my taxes", "my taxes"),
+        ("system_prompt: you are a private assistant", "private assistant"),
+        ("assistant_response='the answer is private'", "the answer is private"),
+        ("memory_text=allergic to penicillin", "penicillin"),
+        ("prompt_text: a note nobody else should read", "nobody else"),
+        # What a validation error prints for the input it rejected.
+        ("[{'type': 'string_type', 'input': 'a typed sentence'}]", "a typed sentence"),
+        ("1 validation error for Turn input=zrejected sentence here", "zrejected sentence"),
+        # A value can hold an escaped quote, and a quote may be left open.
+        ('{"password": "pa\\"ss SECRET"}', "SECRET"),
+        ("password='it\\'s SECRET'", "SECRET"),
+        ('password="left open SECRET', "SECRET"),
+        ('{"detail": "{\\"password\\": \\"pa ss SECRET\\"}"}', "SECRET"),
+        # A value that runs to the end of the record does not stop at a newline.
+        ("bad prompt=a\nzsecond-line", "zsecond-line"),
+        ("bad memory: first\r\nzsecond-line\nzthird-line", "zthird-line"),
     ],
 )
 def test_credential_and_content_redaction_covers_common_shapes(hostile: str, removed: str):
@@ -759,11 +806,31 @@ def test_credential_and_content_redaction_covers_common_shapes(hostile: str, rem
     assert removed not in launcher_main._redact_startup_detail(hostile)
 
 
+def test_redaction_keeps_the_name_of_the_value_it_removed():
+    assert launcher_main._redact_credentials("call failed session_token=zsess-1 retrying") == (
+        "call failed session_token=<redacted> retrying"
+    )
+    assert launcher_main._redact_credentials("LLAMA_API_KEY=zkey") == "LLAMA_API_KEY=<redacted>"
+
+
+def test_redaction_of_a_hostile_run_of_key_names_stays_fast():
+    """A name can be long and repeated; the scan must not go quadratic on it."""
+    # Sized so that an unbounded tail on a key name costs tens of seconds (not
+    # hours), while the shipped patterns take a few milliseconds.
+    hostile = "token_" * 3_000 + "prompt_" * 3_000 + "a-" * 3_000
+    started = time.monotonic()
+
+    launcher_main._redact_credentials(hostile)
+
+    assert time.monotonic() - started < 2.0
+
+
 @pytest.mark.parametrize(
     "harmless",
     [
         "Started server process [1234]",
         "prompt_tokens=12 completion_tokens=40 max_tokens=512",
+        "prompt_eval_count=12 response_time=0.4 memory_usage=512 input_type=str",
         "content-type: application/json",
         "ResponseError: model not found",
         "listening on 127.0.0.1:43125 (basic auth is not used)",

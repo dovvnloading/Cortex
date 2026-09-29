@@ -280,38 +280,71 @@ def _startup_log_path(data_dir: Path | None) -> Path:
 # Text that follows one of these names, as ``name=value`` or ``name: value``, is
 # credential material and is dropped from anything written to a log.
 _CREDENTIAL_KEYS = (
-    r"bootstrap(?:_token)?|token|secret|authorization|password|passwd|handoff"
-    r"|cookie|api[_-]?key"
+    r"bootstrap|token|secret|authorization|password|passwd|passphrase|credential"
+    r"|handoff|cookie|api[_-]?key|private[_-]?key"
 )
 # The same for what the person typed or the model produced. The value runs to
-# the end of the line (or the end of a quoted string, which is how a validation
+# the end of the record (or the end of a quoted string, which is how a validation
 # error prints the input it rejected), because prose has no delimiter to stop at.
-_CONTENT_KEYS = r"prompt|response|completion|memory|memories|input_value"
+_CONTENT_KEYS = r"prompt|response|completion|memory|memories|input"
+# A key name is a stem plus whatever the name goes on with (``memory_text``,
+# ``secret_key``); what comes before the stem is not matched, so it is left as
+# it was written and ``session_token``, ``HF_TOKEN`` and ``user_prompt`` match
+# too. The tail is bounded so a long run of separators cannot make a scan slow.
+_KEY_TAIL = r"(?:[_-][A-Za-z0-9_-]{0,128})?"
+# Names that end in one of these count or time something (``prompt_tokens``,
+# ``response_time``) rather than hold the content their stem names.
+_MEASURE_NAMES = (
+    r"(?![_-][A-Za-z0-9_-]{0,64}?"
+    r"(?:tokens|count|length|size|chars|bytes|ms|seconds|time|duration|usage|code|status|id|type)"
+    r"(?![A-Za-z0-9_-]))"
+)
+# ``=`` or ``:`` after the name, which may be in (escaped) quotes as in JSON.
+_ASSIGNMENT = r"(?:\\*[\"'])?\s*[=:]\s*"
+# A quoted value ends at the matching quote; an escaped quote (``\"``) does not
+# end it, and a quote left open runs to the end of the record.
+_QUOTED_VALUE = (
+    r"\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
+    r"|'(?:[^'\\]|\\.)*(?:'|\Z)"
+    r"|\\+[\"'].*?(?:\\+[\"']|\Z)"
+)
 _CREDENTIAL_PATTERN = re.compile(
-    r"\b(" + _CREDENTIAL_KEYS + r")\b[\"']?\s*[=:]\s*(?:(?:bearer|basic)\s+)?"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\"'}\]]+)",
+    r"(?P<key>(?:" + _CREDENTIAL_KEYS + r")" + _KEY_TAIL + r")" + _ASSIGNMENT
+    + r"(?:(?:bearer|basic)\s+)?(?:" + _QUOTED_VALUE + r"|[^\s,;\"'}\]]+)",
     re.IGNORECASE,
 )
 _CONTENT_PATTERN = re.compile(
-    r"\b(" + _CONTENT_KEYS + r")\b[\"']?\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|.*)",
+    r"(?P<key>(?:" + _CONTENT_KEYS + r")" + _MEASURE_NAMES + _KEY_TAIL + r")" + _ASSIGNMENT
+    + r"(?:" + _QUOTED_VALUE + r"|.*)",
     re.IGNORECASE,
 )
 _BEARER_PATTERN = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+# Every character a reader of a text file could take for the end of a line.
+_LINE_BREAKS = re.compile("[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def _one_line(text: str) -> str:
+    return _LINE_BREAKS.sub(" ", text)
 
 
 def _redact_credentials(text: str) -> str:
-    """Drop credential-like and content-like values from ``text``, line by line."""
+    """Drop credential-like and content-like values from ``text``.
 
-    text = _CREDENTIAL_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", text)
-    text = _CONTENT_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    The text becomes one line first: a value that runs to the end of the record
+    then really does, instead of stopping at a newline inside it and leaving the
+    rest behind, and a newline cannot start a forged record.
+    """
+
+    text = _one_line(text)
+    text = _CREDENTIAL_PATTERN.sub(lambda match: f"{match['key']}=<redacted>", text)
+    text = _CONTENT_PATTERN.sub(lambda match: f"{match['key']}=<redacted>", text)
     return _BEARER_PATTERN.sub("<redacted>", text)
 
 
 def _redact_startup_detail(value: object) -> str:
     """Keep startup diagnostics useful without recording credential-like text."""
 
-    detail = str(value).replace("\r", " ").replace("\n", " ")
-    return _redact_credentials(detail)[:800]
+    return _redact_credentials(str(value))[:800]
 
 
 def _append_startup_log(path: Path, entry: str) -> None:
@@ -497,7 +530,6 @@ class _RedactingFilter(logging.Filter):
             message = record.getMessage()
         except Exception:  # a format/args mismatch must not lose the record
             message = str(record.msg)
-        message = message.replace("\r", " ").replace("\n", " ")
         record.msg = _redact_credentials(message)[:MAX_LOG_MESSAGE_CHARS]
         record.args = None
         # Whatever an earlier handler's formatter cached on the record holds the
