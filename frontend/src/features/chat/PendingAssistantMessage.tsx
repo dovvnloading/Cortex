@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { GENERATION_GAP_NOTICE, humanizeGenerationStatus } from "../../lib/generationStatus";
 import { useThrottledText } from "../../hooks/useThrottledText";
 import { useChatStore } from "../../stores/useChatStore";
 import { SafeMarkdown } from "../markdown/SafeMarkdown";
@@ -35,6 +35,7 @@ export function PendingAssistantMessage({ onOutputChange }: Props) {
   const partialThoughts = useChatStore((state) => state.generation.partialThoughts);
   const contentReady = useChatStore((state) => state.generation.contentReady);
   const statusText = useChatStore((state) => state.generation.statusText);
+  const gap = useChatStore((state) => state.generation.gap);
 
   // Once the backend says the answer is complete the text is exact and final,
   // so throttling is switched off and it is shown without any delay.
@@ -47,7 +48,7 @@ export function PendingAssistantMessage({ onOutputChange }: Props) {
   }, [content, thoughts, hasOutput, onOutputChange]);
 
   if (partialContent === "" && partialThoughts === "") {
-    return <GenerationStatus status={statusText} />;
+    return <GenerationStatus status={gap ? GENERATION_GAP_NOTICE : statusText} />;
   }
 
   return (
@@ -58,6 +59,8 @@ export function PendingAssistantMessage({ onOutputChange }: Props) {
       <div className="message-bubble">
         {content && <div className="markdown-body"><SafeMarkdown content={content} finalized={contentReady} />{!contentReady && <span className="streaming-caret" aria-hidden="true" />}</div>}
         {!content && !contentReady && <span className="streaming-caret" aria-hidden="true" />}
+        {/* Text after a hole is not shown (see useGenerationStream), so what is on screen may stop short. */}
+        {gap && <p className="generation-gap-note" role="status">{GENERATION_GAP_NOTICE}</p>}
       </div>
       {/* Collapses in step with the "Live" badge, matching the persisted card's default state so the swap is invisible. */}
       {thoughts && <details className="reasoning" open={!contentReady}><summary><span>Reasoning</span>{!contentReady && <span className="disclosure-hint">Live</span>}</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={thoughts} finalized={contentReady} /></div></div></details>}

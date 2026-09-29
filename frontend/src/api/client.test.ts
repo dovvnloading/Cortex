@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, CortexApi } from "./client";
+import { ApiError, CortexApi, describeApiError, isAbortedError, isDefinitiveRejection } from "./client";
 
 describe("CortexApi", () => {
   afterEach(() => window.sessionStorage.clear());
@@ -668,5 +668,185 @@ describe("session renewal", () => {
     expect(calls("/session/handoff")).toHaveLength(1);
     expect(bearer(calls("/artifacts/artifact-1")[1]?.[1])).toBe("Bearer renewed-1");
     expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+});
+
+describe("CortexApi failure kinds", () => {
+  afterEach(() => window.sessionStorage.clear());
+
+  const jsonResponse = (body: unknown, status: number) => new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  it("classifies an HTTP error by what the backend said", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ detail: "Local session expired." }, 401))
+      .mockResolvedValueOnce(jsonResponse({ detail: [{ loc: ["body", "name"], msg: "Field required" }] }, 422))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Chat not found." }, 404));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toMatchObject({ status: 401, kind: "auth" });
+    await expect(api.health()).rejects.toMatchObject({ status: 422, kind: "validation" });
+    await expect(api.health()).rejects.toMatchObject({ status: 404, kind: "http" });
+  });
+
+  it("wraps a fetch network failure as a network ApiError instead of leaking the TypeError", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Failed to fetch"));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    const failure = await api.health().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({ status: 0, kind: "network" });
+    expect((failure as ApiError).detail).toMatch(/could not reach the local backend/i);
+    // The browser's own wording must not be what the user reads.
+    expect((failure as ApiError).detail).not.toMatch(/failed to fetch/i);
+  });
+
+  it("classifies a network failure on an authenticated request and on a streamed one", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Failed to fetch"));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.system()).rejects.toMatchObject({ kind: "network" });
+    await expect(api.streamGeneration("job-1", vi.fn())).rejects.toMatchObject({ kind: "network" });
+    // A dead backend is not an expired session: the session must survive it.
+    expect(api.hasSession).toBe(true);
+  });
+
+  it("classifies a connection that drops in the middle of an event stream", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('id: 1\ndata: {"event_id":1}\n\n'));
+      },
+      pull() {
+        throw new TypeError("network error");
+      },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    const api = new CortexApi("/api/v1", fetcher);
+    const events: unknown[] = [];
+
+    await expect(api.streamGeneration("job-1", (event) => events.push(event))).rejects.toMatchObject({
+      status: 0,
+      kind: "network",
+    });
+    expect(events).toHaveLength(1);
+  });
+
+  it("aborts an in-flight request and reports it as aborted, not as a network failure", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const fetcher = vi.fn<typeof fetch>((_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    const api = new CortexApi("/api/v1", fetcher);
+    const controller = new AbortController();
+
+    const pending = api.generationStatus("job-1", { signal: controller.signal }).catch((error: unknown) => error);
+    controller.abort();
+    const failure = await pending;
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({ status: 0, kind: "aborted" });
+    expect(isAbortedError(failure)).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // The abort went to fetch itself; the request is not left running.
+    expect(new Headers((fetcher.mock.calls[0]?.[1] as RequestInit).headers).get("Authorization")).toBe("Bearer session-1");
+    expect((fetcher.mock.calls[0]?.[1] as RequestInit).signal).toBe(controller.signal);
+    // Cancelling is not an expired session.
+    expect(api.hasSession).toBe(true);
+  });
+
+  it("reports an abort as aborted even when the fetch implementation rejects with something else", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      controller.abort();
+      throw new TypeError("Failed to fetch");
+    });
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.generationStatus("job-1", { signal: controller.signal })).rejects.toMatchObject({ kind: "aborted" });
+  });
+
+  it("does not call an AbortError the caller did not ask for a cancellation", async () => {
+    // `aborted` means the caller cancelled. An AbortError while the caller's own
+    // signal is still live, or with no signal at all, came from somewhere else
+    // and is a request that got no answer, like any other lost connection.
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    const api = new CortexApi("/api/v1", fetcher);
+    const controller = new AbortController();
+
+    const withLiveSignal = await api.generationStatus("job-1", { signal: controller.signal }).catch((error: unknown) => error);
+    const withoutSignal = await api.health().catch((error: unknown) => error);
+
+    expect(controller.signal.aborted).toBe(false);
+    for (const failure of [withLiveSignal, withoutSignal]) {
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure).toMatchObject({ status: 0, kind: "network" });
+      expect(isAbortedError(failure)).toBe(false);
+    }
+  });
+
+  it("does not call an AbortError in the middle of an event stream a cancellation unless the caller aborted", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new DOMException("Aborted", "AbortError");
+      },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    const api = new CortexApi("/api/v1", fetcher);
+    const controller = new AbortController();
+
+    await expect(api.streamGeneration("job-1", vi.fn(), { signal: controller.signal })).rejects.toMatchObject({
+      status: 0,
+      kind: "network",
+    });
+  });
+
+  it("does not disguise a non-transport failure as a network error", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new RangeError("not a transport problem"));
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.health()).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("still renews an expired session in place and replays the request", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "session-old");
+    let systemCalls = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/session/handoff")) return jsonResponse({ bootstrap_token: "fresh", expires_at: "2026-07-20T00:00:00Z" }, 200);
+      if (url.endsWith("/session/exchange")) return jsonResponse({ session_token: "session-new", expires_at: "2026-07-20T00:00:00Z" }, 200);
+      systemCalls += 1;
+      return systemCalls === 1 ? jsonResponse({ detail: "Local session expired." }, 401) : jsonResponse({ status: "ok" }, 200);
+    });
+    const api = new CortexApi("/api/v1", fetcher);
+    api.setHandoffSecret("desktop-handoff");
+
+    await expect(api.system()).resolves.toMatchObject({ status: "ok" });
+    expect(api.hasSession).toBe(true);
+  });
+
+  it("describes only what is safe to show and decides retries from the kind", () => {
+    expect(describeApiError(new ApiError(404, "Chat not found."), "fallback")).toBe("Chat not found.");
+    expect(describeApiError(new ApiError(0, "Cortex could not reach the local backend.", "network"), "fallback"))
+      .toMatch(/could not reach/i);
+    expect(describeApiError(new TypeError("Failed to fetch"), "fallback")).toBe("fallback");
+    expect(describeApiError("something", "fallback")).toBe("fallback");
+
+    // A client-side rejection spends the idempotency key; anything that leaves
+    // the outcome unknown must keep it so a replay stays safe.
+    expect(isDefinitiveRejection(new ApiError(422, "bad"))).toBe(true);
+    expect(isDefinitiveRejection(new ApiError(409, "conflict"))).toBe(true);
+    expect(isDefinitiveRejection(new ApiError(401, "expired"))).toBe(true);
+    expect(isDefinitiveRejection(new ApiError(503, "unavailable"))).toBe(false);
+    expect(isDefinitiveRejection(new ApiError(0, "down", "network"))).toBe(false);
+    expect(isDefinitiveRejection(new ApiError(0, "cancelled", "aborted"))).toBe(false);
+    expect(isDefinitiveRejection(new Error("boom"))).toBe(false);
+    expect(isAbortedError(new ApiError(0, "down", "network"))).toBe(false);
+    expect(isAbortedError(new Error("boom"))).toBe(false);
   });
 });

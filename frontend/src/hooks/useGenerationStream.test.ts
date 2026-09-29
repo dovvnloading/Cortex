@@ -642,6 +642,272 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" });
   });
 
+  it("flags a gap after a reconnect that skipped events", async () => {
+    // The backend keeps a bounded tail of a job's events. A reader that was
+    // away (Settings left open) is served from the oldest one it still has, so
+    // the event ids jump. Text after the jump sits behind a hole.
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    useChatStore.getState().beginGeneration("job-gap", "thread-gap");
+    useChatStore.getState().appendContentToken("job-gap", "Hello ");
+    useChatStore.getState().setGenerationCursor("job-gap", 5);
+
+    act(() => {
+      void result.current.consume({ jobId: "job-gap", threadId: "thread-gap", lastEventId: 5 }, onCompleted, vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    expect(streamGeneration.mock.calls[0][2]).toMatchObject({ afterEventId: 5 });
+
+    act(() => {
+      emitEvent({ event_id: 300, event: "generation.content_delta", job_id: "job-gap", thread_id: "thread-gap", data: { delta: "the tail" } });
+      emitEvent({ event_id: 301, event: "generation.thinking_delta", job_id: "job-gap", thread_id: "thread-gap", data: { delta: "more thought" } });
+      emitEvent({ event_id: 302, event: "generation.status", job_id: "job-gap", thread_id: "thread-gap", data: { message: "Almost there." } });
+    });
+
+    const { generation, generationCursor } = useChatStore.getState();
+    expect(generation.gap).toBe(true);
+    // Nothing behind the hole is appended, and the status line says why.
+    expect(generation.partialContent).toBe("Hello ");
+    expect(generation.partialThoughts).toBe("");
+    expect(generation.statusText).toMatch(/full answer will appear when it is saved/i);
+    // The cursor still follows the stream, so a reconnect does not replay it.
+    expect(generationCursor).toBe(302);
+
+    // The job itself carries on to its terminal event and is reconciled.
+    act(() => {
+      emitEvent({ event_id: 303, event: "generation.content_delta", job_id: "job-gap", thread_id: "thread-gap", data: { delta: " still ignored" } });
+      emitEvent({ event_id: 304, event: "generation.completed", job_id: "job-gap", thread_id: "thread-gap", data: {} });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-gap"));
+    await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, gap: false }));
+  });
+
+  it("flags a gap when a cold start finds the first events already evicted", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-cold-gap", "thread-cold-gap", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({ event_id: 41, event: "generation.content_delta", job_id: "job-cold-gap", thread_id: "thread-cold-gap", data: { delta: "the middle of an answer" } });
+    });
+
+    expect(useChatStore.getState().generation).toMatchObject({ gap: true, partialContent: "" });
+    act(() => result.current.stop());
+  });
+
+  it("does not flag a gap while events arrive in order, including after a reconnect", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-ordered", "thread-ordered", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-ordered", thread_id: "thread-ordered", data: { delta: "a" } });
+      emitEvent({ event_id: 2, event: "generation.content_delta", job_id: "job-ordered", thread_id: "thread-ordered", data: { delta: "b" } });
+      // A repeated id (a replay after a reconnect) is not a jump either.
+      emitEvent({ event_id: 2, event: "generation.content_delta", job_id: "job-ordered", thread_id: "thread-ordered", data: { delta: "b" } });
+      emitEvent({ event_id: 3, event: "generation.content_delta", job_id: "job-ordered", thread_id: "thread-ordered", data: { delta: "c" } });
+    });
+
+    await waitFor(() => expect(useChatStore.getState().generation.partialContent).toBe("abc"));
+    expect(useChatStore.getState().generation.gap).toBe(false);
+    act(() => result.current.stop());
+  });
+
+  it("does not append behind a hole the store already knows about when a new consumer takes over", async () => {
+    // The workspace remounted mid-answer: the new consumer has no memory of the
+    // jump the old one saw, but the store does.
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    useChatStore.getState().beginGeneration("job-known-gap", "thread-known-gap");
+    useChatStore.getState().appendContentToken("job-known-gap", "Before the hole");
+    useChatStore.getState().markGenerationGap("job-known-gap");
+    useChatStore.getState().setGenerationCursor("job-known-gap", 300);
+
+    act(() => {
+      void result.current.consume({ jobId: "job-known-gap", threadId: "thread-known-gap", lastEventId: 300 }, vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    act(() => {
+      emitEvent({ event_id: 301, event: "generation.content_delta", job_id: "job-known-gap", thread_id: "thread-known-gap", data: { delta: " after it" } });
+    });
+
+    // Streamed text is batched to the next animation frame, so checking the
+    // store right after the event says nothing: text that was wrongly accepted
+    // is still sitting in the buffer. Stopping flushes the buffer before the
+    // consumer finishes, so once its promises have settled, whatever it
+    // accepted is in the store.
+    expect(useChatStore.getState().generationCursor).toBe(301);
+    act(() => result.current.stop());
+    await settlePromises();
+
+    expect(useChatStore.getState().generation.partialContent).toBe("Before the hole");
+    expect(useChatStore.getState().generation.gap).toBe(true);
+  });
+
+  it("treats an unreachable backend as retryable on both the stream and the status check", async () => {
+    // The typed network failure is neither a lost session nor a vanished job:
+    // the generation is still running one process away, so keep trying.
+    const unreachable = () => new ApiError(0, "Cortex could not reach the local backend.", "network");
+    const generationStatus = vi.fn().mockRejectedValue(unreachable());
+    const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) return Promise.reject(unreachable());
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const onSessionExpired = vi.fn();
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, onSessionExpired));
+
+    act(() => {
+      result.current.start("job-unreachable", "thread-unreachable", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    expect(generationStatus).toHaveBeenCalledTimes(1);
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-unreachable", threadId: "thread-unreachable" });
+
+    act(() => result.current.stop());
+  });
+
+  it("gives the status check the stop signal so stopping does not leave it running", async () => {
+    const generationStatus = vi.fn((_jobId: string, options: { signal?: AbortSignal } = {}) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new ApiError(0, "The request was cancelled.", "aborted")), { once: true });
+    }));
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const api = fakeApi({ streamGeneration, generationStatus: generationStatus as unknown as CortexApi["generationStatus"] });
+    const onFailed = vi.fn();
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-stop-status", "thread-stop-status", vi.fn().mockResolvedValue(undefined), onFailed);
+    });
+    await waitFor(() => expect(generationStatus).toHaveBeenCalledTimes(1));
+    const { signal } = generationStatus.mock.calls[0][1] as { signal: AbortSignal };
+    expect(signal.aborted).toBe(false);
+
+    act(() => result.current.stop());
+    expect(signal.aborted).toBe(true);
+    await settlePromises();
+
+    // A cancelled check is the caller's own doing: no failure, no more attempts.
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().generation.jobId).toBe("job-stop-status");
+  });
+
+  describe("an abort the consumer did not ask for", () => {
+    // Only the consumer's own signal means "stop". The client gives a request
+    // the `aborted` kind whenever fetch rejects with an AbortError, and one can
+    // come from elsewhere (a cancelled read, a signal a lower layer owns). Taken
+    // for a stop, it ended the consumer with the job still tracked: the host
+    // then refused to attach again and the composer said "Generating" until the
+    // page was reloaded.
+    const foreignAbort = () => new ApiError(0, "The request was cancelled.", "aborted");
+    const running = { job_id: "job-foreign", kind: "generation", status: "running", sequence: 1 };
+    const pendingUntilAborted = (options: { signal?: AbortSignal } = {}) => new Promise<void>((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    });
+
+    it("checks the job and opens the stream again when the stream is cut by one", async () => {
+      const generationStatus = vi.fn().mockResolvedValue(running);
+      const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => {
+        if (streamGeneration.mock.calls.length === 1) return Promise.reject(foreignAbort());
+        return pendingUntilAborted(options);
+      });
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const onFailed = vi.fn();
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-foreign", "thread-foreign", vi.fn().mockResolvedValue(undefined), onFailed);
+      });
+
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+      const first = streamGeneration.mock.calls[0][2] as { signal: AbortSignal };
+      expect(first.signal.aborted).toBe(false);
+      expect(generationStatus).toHaveBeenCalledTimes(1);
+      expect(onFailed).not.toHaveBeenCalled();
+      expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-foreign", threadId: "thread-foreign" });
+      act(() => result.current.stop());
+    });
+
+    it("settles a job that finished while the stream was cut by one", async () => {
+      const generationStatus = vi.fn().mockResolvedValue({ ...running, status: "succeeded", sequence: 4, result: {} });
+      const streamGeneration = vi.fn().mockRejectedValue(foreignAbort());
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const onCompleted = vi.fn().mockResolvedValue(undefined);
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-foreign", "thread-foreign", onCompleted, vi.fn());
+      });
+
+      await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-foreign"));
+      await waitFor(() => expect(useChatStore.getState().generation).toMatchObject({ jobId: null, phase: "idle" }));
+      expect(readActiveJob()).toBeNull();
+    });
+
+    it("retries when the status check is cut by one, rather than leaving the job with no consumer", async () => {
+      const generationStatus = vi.fn().mockRejectedValueOnce(foreignAbort()).mockResolvedValue(running);
+      const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => {
+        if (streamGeneration.mock.calls.length === 1) return Promise.reject(new Error("connection dropped"));
+        return pendingUntilAborted(options);
+      });
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const onFailed = vi.fn();
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-foreign", "thread-foreign", vi.fn().mockResolvedValue(undefined), onFailed);
+      });
+
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 2000 });
+      expect(generationStatus).toHaveBeenCalledTimes(1);
+      expect(onFailed).not.toHaveBeenCalled();
+      expect(useChatStore.getState().generation.jobId).toBe("job-foreign");
+      act(() => result.current.stop());
+    });
+
+    it("still stops quietly when its own stop is what aborted the stream", async () => {
+      // The counterpart: the same typed error, but with the consumer's signal
+      // aborted, is the consumer's own doing -- no check, no retry, no failure.
+      const streamGeneration = vi.fn((_jobId, _onEvent, options: { signal?: AbortSignal } = {}) => new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(foreignAbort()), { once: true });
+      }));
+      const generationStatus = vi.fn();
+      const api = fakeApi({ streamGeneration, generationStatus });
+      const onFailed = vi.fn();
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+      act(() => {
+        result.current.start("job-foreign", "thread-foreign", vi.fn().mockResolvedValue(undefined), onFailed);
+      });
+      await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(1));
+      act(() => result.current.stop());
+      await settlePromises();
+
+      expect(generationStatus).not.toHaveBeenCalled();
+      expect(streamGeneration).toHaveBeenCalledTimes(1);
+      expect(onFailed).not.toHaveBeenCalled();
+    });
+  });
+
   it("reconnects with the accumulated cursor after a transient (non-401) stream error", async () => {
     const generationStatus = vi.fn().mockResolvedValue({ job_id: "job-9", kind: "generation", status: "running", sequence: 1 });
     const streamGeneration = vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
