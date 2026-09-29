@@ -9,6 +9,7 @@ import http.client
 import io
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
@@ -26,7 +27,8 @@ from pydantic import BaseModel, ValidationError
 
 import main as launcher_main
 from cortex_backend.api import create_app
-from cortex_backend.core.paths import AppPathError
+from cortex_backend.core import paths as paths_module
+from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.launcher import frontend as frontend_module
 from cortex_backend.launcher import desktop as desktop_module
@@ -764,6 +766,88 @@ def test_a_launch_that_hands_off_does_not_touch_the_runtime_log(
 
     assert not (tmp_path / "logs").exists()
     assert launcher_main._runtime_handlers == []
+
+
+def test_the_runtime_log_is_limited_to_the_shipped_size_and_backup_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The tests above shrink the size to rotate quickly; these are the real numbers."""
+    monkeypatch.setattr(launcher_main.sys, "stderr", None)
+
+    launcher_main._configure_logging(tmp_path, "info")
+
+    handler = launcher_main._runtime_file_handler
+    assert isinstance(handler, RotatingFileHandler)
+    assert handler.maxBytes == 1024 * 1024
+    assert handler.backupCount == 3
+    assert launcher_main.MAX_RUNTIME_LOG_BYTES == 1024 * 1024
+    assert launcher_main.RUNTIME_LOG_BACKUPS == 3
+    # One live file and its backups: "about four megabytes" is the promise.
+    assert handler.maxBytes * (handler.backupCount + 1) == 4 * 1024 * 1024
+
+
+def _launch_with_a_separate_cache_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[_LaunchFakes, AppPaths, list[tuple[AppPaths, bool]]]:
+    """A launch whose paths name a cache root apart from the data directory.
+
+    The last item records, for each ``build_app`` call, the paths it was given
+    and whether the cache root already existed by then.
+    """
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+    paths = AppPaths(
+        data_dir=(tmp_path / "data").resolve(), cache_root=(tmp_path / "local").resolve()
+    )
+    monkeypatch.setattr(launcher_main, "_resolve_paths", lambda _data_dir: paths)
+    built: list[tuple[AppPaths, bool]] = []
+    build_for_the_fake_app = launcher_main.build_app
+
+    def recording_build_app(**kwargs):
+        built.append((kwargs["paths"], (tmp_path / "local").is_dir()))
+        return build_for_the_fake_app(**kwargs)
+
+    monkeypatch.setattr(launcher_main, "build_app", recording_build_app)
+    return fakes, paths, built
+
+
+def test_a_launch_creates_and_secures_the_cache_folder_before_the_app_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Removing the call from ``_launch`` left every other launcher test green."""
+    fakes, paths, built = _launch_with_a_separate_cache_root(monkeypatch, tmp_path)
+    secured: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        paths_module,
+        "secure_private_path",
+        lambda path, *, directory: secured.append((Path(path), directory)) or Path(path),
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((given, cache_root_existed),) = built
+    assert cache_root_existed, "the cache root must exist before the app is built"
+    assert secured == [(paths.cache_root, True)]
+    assert given.cache_dir == paths.cache_root
+    assert fakes.window_configs[0].storage_path == paths.cache_root / "webview"
+
+
+def test_a_launch_keeps_the_caches_with_the_data_when_the_cache_folder_cannot_be_secured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, paths, built = _launch_with_a_separate_cache_root(monkeypatch, tmp_path)
+
+    def refuse(*_args: object, **_kwargs: object) -> Path:
+        raise AppPathError("Cortex could not secure its private data permissions.")
+
+    monkeypatch.setattr(paths_module, "secure_private_path", refuse)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    ((given, _existed),) = built
+    assert given.cache_dir == paths.data_dir
+    assert given.default_gguf_models_dir == paths.data_dir / "gguf_models"
+    assert fakes.window_configs[0].storage_path == paths.data_dir / "webview"
+    assert "caches stay in the data folder" in _runtime_log_text(paths.data_dir)
 
 
 @pytest.mark.parametrize(
