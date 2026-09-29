@@ -486,6 +486,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     selectedModelIsGGUF,
     { backoff: true },
   );
+  // A reply that finishes between two slow polls would leave the model picker
+  // saying "not loaded yet" for the model it just used, so one check follows
+  // every generation that ends.
+  const wasGenerationActiveRef = useRef(generationActive);
+  useEffect(() => {
+    const ended = wasGenerationActiveRef.current && !generationActive;
+    wasGenerationActiveRef.current = generationActive;
+    if (ended && selectedModelIsGGUF) refreshLlamacppStatus().catch(() => undefined);
+  }, [generationActive, selectedModelIsGGUF, refreshLlamacppStatus]);
 
   const visibleExecutionTasks = system?.execution_preview_available
     ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
