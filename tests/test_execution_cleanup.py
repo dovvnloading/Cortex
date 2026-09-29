@@ -218,21 +218,26 @@ def test_cleanup_retains_tombstone_when_database_finalize_fails(tmp_path, monkey
     assert not quarantine.exists()
 
 
-def _tombstone_with_a_rejected_source(repository, tmp_path, *, state, quarantine_root_path=None):
+def _tombstone_with_a_rejected_source(
+    repository, tmp_path, *, state, quarantine_root_path=None, recorded_quarantine_root=None
+):
     """A tombstone whose artifact is already in quarantine but whose source path no longer validates.
 
     The source path points outside the artifact root, as it does after the data
     directory is moved or a job directory is swapped for a link. Returns the
-    artifact and the file sitting in quarantine.
+    artifact and the file sitting in quarantine. ``recorded_quarantine_root`` is
+    the directory the row names for that file when the file is not there (the
+    quarantine directory's old home, after a data directory has moved).
     """
     job = _terminal_job(repository, f"rejected-{state}")
     artifact = repository.publish_artifact(
         job.job_id, name="rejected.txt", content=b"expired bytes", mime_type="text/plain", retention_seconds=1
     )
-    quarantine = (quarantine_root_path or repository.quarantine_root) / f"{artifact.artifact_id}-held.artifact"
+    quarantine = (quarantine_root_path or repository.quarantine_root) / f"{artifact.artifact_id}-{'0' * 32}.artifact"
     quarantine.parent.mkdir(parents=True, exist_ok=True)
     Path(artifact.path).replace(quarantine)
     elsewhere = tmp_path / "moved-data" / "rejected.txt"
+    recorded = (recorded_quarantine_root or quarantine.parent) / quarantine.name
     with repository.connect() as connection:
         connection.execute(
             "UPDATE execution_artifacts SET expires_at = ? WHERE artifact_id = ?",
@@ -244,7 +249,7 @@ def _tombstone_with_a_rejected_source(repository, tmp_path, *, state, quarantine
                 (artifact_id, path, quarantine_path, state, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (artifact.artifact_id, str(elsewhere), str(quarantine), state, repository._now()),
+            (artifact.artifact_id, str(elsewhere), str(recorded), state, repository._now()),
         )
     return artifact, quarantine
 
@@ -316,6 +321,48 @@ def test_a_rejected_tombstone_never_touches_a_file_outside_the_quarantine_root(t
 
     assert result.skipped == 1
     assert stray.read_bytes() == b"expired bytes"  # not ours to delete
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
+@pytest.mark.parametrize("state", ["pending", "quarantined", "finalized"])
+def test_a_rejected_tombstone_from_a_moved_data_directory_reclaims_the_file_by_name(tmp_path, state):
+    """After a data directory moves, the row names a path that is no longer ours.
+
+    The whole ``.quarantine`` directory moved with it, so the file is in the
+    current quarantine root under the name the row recorded. Matching by that
+    name, inside the current root, is what keeps the file from being stranded by
+    the row that alone knew about it.
+    """
+    repository = _repository(tmp_path)
+    old_home = tmp_path / "old-data" / "artifacts" / ".quarantine"
+    artifact, quarantine = _tombstone_with_a_rejected_source(
+        repository, tmp_path, state=state, recorded_quarantine_root=old_home
+    )
+    assert not (old_home / quarantine.name).exists() and quarantine.exists()
+
+    result = repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert not quarantine.exists()
+    assert result.skipped == 1
+    assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
+
+
+def test_a_rejected_tombstone_never_matches_by_name_a_file_made_for_another_artifact(tmp_path):
+    """The by-name match is confined to this artifact's own tombstone in our root."""
+    repository = _repository(tmp_path)
+    artifact, _ = _tombstone_with_a_rejected_source(repository, tmp_path, state="quarantined")
+    bystander = repository.quarantine_root / f"{'b' * 32}-{'c' * 32}.artifact"
+    bystander.write_bytes(b"belongs to another tombstone")
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE execution_artifact_cleanup SET quarantine_path = ? WHERE artifact_id = ?",
+            # An old home naming a file that is not this artifact's.
+            (str(tmp_path / "old-data" / ".quarantine" / bystander.name), artifact.artifact_id),
+        )
+
+    repository.cleanup_expired(now="9999-01-01T00:00:00+00:00", terminal_job_retention_seconds=10**9)
+
+    assert bystander.read_bytes() == b"belongs to another tombstone"
     assert _tombstone_rows(repository, artifact.artifact_id) == (None, None)
 
 

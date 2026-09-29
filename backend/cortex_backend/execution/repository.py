@@ -51,6 +51,8 @@ _SQLITE_CORRUPTION_CODES = frozenset({11, 26})
 # Python 3.10 does not expose sqlite_errorcode, so fall back to the message.
 _SQLITE_CORRUPTION_MESSAGES = ("malformed", "not a database", "disk image")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+# The name cleanup gives an artifact's file in quarantine: ``<artifact id>-<uuid hex>.artifact``.
+_QUARANTINE_FILE_NAME = re.compile(r"(?P<artifact_id>[0-9a-f]{32})-[0-9a-f]{32}\.artifact")
 _SAFE_INSTALLATION_PRINCIPAL = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,31}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _LOGGER = logging.getLogger("cortex.execution.repository")
@@ -1920,7 +1922,7 @@ class ExecutionRepository:
         try:
             return self._advance_artifact_cleanup(artifact_id, path_text, quarantine_text, state), 0
         except ArtifactCleanupRejected as exc:
-            if not self._reclaim_quarantined_file(quarantine_text):
+            if not self._reclaim_quarantined_file(artifact_id, quarantine_text):
                 # Its quarantine file is still there and could not be removed
                 # this time. The row is the only record that it exists, so it
                 # stays and a later pass tries again.
@@ -1933,7 +1935,7 @@ class ExecutionRepository:
             self._requeue_artifact_cleanup(artifact_id)
             return 0, 1
 
-    def _reclaim_quarantined_file(self, quarantine_text: str) -> bool:
+    def _reclaim_quarantined_file(self, artifact_id: str, quarantine_text: str) -> bool:
         """Remove the file a rejected tombstone left in quarantine; False if it must be retried.
 
         A row can be rejected because its *original* location no longer
@@ -1943,14 +1945,28 @@ class ExecutionRepository:
         knows about it: discarding the row without removing it leaves it there
         for good. Nothing outside the validated quarantine root is ever touched,
         and neither is anything that is not a plain file.
+
+        After a moved data directory the row names the quarantine directory's
+        old absolute path, which is outside the current root, but the directory
+        moved too and the file is in it under the same name. Such a row is
+        matched by name in the current root, and only for a name this cleanup
+        gives that artifact's tombstone.
         """
 
         try:
             quarantine = self._validated_quarantine_path(Path(quarantine_text))
-        except ArtifactCleanupRejected:
-            return True  # Not ours to touch; nothing here can be reclaimed.
         except ArtifactCleanupBlocked:
             return False
+        except ArtifactCleanupRejected:
+            match = _QUARANTINE_FILE_NAME.fullmatch(re.split(r"[\\/]", quarantine_text)[-1])
+            if match is None or match.group("artifact_id") != artifact_id:
+                return True  # Not ours to touch; nothing here can be reclaimed.
+            try:
+                quarantine = self._validated_quarantine_path(self.quarantine_root / match.group(0))
+            except ArtifactCleanupRejected:
+                return True
+            except ArtifactCleanupBlocked:
+                return False
         try:
             if not stat.S_ISREG(quarantine.lstat().st_mode):
                 return True
