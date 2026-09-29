@@ -64,8 +64,14 @@ extend-immutable-calls = [
 # backend/cortex_backend/py.typed promises callers that this package is typed.
 # This is what makes that promise true rather than decorative.
 python_version = "3.10"
-files = ["backend/cortex_backend"]
+# The package, the two entry modules, and the tooling around them. Tests are
+# left out on purpose: they are untyped fixtures and doubles, and typing them
+# would be a large change unrelated to what ships.
+files = ["backend/cortex_backend", "main.py", "app_factory.py", "scripts", "tools"]
 mypy_path = ["backend"]
+# `scripts` and `tools` are plain directories of scripts, not packages; name
+# their modules from the repository root so they cannot collide by basename.
+explicit_package_bases = true
 # Windows-first: POSIX-only branches are guarded at runtime and carry targeted
 # ignores at the call site rather than being silenced wholesale.
 ignore_missing_imports = true

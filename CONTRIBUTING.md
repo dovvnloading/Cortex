@@ -93,7 +93,7 @@ The individual commands, if you prefer to run them by hand. These are the steps
 
 ```powershell
 python scripts/check_dev_environment.py
-python -m ruff check backend tests tools main.py app_factory.py
+python -m ruff check backend tests tools main.py app_factory.py scripts
 python -m mypy
 python -m pytest -q
 python -m coverage run -m pytest -q   # full tier, in place of the line above

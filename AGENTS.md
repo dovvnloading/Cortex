@@ -112,7 +112,7 @@ Useful focused commands include:
 
 ```powershell
 python -m pytest -q
-python -m ruff check backend tests tools main.py app_factory.py
+python -m ruff check backend tests tools main.py app_factory.py scripts
 python -m mypy
 python tools/generate_contracts.py --check
 python tools/artifact_boundary_review.py --json --strict

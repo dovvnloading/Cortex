@@ -153,7 +153,7 @@ if (-not $SkipBackend) {
     }
 
     Invoke-Step 'Lint Python (ruff)' {
-        python -m ruff check backend tests tools main.py app_factory.py
+        python -m ruff check backend tests tools main.py app_factory.py scripts
     }
 
     # The same two checks as quality.yml's `Lint workflows` and `Audit

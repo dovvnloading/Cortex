@@ -10,6 +10,7 @@ gate, not a silent pass.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -133,7 +134,8 @@ def _case_copy_in_ads_path(root: Path, _repository: ExecutionRepository, boundar
 
 
 def _case_copy_in_untyped_grant(_root: Path, _repository: ExecutionRepository, boundary: ArtifactBoundary, _job_id: str) -> None:
-    _expect_boundary_error("artifact_grant_invalid", lambda: boundary.copy_in(object()))
+    # Deliberately not an ArtifactSourceGrant: the boundary must refuse it.
+    _expect_boundary_error("artifact_grant_invalid", lambda: boundary.copy_in(object()))  # type: ignore[arg-type]
 
 
 def _case_copy_in_hardlink(root: Path, _repository: ExecutionRepository, boundary: ArtifactBoundary, job_id: str) -> None:
@@ -169,7 +171,7 @@ def _case_mime_active_and_nonfinite_corpus(_root: Path, _repository: ExecutionRe
         b'{"value": 1e999999}',
     )
     for content in rejected:
-        _expect_boundary_error("invalid_artifact", lambda content=content: boundary_module.sniff_artifact_mime(content))
+        _expect_boundary_error("invalid_artifact", partial(boundary_module.sniff_artifact_mime, content))
     if boundary_module.sniff_artifact_mime(b'{"value": ' + b"9" * 5_000 + b"}") != "text/plain":
         raise _ReviewFailure("oversized_json_not_bounded")
 
