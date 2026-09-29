@@ -16,6 +16,7 @@ import logging
 import ssl
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any
@@ -210,8 +211,14 @@ class LlamaCppChatClient:
         is not up yet, a build without the endpoint, or any failure at all is
         ``None``, and the chat call that follows reports whatever is really
         wrong.
+
+        Stop is honoured: a turn already cancelled is not counted at all, and
+        one cancelled while the server is still answering closes the request
+        instead of waiting out its timeout. The count then is ``None``, and the
+        cancelled chat call that follows does nothing.
         """
-        del cancellation_event  # one short request to a server that is already answering
+        if cancellation_event is not None and cancellation_event.is_set():
+            return None
         ready_handle = getattr(self._provider, "ready_handle", None)
         if not callable(ready_handle):
             return None
@@ -228,14 +235,26 @@ class LlamaCppChatClient:
         except Exception:
             return None
         try:
-            response = self._http.post(
+            with self._http.stream(
+                "POST",
                 f"{handle.base_url}/tokenize",
                 json={"content": text},
                 headers=_auth_headers(handle.api_key),
                 timeout=_TOKENIZE_TIMEOUT,
-            )
-            response.raise_for_status()
-            tokens = response.json().get("tokens")
+            ) as response:
+                # Closing the response is what unblocks a read in flight, the
+                # same way it does for the chat stream.
+                watch: AbstractContextManager[None] = (
+                    close_when_cancelled(
+                        cancellation_event, response.close, name="llama-tokenize-cancel-watch"
+                    )
+                    if cancellation_event is not None
+                    else nullcontext()
+                )
+                with watch:
+                    response.raise_for_status()
+                    response.read()
+                    tokens = response.json().get("tokens")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return None
         finally:

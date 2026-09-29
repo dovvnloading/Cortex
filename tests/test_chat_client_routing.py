@@ -1702,6 +1702,107 @@ def test_llamacpp_tokenize_is_none_for_a_model_that_is_not_on_disk_or_a_closed_c
     assert client.tokenize(model=model, text="anything", options={}) is None
 
 
+def test_llamacpp_tokenize_stops_waiting_when_the_turn_is_cancelled(tmp_path: Path) -> None:
+    """Stop must not sit behind the tokenizer's own ten-second timeout."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    cancellation = Event()
+    entered = Event()
+
+    class _HangingResponse:
+        def __init__(self) -> None:
+            self.closed = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.close()
+
+        def close(self) -> None:
+            # What actually releases a read that is in flight.
+            self.closed.set()
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def read(self) -> bytes:
+            # A busy server that has not answered yet. Only closing the response
+            # frees this thread; the bound is there so a broken test cannot hang.
+            entered.set()
+            self.closed.wait(3.0)
+            raise httpx.ReadError("closed by the caller")
+
+        def json(self):
+            raise AssertionError("no body was ever read")
+
+    response = _HangingResponse()
+
+    class _HangingHttp:
+        def post(self, *_args, **_kwargs):
+            # The request the client used to make: nothing could stop it.
+            entered.set()
+            response.closed.wait(3.0)
+            raise httpx.ReadTimeout("the tokenizer never answered")
+
+        def stream(self, *_args, **_kwargs):
+            return response
+
+        def close(self) -> None:
+            return None
+
+    client = LlamaCppChatClient(
+        _ReadyProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=_HangingHttp(),  # type: ignore[arg-type]
+    )
+    result: list[int | None] = []
+    worker = Thread(
+        target=lambda: result.append(
+            client.tokenize(
+                model=f"gguf:{model_path.name}",
+                text="synthetic prompt text",
+                options={},
+                cancellation_event=cancellation,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(timeout=2.0)
+
+    cancellation.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive(), "Stop waited for the tokenizer"
+    assert result == [None]
+
+
+def test_llamacpp_tokenize_does_not_count_a_turn_that_was_already_cancelled(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"tokens": [1, 2, 3]})
+
+    client, model = _tokenizing_client(tmp_path, handler, _ReadyProvider("http://fakellama"))
+    cancelled = Event()
+    cancelled.set()
+
+    assert client.tokenize(model=model, text="anything", options={}, cancellation_event=cancelled) is None
+    assert requests == []
+
+
+def test_llamacpp_tokenize_still_counts_when_a_cancellation_event_is_never_set(tmp_path: Path) -> None:
+    client, model = _tokenizing_client(
+        tmp_path,
+        lambda request: httpx.Response(200, json={"tokens": [1, 2, 3, 4]}),
+        _ReadyProvider("http://fakellama"),
+    )
+
+    assert client.tokenize(model=model, text="anything", options={}, cancellation_event=Event()) == 4
+
+
 def test_routing_tokenize_asks_only_the_llamacpp_client() -> None:
     class _Counting(_RecordingLlamaCppClient):
         def __init__(self) -> None:
