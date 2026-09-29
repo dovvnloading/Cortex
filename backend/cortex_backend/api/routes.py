@@ -105,6 +105,11 @@ from .security import SessionPrincipal
 
 
 DEFAULT_AUTOMATIC_COMPUTE_WAIT_SECONDS = 1.5
+# The most memory suggestions one answer can put in front of the user, and the
+# longest one. Both match what the model reply parser accepts and what the
+# memories API stores (AddMemoryRequest.memo).
+MAX_PROPOSED_MEMORIES = 5
+MAX_PROPOSED_MEMORY_LENGTH = 500
 
 # Execution SSE pacing. The generation stream polls an in-memory event list
 # (api/jobs.py) and can afford to be quick about it; this one polls SQLite, so
@@ -576,10 +581,25 @@ async def _start_generation_job(
                 )
 
             # Model-produced memory additions are proposals, not an authority
-            # to write durable state.  Permanent memories can only be created
-            # through the explicit memory-management API (or a future UI
-            # confirmation flow), so an instruction-like model response cannot
-            # become a persistent prompt injection on its own.
+            # to write durable state.  They are reported to the client, which
+            # asks the user and saves each accepted one through the explicit
+            # memory-management API, so an instruction-like model response
+            # cannot become a persistent prompt injection on its own.  A clear
+            # request is reported the same way and is likewise never applied
+            # here.
+            proposed_memories = _proposed_memories(deps, result.memory_command)
+            clear_requested = bool(result.memory_command.clear_requested)
+            if proposed_memories or clear_requested:
+                sink.publish_progress(
+                    "memory_proposed",
+                    "Cortex suggested a change to your memory. "
+                    "Nothing is saved until you confirm it.",
+                    data={
+                        "assistant_message_id": assistant_message_id,
+                        "proposed_memories": proposed_memories,
+                        "clear_requested": clear_requested,
+                    },
+                )
 
             overview = deps.chats.get_chat_overview(thread_id) or {}
             title = str(overview.get("title") or "New Chat")
@@ -637,7 +657,8 @@ async def _start_generation_job(
                 "title": str(overview.get("title") or title),
                 "response": result.response,
                 "thoughts": result.thoughts,
-                "clear_requested": result.memory_command.clear_requested,
+                "clear_requested": clear_requested,
+                "proposed_memories": proposed_memories,
                 "code_execution_job_id": code_execution_job_id,
                 "code_execution_rejection": code_execution_rejection,
                 # Present only when translation was requested and failed. The
@@ -877,6 +898,45 @@ def _rejection_payload(result: Any) -> dict[str, Any] | None:
     return {"code": code, "message": message}
 
 
+def _proposed_memories(deps: BackendDependenciesProtocol, command: Any) -> list[str]:
+    """The model's memory suggestions that are worth putting in front of the user.
+
+    The engine already validated the command, but the engine is a replaceable
+    boundary and this list is what the user is asked to approve, so it is
+    bounded again here: a handful of short, non-blank, distinct facts. A fact
+    the store already holds is dropped -- asking again would only teach the
+    user to ignore the prompt. Nothing is written; the user saves each one
+    through the memories API.
+    """
+
+    additions = getattr(command, "additions", None)
+    if not isinstance(additions, (tuple, list)):
+        return []
+    try:
+        seen = {memo.casefold() for memo in deps.memories.get_memos()}
+    except Exception as exc:
+        # Showing a suggestion the store already holds is harmless: the user
+        # decides, and saving a duplicate is a no-op.
+        logging.warning(
+            "Cortex could not compare memory suggestions with saved memories (%s).",
+            type(exc).__name__,
+        )
+        seen = set()
+    proposals: list[str] = []
+    for memo in additions:
+        if not isinstance(memo, str):
+            continue
+        text = memo.strip()
+        key = text.casefold()
+        if not text or len(text) > MAX_PROPOSED_MEMORY_LENGTH or key in seen:
+            continue
+        seen.add(key)
+        proposals.append(text)
+        if len(proposals) == MAX_PROPOSED_MEMORIES:
+            break
+    return proposals
+
+
 def _chunks(value: str, size: int = 80):
     for start in range(0, len(value), size):
         yield value[start : start + size]
@@ -953,6 +1013,7 @@ _GENERATION_PHASE_EVENTS = {
     "content_delta": "generation.content_delta",
     "translation": "generation.translation_started",
     "translation_failed": "generation.translation_failed",
+    "memory_proposed": "generation.memory_proposed",
     "persisting": "generation.persisting",
     "loading_model": "generation.loading_model",
 }

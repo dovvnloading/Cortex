@@ -22,7 +22,8 @@ from cortex_backend.api.routes import _generation_snapshot, _model_sets
 from cortex_backend.api.jobs import JobConflict, JobOwnershipError, JobRegistry
 from cortex_backend.api.security import SessionManager, SessionSecurityError
 from cortex_backend.api.schemas import GenerationRequest
-from cortex_backend.core.settings import CortexSettings, TranslationSettings
+from cortex_backend.core.settings import CortexSettings, MemorySettings, TranslationSettings
+from cortex_backend.repositories.settings import InMemorySettingsRepository
 from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
@@ -1483,3 +1484,210 @@ def test_every_generation_event_the_api_can_emit_is_a_schema_event_name():
         _generation_event_name("error", "failed", None),
     }
     assert emitted <= allowed, f"emits names the schema rejects: {sorted(emitted - allowed)}"
+
+
+# --- Model-proposed memories reach the user and are never saved by the model ---
+
+
+def _run_generation(client: TestClient, headers: dict[str, str], **body) -> list[dict]:
+    accepted = client.post("/api/v1/generations", json=body, headers=headers)
+    assert accepted.status_code == 202
+    job_id = accepted.json()["job_id"]
+    with client.stream(
+        "GET", f"/api/v1/generations/{job_id}/events", headers=headers
+    ) as response:
+        return _events("".join(response.iter_text()))
+
+
+def test_completed_generation_carries_proposed_memory_additions():
+    """The model's memory suggestion reaches the client and nothing is saved.
+
+    The event and the job result both carry the suggestion and the id of the
+    saved answer it belongs to, so a client can put it under that answer. The
+    store stays empty until the user saves it through the memories API.
+    """
+    dependencies = build_demo_dependencies()
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client,
+            headers,
+            request_id="propose-1",
+            user_input="!remember User likes tea.",
+        )
+        names = [event["event"] for event in events]
+        completed = events[-1]
+        assert completed["event"] == "generation.completed"
+        assert names.count("generation.memory_proposed") == 1
+        assert names.index("generation.memory_proposed") < len(names) - 1
+
+        proposed = next(
+            event for event in events if event["event"] == "generation.memory_proposed"
+        )
+        assert proposed["data"]["proposed_memories"] == ["User likes tea."]
+        assert proposed["data"]["clear_requested"] is False
+        assert proposed["data"]["assistant_message_id"] == (
+            completed["data"]["assistant_message_id"]
+        )
+        assert completed["data"]["proposed_memories"] == ["User likes tea."]
+        assert completed["data"]["clear_requested"] is False
+
+        # Nothing was written on the model's say-so.
+        assert dependencies.memories.get_memos() == []
+        assert client.get("/api/v1/memories", headers=headers).json() == {"memos": []}
+
+        # Accepting is the user's explicit call to the existing memories API.
+        saved = client.post(
+            "/api/v1/memories", json={"memo": "User likes tea."}, headers=headers
+        )
+        assert saved.status_code == 200
+        assert saved.json() == {"memos": ["User likes tea."]}
+
+
+def test_a_turn_without_memory_suggestions_announces_none():
+    app = create_app(build_demo_dependencies(), allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client, headers, request_id="no-propose-1", user_input="hello"
+        )
+    assert "generation.memory_proposed" not in [event["event"] for event in events]
+    assert events[-1]["data"]["proposed_memories"] == []
+    assert events[-1]["data"]["clear_requested"] is False
+
+
+def test_a_clear_request_is_announced_but_never_applied():
+    dependencies = build_demo_dependencies()
+    dependencies.memories.add_memo("keep this fact")
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client, headers, request_id="clear-1", user_input="!clear-memory"
+        )
+    proposed = next(
+        event for event in events if event["event"] == "generation.memory_proposed"
+    )
+    assert proposed["data"]["clear_requested"] is True
+    assert proposed["data"]["proposed_memories"] == []
+    assert events[-1]["data"]["clear_requested"] is True
+    assert dependencies.memories.get_memos() == ["keep this fact"]
+
+
+def test_a_suggestion_the_store_already_holds_is_not_offered_again():
+    dependencies = build_demo_dependencies()
+    dependencies.memories.add_memo("User likes tea.")
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client,
+            headers,
+            request_id="known-1",
+            user_input="!remember user likes TEA.",
+        )
+    assert "generation.memory_proposed" not in [event["event"] for event in events]
+    assert events[-1]["data"]["proposed_memories"] == []
+
+
+def test_no_memory_suggestion_is_announced_when_memory_is_turned_off():
+    dependencies = replace(
+        build_demo_dependencies(),
+        settings=InMemorySettingsRepository(
+            CortexSettings(memory=MemorySettings(enabled=False))
+        ),
+    )
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client,
+            headers,
+            request_id="memory-off-1",
+            user_input="!remember User likes tea.",
+        )
+    assert "generation.memory_proposed" not in [event["event"] for event in events]
+    assert events[-1]["data"]["proposed_memories"] == []
+    assert dependencies.memories.get_memos() == []
+
+
+def test_the_api_bounds_what_an_engine_proposes():
+    """An engine that hands back an oversized command still cannot flood the user."""
+    from cortex_backend.core.generation import MemoryCommand
+    from cortex_backend.testing.fake_ollama import FakeGenerationEngine
+
+    class OverEagerEngine(FakeGenerationEngine):
+        def generate(self, **kwargs):
+            response, thoughts, _command, stats = super().generate(**kwargs)
+            command = MemoryCommand(
+                additions=tuple(f"Fact number {number}." for number in range(20))
+            )
+            return response, thoughts, command, stats
+
+    dependencies = build_demo_dependencies()
+    dependencies.generation._engine_factory = lambda snapshot: OverEagerEngine(
+        FakeOllamaState()
+    )
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        events = _run_generation(
+            client, headers, request_id="flood-1", user_input="hello"
+        )
+    proposals = events[-1]["data"]["proposed_memories"]
+    assert proposals == [f"Fact number {number}." for number in range(5)]
+    assert dependencies.memories.get_memos() == []
+
+
+def _stub_deps(memos=None, *, unreadable: bool = False):
+    class _Memories:
+        def get_memos(self):
+            if unreadable:
+                raise RuntimeError("store unavailable")
+            return list(memos or [])
+
+    class _Deps:
+        memories = _Memories()
+
+    return _Deps()
+
+
+@pytest.mark.parametrize(
+    ("additions", "stored", "expected"),
+    [
+        # Trimmed, and blank entries dropped.
+        (("  keep me  ", "   ", ""), [], ["keep me"]),
+        # Duplicates within the suggestion, ignoring case.
+        (("Likes tea", "likes TEA", "Likes coffee"), [], ["Likes tea", "Likes coffee"]),
+        # Already saved, ignoring case and outer whitespace.
+        (("likes tea", "Likes coffee"), ["Likes Tea"], ["Likes coffee"]),
+        # One oversized entry is dropped without hiding the others.
+        (("x" * 501, "y" * 500), [], ["y" * 500]),
+        # Non-text entries never reach the user.
+        ((None, 7, ["nested"], "ok"), [], ["ok"]),
+        # At most five.
+        (tuple(f"fact {n}" for n in range(9)), [], [f"fact {n}" for n in range(5)]),
+    ],
+)
+def test_proposed_memories_are_bounded_distinct_and_new(additions, stored, expected):
+    from cortex_backend.api.routes import _proposed_memories
+    from cortex_backend.core.generation import MemoryCommand
+
+    command = MemoryCommand(additions=additions)  # type: ignore[arg-type]
+    assert _proposed_memories(_stub_deps(stored), command) == expected
+
+
+def test_proposed_memories_still_reach_the_user_when_the_store_is_unreadable():
+    from cortex_backend.api.routes import _proposed_memories
+    from cortex_backend.core.generation import MemoryCommand
+
+    command = MemoryCommand(additions=("Likes tea",))
+    assert _proposed_memories(_stub_deps(unreadable=True), command) == ["Likes tea"]
+
+
+@pytest.mark.parametrize("command", [None, object(), "add", 7])
+def test_proposed_memories_ignore_a_value_that_is_not_a_memory_command(command):
+    from cortex_backend.api.routes import _proposed_memories
+
+    assert _proposed_memories(_stub_deps(), command) == []
