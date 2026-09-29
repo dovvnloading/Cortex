@@ -2524,6 +2524,40 @@ def test_a_failed_startup_is_shown_in_the_window_with_the_diagnostic_path(
     assert "do-not-show" not in runtime_log
 
 
+def test_a_data_path_failure_after_the_window_opened_names_the_remedy_on_the_error_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(**_kwargs):
+        raise AppPathError("Cortex could not secure its private data permissions.")
+
+    monkeypatch.setattr(launcher_main, "build_app", refuse)
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 1
+
+    (page,) = fakes.windows[0].pages
+    assert "could not secure its private data permissions" in page
+    assert "--data-dir" in page
+
+
+def test_a_data_path_failure_without_a_window_names_the_remedy_in_the_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(**_kwargs):
+        raise AppPathError("Cortex could not create its data directory.")
+
+    monkeypatch.setattr(launcher_main, "build_app", refuse)
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path), "--headless"]) == 1
+
+    (dialog,) = shown
+    assert "--data-dir" in dialog
+
+
 def test_the_error_page_close_button_destroys_the_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

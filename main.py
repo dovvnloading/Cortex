@@ -863,8 +863,11 @@ def _startup_failure_page(error: BaseException, log_path: Path | None) -> str:
     values are HTML-escaped and substituted in a single pass over the template.
     """
     template = _read_asset_text("startup_failed.html") or _STARTUP_FAILURE_FALLBACK
+    detail = _redact_startup_detail(error)
+    if isinstance(error, AppPathError):
+        detail = f"{detail} {DATA_PATH_REMEDY}"
     values = {
-        "message": html_escape(_redact_startup_detail(error)),
+        "message": html_escape(detail),
         "log": html_escape(
             str(log_path) if log_path is not None else "Cortex could not write its diagnostic log."
         ),
@@ -1183,6 +1186,8 @@ def _run_instance(
         if isinstance(exc, WebViewRuntimeError):
             # Fixed text that says what to do next, so show it.
             _startup_dialog_hint = str(exc)
+        elif isinstance(exc, AppPathError):
+            _startup_dialog_hint = DATA_PATH_REMEDY
         print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
         return 1
     finally:
