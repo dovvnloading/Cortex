@@ -250,7 +250,11 @@ describe("a model download", () => {
     await server.streams[0].push({ id: 2, kind: "error", status: "failed", data: { message: reason } });
     await server.streams[0].close();
 
-    expect(await screen.findByRole("alert", {}, WAIT)).toHaveTextContent(reason);
+    // A failure also raises an error toast, which is an alert of its own and
+    // carries the same sentence; this is the copy that stays beside the button.
+    const inline = await screen.findByText(reason, { selector: ".field-error" }, WAIT);
+    expect(inline).toHaveAttribute("role", "alert");
+    expect(inline.textContent).toBe(reason);
     expect(screen.getByLabelText(/Repo id/)).toHaveValue("owner/name");
     expect(remembered()).toBeNull();
   });

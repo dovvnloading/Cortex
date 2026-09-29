@@ -14,6 +14,7 @@ import { useUiStore } from "../../stores/useUiStore";
 import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
+import { NewChatGuide } from "./NewChatGuide";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
 
 const DEFAULT_GENERATION_SETTINGS = {
@@ -877,6 +878,10 @@ export function ChatPage({
     setShowJumpToLatest(false);
   };
 
+  // A new thread has nothing to show yet, so it shows a short guide until the
+  // first message starts (a starting or streaming first turn has its own bubble).
+  const showNewChatGuide = threadId === null && messages.length === 0 && !starting;
+
   if (chatLoad.threadId !== threadId || chatLoad.loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
   if (chatLoad.error) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{chatLoad.error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
 
@@ -899,7 +904,9 @@ export function ChatPage({
         onFork={forkFrom}
         onSaveMemory={saveProposedMemory}
         onNearEndChange={handleNearEndChange}
-        trailingContent={activeJobForCurrentThread ? <PendingAssistantMessage key={generation.jobId} onOutputChange={followStreamedOutput} /> : null}
+        trailingContent={activeJobForCurrentThread
+          ? <PendingAssistantMessage key={generation.jobId} onOutputChange={followStreamedOutput} />
+          : showNewChatGuide ? <NewChatGuide selectedModel={selectedModel} /> : null}
       />
       <div className="input-container composer-dock">
         {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}>Jump to latest</button>}

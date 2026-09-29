@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SystemResponse } from "../../../contracts/cortex-api";
 import {
   CortexApi,
@@ -19,6 +19,7 @@ const SettingsPanel = lazyRoute<SettingsPanelProps>(() => import("../features/se
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
+import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
@@ -36,9 +37,20 @@ import { resolveRuntimeAvailability } from "./runtimeAvailability";
 
 type Props = { api?: CortexApi };
 
+/**
+ * How long "Chat deleted" offers Undo. The request is sent when this window
+ * closes, so it is also how long a deleted chat still exists on the backend.
+ */
+const CHAT_DELETE_UNDO_MS = 6000;
+
 /** Statuses an execution task never leaves, so nothing more will change. */
 const EXECUTION_TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
+/**
+ * What the model inventory shows when the request for it failed. Distinct from
+ * "not answered yet", which is a null inventory in the store: a placeholder that
+ * looked like this one on every launch reported a fault that was not there.
+ */
 const UNAVAILABLE_MODELS: ModelResponse = {
   required_models: [],
   optional_models: [],
@@ -51,6 +63,16 @@ const UNAVAILABLE_MODELS: ModelResponse = {
     status: "error",
     message: "The model service is unavailable. You can continue browsing your workspace.",
   },
+};
+
+/** Shown only while the first inventory request is in flight: empty, and no connection verdict either way. */
+const LOADING_MODELS: ModelResponse = {
+  required_models: [],
+  optional_models: [],
+  installed_models: [],
+  missing_models: [],
+  optional_missing_models: [],
+  models: [],
 };
 
 const DEFAULT_LLAMACPP_STATUS: LlamaCppRuntimeStatus = {
@@ -286,7 +308,23 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // derived from it (and painted by useAppliedTheme), never copied into state.
   const theme = settings?.appearance?.theme ?? DEFAULT_THEME_PREFERENCE;
   useAppliedTheme(settings ? theme : null);
-  const chatsRef = useRef(chats);
+  // A chat that was just deleted is hidden here at once but only removed from
+  // the backend when its Undo window closes (see `deleteChat`). Everything that
+  // lists or picks a chat reads `visibleChats`, so a hidden chat stays hidden
+  // even if the store's list is refilled from the server or a finishing
+  // generation upserts it, and Undo puts it back exactly as it was.
+  const pendingChatDeletesRef = useRef(new Set<string>());
+  const [pendingChatDeleteIds, setPendingChatDeleteIds] = useState<ReadonlySet<string>>(() => new Set());
+  const visibleChats = useMemo(
+    () => chats.filter((chat) => !pendingChatDeleteIds.has(chat.id)),
+    [chats, pendingChatDeleteIds],
+  );
+  const setChatDeletePending = useCallback((id: string, pending: boolean) => {
+    if (pending) pendingChatDeletesRef.current.add(id);
+    else pendingChatDeletesRef.current.delete(id);
+    setPendingChatDeleteIds(new Set(pendingChatDeletesRef.current));
+  }, []);
+  const chatsRef = useRef(visibleChats);
   const executionTaskRefreshRef = useRef<Promise<void> | null>(null);
   // These guards cover requests whose results are deliberately loaded out of
   // band. A response can outlive both the load that started it and this
@@ -311,8 +349,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   }, []);
 
   useEffect(() => {
-    chatsRef.current = chats;
-  }, [chats]);
+    chatsRef.current = visibleChats;
+  }, [visibleChats]);
 
   const loadWorkspace = useCallback(async () => {
     const loadGeneration = ++workspaceLoadGenerationRef.current;
@@ -336,6 +374,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setSystem(systemResponse);
       setLlamacppStatus(systemResponse.llamacpp ?? null);
       setChats(chatResponse);
+      // `chatResponse` is the whole list, so any other saved draft belongs to a chat that is gone.
+      pruneComposerDrafts(chatResponse.map((chat) => chat.id));
       // Groups are organisation on top of the chats, so they load out of band
       // like the model inventory does: if the endpoint is unavailable the
       // library still opens with every chat present, just ungrouped. Blocking
@@ -348,7 +388,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
           if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
-      if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
+      // Nothing is known about the inventory until it answers (see LOADING_MODELS).
+      if (isCurrentModelLoad()) setModels(null);
       void api.models()
         .then((nextModels) => {
           if (isCurrentModelLoad()) setModels(nextModels);
@@ -522,19 +563,43 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
+  // Deleting hides the chat at once and asks the backend only when the Undo
+  // window closes. Closing the app inside that window loses nothing: the
+  // request was never sent, so the chat is simply still there next launch.
   const deleteChat = async (id: string): Promise<boolean> => {
-    try {
-      await api.deleteChat(id);
-      const fallbackChatId = chatsRef.current.find((chat) => chat.id !== id)?.id ?? null;
-      setChats((current) => current.filter((chat) => chat.id !== id));
-      setSettingsReturnChatId((current) => current === id ? fallbackChatId : current);
-      const currentRoute = parseAppRoute(window.location.pathname);
-      if (currentRoute.kind === "chat" && currentRoute.threadId === id) {
-        navigate(fallbackChatId ? chatPath(fallbackChatId) : "/chat/new", { replace: true });
+    if (pendingChatDeletesRef.current.has(id)) return true;
+    const fallbackChatId = chatsRef.current.find((chat) => chat.id !== id)?.id ?? null;
+    const fallbackPath = fallbackChatId ? chatPath(fallbackChatId) : "/chat/new";
+    const currentRoute = parseAppRoute(window.location.pathname);
+    const wasOpen = currentRoute.kind === "chat" && currentRoute.threadId === id;
+    setChatDeletePending(id, true);
+    setSettingsReturnChatId((current) => current === id ? fallbackChatId : current);
+    if (wasOpen) navigate(fallbackPath, { replace: true });
+
+    const commit = async () => {
+      try {
+        await api.deleteChat(id);
+        discardComposerDraft(id);
+        // Take the row out of the list before it is un-hidden, so it cannot flash back.
+        setChats((current) => current.filter((chat) => chat.id !== id));
+        setChatDeletePending(id, false);
+      } catch (error) {
+        setChatDeletePending(id, false);
+        notify(apiMessage(error, "Could not delete chat."), "error");
       }
-      notify("Chat deleted.", "success");
-      return true;
-    } catch (error) { notify(apiMessage(error, "Could not delete chat."), "error"); return false; }
+    };
+    const undo = () => {
+      setChatDeletePending(id, false);
+      // Only follow the chat back if the person is still where deleting it left them.
+      if (wasOpen && window.location.pathname === fallbackPath) navigate(chatPath(id), { replace: true });
+      notify("Chat restored.", "success");
+    };
+    notify("Chat deleted.", "success", {
+      action: { label: "Undo", onAction: undo },
+      durationMs: CHAT_DELETE_UNDO_MS,
+      onClose: () => void commit(),
+    });
+    return true;
   };
 
   const createGroup = async (name: string): Promise<boolean> => {
@@ -722,8 +787,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       accepted = await api.downloadGGUFModel(request);
     } catch (error) {
-      notify(apiMessage(error, "Could not start the model download."), "error");
-      throw error;
+      const message = apiMessage(error, "Could not start the model download.");
+      notify(message, "error");
+      throw new Error(message, { cause: error });
     }
     const result = await modelJobs.run(accepted, label, { checkOllamaConnection: false, notifyOnSuccess: false });
     // The workspace closed first; the download carries on and is picked up
@@ -767,14 +833,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace...</main>;
-  if (loadError || !system || !settings || !models) {
+  if (loadError || !system || !settings) {
     return <main className="fatal-state"><h1>Workspace unavailable</h1><p>{loadError ?? "Cortex returned an incomplete workspace."}</p><button className="button button-primary" onClick={() => void loadWorkspace()}>Retry</button></main>;
   }
 
-  const localModels = localModelNames(models);
-  const hasLocalInventory = Array.isArray(models.installed_models) || Array.isArray(models.models);
+  // The inventory is fetched after the workspace opens, so for a moment it is
+  // unknown rather than empty: an empty stand-in with no connection report.
+  const inventoryLoading = models === null;
+  const inventory = models ?? LOADING_MODELS;
+  const localModels = localModelNames(inventory);
+  const hasLocalInventory = Array.isArray(inventory.installed_models) || Array.isArray(inventory.models);
   const selectedModel = settings.models?.chat?.trim() || null;
-  const selectedModelSupportsVision = models.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
+  const selectedModelSupportsVision = inventory.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
   const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
   // The initial system response seeds the store, while polling updates it as
   // the managed runtime starts/stops. Settings must consume that live value
@@ -785,8 +855,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const runtimeAvailability = resolveRuntimeAvailability({
     selectedModel,
     selectedModelAvailable,
-    ollamaConnected: models.connection?.success ?? true,
-    ollamaMessage: models.connection?.message,
+    inventoryLoading,
+    ollamaConnected: inventory.connection?.success ?? true,
+    ollamaMessage: inventory.connection?.message,
     llamacppStatus,
   });
   const routeChatId = route.kind === "chat" ? route.threadId : null;
@@ -807,15 +878,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     <>
       {/* Above the route switch, so a generation keeps streaming into the store while Settings is open. */}
       <GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />
-      <AppShell chats={chats} activeChatId={routeChatId} modelConnection={models.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
+      <AppShell chats={visibleChats} activeChatId={routeChatId} modelConnection={inventory.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
-            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={models} modelBusy={modelBusy} modelProgress={modelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} /></RouteBoundary>
+            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} modelBusy={modelBusy} modelProgress={modelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} /></RouteBoundary>
             : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>
       <CommandPalette
-        chats={chats}
+        chats={visibleChats}
         localModels={localModels}
         selectedModel={selectedModel}
         onNewChat={() => navigate("/chat/new")}
