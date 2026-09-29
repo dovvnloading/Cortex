@@ -1098,6 +1098,72 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
   .execution-task-tray { top: auto; right: 12px; bottom: 12px; width: calc(100vw - 24px); max-height: calc(100vh - 80px); }
 }
 
+/* Windows High Contrast ------------------------------------------------------
+   In forced-colors mode the browser discards author box-shadows and replaces
+   author colours and backgrounds with the user's system palette. This
+   stylesheet paints keyboard focus, on/off state and "current item" with
+   exactly those things, so without this block a keyboard user cannot see where
+   focus is, and every toggle looks off. Everything here restores one of those
+   signals using system colour keywords only, so it follows whatever palette
+   the person has chosen. styles/forcedColors.test.ts fails if a rule that
+   removes a focus outline has no counterpart in this block. */
+@media (forced-colors: active) {
+  /* Focus: fields and wrappers whose ring is a box-shadow. */
+  :focus-visible,
+  .field-label input:focus, .field-label select:focus, .field-label textarea:focus, .inline-form input:focus,
+  .input-with-icon:focus-within,
+  .sidebar-search:focus-within,
+  .composer-surface:has(textarea:focus-visible),
+  .model-picker-search:focus-within,
+  .model-picker-empty:focus-visible,
+  .memory-list-item input:focus-visible,
+  .range-field-value:focus,
+  .range-input:focus-visible,
+  .params-trigger:focus-visible,
+  .composer-attachment-remove:focus-visible,
+  .toggle-row input[type="checkbox"]:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+
+  /* Focus and highlight inside a menu, listbox or palette: the row is only
+     ever tinted, so outline it. Inset, because these sit in clipped popups. */
+  .rounded-picker-option:focus-visible,
+  .select-item[data-highlighted],
+  .chat-row-menu-item:focus-visible,
+  .model-picker-option[data-highlighted],
+  .command-palette-item[data-selected="true"],
+  .command-palette-input:focus { outline: 2px solid Highlight; outline-offset: -2px; }
+
+  /* The current chat, settings section, segment or model: an inset bar or a
+     tinted fill in the normal theme, which forced colours flatten. */
+  .chat-row-active,
+  .settings-tab-active,
+  .segmented-option-checked,
+  .model-choice-selected { outline: 2px solid Highlight; outline-offset: -2px; }
+
+  /* Toggle switch. State is a background colour and a thumb colour, both of
+     which are overridden, so draw it from system colours: a filled Highlight
+     track with a check mark when on, an empty track when off. */
+  .toggle-row input[type="checkbox"] { forced-color-adjust: none; border-color: ButtonText; background: Canvas; }
+  .toggle-row input[type="checkbox"]::after { background: ButtonText; }
+  .toggle-row input[type="checkbox"]:checked { border-color: Highlight; background: Highlight; }
+  .toggle-row input[type="checkbox"]:checked::after { background: HighlightText; }
+  .toggle-row input[type="checkbox"]:checked::before { content: "✓"; position: absolute; top: 50%; left: 8px; color: HighlightText; font-size: var(--text-xs); font-weight: var(--weight-bold); line-height: 1; transform: translateY(-50%); }
+  .toggle-row input[type="checkbox"]:disabled { border-color: GrayText; }
+  .toggle-row input[type="checkbox"]:disabled::after { background: GrayText; }
+
+  /* Slider: forced colours do not paint a gradient background-image at all, so
+     the track vanishes (only the thumb is left). Opt the control out and draw
+     track and thumb from system colours; the default-value notch is a plain
+     background and gets the same treatment. */
+  .range-input { forced-color-adjust: none; }
+  .range-input::-webkit-slider-runnable-track { background: linear-gradient(to right, Highlight 0 var(--range-fill), ButtonText var(--range-fill) 100%); }
+  .range-input::-webkit-slider-thumb { border-color: ButtonText; background: ButtonFace; }
+  .range-field-default { forced-color-adjust: none; background: ButtonText; opacity: 1; }
+
+  /* Progress: the filled portion is a background on an empty track. */
+  .progress-track { border: 1px solid ButtonText; }
+  .progress-track span { forced-color-adjust: none; background: Highlight; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   .loading-spinner, .composer-control-spinner, .model-picker-status-starting, .generation-status-dots i, .streaming-caret { animation: none !important; }
