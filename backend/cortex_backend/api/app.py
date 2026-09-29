@@ -206,7 +206,16 @@ def create_app(
     default_gguf_models_dir: Path | None = None,
     closeables: Iterable[object] = (),
 ) -> FastAPI:
-    """Create a request-safe local API without import-time side effects."""
+    """Create a request-safe local API without import-time side effects.
+
+    CORS is deliberately kept, not removed. The production bundle is served from
+    the API's own origin and the dev server proxies ``/api``, so neither needs
+    it -- but the client also accepts an explicit loopback ``VITE_API_BASE_URL``
+    (see ``normalizeApiBaseUrl``), and a page on another loopback port can only
+    reach the API through a preflight that allows every header the client
+    sends: ``Authorization``, ``Content-Type``, ``Last-Event-ID`` and the
+    launcher's ``X-Cortex-Handoff``. Only loopback origins are allowed.
+    """
     if allowed_hosts is None:
         allowed = (
             tuple(session_manager.allowed_hosts)
@@ -411,7 +420,12 @@ def create_app(
         CORSMiddleware,
         allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$",
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Last-Event-ID",
+            "X-Cortex-Handoff",
+        ],
         max_age=600,
     )
     app.include_router(build_router(), prefix="/api/v1")

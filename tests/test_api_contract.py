@@ -642,6 +642,46 @@ def test_generation_conflict_and_cancellation_are_explicit():
         ]
 
 
+def _preflight(client: TestClient, *, origin: str, headers: str, path: str = "/api/v1/session/handoff"):
+    return client.options(
+        path,
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": headers,
+        },
+    )
+
+
+def test_preflight_allows_the_handoff_header():
+    """A page on another loopback port can renew its session.
+
+    The client sends ``X-Cortex-Handoff`` on ``POST /session/handoff``. The
+    preflight used to leave it off the allow list, so a client pointed at a
+    loopback API origin could not rebootstrap after its session expired.
+    """
+
+    _, client = _client()
+    with client:
+        allowed = _preflight(
+            client,
+            origin="http://localhost:5173",
+            headers="x-cortex-handoff, content-type, authorization, last-event-id",
+        )
+        assert allowed.status_code == 200
+        assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+        offered = {
+            name.strip().lower()
+            for name in allowed.headers["access-control-allow-headers"].split(",")
+        }
+        assert {"x-cortex-handoff", "authorization", "content-type", "last-event-id"} <= offered
+
+        # The list is exact, and only loopback origins are trusted.
+        assert _preflight(client, origin="http://localhost:5173", headers="x-something-else").status_code == 400
+        assert _preflight(client, origin="https://example.test", headers="x-cortex-handoff").status_code == 400
+        assert _preflight(client, origin="http://localhost.example.test", headers="x-cortex-handoff").status_code == 400
+
+
 def test_generation_routes_refuse_non_generation_jobs():
     """``/generations`` is the chat family; a model job is not its to read or stop.
 
