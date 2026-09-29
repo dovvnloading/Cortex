@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
-import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,7 @@ from cortex_backend.repositories.chats import (
 )
 from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.testing.fake_ollama import FakeOllamaState
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 
@@ -61,13 +61,6 @@ def test_sqlite_chat_revision_conflict_is_atomic(tmp_path: Path):
     assert [message["content"] for message in chat["messages"]] == ["one"]
 
 
-
-def _events(body: str) -> list[dict]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 def test_message_route_rejects_a_stale_base_revision():
