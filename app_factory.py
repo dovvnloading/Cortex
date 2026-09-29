@@ -193,6 +193,7 @@ def build_app(
         llamacpp_manager=llamacpp_manager,
         llamacpp_chat_client=llamacpp_chat_client,
         default_gguf_models_dir=paths.default_gguf_models_dir,
+        closeables=(client,),
     )
     app.state.execution_repository = execution_repository
     app.state.required_paths = (

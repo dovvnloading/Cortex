@@ -66,6 +66,7 @@ def create_app(
     llamacpp_manager: LlamaServerManager | None = None,
     llamacpp_chat_client: object | None = None,
     default_gguf_models_dir: Path | None = None,
+    closeables: Iterable[object] = (),
 ) -> FastAPI:
     """Create a request-safe local API without import-time side effects."""
     if allowed_hosts is None:
@@ -183,6 +184,19 @@ def create_app(
                             logger.exception(
                                 "Cortex llama.cpp chat client shutdown raised; continuing teardown."
                             )
+                # Other owned clients (the Ollama HTTP client). An abandoned
+                # worker blocked in one of their reads is otherwise joined by
+                # the interpreter's exit hook, which can wait out the read
+                # timeout; closing the client cuts that connection.
+                for resource in app.state.closeables:
+                    close = getattr(resource, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.exception(
+                                "Cortex client shutdown raised; continuing teardown."
+                            )
 
     app = FastAPI(
         title="Cortex Local API",
@@ -227,6 +241,7 @@ def create_app(
     app.state.ollama_setup_url = "https://ollama.com/download"
     app.state.llamacpp_manager = llamacpp_manager
     app.state.llamacpp_chat_client = llamacpp_chat_client
+    app.state.closeables = tuple(closeables)
     app.state.default_gguf_models_dir = default_gguf_models_dir or (
         Path(tempfile.gettempdir()) / "cortex-gguf-models"
     )

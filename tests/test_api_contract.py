@@ -8,7 +8,8 @@ import subprocess
 import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from threading import Event
+from threading import Event, Thread
+import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -27,6 +28,7 @@ from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
 from support import parse_sse_events as _events
 from support import session_headers as _session
+from support import wait_until
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
@@ -1126,6 +1128,302 @@ def test_lifespan_closes_llama_resources_when_execution_start_raises():
 
     assert fake_manager.closed is True
     assert fake_chat_client.closed is True
+
+
+def test_lifespan_closes_owned_clients_and_keeps_going_when_one_raises():
+    """The Ollama client is closed at shutdown, and one bad close stops nothing.
+
+    An abandoned worker blocked in an Ollama read is otherwise joined by the
+    interpreter's exit hook, which can wait out the 600 second read timeout.
+    """
+
+    class _Closeable:
+        def __init__(self, *, raises: bool = False) -> None:
+            self.closed = False
+            self._raises = raises
+
+        def close(self) -> None:
+            self.closed = True
+            if self._raises:
+                raise RuntimeError("synthetic close failure")
+
+    failing = _Closeable(raises=True)
+    healthy = _Closeable()
+    app = create_app(
+        build_demo_dependencies(),
+        allowed_hosts=ALLOWED_HOSTS,
+        closeables=(failing, healthy, object()),
+    )
+
+    with TestClient(app):
+        assert not failing.closed and not healthy.closed
+
+    assert failing.closed is True
+    assert healthy.closed is True
+
+
+def test_build_app_hands_the_ollama_client_to_the_lifespan_to_close(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    import app_factory
+
+    closed: list[object] = []
+
+    class _RecordingClient(app_factory.ollama.Client):
+        def close(self) -> None:
+            closed.append(self)
+            super().close()
+
+    monkeypatch.setattr(app_factory.ollama, "Client", _RecordingClient)
+    app = app_factory.build_app(data_dir=tmp_path / "app-data", serve_frontend=False)
+
+    with TestClient(app):
+        assert closed == []
+
+    assert len(closed) == 1
+    assert isinstance(closed[0], _RecordingClient)
+
+
+class _HoldsUntilCancelledEngine:
+    """A generation that stays open until it is asked to stop."""
+
+    def __init__(self, inner, *, started: Event) -> None:
+        self._inner = inner
+        self._started = started
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def generate(self, *, cancellation_event=None, **_kwargs):
+        from cortex_backend.core.generation import ModelOperationError
+
+        self._started.set()
+        assert cancellation_event is not None
+        if not cancellation_event.wait(10):
+            raise AssertionError("the generation was never cancelled")
+        raise ModelOperationError("Generation was cancelled.", operation="generation")
+
+
+def _read_stream_in_thread(client: TestClient, url: str, headers: dict[str, str]):
+    """Open ``url`` on a thread; return (thread, finished event, body holder)."""
+
+    finished = Event()
+    body: list[str] = []
+
+    def read() -> None:
+        try:
+            with client.stream("GET", url, headers=headers) as response:
+                body.append("".join(response.iter_text()))
+        finally:
+            finished.set()
+
+    thread = Thread(target=read, name="test-open-stream", daemon=True)
+    thread.start()
+    return thread, finished, body
+
+
+def test_system_shutdown_ends_an_open_generation_stream_promptly():
+    """Quitting mid-generation must not wait on a stream that waits on the quit.
+
+    uvicorn drains open responses before it runs the lifespan teardown that
+    cancels jobs, and a generation stream only ends when its job does -- so
+    with the stream attached, nothing ever finished. Shutdown now cancels the
+    jobs first, and the stream both delivers that outcome and ends.
+    """
+
+    started = Event()
+    dependencies = build_demo_dependencies()
+    inner_factory = dependencies.generation._engine_factory
+    dependencies.generation._engine_factory = lambda snapshot: _HoldsUntilCancelledEngine(
+        inner_factory(snapshot), started=started
+    )
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    server_stops: list[bool] = []
+    app.state.shutdown_callback = lambda: server_stops.append(True)
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "shutdown-1", "user_input": "explain it"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+        assert started.wait(10)
+
+        thread, finished, body = _read_stream_in_thread(
+            client, f"/api/v1/generations/{job_id}/events", headers
+        )
+        # The stream is open once the registry counts it as an attached reader.
+        wait_until(
+            lambda: app.state.jobs._records[job_id].live_cursors,
+            describe="the event stream to attach",
+        )
+        assert not finished.is_set()
+
+        began = time.monotonic()
+        shutdown = client.post("/api/v1/system/shutdown", headers=headers)
+        assert shutdown.status_code == 200
+        assert finished.wait(5), "the open generation stream outlived the shutdown request"
+        elapsed = time.monotonic() - began
+        thread.join(timeout=5)
+
+    assert server_stops == [True]
+    assert elapsed < 3.0
+    names = [event["event"] for event in _events(body[0])]
+    assert names[-2:] == ["generation.cancelling", "generation.cancelled"]
+
+
+def test_system_shutdown_ends_an_open_execution_stream_promptly(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A job parked on an approval emits nothing, so its stream had no end at all."""
+
+    from cortex_backend.api.routers import execution as execution_routes
+    from cortex_backend.execution.repository import ExecutionRepository
+    from cortex_backend.testing import DurableFakeCoordinator, install_execution_preview
+
+    # Without the fix the stream ends on this cap; make it long enough that the
+    # assertion below can only be met by observing the shutdown.
+    monkeypatch.setattr(execution_routes, "EXECUTION_STREAM_IDLE_TIMEOUT_SECONDS", 8.0)
+    repository = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts")
+    app = install_execution_preview(
+        create_app(
+            build_demo_dependencies(),
+            allowed_hosts=ALLOWED_HOSTS,
+            execution_coordinator=DurableFakeCoordinator(repository),
+        )
+    )
+    app.state.shutdown_callback = lambda: None
+
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        token = headers["Authorization"].removeprefix("Bearer ")
+        owner = app.state.session_manager.authenticate(token).installation_principal_id
+        repository.create_job(
+            job_id="parked-job",
+            owner=owner,
+            request_id="parked-request",
+            profile="artifact.extended.v1",
+            payload={},
+        )
+        repository.request_approval(
+            "parked-job",
+            owner=owner,
+            scope_digest="server-bound-scope",
+            reason="Create a larger staged image preview.",
+            ttl_seconds=60.0,
+        )
+
+        thread, finished, body = _read_stream_in_thread(
+            client, "/api/v1/execution/parked-job/events", headers
+        )
+        assert not finished.wait(0.5), "the stream ended before shutdown was requested"
+
+        began = time.monotonic()
+        assert client.post("/api/v1/system/shutdown", headers=headers).status_code == 200
+        assert finished.wait(5), "the open execution stream outlived the shutdown request"
+        elapsed = time.monotonic() - began
+        thread.join(timeout=5)
+
+    assert elapsed < 3.0
+    assert "execution.queued" in body[0]
+
+
+def test_job_registry_begin_shutdown_cancels_jobs_without_waiting_for_them():
+    async def exercise():
+        registry = JobRegistry(poll_seconds=0.001)
+        started = Event()
+        release = Event()
+
+        def runner(_sink, cancel_event):
+            started.set()
+            release.wait(timeout=5)
+            return {"cancelled": cancel_event.is_set()}
+
+        job = await registry.start(
+            kind="generation", owner="owner", thread_id="thread-1", runner=runner
+        )
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("worker did not start")
+
+        registry.begin_shutdown()
+        registry.begin_shutdown()  # a second call, as the lifespan teardown makes, is inert
+
+        snapshot = registry.status(job.job_id, owner="owner")
+        assert snapshot.status == "cancelling"
+        events = [event.status for event in registry._records[job.job_id].events]
+        assert events.count("cancelling") == 1
+        try:
+            await registry.start(
+                kind="generation", owner="owner", thread_id="thread-2", runner=runner
+            )
+        except JobConflict:
+            pass
+        else:
+            raise AssertionError("a registry that began shutting down accepted new work")
+
+        release.set()
+        await registry.shutdown()
+        assert registry.status(job.job_id, owner="owner").status == "cancelled"
+
+    asyncio.run(exercise())
+
+
+def test_job_event_stream_ends_when_told_to_stop_even_if_its_job_never_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from cortex_backend.api import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "STREAM_STOP_FLUSH_SECONDS", 0.05)
+
+    async def exercise():
+        registry = JobRegistry(poll_seconds=0.001, shutdown_grace_seconds=0.05)
+        started = Event()
+        release = Event()
+
+        def stuck_runner(_sink, _cancel_event):
+            started.set()
+            release.wait(timeout=5)  # ignores cancellation, like a blocked model read
+            return {}
+
+        job = await registry.start(
+            kind="generation", owner="owner", thread_id="thread-1", runner=stuck_runner
+        )
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("worker did not start")
+
+        stopping = Event()
+        seen: list[str] = []
+
+        async def consume():
+            async for event in registry.events(
+                job.job_id, owner="owner", stop=stopping.is_set
+            ):
+                seen.append(event.status)
+
+        consumer = asyncio.create_task(consume())
+        await asyncio.sleep(0.05)
+        assert not consumer.done(), "the stream must stay open until it is told to stop"
+
+        registry.begin_shutdown()
+        stopping.set()
+        await asyncio.wait_for(consumer, timeout=2.0)
+
+        # It delivered what had been published, then ended without a terminal event.
+        assert seen[-1] == "cancelling"
+        assert registry.status(job.job_id, owner="owner").status == "cancelling"
+        release.set()
+        await registry.shutdown()
+
+    asyncio.run(exercise())
 
 
 def test_concurrent_settings_updates_have_one_winner_and_no_lost_overwrite():

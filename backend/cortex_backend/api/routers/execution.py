@@ -558,7 +558,10 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         # connection demonstrably alive while a job waits on
                         # an approval that emits nothing.
                         yield ": keep-alive\n\n"
-                if await request.is_disconnected():
+                # Events already available were flushed above. An open stream
+                # would otherwise hold graceful shutdown open for as long as
+                # its job runs, so end it once shutdown has been requested.
+                if request.app.state.shutting_down or await request.is_disconnected():
                     return
                 await asyncio.sleep(EXECUTION_STREAM_POLL_SECONDS)
 
