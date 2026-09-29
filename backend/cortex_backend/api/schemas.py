@@ -102,6 +102,10 @@ class LlamaCppRuntimeStatus(APIModel):
     # increase, crash with exit code, unresponsive). A model reload costs
     # minutes; it is never anonymous.
     last_restart_reason: str | None = None
+    # The context window the running server reports for itself, in tokens,
+    # which can differ from the size that was requested. Null while nothing is
+    # ready or when the server did not report one.
+    loaded_context: int | None = None
 
 
 class SystemResponse(APIModel):

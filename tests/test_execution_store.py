@@ -19,6 +19,7 @@ from cortex_backend.execution.repository import (
 from cortex_backend.testing import DurableFakeCoordinator
 from cortex_backend.testing import FakeExecutionPlan
 from cortex_backend.execution.repository import ApprovalPolicyError, ApprovalTransitionError
+from support import wait_until
 
 
 def _repository(tmp_path):
@@ -29,7 +30,7 @@ def _repository(tmp_path):
     )
 
 
-def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path):
+def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     with repository.connect() as connection:
         assert connection.execute("SELECT version FROM execution_schema WHERE id = 1").fetchone()[0] == 3
@@ -62,8 +63,8 @@ def test_durable_idempotency_event_replay_and_restart_recovery(tmp_path):
     assert duplicate_created is False
     assert duplicate.job_id == first.job_id
 
-    repository.claim_lease(first.job_id, lease_owner="dead-coordinator", ttl_seconds=0.01)
-    time.sleep(0.03)
+    repository.claim_lease(first.job_id, lease_owner="dead-coordinator", ttl_seconds=30)
+    frozen_clock.advance(31)
     assert repository.recover_expired_leases() == [first.job_id]
 
     restarted = ExecutionRepository(tmp_path / "execution.sqlite", tmp_path / "artifacts", max_artifact_bytes=64)
@@ -87,7 +88,117 @@ def test_leases_reject_live_foreign_owner_and_allow_expiry_recovery(tmp_path):
         repository.claim_lease(job.job_id, lease_owner="coordinator-b", ttl_seconds=10)
 
 
-def test_expired_lease_does_not_resurrect_a_persisted_cancellation(tmp_path):
+def test_lease_expiry_is_driven_by_the_repository_clock_not_wall_time(tmp_path, frozen_clock):
+    """An hour-long lease lapses the instant the clock says so, with no waiting."""
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-clock-lease",
+        owner="session-a",
+        request_id="request-clock-lease",
+        profile="fake.v1",
+        payload={},
+    )
+    repository.claim_lease(job.job_id, lease_owner="coordinator-a", ttl_seconds=3600)
+
+    frozen_clock.advance(3599)
+    with pytest.raises(LeaseConflict):
+        repository.claim_lease(job.job_id, lease_owner="coordinator-b", ttl_seconds=3600)
+    assert repository.recover_expired_leases() == []
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+
+    frozen_clock.advance(2)
+    assert repository.recover_expired_leases() == [job.job_id]
+    assert repository.lease_holder(job.job_id) is None
+    repository.claim_lease(job.job_id, lease_owner="coordinator-b", ttl_seconds=3600)
+    assert repository.lease_holder(job.job_id) == "coordinator-b"
+
+
+def test_an_approval_expires_by_the_repository_clock_not_wall_time(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-clock-approval",
+        owner="session-a",
+        request_id="request-clock-approval",
+        profile="artifact.extended.v1",
+        payload={},
+    )
+    repository.request_approval(
+        job.job_id, owner="session-a", scope_digest="scope", reason="test", ttl_seconds=300
+    )
+
+    frozen_clock.advance(299)
+    assert repository.get_job(job.job_id).approval_state == "pending"
+    assert repository.expire_approvals() == []
+
+    frozen_clock.advance(2)
+    assert repository.get_job(job.job_id).approval_state == "expired"
+    assert repository.expire_approvals() == [job.job_id]
+
+
+def test_lease_holder_names_the_recorded_owner_until_release(tmp_path, frozen_clock):
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-lease-holder",
+        owner="session-a",
+        request_id="request-lease-holder",
+        profile="fake.v1",
+        payload={},
+    )
+    assert repository.lease_holder(job.job_id) is None
+    assert repository.lease_holder("job-that-does-not-exist") is None
+
+    repository.claim_lease(job.job_id, lease_owner="coordinator-a", ttl_seconds=30)
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+
+    # It reports the row, not liveness: an expired lease still names its owner.
+    frozen_clock.advance(31)
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+
+    repository.release_lease(job.job_id, lease_owner="someone-else")
+    assert repository.lease_holder(job.job_id) == "coordinator-a"
+    repository.release_lease(job.job_id, lease_owner="coordinator-a")
+    assert repository.lease_holder(job.job_id) is None
+
+
+def test_a_lease_lapses_in_real_time_and_the_restarted_coordinator_finishes_the_job(tmp_path):
+    """The one test that runs on the real clock, so the frozen-clock ones stay honest.
+
+    It never asserts that the lease is still live, so a stalled machine cannot
+    fail it; it waits for the wall clock to pass the expiry the repository
+    reported and then bounds the recovery with coordinator.wait.
+    """
+    repository = _repository(tmp_path)
+    job, _ = repository.create_job(
+        job_id="job-real-time-lease",
+        owner="session-a",
+        request_id="request-real-time-lease",
+        profile="fake.v1",
+        payload={
+            "provider": "fake-v1",
+            "outcome": "success",
+            "steps": 2,
+            "step_delay_seconds": 0.01,
+            "failure_message": "Deterministic fake execution failed.",
+        },
+    )
+    expires_at = datetime.fromisoformat(
+        repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.25)
+    )
+    wait_until(
+        lambda: datetime.now(timezone.utc) > expires_at,
+        describe="the wall clock to pass the lease expiry",
+    )
+
+    coordinator = DurableFakeCoordinator(repository)
+    try:
+        finished = coordinator.wait(job.job_id, timeout=10.0)
+        assert finished.status == "succeeded"
+        assert [event.event for event in repository.events(job.job_id)].count("recovered") == 1
+    finally:
+        coordinator.shutdown()
+
+
+def test_expired_lease_does_not_resurrect_a_persisted_cancellation(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
         job_id="job-cancelled-before-restart",
@@ -99,10 +210,10 @@ def test_expired_lease_does_not_resurrect_a_persisted_cancellation(tmp_path):
     repository.claim_lease(
         job.job_id,
         lease_owner="dead-coordinator",
-        ttl_seconds=0.01,
+        ttl_seconds=30,
     )
     repository.request_cancel(job.job_id)
-    time.sleep(0.03)
+    frozen_clock.advance(31)
 
     assert repository.recover_expired_leases() == [job.job_id]
     recovered = repository.get_job(job.job_id)
@@ -386,7 +497,7 @@ def test_fake_coordinator_cancellation_is_terminal_and_ordered(tmp_path):
         coordinator.shutdown()
 
 
-def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_path):
+def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     fake_job, _ = repository.create_job(
         job_id="job-approval-fake",
@@ -452,9 +563,10 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
         owner="session-a",
         scope_digest="scope",
         reason="test",
-        ttl_seconds=0.01,
+        ttl_seconds=30,
     ) == "pending"
-    time.sleep(0.03)
+    assert repository.get_job(expiring.job_id).approval_state == "pending"
+    frozen_clock.advance(31)
     assert repository.get_job(expiring.job_id).approval_state == "expired"
     assert repository.get_approval(expiring.job_id).state == "expired"
     with pytest.raises(ApprovalTransitionError, match="expired"):
@@ -487,9 +599,9 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
         owner="session-a",
         scope_digest="scope",
         reason="test cleanup",
-        ttl_seconds=0.01,
+        ttl_seconds=30,
     )
-    time.sleep(0.03)
+    frozen_clock.advance(31)
     assert repository.expire_approvals() == [cleanup.job_id]
     cleaned = repository.get_job(cleanup.job_id)
     assert cleaned.status == "cancelled"
@@ -498,7 +610,7 @@ def test_approval_state_is_profile_gated_strict_and_expires_before_cleanup(tmp_p
     assert repository.events(cleanup.job_id)[-1].event == "cancelled"
 
 
-def test_create_job_duplicate_request_reports_real_approval_state(tmp_path):
+def test_create_job_duplicate_request_reports_real_approval_state(tmp_path, frozen_clock):
     """A retried POST for a job that requires approval must report the real
     approval_state, not silently fall back to "not_required".
 
@@ -555,11 +667,11 @@ def test_create_job_duplicate_request_reports_real_approval_state(tmp_path):
             owner="session-a",
             scope_digest="scope",
             reason="test",
-            ttl_seconds=0.01,
+            ttl_seconds=30,
         )
         == "pending"
     )
-    time.sleep(0.03)
+    frozen_clock.advance(31)
 
     retried_expired, retried_expired_created = repository.create_job(
         job_id="job-approval-retry-expiring-duplicate",
@@ -618,7 +730,7 @@ def test_concurrent_approval_decisions_commit_exactly_once(tmp_path):
         assert final.status == "queued"
 
 
-def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(tmp_path):
+def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
         job_id="job-restart",
@@ -633,8 +745,8 @@ def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(t
             "failure_message": "Deterministic fake execution failed.",
         },
     )
-    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
-    time.sleep(0.03)
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=30)
+    frozen_clock.advance(31)
 
     coordinator = DurableFakeCoordinator(repository)
     try:
@@ -650,7 +762,7 @@ def test_recovery_supervisor_reclaims_stale_fake_job_once_and_blocks_live_peer(t
         coordinator.shutdown()
 
 
-def test_recovery_supervisor_fails_closed_on_malformed_payload(tmp_path):
+def test_recovery_supervisor_fails_closed_on_malformed_payload(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
     job, _ = repository.create_job(
         job_id="job-restart-invalid",
@@ -659,8 +771,8 @@ def test_recovery_supervisor_fails_closed_on_malformed_payload(tmp_path):
         profile="fake.v1",
         payload={"provider": "host-process"},
     )
-    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=0.01)
-    time.sleep(0.03)
+    repository.claim_lease(job.job_id, lease_owner="dead-worker", ttl_seconds=30)
+    frozen_clock.advance(31)
 
     coordinator = DurableFakeCoordinator(repository)
     try:
@@ -672,9 +784,11 @@ def test_recovery_supervisor_fails_closed_on_malformed_payload(tmp_path):
         coordinator.shutdown()
 
 
-def test_supervisor_lease_expiry_is_reclaimable(tmp_path):
+def test_supervisor_lease_expiry_is_reclaimable(tmp_path, frozen_clock):
     repository = _repository(tmp_path)
-    repository.claim_supervisor_lease(lease_owner="dead-supervisor", ttl_seconds=0.01)
-    time.sleep(0.03)
+    repository.claim_supervisor_lease(lease_owner="dead-supervisor", ttl_seconds=30)
+    with pytest.raises(LeaseConflict):
+        repository.claim_supervisor_lease(lease_owner="new-supervisor", ttl_seconds=10)
+    frozen_clock.advance(31)
     repository.claim_supervisor_lease(lease_owner="new-supervisor", ttl_seconds=10)
     repository.release_supervisor_lease(lease_owner="new-supervisor")

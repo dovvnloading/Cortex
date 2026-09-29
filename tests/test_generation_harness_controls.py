@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
-from typing import Any
 import unittest
 
 from fastapi.testclient import TestClient
@@ -18,16 +16,10 @@ from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyData
 from cortex_backend.repositories.storage import DatabaseManager
 from cortex_backend.services.llm import _extract_stats
 from cortex_backend.testing.fake_ollama import FAKE_GENERATION_STATS
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 
-
-def _events(body: str) -> list[dict[str, Any]]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 class GenerationOptionsMergeTests(unittest.TestCase):

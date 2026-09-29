@@ -22,9 +22,9 @@ python -m pip install -r requirements-dev.txt
 python main.py --dev
 ```
 
-Install a small local model for smoke checks, for example
-`nemotron-3-nano:4b`. Do not use real prompts, responses, memories, or user
-data in tests or logs.
+Install a small local model for smoke checks; the README's quick start names
+one, and any model you already have works too. Do not use real prompts,
+responses, memories, or user data in tests or logs.
 
 `requirements.txt` and `requirements-dev.txt` intentionally carry loose
 version ranges so your local environment isn't forced onto one exact set of
@@ -58,13 +58,13 @@ One script runs the repository's fast quality gates on your machine:
 ./scripts/check.ps1
 ```
 
-That is the `quick` tier -- environment and lockfile checks, lint, backend
-tests, contract drift, the artifact-boundary review, and frontend
-types/lint/unit tests. The lockfile check needs `uv` (`python -m pip install
-uv`); without it that one step reports `skip` rather than failing, and CI still
-enforces it. Before opening a pull request, run the `full` tier, which adds
-`compileall`, the Playwright browser installation and tests, and the bundle
-build:
+That is the `quick` tier -- environment and lockfile checks, Ruff, the workflow
+linters, the `mypy` type check, backend tests, the artifact-boundary review,
+contract drift, and frontend types/lint/unit tests. The lockfile check needs
+`uv` (`python -m pip install uv`); without it that one step reports `skip`
+rather than failing, and CI still enforces it. Before opening a pull request,
+run the `full` tier, which adds `compileall`, the Playwright browser
+installation and tests, and the bundle build:
 
 ```powershell
 ./scripts/check.ps1 -Tier full
@@ -87,18 +87,27 @@ git config core.hooksPath .githooks
 The `pre-push` hook then runs the `quick` tier and aborts the push if anything
 fails. Bypass it in an emergency with `git push --no-verify`.
 
-The individual commands, if you prefer to run them by hand:
+The individual commands, if you prefer to run them by hand. These are the steps
+`check.ps1` runs and CI's `fast` job runs; the quick tier skips the ones marked
+`full tier`:
 
 ```powershell
-python -m pytest
-python -m compileall -q main.py backend
+python scripts/check_dev_environment.py
+python -m ruff check backend tests tools main.py app_factory.py
+python -m mypy
+python -m pytest -q
+python tools/artifact_boundary_review.py --json --strict
+python tools/generate_contracts.py --check
+python -m compileall -q main.py app_factory.py backend   # full tier
 
 Push-Location frontend
 npm ci
 npm run typecheck
 npm run lint
 npm test -- --run
-npm run build
+npx playwright install chromium   # full tier
+npm run e2e -- --workers=1        # full tier
+npm run build                     # full tier
 Pop-Location
 ```
 
@@ -131,19 +140,48 @@ The GitHub Actions workflows are part of the code and get the same treatment:
   opens one grouped pull request. A pull request opened by a workflow does
   not start CI on its own: close and reopen it, or push to its branch.
 
+### Bumping the pinned llama.cpp release
+
+Cortex downloads a Windows llama.cpp build on demand and trusts only the
+SHA-256 values pinned in `backend/cortex_backend/llamacpp/binary_release.py`
+(`CURRENT_RELEASE`), because upstream publishes no checksums. To move to a newer
+build:
+
+1. Pick a `bNNNN` release tag from the ggml-org/llama.cpp releases page.
+2. Run `python tools/pin_llamacpp_release.py bNNNN`. It downloads the CPU and
+   Vulkan Windows archives (roughly 50-150 MB each) and prints a
+   `PinnedRelease(...)` literal holding each archive's SHA-256 and the hash of
+   its whole extracted directory. Run it deliberately, never from CI: it makes
+   real downloads.
+3. Paste the literal over the value of `CURRENT_RELEASE` and update the comment
+   above it with the new tag and date. The tool does not edit the file.
+4. Run `python -m pytest -q tests/test_llamacpp_binary_fetcher.py
+   tests/test_llamacpp_server_manager.py`, then load a GGUF model once from a
+   source checkout to confirm the new `llama-server` still accepts the flags
+   Cortex passes. Nothing checks that automatically today.
+
 ## Pull requests
 
 - Keep each pull request limited to one staged architectural concern.
 - Do not stage local databases, frontend build output, credentials, or private
   planning files.
 - Add focused tests for behavior, persistence compatibility, and safe failure.
-- Update the README and changelog for user-visible runtime changes.
+- Update the README for user-visible runtime changes, and add a
+  `Change_Log.md` entry under `[Unreleased]` for any user-visible change.
 - Include a rollback procedure for data or launcher changes.
 - Use Conventional Commit subjects, for example
   `fix(storage): preserve legacy chat migration sources`.
+- Fill in the pull request template; its headings are the handoff list in
+  [AGENTS.md](AGENTS.md).
 
-The repository workflow uses draft pull requests, required CI, review before
-ready status, and squash merges into `main`.
+What the repository enforces, and what it does not: CI runs on every pull
+request and every push to `main`, and a change should not be merged until it is
+green. That is a convention, not a rule GitHub applies -- `main` has no branch
+protection or ruleset, so a failing check does not block a merge. There is no
+required reviewer, because Cortex has a single maintainer. Changes are
+squash-merged so each pull request becomes one Conventional Commit on `main`;
+the repository settings also still allow merge commits and rebase merges, so
+that is a convention too.
 
 ## Releasing
 
@@ -151,8 +189,9 @@ The version is written once, in `backend/cortex_backend/__init__.py`;
 `frontend/package.json` must match it (a test enforces this), and
 `python tools/generate_contracts.py --write` carries it into the API contract.
 
-1. Merge a pull request that sets the new version and adds its changelog
-   entry.
+1. Merge a pull request that sets the new version and turns the changelog's
+   `[Unreleased]` section into `## [<version>] - <date>`, leaving a fresh empty
+   `[Unreleased]` above it.
 2. Tag that commit on `main` as `v<version>` and push the tag. The release
    workflow refuses a tag that disagrees with the declared version, builds and
    smoke-tests the Windows package from the tag, and opens a **draft** release

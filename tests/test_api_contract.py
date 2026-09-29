@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -26,6 +25,7 @@ from cortex_backend.core.settings import CortexSettings, TranslationSettings
 from cortex_backend.services.chat import ChatDomainError
 from cortex_backend.services.progress import ProgressEvent, ProgressSink
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 
@@ -40,13 +40,6 @@ def _client(state: FakeOllamaState | None = None):
     return app, TestClient(app)
 
 
-
-def _events(body: str) -> list[dict]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 def test_generation_stream_openapi_declares_sse_media_type():

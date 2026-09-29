@@ -2377,6 +2377,17 @@
             ],
             "title": "Last Restart Reason"
           },
+          "loaded_context": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loaded Context"
+          },
           "loaded_model": {
             "anyOf": [
               {

@@ -308,8 +308,16 @@ class LocalExecutionCoordinator:
             if job.status in TerminalExecutionStatus:
                 return job
             if time.monotonic() >= deadline:
-                raise TimeoutError("execution job did not reach a terminal state")
+                raise TimeoutError(
+                    f"execution job {job_id} did not reach a terminal state "
+                    f"within {timeout:g}s (last status: {job.status})"
+                )
             time.sleep(0.005)
+
+    def active_code_job_ids(self) -> frozenset[str]:
+        """Return the code jobs whose worker thread has launched and not yet exited."""
+        with self._code_lock:
+            return frozenset(self._code_threads)
 
     def cancel(self, job_id: str, *, owner: str) -> ExecutionJob:
         job = self.repository.get_job(job_id, owner=owner)

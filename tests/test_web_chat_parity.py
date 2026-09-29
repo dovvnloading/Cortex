@@ -15,16 +15,10 @@ from cortex_backend.core.settings import CortexSettings, TranslationSettings
 from cortex_backend.repositories.settings import InMemorySettingsRepository
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.testing.fake_ollama import FakeOllamaState, create_fake_ollama_app
+from support import parse_sse_events as _events
 from support import session_headers as _session
 
 
-
-def _events(body: str) -> list[dict]:
-    return [
-        json.loads(line.removeprefix("data: "))
-        for line in body.splitlines()
-        if line.startswith("data: ")
-    ]
 
 
 def test_fake_ollama_streams_thinking_content_and_can_disconnect():
