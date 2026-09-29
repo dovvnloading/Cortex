@@ -566,20 +566,22 @@ def test_a_newer_database_is_refused_untouched_and_names_the_snapshot_to_restore
     refuse it. It now refuses first, and says which file goes back."""
     path = tmp_path / "newer.sqlite"
     _write_old_schema_database(path, user_version=99)
-    # What the newer release kept when it upgraded from versions 3 and 4, plus
-    # one from the future that this release could not read anyway.
-    for version in (3, 4, 7):
+    # What the newer release kept when it upgraded from versions 3 and 4 and from
+    # this release's own, plus one from the future that this release could not
+    # read anyway.
+    current = DatabaseManager.SCHEMA_VERSION
+    for version in (3, 4, current, current + 1):
         Path(f"{path}.pre-v{version}.bak").write_bytes(b"snapshot")
     before = path.read_bytes()
 
     with pytest.raises(PersistenceError, match=r"schema version 99") as refused:
         DatabaseManager(db_path=str(path))
 
-    assert "newer.sqlite.pre-v4.bak" in str(refused.value)
+    assert f"newer.sqlite.pre-v{current}.bak" in str(refused.value)
     # Restoring replaces the database, so the message says where to put it first.
     assert "move the current database" in str(refused.value)
     assert "written since the upgrade" in str(refused.value)
-    assert "pre-v7" not in str(refused.value)
+    assert f"pre-v{current + 1}" not in str(refused.value)
     assert str(tmp_path) not in str(refused.value)
     assert path.read_bytes() == before
 
@@ -711,14 +713,19 @@ def test_a_new_database_ends_up_with_the_same_shape_as_an_upgraded_one(tmp_path:
         assert _column_names(tmp_path / "fresh.sqlite", table) == _column_names(old, table)
 
 
-def _write_v4_database(path: Path) -> None:
-    """A database as the release before the revision column left it.
+ORIGINAL_OF_M1 = "m1 as the model wrote it"
 
-    Built from the ladder's own first four steps, so it has exactly the shape
-    that release created: two chats, one with three messages and one empty.
+
+def _write_database_at(path: Path, version: int) -> None:
+    """A database as the release that stopped at schema ``version`` left it.
+
+    Built from the ladder's own first ``version`` steps, so it has exactly the
+    shape that release created: two chats, one with three messages and one
+    empty. From version 5 on the busy chat's answer also carries the original
+    text that a translated answer keeps beside what it displays.
     """
     connection = sqlite3.connect(path)
-    for step in (1, 2, 3, 4):
+    for step in range(1, version + 1):
         storage._MIGRATIONS[step](connection)
     connection.execute(
         "INSERT INTO threads (id, title, timestamp) VALUES ('busy', 'Busy chat', '2026-01-02T00:00:00+00:00')"
@@ -731,7 +738,12 @@ def _write_v4_database(path: Path) -> None:
             "INSERT INTO messages (thread_id, role, content, timestamp) VALUES ('busy', ?, ?, ?)",
             (role, f"m{index}", f"2026-01-02T00:00:0{index}+00:00"),
         )
-    connection.execute("PRAGMA user_version = 4")
+    if version >= 5:
+        connection.execute(
+            "UPDATE messages SET original_content = ? WHERE thread_id = 'busy' AND content = 'm1'",
+            (ORIGINAL_OF_M1,),
+        )
+    connection.execute(f"PRAGMA user_version = {version}")
     connection.commit()
     connection.close()
 
@@ -749,61 +761,105 @@ def _message_texts(path: Path, thread_id: str) -> list[str]:
         probe.close()
 
 
-def test_a_v4_database_upgrades_with_each_chats_revision_set_to_its_message_count(tmp_path: Path) -> None:
+def _original_of(path: Path, content: str) -> str | None:
+    probe = sqlite3.connect(path)
+    try:
+        return probe.execute("SELECT original_content FROM messages WHERE content = ?", (content,)).fetchone()[0]
+    finally:
+        probe.close()
+
+
+def test_a_v4_database_upgrades_through_5_and_6_with_each_chats_revision_set_to_its_message_count(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "chats.sqlite"
-    _write_v4_database(path)
+    _write_database_at(path, 4)
 
     database = DatabaseManager(db_path=str(path))
 
+    assert _user_version(path) == 6
     assert database.load_chat_overview("busy")["revision"] == 3
     assert database.load_chat_overview("empty")["revision"] == 0
     assert [message["content"] for message in database.load_chat("busy")["messages"]] == ["m0", "m1", "m2"]
+    # Step 5 ran on the way: the column is there and the earlier answers have no original.
+    assert "original_content" in _column_names(path, "messages")
+    assert {message["original_content"] for message in database.load_chat("busy")["messages"]} == {None}
     assert "revision" in _column_names(path, "threads")
     # The upgrade kept what it started from, in the shape the previous release reads.
     snapshot = Path(f"{path}.pre-v4.bak")
     assert _user_version(snapshot) == 4
     assert "revision" not in _column_names(snapshot, "threads")
+    assert "original_content" not in _column_names(snapshot, "messages")
+    assert not Path(f"{path}.pre-v5.bak").exists()  # one snapshot per upgrade, of where it began
     # And the counter carries on from there.
     database.add_message("busy", "user", "next", expected_revision=3)
     assert database.load_chat_overview("busy")["revision"] == 4
 
 
+def test_a_v5_database_upgrades_to_v6_keeping_its_originals_and_backfilling_revisions(tmp_path: Path) -> None:
+    """A database written by the release that added ``original_content``."""
+    path = tmp_path / "chats.sqlite"
+    _write_database_at(path, 5)
+
+    database = DatabaseManager(db_path=str(path))
+
+    assert _user_version(path) == 6
+    assert database.load_chat_overview("busy")["revision"] == 3
+    assert database.load_chat_overview("empty")["revision"] == 0
+    messages = database.load_chat("busy")["messages"]
+    assert [message["content"] for message in messages] == ["m0", "m1", "m2"]
+    assert [message["original_content"] for message in messages] == [None, ORIGINAL_OF_M1, None]
+    snapshot = Path(f"{path}.pre-v5.bak")
+    assert _user_version(snapshot) == 5
+    assert "revision" not in _column_names(snapshot, "threads")
+    assert _original_of(snapshot, "m1") == ORIGINAL_OF_M1
+    assert not Path(f"{path}.pre-v4.bak").exists()
+    database.add_message("busy", "user", "next", expected_revision=3)
+    assert database.load_chat_overview("busy")["revision"] == 4
+
+
+@pytest.mark.parametrize("previous_release_reads", [4, 5], ids=["reads-4", "reads-5"])
 def test_the_previous_release_refuses_the_upgraded_database_and_the_named_snapshot_restores_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_release_reads: int
 ) -> None:
     """The rollback procedure for the revision column, end to end.
 
-    The release before it reads schema 4. It must refuse the upgraded file
-    without touching it and name the snapshot to go back to; following that
-    advice (move the database and its logs aside, copy the snapshot into place)
-    gives back every chat as it was when the upgrade ran.
+    Schema 6 is what this release writes. The release before it reads schema 5
+    and the one before that reads 4. Each must refuse the upgraded file without
+    touching it and name the snapshot to go back to; following that advice (move
+    the database and its logs aside, copy the snapshot into place) gives back
+    every chat as it was when the upgrade ran.
     """
     path = tmp_path / "chats.sqlite"
-    _write_v4_database(path)
+    _write_database_at(path, previous_release_reads)
     upgraded = DatabaseManager(db_path=str(path))
     upgraded.add_message("busy", "user", "written after the upgrade", expected_revision=3)
-    monkeypatch.setattr(DatabaseManager, "SCHEMA_VERSION", 4)  # the previous release
+    monkeypatch.setattr(DatabaseManager, "SCHEMA_VERSION", previous_release_reads)
+    snapshot_name = f"{path.name}.pre-v{previous_release_reads}.bak"
 
-    with pytest.raises(PersistenceError, match="schema version 5") as refused:
+    with pytest.raises(PersistenceError, match="schema version 6") as refused:
         DatabaseManager(db_path=str(path))
-    assert f"{path.name}.pre-v4.bak" in str(refused.value)
+    assert snapshot_name in str(refused.value)
 
     aside = tmp_path / "aside"
     aside.mkdir()
     for suffix in ("", "-wal", "-shm"):
         if Path(f"{path}{suffix}").exists():
             shutil.move(f"{path}{suffix}", aside / f"{path.name}{suffix}")
-    shutil.copy2(f"{path}.pre-v4.bak", path)
+    shutil.copy2(tmp_path / snapshot_name, path)
     DatabaseManager(db_path=str(path))  # the previous release opens it again
 
-    assert _user_version(path) == 4
+    assert _user_version(path) == previous_release_reads
     assert "revision" not in _column_names(path, "threads")
     assert _message_texts(path, "busy") == ["m0", "m1", "m2"]
+    if previous_release_reads >= 5:
+        assert _original_of(path, "m1") == ORIGINAL_OF_M1
     # What was written after the upgrade is still in the file that was moved aside.
     assert _message_texts(aside / path.name, "busy") == ["m0", "m1", "m2", "written after the upgrade"]
     # Going forward again upgrades the restored file once more.
     monkeypatch.undo()
     again = DatabaseManager(db_path=str(path))
+    assert _user_version(path) == 6
     assert again.load_chat_overview("busy")["revision"] == 3
 
 
@@ -816,7 +872,7 @@ def test_running_the_revision_step_again_never_lowers_a_revision(tmp_path: Path)
 
     connection = sqlite3.connect(database.db_path)
     try:
-        storage._MIGRATIONS[5](connection)
+        storage._MIGRATIONS[6](connection)
         connection.commit()
     finally:
         connection.close()

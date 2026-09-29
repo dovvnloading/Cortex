@@ -792,6 +792,8 @@ def test_a_full_disk_is_reported_as_insufficient_storage_and_the_chat_is_unchang
     from support import session_headers
 
     manager, before = _a_chat_with_an_exchange(tmp_path)
+    fork_url = "/api/v1/chats/t/forks"
+    first_message = str(before["messages"][0]["id"])
     dependencies = build_demo_dependencies()
     dependencies.chats = LegacyDatabaseChatRepository(manager)
     app = create_app(dependencies, allowed_hosts=("testserver",))
@@ -799,22 +801,23 @@ def test_a_full_disk_is_reported_as_insufficient_storage_and_the_chat_is_unchang
         headers = session_headers(client, app)
         disk_full_when(monkeypatch, _writes_a_message)
 
-        full = client.post(
-            "/api/v1/chats/t/messages", json={"role": "user", "content": "no room"}, headers=headers
-        )
+        full = client.post(fork_url, json={"message_id": first_message}, headers=headers)
         monkeypatch.undo()
 
         assert full.status_code == 507
         detail = full.json()["detail"]
-        assert "disk is full" in detail and "Free some disk space" in detail
-        assert str(tmp_path) not in detail and "no room" not in detail
-        assert manager.load_chat("t") == before
-        # The same request goes through once there is room.
-        again = client.post(
-            "/api/v1/chats/t/messages", json={"role": "user", "content": "now it fits"}, headers=headers
+        assert detail == (
+            "Could not fork chat because the disk is full. Free some disk space and try again."
         )
-        assert again.status_code == 200
-        assert again.json()["revision"] == 3
+        assert str(tmp_path) not in detail and "kept" not in detail
+        # Nothing was saved: the chat is as it was and no empty fork was left behind.
+        assert manager.load_chat("t") == before
+        assert [item["id"] for item in manager.get_all_chats_summary()] == ["t"]
+        # The same request goes through once there is room.
+        again = client.post(fork_url, json={"message_id": first_message}, headers=headers)
+        assert again.status_code == 201
+        assert [message["content"] for message in again.json()["messages"]] == ["kept"]
+        assert again.json()["revision"] == 1
 
 
 def test_a_failure_that_is_not_a_full_disk_is_still_an_internal_error(
@@ -828,22 +831,25 @@ def test_a_failure_that_is_not_a_full_disk_is_still_an_internal_error(
     from support import session_headers
 
     manager, before = _a_chat_with_an_exchange(tmp_path)
+    fork_url = "/api/v1/chats/t/forks"
+    first_message = str(before["messages"][0]["id"])
     dependencies = build_demo_dependencies()
     dependencies.chats = LegacyDatabaseChatRepository(manager)
     app = create_app(dependencies, allowed_hosts=("testserver",))
-    real_add = manager.add_message
+    real_fork = manager.create_chat_from_messages
 
     def broken(*_args, **_kwargs):
-        raise PersistenceError("Failed to add message.", operation="add_message", cause=sqlite3.DatabaseError("x"))
+        raise PersistenceError(
+            "Failed to create forked chat.", operation="create_chat_from_messages", cause=sqlite3.DatabaseError("x")
+        )
 
     with TestClient(app) as client:
         headers = session_headers(client, app)
-        monkeypatch.setattr(manager, "add_message", broken)
-        response = client.post(
-            "/api/v1/chats/t/messages", json={"role": "user", "content": "hello"}, headers=headers
-        )
-        monkeypatch.setattr(manager, "add_message", real_add)
+        monkeypatch.setattr(manager, "create_chat_from_messages", broken)
+        response = client.post(fork_url, json={"message_id": first_message}, headers=headers)
+        monkeypatch.setattr(manager, "create_chat_from_messages", real_fork)
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "Could not save message."
+    # The request id is the one thing added to the text, so a report can be matched to the log.
+    assert response.json()["detail"] == f"Could not fork chat. (Request ID: {response.headers['X-Request-ID']})"
     assert manager.load_chat("t") == before

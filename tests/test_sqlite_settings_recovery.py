@@ -427,7 +427,10 @@ def test_a_newer_settings_schema_is_a_reported_error_at_the_api_not_a_crash(tmp_
         response = client.get("/api/v1/settings", headers=session_headers(client, app))
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "Could not load settings."
+    # The message is the same as ever; the request id is appended so a report can be matched to the log.
+    assert response.json()["detail"] == (
+        f"Could not load settings. (Request ID: {response.headers['X-Request-ID']})"
+    )
 
 
 def _snapshot_that_fails_verification(monkeypatch: pytest.MonkeyPatch, repository) -> None:
