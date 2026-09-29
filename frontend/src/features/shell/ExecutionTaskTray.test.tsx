@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionTaskSummary } from "../../../../contracts/cortex-api";
 import { ExecutionTaskTray } from "./ExecutionTaskTray";
 
@@ -312,5 +312,109 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByText("Processes")).toBeVisible();
     expect(screen.getByRole("button", { name: "Allow background task code-1 once" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Deny background task code-1" })).toBeEnabled();
+  });
+
+  describe("approval window", () => {
+    const NOW = new Date("2026-07-21T18:00:00Z");
+    const pendingCode = (expiresAt: string | null): ExecutionTaskSummary => ({
+      ...codeTask,
+      status: "queued",
+      approval_state: "pending",
+      approval_expires_at: expiresAt,
+      result: null,
+    });
+    const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("shows how long a pending code approval has left and recomputes it every 30 seconds", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      render(<ExecutionTaskTray tasks={[pendingCode("2026-07-21T18:30:00Z")]} onDecideApproval={vi.fn()} />);
+
+      expect(screen.getByText("Approval needed · expires in 30 min")).toBeVisible();
+
+      // Nothing changes between ticks, and the first tick (29.5 minutes left) still rounds up to 30.
+      advance(30_000);
+      expect(screen.getByText("Approval needed · expires in 30 min")).toBeVisible();
+      advance(4 * 60_000 + 30_000);
+      expect(screen.getByText("Approval needed · expires in 25 min")).toBeVisible();
+    });
+
+    it("says under a minute in the last minute and expiring now at the deadline", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      // 105 s out: the deadline falls between the 90 s and 120 s ticks.
+      render(<ExecutionTaskTray tasks={[pendingCode("2026-07-21T18:01:45Z")]} onDecideApproval={vi.fn()} />);
+      expect(screen.getByText("Approval needed · expires in 2 min")).toBeVisible();
+
+      advance(91_000);
+      expect(screen.getByText("Approval needed · expires in under a minute")).toBeVisible();
+
+      // The deadline itself wakes the display; it does not wait for the next tick.
+      advance(14_000 + 60);
+      expect(screen.getByText("Approval needed · expiring now")).toBeVisible();
+    });
+
+    it("keeps the approval actions while the window is open and leaves the status plain without an expiry", () => {
+      render(<ExecutionTaskTray tasks={[pendingCode(null)]} onDecideApproval={vi.fn()} />);
+
+      expect(screen.getByText("Approval needed")).toBeVisible();
+      expect(screen.queryByText(/expires|expiring/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Deny background task code-1" })).toBeEnabled();
+    });
+
+    it("ignores an expiry it cannot read", () => {
+      render(<ExecutionTaskTray tasks={[pendingCode("not a date")]} onDecideApproval={vi.fn()} />);
+
+      expect(screen.getByText("Approval needed")).toBeVisible();
+      expect(screen.queryByText(/expires|expiring/)).not.toBeInTheDocument();
+    });
+
+    it("marks a code approval that expired, explains it, and offers no way to decide it", () => {
+      render(
+        <ExecutionTaskTray
+          tasks={[{ ...codeTask, status: "cancelled", approval_state: "expired", approval_expires_at: "2026-07-21T18:30:00Z", can_cancel: false, result: null, message: "Approval expired." }]}
+          onDecideApproval={vi.fn()}
+          onLoadCodeSource={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("Expired", { selector: ".execution-task-state" })).toBeVisible();
+      expect(screen.getByText("Expired", { selector: ".execution-task-code-title span" })).toBeVisible();
+      expect(screen.getByRole("note")).toHaveTextContent("The approval window closed before this task was allowed, so it did not run. Ask for it again to run it.");
+      expect(screen.queryByText("Cancelled")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Allow background task|Deny background task/ })).not.toBeInTheDocument();
+      expect(screen.queryByText("Review generated source")).not.toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("The latest task's approval expired before it was decided.");
+    });
+
+    it("calls an expired approval expired, not cancelled, for other task kinds too", () => {
+      render(
+        <ExecutionTaskTray
+          tasks={[{ ...task, profile: "artifact.extended.v1", status: "cancelled", approval_state: "expired", can_cancel: false, message: "Approval expired." }]}
+          onDecideApproval={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("Expired")).toBeVisible();
+      expect(screen.queryByText("Cancelled")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Allow background task|Deny background task/ })).not.toBeInTheDocument();
+    });
+
+    it("still calls a task the person denied cancelled", () => {
+      render(
+        <ExecutionTaskTray
+          tasks={[{ ...codeTask, status: "cancelled", approval_state: "denied", can_cancel: false, result: null }]}
+          onDecideApproval={vi.fn()}
+        />,
+      );
+
+      expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+      expect(screen.queryByText("Expired")).not.toBeInTheDocument();
+      expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    });
   });
 });
