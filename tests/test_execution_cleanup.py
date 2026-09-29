@@ -5,13 +5,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timedelta, timezone
-import time
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
+from support import wait_until
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
@@ -280,15 +280,28 @@ def test_cleanup_supervisor_skips_live_peer_and_local_overlap(tmp_path):
 
 
 def test_cleanup_supervisor_can_restart_after_clean_stop(tmp_path):
+    # Wait for the pass itself, never for a stretch of wall-clock time: a fixed
+    # sleep after start() assumes the new thread got scheduled inside it, and
+    # on a loaded machine it can have run no pass at all before stop() is
+    # called (the loop then never enters), which read as "did not restart".
     supervisor = ExecutionCleanupSupervisor(_repository(tmp_path), interval_seconds=0.01)
     supervisor.start()
-    time.sleep(0.04)
-    supervisor.stop(timeout=1)
+    try:
+        wait_until(lambda: supervisor.metrics.runs >= 1, describe="a first cleanup pass")
+    finally:
+        supervisor.stop()
     first_runs = supervisor.metrics.runs
-    supervisor.start()
-    time.sleep(0.04)
-    supervisor.stop(timeout=1)
     assert first_runs > 0
+    assert not supervisor.running
+
+    supervisor.start()
+    try:
+        wait_until(
+            lambda: supervisor.metrics.runs > first_runs,
+            describe=lambda: f"a cleanup pass after the restart (runs={supervisor.metrics.runs})",
+        )
+    finally:
+        supervisor.stop()
     assert supervisor.metrics.runs > first_runs
     assert not supervisor.running
 

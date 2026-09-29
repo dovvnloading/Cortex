@@ -35,6 +35,20 @@ function fakeApi(overrides: Partial<CortexApi> = {}): CortexApi {
 
 const ignoreSessionExpiry = () => undefined;
 
+/**
+ * Let every promise continuation that is already queued run to completion.
+ *
+ * A timer callback only runs once the microtask queue is empty, so a zero-delay
+ * timer is a barrier that holds however slow the machine is. That is what a
+ * "nothing further happened" assertion needs when the code under test only
+ * ever continues through promises. It is not a wall-clock wait: never use it
+ * to give a timer- or frame-driven effect time to show up.
+ */
+const settlePromises = () =>
+  act(async () => {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+  });
+
 describe("useGenerationStream", () => {
   afterEach(() => {
     window.sessionStorage.clear();
@@ -140,12 +154,18 @@ describe("useGenerationStream", () => {
     });
     await waitFor(() => expect(emit).not.toBeNull());
 
+    // The stream delivers events in order, so the foreign event has been
+    // handled by the time the matching one is. Waiting for that matching
+    // event's text to appear is the positive signal; the foreign text must
+    // then be absent from what was flushed with it. A wall-clock sleep before
+    // an "is still empty" check passes vacuously when the frame is late.
     act(() => {
       emit!({ event_id: 1, event: "generation.content_delta", job_id: "job-3", thread_id: "some-other-thread", data: { delta: "wrong" } });
+      emit!({ event_id: 1, event: "generation.content_delta", job_id: "job-3", thread_id: "thread-3", data: { delta: "right" } });
     });
 
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
-    expect(useChatStore.getState().generation.partialContent).toBe("");
+    await waitFor(() => expect(useChatStore.getState().generation.partialContent).not.toBe(""));
+    expect(useChatStore.getState().generation.partialContent).toBe("right");
   });
 
   it("on generation.completed calls onCompleted, clears sessionStorage, and resets the store to idle", async () => {
@@ -338,10 +358,25 @@ describe("useGenerationStream", () => {
         thread_id: "thread-rej2",
         data: { code_execution_rejection: { code: "imports_not_allowed" } },
       });
+      // A well-formed rejection right behind it. Events are handled in order,
+      // so once its toast is up the malformed one has been handled too, and
+      // it must not have produced a toast of its own. Announcing the valid one
+      // also shows the malformed one did not use up the once-only notice.
+      emitEvent({
+        event_id: 2,
+        event: "generation.status",
+        job_id: "job-rej2",
+        thread_id: "thread-rej2",
+        data: {
+          code_execution_rejection: { code: "imports_not_allowed", message: "Cortex only runs code without imports." },
+        },
+      });
     });
 
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
-    expect(useUiStore.getState().toasts).toHaveLength(0);
+    await waitFor(() => expect(useUiStore.getState().toasts).not.toHaveLength(0));
+    expect(useUiStore.getState().toasts.map((toast) => toast.message)).toEqual([
+      "Cortex only runs code without imports.",
+    ]);
   });
 
   it("waits for onCompleted's reload to finish before clearing the store's jobId", async () => {
@@ -371,8 +406,11 @@ describe("useGenerationStream", () => {
     await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-11"));
 
     // The reload is deliberately left pending -- the job must still read as
-    // active so the pending bubble stays mounted.
-    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    // active so the pending bubble stays mounted. Everything between the
+    // terminal event and the store reset runs through promises, so once they
+    // have all settled the only thing left holding the reset back is the
+    // reload itself.
+    await settlePromises();
     expect(useChatStore.getState().generation.jobId).toBe("job-11");
 
     act(() => resolveReload?.());
@@ -470,10 +508,17 @@ describe("useGenerationStream", () => {
     });
     await waitFor(() => expect(useChatStore.getState().generation.jobId).toBe("job-7"));
 
+    // The positive signal: the abort reached the connection the hook opened.
+    // The rejection it causes is then handled entirely through promises, so
+    // once those have settled a wrongly reported failure would have shown.
+    const { signal } = (api.streamGeneration as ReturnType<typeof vi.fn>).mock.calls[0][2] as { signal: AbortSignal };
+    expect(signal.aborted).toBe(false);
+
     act(() => {
       result.current.stop();
     });
-    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(signal.aborted).toBe(true);
+    await settlePromises();
 
     expect(onFailed).not.toHaveBeenCalled();
   });
