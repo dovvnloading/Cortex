@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { CortexApi } from "../api/client";
@@ -91,11 +92,13 @@ describe("a generation while Settings is open", () => {
   });
 
   /** A chat with a job already running on the backend, as a reload would find it. */
-  const openRunningChat = async (server: ReturnType<typeof backend>) => {
+  const openRunningChat = async (server: ReturnType<typeof backend>, { strict = false }: { strict?: boolean } = {}) => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-a", threadId: "thread-a", lastEventId: 0 }));
     window.history.replaceState({}, "", "/chat/thread-a");
-    render(<ToastProvider><App api={new CortexApi("/api/v1", server.fetcher)} /></ToastProvider>);
+    // main.tsx renders the app inside StrictMode, so that is the shape to test.
+    const app = <ToastProvider><App api={new CortexApi("/api/v1", server.fetcher)} /></ToastProvider>;
+    render(strict ? <StrictMode>{app}</StrictMode> : app);
     expect(await screen.findByText("Tell me a story", {}, WAIT)).toBeVisible();
     await waitFor(() => expect(server.calls("/generations/job-a/events")).toHaveLength(1), WAIT);
     const user = userEvent.setup();
@@ -138,6 +141,27 @@ describe("a generation while Settings is open", () => {
     expect(await screen.findByText("Once upon a time, the end.", {}, WAIT)).toBeVisible();
     expect(screen.queryByLabelText(/cortex response in progress/i)).not.toBeInTheDocument();
     expect(server.calls("/generations/job-a/events")).toHaveLength(1);
+  });
+
+  it("holds one consumer for the job under StrictMode, through Settings and back", async () => {
+    // The app is mounted, unmounted and mounted again on the same instance in
+    // development. That must leave exactly one live connection to the job, and
+    // it has to be the one that carries the text.
+    const server = backend();
+    const user = await openRunningChat(server, { strict: true });
+    await server.stream.push({ event_id: 1, event: "generation.content_delta", data: { delta: "Once upon" } });
+    await waitFor(() => expect(partialContent()).toBe("Once upon"), WAIT);
+    expect(server.calls("/generations/job-a/events")).toHaveLength(1);
+
+    await openSettings(user);
+    await server.stream.push({ event_id: 2, event: "generation.content_delta", data: { delta: " a time" } });
+    await waitFor(() => expect(partialContent()).toBe("Once upon a time"), WAIT);
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    await screen.findByLabelText("Message Cortex", {}, WAIT);
+
+    expect(server.calls("/generations/job-a/events")).toHaveLength(1);
+    expect(useChatStore.getState().generation.gap).toBe(false);
+    expect(partialContent()).toBe("Once upon a time");
   });
 
   it("hands the text streamed while away to the bubble on return, without a hole", async () => {

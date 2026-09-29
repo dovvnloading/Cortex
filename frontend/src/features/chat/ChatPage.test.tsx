@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState, type ComponentProps } from "react";
 import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi } from "../../api/client";
+import { trackGeneration } from "../../hooks/useGenerationStream";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
@@ -61,8 +62,8 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
   } as unknown as CortexApi;
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
-  return render(
+function chatElement(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+  return (
     <ChatWithHost
       api={api}
       threadId={threadId}
@@ -77,8 +78,12 @@ function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupports
       onThreadCreated={vi.fn()}
       onForked={vi.fn()}
       onClearMemory={onClearMemory}
-    />,
+    />
   );
+}
+
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+  return render(chatElement(api, threadId, selectedModelSupportsVision, onClearMemory));
 }
 
 describe("ChatPage composer integration", () => {
@@ -1578,6 +1583,122 @@ describe("ChatPage reload failure recovery", () => {
     await waitFor(() => {
       expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("ChatPage stream outcomes published by the host", () => {
+  const transcriptOf = (id: string, text: string): ChatResponse => ({
+    ...emptyChat(id),
+    title: id,
+    revision: 1,
+    messages: [{ id: `answer-${id}`, role: "assistant", content: text }],
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    useChatStore.setState({ generationOptionsByThread: {} });
+    const { generation, endGeneration } = useChatStore.getState();
+    if (generation.jobId) endGeneration(generation.jobId);
+  });
+
+  it("does not apply a completion that predates the page mount: the mount load decides what shows", async () => {
+    // A generation ended while the user was in Settings; the host published
+    // the outcome with the chat as it was reloaded then. The page mounting now
+    // fetches the current chat itself, which may already be newer, so the
+    // older copy must never be put on screen, not even for a moment.
+    useChatStore.getState().recordCompletion({
+      jobId: "job-while-away",
+      threadId: "thread-a",
+      chat: transcriptOf("thread-a", "Copy published while the page was away"),
+      clearRequested: false,
+    });
+    const api = chatApi({ chat: vi.fn(async (id: string) => transcriptOf(id, "Current copy from the mount load")) });
+
+    renderChat(api, "thread-a");
+
+    // Nothing has been fetched yet. An applied completion would already be
+    // showing here, ahead of the load.
+    expect(screen.queryByText("Copy published while the page was away")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading conversation...")).toBeVisible();
+    expect(await screen.findByText("Current copy from the mount load")).toBeVisible();
+    expect(screen.queryByText("Copy published while the page was away")).not.toBeInTheDocument();
+    // The outcome was still taken: it is not left for the next mount.
+    expect(useChatStore.getState().lastCompletion).toBeNull();
+  });
+
+  it("applies a completion that arrives after the page mounted", async () => {
+    // The other side of the check above: the id only excludes what was already
+    // there at mount, never what the running page is waiting for.
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    let reloadAfterAnswer = false;
+    trackGeneration("job-live", "thread-a");
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => transcriptOf(id, reloadAfterAnswer ? "The saved answer" : "Before the answer")),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    renderChat(api, "thread-a");
+    expect(await screen.findByText("Before the answer")).toBeVisible();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    reloadAfterAnswer = true;
+    await act(async () => {
+      emit!({ event_id: 1, event: "generation.completed", job_id: "job-live", thread_id: "thread-a", data: {} });
+      resolveStream?.();
+    });
+
+    expect(await screen.findByText("The saved answer")).toBeVisible();
+    expect(screen.queryByText("Before the answer")).not.toBeInTheDocument();
+  });
+
+  it("keeps the chat being viewed when another chat's generation finishes", async () => {
+    // Switching chats does not stop a running generation, so its completion can
+    // arrive while another chat is open. That chat's transcript must stay: the
+    // completion belongs to the chat that was generating, and putting it into
+    // the page's load state would leave this one waiting for a load that has
+    // already finished.
+    let emit: ((event: unknown) => void) | null = null;
+    let resolveStream: (() => void) | null = null;
+    trackGeneration("job-elsewhere", "thread-a");
+    const api = chatApi({
+      chat: vi.fn(async (id: string) => transcriptOf(id, `Transcript of ${id}`)),
+      streamGeneration: vi.fn((_jobId, onEvent, options: { signal?: AbortSignal } = {}) => {
+        emit = onEvent as (event: unknown) => void;
+        return new Promise<void>((resolve, reject) => {
+          options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          resolveStream = resolve;
+        });
+      }),
+    });
+    const view = renderChat(api, "thread-a");
+    expect(await screen.findByText("Transcript of thread-a")).toBeVisible();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    view.rerender(chatElement(api, "thread-b"));
+    expect(await screen.findByText("Transcript of thread-b")).toBeVisible();
+
+    await act(async () => {
+      emit!({ event_id: 1, event: "generation.completed", job_id: "job-elsewhere", thread_id: "thread-a", data: {} });
+      resolveStream?.();
+    });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    // The host reloaded the chat that was generating, not the one on screen.
+    expect(api.chat).toHaveBeenCalledWith("thread-a");
+
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+    expect(screen.getByText("Transcript of thread-b")).toBeVisible();
+    expect(screen.queryByText("Transcript of thread-a")).not.toBeInTheDocument();
+
+    // And the chat that was generating shows its saved answer when opened.
+    view.rerender(chatElement(api, "thread-a"));
+    expect(await screen.findByText("Transcript of thread-a")).toBeVisible();
   });
 });
 

@@ -1,4 +1,5 @@
 import { act, render, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, type CortexApi } from "../../api/client";
@@ -128,6 +129,125 @@ describe("GenerationStreamHost", () => {
     await settleTimers();
 
     expect(attachments).toHaveLength(1);
+  });
+
+  it("does not attach again to a job whose consumer stopped on a refused session", async () => {
+    // The app leaves the workspace mounted when it finds that a newer session
+    // exists, so the host outlives the refusal with the job still tracked, and
+    // its effect re-runs for any change of dependency. Attaching again there
+    // would run a second consumer behind the very refusal the app is acting on.
+    const streamGeneration = vi.fn((_jobId: string, _onEvent: unknown, options: { signal?: AbortSignal } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) return Promise.reject(new ApiError(401, "Local session expired."));
+      return new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const { api } = fakeStreamApi({ streamGeneration: streamGeneration as unknown as CortexApi["streamGeneration"] });
+    const onSessionExpired = vi.fn();
+    const { rerender, unmount } = render(<GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />);
+    act(() => trackGeneration("job-1", "thread-a"));
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().generation.jobId).toBe("job-1");
+
+    rerender(<GenerationStreamHost api={api} onSessionExpired={() => undefined} />);
+    await settleTimers();
+
+    expect(streamGeneration).toHaveBeenCalledTimes(1);
+
+    // The claim belongs to this host: the workspace that replaces it once the
+    // session is renewed picks the job up again, from where the store left it.
+    unmount();
+    render(<GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />);
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2));
+    expect(streamGeneration.mock.calls[1][2]).toMatchObject({ afterEventId: 0 });
+  });
+
+  it("does not adopt a stored job when its effect re-runs with the store idle after a first look found nothing", async () => {
+    const { api, attachments } = fakeStreamApi();
+    const { rerender } = render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    // The first look happens a tick after mounting. A zero-delay timer queued
+    // now runs after it, so nothing is left to find.
+    await settleTimers();
+    expect(attachments).toHaveLength(0);
+
+    // Storage now holds a job (a copy that a failed clear left behind). Only
+    // the first look may adopt one; a later run of the effect must not.
+    window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-left-over", threadId: "thread-a", lastEventId: 3 }));
+    rerender(<GenerationStreamHost api={api} onSessionExpired={() => undefined} />);
+    await settleTimers();
+
+    expect(attachments).toHaveLength(0);
+    expect(useChatStore.getState().generation.jobId).toBeNull();
+  });
+
+  describe("under React.StrictMode", () => {
+    // StrictMode mounts, unmounts and mounts again on the same instance, in
+    // development, to expose effects that are not safe to repeat. What it
+    // must not leave behind is a second consumer for the job -- or, worse, none
+    // that is alive: an attach made before the simulated unmount is aborted by
+    // it, and a guard that remembers the attach then refuses to make another.
+    const strict = (api: CortexApi) => (
+      <StrictMode>
+        <GenerationStreamHost api={api} onSessionExpired={expireSession} />
+      </StrictMode>
+    );
+
+    it("attaches one live consumer to a job left in session storage", async () => {
+      window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({ jobId: "job-stored", threadId: "thread-a", lastEventId: 9 }));
+      const { api, attachments } = fakeStreamApi();
+
+      render(strict(api));
+
+      await waitFor(() => expect(attachments).toHaveLength(1));
+      await settleTimers();
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]).toMatchObject({ jobId: "job-stored", afterEventId: 0 });
+      expect(attachments[0].signal?.aborted).toBe(false);
+    });
+
+    it("attaches one live consumer to a job the store already tracks", async () => {
+      useChatStore.getState().beginGeneration("job-warm", "thread-a");
+      useChatStore.getState().setGenerationCursor("job-warm", 12);
+      const { api, attachments } = fakeStreamApi();
+
+      render(strict(api));
+
+      await waitFor(() => expect(attachments).toHaveLength(1));
+      await settleTimers();
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]).toMatchObject({ jobId: "job-warm", afterEventId: 12 });
+      expect(attachments[0].signal?.aborted).toBe(false);
+    });
+
+    it("attaches one live consumer to a job a page starts after mounting", async () => {
+      const { api, attachments } = fakeStreamApi();
+      render(strict(api));
+      await settleTimers();
+
+      act(() => trackGeneration("job-1", "thread-a"));
+
+      expect(attachments).toHaveLength(1);
+      await settleTimers();
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].signal?.aborted).toBe(false);
+    });
+
+    it("keeps one live consumer at a time across a real unmount and a new mount", async () => {
+      const { api, attachments } = fakeStreamApi();
+      const first = render(strict(api));
+      act(() => trackGeneration("job-1", "thread-a"));
+      await waitFor(() => expect(attachments).toHaveLength(1));
+
+      first.unmount();
+      expect(attachments[0].signal?.aborted).toBe(true);
+      render(strict(api));
+      await waitFor(() => expect(attachments).toHaveLength(2));
+      await settleTimers();
+
+      expect(attachments).toHaveLength(2);
+      expect(attachments.map((attachment) => attachment.signal?.aborted)).toEqual([true, false]);
+    });
   });
 
   it("reloads the chat and updates the sidebar before ending the generation, with no page mounted", async () => {
