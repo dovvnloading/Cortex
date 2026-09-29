@@ -6,17 +6,28 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from threading import Lock, RLock
 from uuid import uuid4
 
 from cortex_backend.core.settings import CortexSettings
 
+from .sqlite_backup import (
+    SIDECAR_SUFFIXES,
+    BackupStatus,
+    RecoveryReport,
+    failure_detail,
+    move_sidecars,
+    put_sidecars_back,
+    snapshot_database,
+    utc_now_iso,
+)
 from .settings import (
     SettingsMigrationReport,
     SettingsReadResult,
@@ -84,6 +95,11 @@ class SQLiteSettingsRepository:
         # cannot discard the only recovery copy.
         self.previous_backup_path = Path(f"{self.backup_path}.1")
         self.last_corrupt_path: Path | None = None
+        # What the backup and recovery steps did, for the diagnostics route.
+        # A backup that could not be written is reported here; it does not
+        # stop Cortex from starting on a healthy primary.
+        self.backup_status = BackupStatus("skipped", "No backup was refreshed at startup.")
+        self.recovery_report: RecoveryReport | None = None
         self.legacy = legacy
         # Every repository instance for a database shares this lock. Backup
         # rotation is file I/O rather than SQLite I/O, so SQLite's own
@@ -214,7 +230,7 @@ class SQLiteSettingsRepository:
                 # same pragma lets an OS crash or power loss corrupt the file
                 # outright, which is exactly why the chat store switched (see
                 # storage._create_tables). Backups stay whole because
-                # _create_backup checkpoints before copying.
+                # _create_backup reads through SQLite's online backup API.
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute(
                     """
@@ -269,6 +285,30 @@ class SQLiteSettingsRepository:
     @classmethod
     def _atomic_copy_database(cls, source: Path, destination: Path) -> None:
         """Copy a verified SQLite file without exposing a partial destination."""
+        cls._publish_verified_copy(destination, lambda temporary: shutil.copy2(source, temporary))
+
+    @classmethod
+    def _atomic_snapshot_database(cls, source: Path, destination: Path) -> None:
+        """Snapshot a live database, including uncheckpointed commits, into ``destination``.
+
+        Same publish rules as _atomic_copy_database, but the bytes come from
+        SQLite's online backup API instead of a file copy, so a reader that
+        pins the write-ahead log cannot make the backup silently stale.
+        """
+        cls._publish_verified_copy(
+            destination, lambda temporary: snapshot_database(source, temporary)
+        )
+
+    @classmethod
+    def _publish_verified_copy(
+        cls, destination: Path, populate: Callable[[Path], object]
+    ) -> None:
+        """Fill a temporary file, verify it, and only then move it into place.
+
+        ``destination`` is replaced atomically or not at all, so a failure at
+        any step (a full disk, a locked file, a failed integrity check)
+        leaves whatever was there before exactly as it was.
+        """
         temporary_path: Path | None = None
         try:
             fd, temporary_name = tempfile.mkstemp(
@@ -278,7 +318,7 @@ class SQLiteSettingsRepository:
             )
             os.close(fd)
             temporary_path = Path(temporary_name)
-            shutil.copy2(source, temporary_path)
+            populate(temporary_path)
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
             os.replace(temporary_path, destination)
@@ -287,10 +327,19 @@ class SQLiteSettingsRepository:
             for suffix in ("-wal", "-shm"):
                 Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
             temporary_path = None
-        except (OSError, shutil.Error) as exc:
+        except (OSError, shutil.Error, sqlite3.Error) as exc:
             raise SettingsRepositoryError("Could not copy the settings database safely.") from exc
         finally:
             if temporary_path is not None:
+                # Validating the copy opened it, which made SQLite create the
+                # sidecars. A backup that keeps failing (a locked .bak, a full
+                # disk) is now survivable at startup, so without this it would
+                # strand two files per launch.
+                for suffix in SIDECAR_SUFFIXES:
+                    try:
+                        Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
+                    except OSError:
+                        logging.warning("Could not remove a temporary settings database sidecar.")
                 try:
                     temporary_path.unlink()
                 except OSError as exc:
@@ -299,44 +348,90 @@ class SQLiteSettingsRepository:
                     ) from exc
 
     def _prepare_primary(self) -> str | None:
-        """Validate the primary before backup rotation, recovering if needed."""
+        """Validate the primary before backup rotation, recovering if needed.
+
+        Fail-closed where it matters: a corrupt primary with no usable backup,
+        or a recovery that cannot preserve what it replaces, raises. A healthy
+        primary whose backup cannot be written does not (see
+        _refresh_startup_backup).
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.db_path.exists():
             return None
         if self._database_is_valid(self.db_path):
-            return self._create_backup()
+            return self._refresh_startup_backup()
 
         for candidate in (self.backup_path, self.previous_backup_path):
             if not candidate.exists() or not self._database_is_valid(candidate):
                 continue
-            corrupt_path = Path(f"{self.db_path}.corrupt-{uuid4().hex}")
-            try:
-                os.replace(self.db_path, corrupt_path)
-            except OSError as exc:
-                raise SettingsRepositoryError(
-                    "Could not preserve the corrupt settings database before recovery."
-                ) from exc
-            try:
-                self._atomic_copy_database(candidate, self.db_path)
-            except SettingsRepositoryError:
-                try:
-                    os.replace(corrupt_path, self.db_path)
-                except OSError as rollback_exc:
-                    raise SettingsRepositoryError(
-                        "Settings recovery failed and the corrupt primary could not be restored; "
-                        f"it remains at {corrupt_path}."
-                    ) from rollback_exc
-                # The rollback put the original primary back, so its own
-                # sidecars are still the right ones. Leave them alone.
-                raise
-            # Recovery succeeded: the sidecars still on disk describe the
-            # quarantined database, not the backup that just replaced it.
-            self._discard_sidecars()
-            self.last_corrupt_path = corrupt_path
+            self.recovery_report = self._recover_from(candidate)
+            self.last_corrupt_path = Path(self.recovery_report.quarantined_path)
+            logging.error(
+                "Settings database was corrupt; recovered from a verified backup. "
+                "The corrupt file and its write-ahead log were preserved for "
+                "inspection (path omitted from logs)."
+            )
             return str(candidate)
 
         raise SettingsRepositoryError(
             "Settings database is corrupt and no valid backup is available."
+        )
+
+    def _recover_from(self, candidate: Path) -> RecoveryReport:
+        """Replace the corrupt primary with ``candidate``, keeping everything it had.
+
+        The sidecars still on disk describe the corrupt database, not the
+        backup about to replace it, and SQLite would replay them onto the
+        replacement. They may also hold the newest committed settings, so they
+        are moved beside the quarantined primary (``<corrupt>-wal``) instead of
+        deleted. They move first, so a crash between the renames leaves a
+        primary that is still detectably corrupt and the next start simply
+        repeats recovery. If the backup cannot be put in place, everything is
+        moved back.
+        """
+        corrupt_path = Path(f"{self.db_path}.corrupt-{uuid4().hex}")
+        try:
+            moved_sidecars = move_sidecars(self.db_path, corrupt_path)
+        except OSError as exc:
+            raise SettingsRepositoryError(
+                "Could not preserve the write-ahead log of the corrupt settings database "
+                "before recovery."
+            ) from exc
+        try:
+            os.replace(self.db_path, corrupt_path)
+        except OSError as exc:
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError:
+                logging.warning("Could not return the settings database write-ahead log.")
+            raise SettingsRepositoryError(
+                "Could not preserve the corrupt settings database before recovery."
+            ) from exc
+        try:
+            self._atomic_copy_database(candidate, self.db_path)
+        except SettingsRepositoryError:
+            try:
+                os.replace(corrupt_path, self.db_path)
+            except OSError as rollback_exc:
+                raise SettingsRepositoryError(
+                    "Settings recovery failed and the corrupt primary could not be restored; "
+                    f"it remains at {corrupt_path}."
+                ) from rollback_exc
+            # The original primary is back, so its own log is the right one
+            # again. Restored second: with the primary in place, a log that
+            # cannot be returned is still safe on disk, just not replayed.
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError as rollback_exc:
+                raise SettingsRepositoryError(
+                    "Settings recovery failed; the corrupt primary was restored but its "
+                    f"write-ahead log remains at {corrupt_path}-wal."
+                ) from rollback_exc
+            raise
+        return RecoveryReport(
+            recovered_from=str(candidate),
+            quarantined_path=str(corrupt_path),
+            at=utc_now_iso(),
         )
 
     def _sidecar_paths(self) -> tuple[Path, ...]:
@@ -344,13 +439,12 @@ class SQLiteSettingsRepository:
         return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
 
     def _discard_sidecars(self) -> None:
-        """Drop WAL sidecars left behind after the primary file is replaced.
+        """Drop WAL sidecars left behind after an explicit restore replaced the primary.
 
-        Replacing the primary out from under SQLite (recovery, restore) leaves
-        the previous database's -wal and -shm in place. The next connection
-        would treat them as belonging to the new file and replay them onto it.
-        They describe a database that no longer exists, so remove them before
-        anything opens the replacement.
+        restore_backup overwrites the primary in place, and the previous
+        database's -wal and -shm would otherwise be replayed onto the copy.
+        Startup recovery does not use this: it preserves them (see
+        _recover_from).
         """
         for sidecar in self._sidecar_paths():
             try:
@@ -360,18 +454,14 @@ class SQLiteSettingsRepository:
                     "Could not remove a stale settings write-ahead log."
                 ) from exc
 
-    def _checkpoint(self) -> None:
-        """Fold the write-ahead log back into the primary file.
-
-        In WAL mode a committed write can still live only in the -wal sidecar,
-        so a plain file copy of the primary would omit it. TRUNCATE moves those
-        commits into the main file and empties the sidecar, which is what makes
-        the copy below a complete, self-contained snapshot.
-        """
-        with self.connect() as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
     def _create_backup(self) -> str | None:
+        """Refresh the verified backup from the current primary.
+
+        The primary is read through SQLite's online backup API, not copied as
+        a file after a checkpoint: in WAL mode recent commits can live only in
+        the -wal sidecar, and wal_checkpoint(TRUNCATE) does not raise when a
+        reader keeps it from finishing.
+        """
         with self._write_lock:
             if not self.db_path.exists():
                 return None
@@ -380,17 +470,43 @@ class SQLiteSettingsRepository:
                     "Could not create a settings database backup from an invalid database."
                 )
             try:
-                self._checkpoint()
                 # Preserve the prior verified backup before replacing the current
                 # generation. If the new copy fails, the old .bak remains intact.
                 if self.backup_path.exists() and self._database_is_valid(self.backup_path):
                     self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-                self._atomic_copy_database(self.db_path, self.backup_path)
+                self._atomic_snapshot_database(self.db_path, self.backup_path)
             except SettingsRepositoryError:
                 raise
             except OSError as exc:
                 raise SettingsRepositoryError("Could not create a settings database backup.") from exc
             return str(self.backup_path)
+
+    def _refresh_startup_backup(self) -> str | None:
+        """Take the startup backup without letting its failure stop the launch.
+
+        It is a safety copy of a primary that has just been validated. A full
+        disk, a scanner holding the file, or a read-only .bak would otherwise
+        turn "no spare copy" into "cannot start". The failure is logged and
+        reported through ``backup_status``; every write into the backups is
+        atomic, so the existing ones are left exactly as they were.
+        """
+        try:
+            path = self._create_backup()
+        except SettingsRepositoryError as exc:
+            self._record_backup_failure(exc)
+            return None
+        if path is not None:
+            self.backup_status = BackupStatus("ok")
+        return path
+
+    def _record_backup_failure(self, error: SettingsRepositoryError) -> None:
+        # Never log the exception text: an OS error carries the private path.
+        cause = error.__cause__
+        logging.error(
+            "Settings database backup failed (%s).",
+            type(cause).__name__ if cause is not None else "no cause recorded",
+        )
+        self.backup_status = BackupStatus("failed", failure_detail(str(error), cause))
 
     def restore_backup(self) -> None:
         """Restore the last verified database backup without changing QSettings."""
@@ -563,7 +679,15 @@ class SQLiteSettingsRepository:
         if expected_revision is not None and settings.revision != expected_revision + 1:
             raise ValueError("settings revision must be expected_revision + 1")
         with self._write_lock:
-            self._create_backup()
+            # Unlike the startup backup this stays fatal: a save is an explicit
+            # user action with an error path, and writing without the rollback
+            # copy the caller expects is not a safe default.
+            try:
+                self._create_backup()
+            except SettingsRepositoryError as exc:
+                self._record_backup_failure(exc)
+                raise
+            self.backup_status = BackupStatus("ok")
             try:
                 with self.connect() as connection:
                     values = (

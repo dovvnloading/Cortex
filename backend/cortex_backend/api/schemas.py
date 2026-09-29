@@ -295,11 +295,39 @@ class ClearMemoryRequest(APIModel):
     confirmation_intent: Literal["clear_permanent_memory"] | None = None
 
 
+class DatabaseRecoveryReport(APIModel):
+    """A corrupt database was replaced from a verified backup at startup.
+
+    The restored data is the backup's, which reflects the previous launch;
+    anything written since is in ``quarantined_path`` (and its ``-wal``).
+    """
+
+    recovered_from: str
+    quarantined_path: str
+    at: str
+
+
+class DatabaseBackupStatus(APIModel):
+    """How the startup backup and recovery of one database went.
+
+    ``status`` is ``failed`` when the backup could not be refreshed although
+    the database itself opened, and ``skipped`` when there was nothing to
+    back up yet. ``recovery`` is set only when this launch had to restore a
+    corrupt database from its backup.
+    """
+
+    status: Literal["ok", "failed", "skipped"]
+    detail: str | None = None
+    recovery: DatabaseRecoveryReport | None = None
+
+
 class DiagnosticsResponse(APIModel):
     api_version: Literal["v1"] = "v1"
     settings_source: str
     invalid_settings_keys: tuple[str, ...] = ()
     migration: SettingsMigrationReport | None = None
+    chat_backup: DatabaseBackupStatus | None = None
+    settings_backup: DatabaseBackupStatus | None = None
     installed_models: tuple[str, ...] = ()
     required_models: tuple[str, ...] = ()
     optional_models: tuple[str, ...] = ()

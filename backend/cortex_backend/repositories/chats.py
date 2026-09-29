@@ -100,6 +100,16 @@ class LegacyDatabaseChatRepository:
     def __init__(self, database_manager: Any):
         self._database = database_manager
 
+    @property
+    def backup_status(self) -> Any:
+        """The database's startup backup status, for the diagnostics route."""
+        return getattr(self._database, "backup_status", None)
+
+    @property
+    def recovery_report(self) -> Any:
+        """Set when startup had to restore the database from its backup."""
+        return getattr(self._database, "recovery_report", None)
+
     def list_summaries(self) -> list[dict[str, Any]]:
         return self._database.get_all_chats_summary()
 

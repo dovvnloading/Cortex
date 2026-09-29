@@ -11,6 +11,7 @@ migration path DatabaseManager offers, not what this module is.
 """
 
 import logging
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
@@ -26,6 +27,15 @@ from threading import Lock, RLock
 from uuid import uuid4
 
 from cortex_backend.core.paths import AppPaths
+from cortex_backend.repositories.sqlite_backup import (
+    BackupStatus,
+    RecoveryReport,
+    failure_detail,
+    move_sidecars,
+    put_sidecars_back,
+    snapshot_database,
+    utc_now_iso,
+)
 
 
 def _utc_now_iso() -> str:
@@ -142,6 +152,12 @@ class DatabaseManager:
         # cannot discard the only recovery copy (mirrors sqlite_settings.py).
         self.previous_backup_path = f"{self.backup_path}.1"
         self.last_corrupt_path: str | None = None
+        # What startup did about backups and recovery, for the diagnostics
+        # route. A backup that could not be written is reported here; it does
+        # not stop Cortex from starting on a healthy primary.
+        self.backup_status = BackupStatus("ok")
+        self.recovery_report: RecoveryReport | None = None
+        self.pre_upgrade_snapshot_path: str | None = None
         self._write_lock = _chat_db_lock_for(self.db_path)
         # Paths and chat metadata are private local data.  Keep startup
         # diagnostics useful without copying them into process logs.
@@ -149,8 +165,9 @@ class DatabaseManager:
         self._ensure_parent_directory()
         with self._write_lock:
             self._prepare_primary()
+            self._snapshot_before_upgrade()
             self._create_tables()
-            self._create_backup()
+            self._refresh_startup_backup()
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -211,6 +228,30 @@ class DatabaseManager:
     @classmethod
     def _atomic_copy_database(cls, source: str, destination: str) -> None:
         """Copy a verified SQLite file without exposing a partial destination."""
+        cls._publish_verified_copy(destination, lambda temporary: shutil.copy2(source, temporary))
+
+    @classmethod
+    def _atomic_snapshot_database(cls, source: str, destination: str) -> None:
+        """Snapshot a live database, including uncheckpointed commits, into ``destination``.
+
+        Same publish rules as _atomic_copy_database, but the bytes come from
+        SQLite's online backup API instead of a file copy, so a reader that
+        pins the write-ahead log cannot make the backup silently stale.
+        """
+        cls._publish_verified_copy(
+            destination, lambda temporary: snapshot_database(source, temporary)
+        )
+
+    @classmethod
+    def _publish_verified_copy(
+        cls, destination: str, populate: Callable[[str], object]
+    ) -> None:
+        """Fill a temporary file, verify it, and only then move it into place.
+
+        ``destination`` is replaced atomically or not at all, so a failure at
+        any step (a full disk, a locked file, a failed integrity check)
+        leaves whatever was there before exactly as it was.
+        """
         temporary_path: str | None = None
         try:
             fd, temporary_path = tempfile.mkstemp(
@@ -219,7 +260,7 @@ class DatabaseManager:
                 dir=os.path.dirname(destination) or ".",
             )
             os.close(fd)
-            shutil.copy2(source, temporary_path)
+            populate(temporary_path)
             if not cls._database_is_valid(temporary_path):
                 raise OSError("database copy failed integrity validation")
             os.replace(temporary_path, destination)
@@ -230,7 +271,7 @@ class DatabaseManager:
             # without this the data directory grows by two dead files a launch.
             _discard_sidecars_for(temporary_path)
             temporary_path = None
-        except (OSError, shutil.Error) as exc:
+        except (OSError, shutil.Error, sqlite3.Error) as exc:
             raise PersistenceError(
                 "Could not copy the chat database safely.", operation="backup", cause=exc
             ) from exc
@@ -246,31 +287,6 @@ class DatabaseManager:
                         cause=exc,
                     ) from exc
 
-    def _sidecar_paths(self) -> tuple[Path, ...]:
-        """The WAL sidecars SQLite keeps beside the primary database file."""
-        return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
-
-    def _discard_sidecars(self) -> None:
-        """Drop the write-ahead log left behind by the database we replaced.
-
-        The crash that corrupts the primary is the same event that leaves an
-        uncheckpointed -wal beside it. After recovery that log describes a
-        file that no longer exists, and SQLite cannot tell -- it would replay
-        the frames onto the restored backup and overwrite recovered rows with
-        content from the database just declared corrupt.
-
-        Only safe once the replacement is committed. On the rollback path the
-        original primary is put back, so its sidecars still describe it and
-        must survive.
-        """
-        for sidecar in self._sidecar_paths():
-            try:
-                sidecar.unlink(missing_ok=True)
-            except OSError:
-                # A locked sidecar is not worth failing recovery over; SQLite
-                # validates the log against the database header before replay.
-                logging.warning("Could not remove a stale chat database sidecar.")
-
     def _prepare_primary(self) -> None:
         """Validate the primary before backup rotation, recovering if needed.
 
@@ -279,6 +295,10 @@ class DatabaseManager:
         _create_tables), so this defends against the rarer catastrophic case
         -- a corrupt or unreadable primary -- using the same validated,
         two-generation backup rotation already proven in sqlite_settings.py.
+
+        This stays fail-closed. A corrupt primary with no usable backup, or a
+        recovery that cannot preserve what it is replacing, raises rather than
+        starting on an empty or half-restored database.
         """
         if not os.path.exists(self.db_path) or self._database_is_valid(self.db_path):
             return
@@ -286,39 +306,90 @@ class DatabaseManager:
         for candidate in (self.backup_path, self.previous_backup_path):
             if not self._database_is_valid(candidate):
                 continue
-            corrupt_path = f"{self.db_path}.corrupt-{uuid4().hex}"
-            try:
-                os.replace(self.db_path, corrupt_path)
-            except OSError as exc:
-                raise PersistenceError(
-                    "Could not preserve the corrupt chat database before recovery.",
-                    operation="recovery",
-                    cause=exc,
-                ) from exc
-            try:
-                self._atomic_copy_database(candidate, self.db_path)
-                self._discard_sidecars()
-            except PersistenceError:
-                try:
-                    os.replace(corrupt_path, self.db_path)
-                except OSError as rollback_exc:
-                    raise PersistenceError(
-                        "Chat database recovery failed and the corrupt primary could not be "
-                        f"restored; it remains at {corrupt_path}.",
-                        operation="recovery",
-                        cause=rollback_exc,
-                    ) from rollback_exc
-                raise
+            self.recovery_report = self._recover_from(candidate)
+            self.last_corrupt_path = self.recovery_report.quarantined_path
             logging.error(
                 "Chat database was corrupt; recovered from a verified backup. "
-                "The corrupt file was preserved for inspection (path omitted from logs)."
+                "The corrupt file and its write-ahead log were preserved for "
+                "inspection (path omitted from logs)."
             )
-            self.last_corrupt_path = corrupt_path
             return
 
         raise PersistenceError(
             "Chat database is corrupt and no valid backup is available.",
             operation="recovery",
+        )
+
+    def _recover_from(self, candidate: str) -> RecoveryReport:
+        """Replace the corrupt primary with ``candidate``, keeping everything it had.
+
+        The crash that corrupts the primary is the same event that leaves an
+        uncheckpointed -wal beside it. That log must not sit next to the
+        restored copy: SQLite cannot tell it describes a different database
+        and would replay its frames onto the backup, overwriting recovered
+        rows with content from the file just declared corrupt. But it may also
+        hold the newest committed messages, so it is moved next to the
+        quarantined primary (``<corrupt>-wal``) rather than deleted, where
+        ``sqlite3 .recover`` can still find it.
+
+        The log moves first. A crash between the two renames then leaves the
+        primary still detectably corrupt, so the next start repeats recovery;
+        the other order would leave a log with no database beside it, which
+        SQLite replays onto whatever file is created there next.
+
+        If the backup cannot be put in place, everything is moved back.
+        """
+        corrupt_path = f"{self.db_path}.corrupt-{uuid4().hex}"
+        try:
+            moved_sidecars = move_sidecars(self.db_path, corrupt_path)
+        except OSError as exc:
+            raise PersistenceError(
+                "Could not preserve the write-ahead log of the corrupt chat database "
+                "before recovery.",
+                operation="recovery",
+                cause=exc,
+            ) from exc
+        try:
+            os.replace(self.db_path, corrupt_path)
+        except OSError as exc:
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError:
+                logging.warning("Could not return the chat database write-ahead log.")
+            raise PersistenceError(
+                "Could not preserve the corrupt chat database before recovery.",
+                operation="recovery",
+                cause=exc,
+            ) from exc
+        try:
+            self._atomic_copy_database(candidate, self.db_path)
+        except PersistenceError:
+            try:
+                os.replace(corrupt_path, self.db_path)
+            except OSError as rollback_exc:
+                raise PersistenceError(
+                    "Chat database recovery failed and the corrupt primary could not be "
+                    f"restored; it remains at {corrupt_path}.",
+                    operation="recovery",
+                    cause=rollback_exc,
+                ) from rollback_exc
+            # The original primary is back, so its own log is the right one
+            # again. Restored second: with the primary in place, a log that
+            # cannot be returned is still safe on disk, just not replayed.
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError as rollback_exc:
+                raise PersistenceError(
+                    "Chat database recovery failed; the corrupt primary was restored but "
+                    f"its write-ahead log remains at {corrupt_path}-wal.",
+                    operation="recovery",
+                    cause=rollback_exc,
+                ) from rollback_exc
+            raise
+        return RecoveryReport(
+            recovered_from=candidate,
+            quarantined_path=corrupt_path,
+            at=utc_now_iso(),
         )
 
     def _create_backup(self) -> None:
@@ -327,30 +398,135 @@ class DatabaseManager:
         Called once at startup (after _prepare_primary and schema init), not
         on every message write -- unlike settings, chat writes happen on
         every turn, and a full-file copy on each one would not scale.
+
+        The primary is read through SQLite's online backup API, not copied
+        as a file after a checkpoint: in WAL mode recent commits can live
+        only in the -wal sidecar, and wal_checkpoint(TRUNCATE) does not raise
+        when a reader keeps it from finishing.
         """
         with self._write_lock:
-            if not os.path.exists(self.db_path) or not self._database_is_valid(self.db_path):
+            if not os.path.exists(self.db_path):
                 return
+            if not self._database_is_valid(self.db_path):
+                raise PersistenceError(
+                    "Could not back up a chat database that failed validation.",
+                    operation="backup",
+                )
             try:
-                # In WAL mode, recent commits can still live only in the
-                # sidecar -wal file; copying just the main file without
-                # checkpointing first could back up a database that is
-                # missing them. TRUNCATE folds the WAL back into the main
-                # file and removes the sidecar, so a plain file copy is a
-                # complete, self-contained snapshot.
-                with self.connect() as connection:
-                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 # Preserve the prior verified backup before replacing the
                 # current generation. If the new copy fails, .bak stays intact.
                 if self._database_is_valid(self.backup_path):
                     self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-                self._atomic_copy_database(self.db_path, self.backup_path)
+                self._atomic_snapshot_database(self.db_path, self.backup_path)
             except PersistenceError:
                 raise
             except OSError as exc:
                 raise PersistenceError(
                     "Could not create a chat database backup.", operation="backup", cause=exc
                 ) from exc
+
+    def _refresh_startup_backup(self) -> None:
+        """Take the startup backup without letting its failure stop the launch.
+
+        The backup is a safety copy, and at this point the primary has been
+        validated and opened. A full disk, a scanner holding the file, or a
+        read-only .bak would otherwise turn "no spare copy" into "cannot
+        chat", when chatting needs kilobytes. The failure is logged and
+        reported through ``backup_status``; the previous backups are left
+        exactly as they were, because every write into them is atomic.
+        """
+        try:
+            self._create_backup()
+        except PersistenceError as exc:
+            self._note_backup_failure(str(exc), exc.cause)
+
+    def _note_backup_failure(self, message: str, cause: BaseException | None) -> None:
+        # Never log the exception text: an OS error carries the private path.
+        logging.error(
+            "Chat database backup failed; continuing with the existing backups (%s).",
+            type(cause).__name__ if cause is not None else "no cause recorded",
+        )
+        if self.backup_status.state != "failed":
+            self.backup_status = BackupStatus("failed", failure_detail(message, cause))
+
+    def _stored_schema_state(self) -> tuple[int, bool]:
+        """Return ``(user_version, has_tables)`` for the existing primary."""
+        with self.connect() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            has_tables = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+        return version, has_tables
+
+    def _pre_upgrade_snapshot_path(self, version: int) -> str:
+        return f"{self.db_path}.pre-v{version}.bak"
+
+    def _unsupported_schema_error(self, version: int) -> PersistenceError:
+        """Refuse a database a newer release has upgraded, and say how to go back."""
+        # Any snapshot at or below this release's version is readable by it;
+        # the highest such version is the newest data that can go back.
+        pattern = re.compile(rf"{re.escape(os.path.basename(self.db_path))}\.pre-v(\d+)\.bak")
+        try:
+            names = os.listdir(os.path.dirname(os.path.abspath(self.db_path)))
+        except OSError:
+            names = []
+        readable = {
+            int(match.group(1)): match.group(0)
+            for match in map(pattern.fullmatch, names)
+            if match is not None and int(match.group(1)) <= self.SCHEMA_VERSION
+        }
+        if readable:
+            advice = (
+                f"To go back to this release, close Cortex and restore {readable[max(readable)]}, "
+                "which the newer release kept before it upgraded the database."
+            )
+        else:
+            advice = "Install the release that wrote it, or restore a backup taken before it was upgraded."
+        return PersistenceError(
+            f"Unsupported database schema version {version}; this release reads up to "
+            f"{self.SCHEMA_VERSION}. {advice}",
+            operation="schema_check",
+        )
+
+    def _snapshot_before_upgrade(self) -> None:
+        """Keep the pre-upgrade state of a database this release is about to change.
+
+        The ordinary backup is refreshed after the schema upgrade, so it and
+        the generation behind it both hold the new schema, and an older
+        release refuses all of them. A database on an older schema version is
+        therefore snapshotted first, to ``<db>.pre-v<version>.bak``: a fixed
+        name per version, written once and never rotated or overwritten.
+
+        A database from a newer release is refused here, before anything
+        touches it, with the name of the snapshot to restore.
+
+        A failed snapshot is reported through ``backup_status`` but does not
+        block the upgrade: the schema steps are additive, and the alternative
+        is a Cortex that cannot start until the disk has room.
+        """
+        if not os.path.exists(self.db_path):
+            return
+        version, has_tables = self._stored_schema_state()
+        if version > self.SCHEMA_VERSION:
+            raise self._unsupported_schema_error(version)
+        # A pre-versioning file (user_version 0) that already has tables is
+        # real history about to be altered; an empty or brand-new one is not.
+        if version == self.SCHEMA_VERSION or not has_tables:
+            return
+        snapshot_path = self._pre_upgrade_snapshot_path(version)
+        if os.path.exists(snapshot_path):
+            return
+        try:
+            self._atomic_snapshot_database(self.db_path, snapshot_path)
+        except PersistenceError as exc:
+            self._note_backup_failure(
+                f"Could not keep a pre-upgrade snapshot. {exc}", exc.cause
+            )
+            return
+        self.pre_upgrade_snapshot_path = snapshot_path
 
     def _create_tables(self):
         """Creates the necessary tables in the database if they don't exist."""
@@ -406,10 +582,7 @@ class DatabaseManager:
             )
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > self.SCHEMA_VERSION:
-                raise PersistenceError(
-                    f"Unsupported database schema version {version}.",
-                    operation="schema_check",
-                )
+                raise self._unsupported_schema_error(version)
             columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(messages)").fetchall()

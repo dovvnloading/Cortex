@@ -95,6 +95,8 @@ from .schemas import (
     JobAccepted,
     JobStatusResponse,
     LlamaCppRuntimeStatus,
+    DatabaseBackupStatus,
+    DatabaseRecoveryReport,
     ModelResponse,
     InstalledModel,
     SettingsMigrationReport as SettingsMigrationReportResponse,
@@ -1003,6 +1005,31 @@ def _migration_response(report: SettingsMigrationReport | None):
         invalid_keys=report.invalid_keys,
         backup_path=report.backup_path,
         message=report.message,
+    )
+
+
+def _backup_response(repository: object) -> DatabaseBackupStatus | None:
+    """Report a SQLite-backed store's startup backup and recovery, if it keeps them.
+
+    The in-memory stores used by previews have neither, so they report
+    nothing rather than a made-up "ok".
+    """
+    status_value = getattr(repository, "backup_status", None)
+    if status_value is None:
+        return None
+    recovery = getattr(repository, "recovery_report", None)
+    return DatabaseBackupStatus(
+        status=status_value.state,
+        detail=status_value.detail,
+        recovery=(
+            DatabaseRecoveryReport(
+                recovered_from=recovery.recovered_from,
+                quarantined_path=recovery.quarantined_path,
+                at=recovery.at,
+            )
+            if recovery is not None
+            else None
+        ),
     )
 
 

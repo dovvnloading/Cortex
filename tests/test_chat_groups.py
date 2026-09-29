@@ -17,7 +17,7 @@ from cortex_backend.repositories.chats import (
     InMemoryChatRepository,
     LegacyDatabaseChatRepository,
 )
-from cortex_backend.repositories.storage import DatabaseManager
+from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
 
 def _repositories(tmp_path: Path):
@@ -99,8 +99,8 @@ def test_moving_an_unknown_chat_reports_miss_without_raising(tmp_path: Path) -> 
 # -- schema migration ------------------------------------------------------
 
 
-def test_a_v3_database_upgrades_in_place_without_losing_chats(tmp_path: Path) -> None:
-    path = tmp_path / "legacy.sqlite"
+def _write_old_schema_database(path: Path, *, user_version: int = 3) -> None:
+    """A database as an earlier build left it: one chat, no groups column."""
     connection = sqlite3.connect(path)
     connection.execute(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, timestamp TEXT NOT NULL)"
@@ -117,9 +117,30 @@ def test_a_v3_database_upgrades_in_place_without_losing_chats(tmp_path: Path) ->
         "INSERT INTO messages (thread_id, role, content, timestamp) "
         "VALUES ('old-1', 'user', 'hello', '2026-01-01T00:00:00Z')"
     )
-    connection.execute("PRAGMA user_version = 3")
+    connection.execute(f"PRAGMA user_version = {user_version}")
     connection.commit()
     connection.close()
+
+
+def _user_version(path: str | Path) -> int:
+    probe = sqlite3.connect(path)
+    try:
+        return int(probe.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        probe.close()
+
+
+def _column_names(path: str | Path, table: str) -> set[str]:
+    probe = sqlite3.connect(path)
+    try:
+        return {row[1] for row in probe.execute(f"PRAGMA table_info({table})")}
+    finally:
+        probe.close()
+
+
+def test_a_v3_database_upgrades_in_place_without_losing_chats(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
 
     database = DatabaseManager(db_path=str(path))
 
@@ -134,6 +155,133 @@ def test_a_v3_database_upgrades_in_place_without_losing_chats(tmp_path: Path) ->
         assert probe.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         probe.close()
+
+
+def test_upgrading_a_v3_database_keeps_a_pre_upgrade_snapshot(tmp_path: Path) -> None:
+    """The ordinary backup is refreshed after the schema upgrade, so an older
+    release would refuse it. The snapshot taken first is the rollback path."""
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+
+    database = DatabaseManager(db_path=str(path))
+
+    snapshot = Path(f"{path}.pre-v3.bak")
+    assert database.pre_upgrade_snapshot_path == str(snapshot)
+    assert database.backup_status == ("ok", None)
+    assert snapshot.exists()
+    # The snapshot is the database as it was: old version, old shape, same chat.
+    assert _user_version(snapshot) == 3
+    assert "group_id" not in _column_names(snapshot, "threads")
+    probe = sqlite3.connect(snapshot)
+    try:
+        assert probe.execute("SELECT content FROM messages").fetchall() == [("hello",)]
+    finally:
+        probe.close()
+    # ... while the live database and its ordinary backup are on the new version.
+    assert _user_version(path) == 4
+    assert _user_version(f"{path}.bak") == 4
+
+    # A second open sees a current database and leaves the snapshot alone.
+    snapshot_before = snapshot.read_bytes()
+    modified_before = snapshot.stat().st_mtime_ns
+    reopened = DatabaseManager(db_path=str(path))
+    assert reopened.pre_upgrade_snapshot_path is None
+    assert snapshot.read_bytes() == snapshot_before
+    assert snapshot.stat().st_mtime_ns == modified_before
+
+
+def test_the_pre_upgrade_snapshot_is_never_overwritten(tmp_path: Path) -> None:
+    """One fixed name per version, written once. If an upgrade was interrupted
+    and the database is still on the old version, the first snapshot stands."""
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+    snapshot = Path(f"{path}.pre-v3.bak")
+    snapshot.write_bytes(b"the snapshot an earlier launch took")
+
+    database = DatabaseManager(db_path=str(path))
+
+    assert database.pre_upgrade_snapshot_path is None
+    assert snapshot.read_bytes() == b"the snapshot an earlier launch took"
+    assert _user_version(path) == 4
+
+
+def test_a_pre_versioning_database_with_history_is_snapshotted(tmp_path: Path) -> None:
+    """user_version 0 with tables is real history from a build that predates
+    versioning, and it is about to be altered like any other."""
+    path = tmp_path / "unversioned.sqlite"
+    _write_old_schema_database(path, user_version=0)
+
+    database = DatabaseManager(db_path=str(path))
+
+    snapshot = Path(f"{path}.pre-v0.bak")
+    assert database.pre_upgrade_snapshot_path == str(snapshot)
+    assert _user_version(snapshot) == 0
+    assert "group_id" not in _column_names(snapshot, "threads")
+    assert _user_version(path) == 4
+
+
+def test_a_new_or_current_database_gets_no_pre_upgrade_snapshot(tmp_path: Path) -> None:
+    fresh = DatabaseManager(db_path=str(tmp_path / "fresh.sqlite"))
+    assert fresh.pre_upgrade_snapshot_path is None
+    DatabaseManager(db_path=str(tmp_path / "fresh.sqlite"))
+
+    assert not list(tmp_path.glob("*.pre-v*.bak"))
+
+
+def test_a_failed_pre_upgrade_snapshot_reports_but_does_not_block_the_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The schema steps are additive; a full disk must not leave Cortex unable
+    to start. The failure is reported and nothing else is disturbed."""
+    path = tmp_path / "legacy.sqlite"
+    _write_old_schema_database(path)
+
+    def full_disk(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr("cortex_backend.repositories.storage.snapshot_database", full_disk)
+
+    database = DatabaseManager(db_path=str(path))
+    monkeypatch.undo()
+
+    state, detail = database.backup_status
+    assert state == "failed"
+    assert detail is not None and "pre-upgrade" in detail and str(tmp_path) not in detail
+    assert database.pre_upgrade_snapshot_path is None
+    assert not Path(f"{path}.pre-v3.bak").exists()
+    assert not [entry.name for entry in tmp_path.iterdir() if ".tmp" in entry.name]
+    assert _user_version(path) == 4
+    assert len(database.load_chat("old-1")["messages"]) == 1
+
+
+def test_a_newer_database_is_refused_untouched_and_names_the_snapshot_to_restore(
+    tmp_path: Path,
+) -> None:
+    """An older release used to create indexes in a newer file and only then
+    refuse it. It now refuses first, and says which file goes back."""
+    path = tmp_path / "newer.sqlite"
+    _write_old_schema_database(path, user_version=99)
+    # What the newer release kept when it upgraded from versions 3 and 4, plus
+    # one from the future that this release could not read anyway.
+    for version in (3, 4, 7):
+        Path(f"{path}.pre-v{version}.bak").write_bytes(b"snapshot")
+    before = path.read_bytes()
+
+    with pytest.raises(PersistenceError, match=r"schema version 99") as refused:
+        DatabaseManager(db_path=str(path))
+
+    assert "newer.sqlite.pre-v4.bak" in str(refused.value)
+    assert "pre-v7" not in str(refused.value)
+    assert str(tmp_path) not in str(refused.value)
+    assert path.read_bytes() == before
+
+
+def test_a_newer_database_with_no_snapshot_is_still_refused_with_guidance(tmp_path: Path) -> None:
+    path = tmp_path / "newer.sqlite"
+    _write_old_schema_database(path, user_version=99)
+
+    with pytest.raises(PersistenceError, match=r"schema version 99.*release that wrote it"):
+        DatabaseManager(db_path=str(path))
 
 
 def test_a_chat_pointing_at_a_vanished_group_is_returned_to_ungrouped(tmp_path: Path) -> None:

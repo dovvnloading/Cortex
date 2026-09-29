@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
 from cortex_backend.api.routes import (
+    _backup_response,
     _llamacpp_status,
     _load_settings_result,
     _migration_response,
@@ -98,6 +99,8 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             settings_source=settings.source,
             invalid_settings_keys=settings.invalid_keys,
             migration=_migration_response(settings.migration),
+            chat_backup=_backup_response(deps.chats),
+            settings_backup=_backup_response(deps.settings),
             installed_models=installed,
             required_models=required,
             optional_models=optional,

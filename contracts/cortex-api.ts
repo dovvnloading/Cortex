@@ -175,11 +175,25 @@ export interface CropStep {
   height: number;
 }
 
+export interface DatabaseBackupStatus {
+  status: "ok" | "failed" | "skipped";
+  detail?: string | null;
+  recovery?: DatabaseRecoveryReport | null;
+}
+
+export interface DatabaseRecoveryReport {
+  recovered_from: string;
+  quarantined_path: string;
+  at: string;
+}
+
 export interface DiagnosticsResponse {
   api_version?: "v1";
   settings_source: string;
   invalid_settings_keys?: Array<string>;
   migration?: SettingsMigrationReport | null;
+  chat_backup?: DatabaseBackupStatus | null;
+  settings_backup?: DatabaseBackupStatus | null;
   installed_models?: Array<string>;
   required_models?: Array<string>;
   optional_models?: Array<string>;
