@@ -302,6 +302,18 @@ def _age(path: Path, days: float) -> None:
     os.utime(path, (moment, moment))
 
 
+def _seen_marker(copy: Path) -> Path:
+    """The sidecar whose own age says when Cortex first saw ``copy`` set aside."""
+    return copy.with_name(f"execution.sqlite.seen-{copy.name.removeprefix('execution.sqlite.')}")
+
+
+def _mark_seen(copy: Path, days_ago: float) -> Path:
+    marker = _seen_marker(copy)
+    marker.write_bytes(b"")
+    _age(marker, days_ago)
+    return marker
+
+
 def test_startup_sweep_reclaims_only_old_set_aside_copies(tmp_path: Path) -> None:
     db_path = _seed_store(tmp_path)
     keep_days = ASIDE_COPY_RETENTION_SECONDS / 86_400
@@ -312,9 +324,11 @@ def test_startup_sweep_reclaims_only_old_set_aside_copies(tmp_path: Path) -> Non
     other_store = tmp_path / f"other.sqlite.damaged-{'d' * 32}"
     for path in (old_damaged, old_newer, recent, wrong_shape, other_store):
         path.write_bytes(b"synthetic")
-    _age(old_damaged, keep_days + 1)
-    _age(old_newer, keep_days + 1)
-    _age(recent, keep_days - 1)
+    # The clock is the sidecar's age, not the copy's: set aside longer ago than
+    # the window, or not.
+    _mark_seen(old_damaged, keep_days + 1)
+    _mark_seen(old_newer, keep_days + 1)
+    _mark_seen(recent, keep_days - 1)
     _age(wrong_shape, 400)
     _age(other_store, 400)
 
@@ -322,10 +336,87 @@ def test_startup_sweep_reclaims_only_old_set_aside_copies(tmp_path: Path) -> Non
 
     assert not old_damaged.exists()
     assert not old_newer.exists()
+    assert not _seen_marker(old_damaged).exists()
+    assert not _seen_marker(old_newer).exists()
     assert recent.exists()
+    assert _seen_marker(recent).exists()
     assert wrong_shape.exists()
     assert other_store.exists()
     assert db_path.exists()
+
+
+def test_a_copy_from_an_earlier_build_gets_its_own_retention_window(tmp_path: Path) -> None:
+    """Earlier builds set copies aside without recording when, so their age is unknown.
+
+    Judging them by modification time meant the first launch after an upgrade
+    deleted every copy an earlier build had promised to keep for inspection, since
+    the file's last write is when the store died, not when it was set aside. The
+    window now runs from the first time this build sees the copy.
+    """
+    db_path = _seed_store(tmp_path)
+    legacy = tmp_path / f"execution.sqlite.damaged-{'e' * 32}"
+    legacy.write_bytes(b"synthetic")
+    _age(legacy, 400)
+
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    assert legacy.exists()
+    marker = _seen_marker(legacy)
+    assert marker.is_file()
+    assert abs(marker.stat().st_mtime - time.time()) < 120
+
+    # Seeing it again does not restart the clock or reclaim it early.
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+    assert legacy.exists()
+
+    # Once that window has run out, it goes, together with its sidecar.
+    _age(marker, ASIDE_COPY_RETENTION_SECONDS / 86_400 + 1)
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+    assert not legacy.exists()
+    assert not marker.exists()
+
+
+def test_a_store_set_aside_now_is_marked_at_once(tmp_path: Path) -> None:
+    db_path = _seed_store(tmp_path)
+    _tear_a_page(db_path)
+
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    (copy,) = _set_aside(tmp_path, "damaged")
+    marker = _seen_marker(copy)
+    assert marker.is_file()
+    assert abs(marker.stat().st_mtime - time.time()) < 120
+
+
+def test_a_sidecar_whose_copy_is_gone_is_removed(tmp_path: Path) -> None:
+    db_path = _seed_store(tmp_path)
+    gone = tmp_path / f"execution.sqlite.damaged-{'f' * 32}"
+    orphan = _mark_seen(gone, 1)
+    unrelated = tmp_path / f"other.sqlite.seen-damaged-{'f' * 32}"
+    unrelated.write_bytes(b"")
+    wrong_shape = tmp_path / "execution.sqlite.seen-damaged-keep"
+    wrong_shape.write_bytes(b"")
+
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    assert not orphan.exists()
+    assert unrelated.exists()
+    assert wrong_shape.exists()
+
+
+def test_a_sidecar_that_is_not_a_plain_file_is_never_trusted(tmp_path: Path) -> None:
+    """Something else wearing the sidecar's name must not become a reason to delete a copy."""
+    db_path = _seed_store(tmp_path)
+    copy = tmp_path / f"execution.sqlite.damaged-{'9' * 32}"
+    copy.write_bytes(b"synthetic")
+    impostor = _seen_marker(copy)
+    impostor.mkdir()
+    _age(impostor, ASIDE_COPY_RETENTION_SECONDS / 86_400 + 30)
+
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    assert copy.exists()
+    assert impostor.is_dir()
 
 
 def test_a_store_set_aside_now_is_not_swept_for_its_old_last_write(tmp_path: Path) -> None:

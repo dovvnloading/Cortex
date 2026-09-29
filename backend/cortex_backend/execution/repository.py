@@ -306,11 +306,8 @@ class ExecutionRepository:
                 else "The execution store was written by a newer version of Cortex "
                 "and could not be set aside."
             ) from exc
-        try:
-            # The retention window runs from now, not from the last write.
-            os.utime(aside)
-        except OSError:
-            pass
+        # The retention window runs from now, not from the last write.
+        self._mark_aside_copy_seen(aside)
         for suffix in ("-wal", "-shm"):
             # They describe the file just moved aside, so SQLite must not
             # replay them onto the empty replacement.
@@ -377,31 +374,80 @@ class ExecutionRepository:
         message = str(exc).lower()
         return any(marker in message for marker in _SQLITE_CORRUPTION_MESSAGES)
 
+    def _aside_marker_path(self, copy: Path) -> Path:
+        """The sidecar recording when Cortex first saw ``copy`` set aside.
+
+        Its own modification time is the start of the copy's retention window.
+        The name shares the copy's kind and id but not its prefix, so it never
+        matches the ``<store>.damaged-*`` patterns that find the copies.
+        """
+
+        tag = copy.name[len(self.db_path.name) + 1 :]
+        return copy.with_name(f"{self.db_path.name}.seen-{tag}")
+
+    def _mark_aside_copy_seen(self, copy: Path) -> None:
+        """Start ``copy``'s retention window now, unless one is already running."""
+
+        try:
+            with open(self._aside_marker_path(copy), "x"):
+                pass
+        except OSError:
+            pass  # Already marked, or unwritable: the next launch tries again.
+
     def _sweep_aside_copies(self) -> None:
-        """Reclaim set-aside stores older than the retention window.
+        """Reclaim set-aside stores whose retention window has run out.
 
         Nothing else ever removed them, and the artifact files their rows
         named are unreachable anyway, so each one was a permanent copy of a
-        store nobody could open. Best effort: a failure here never stops
-        startup, and only regular files with the exact set-aside name are
-        touched.
+        store nobody could open.
+
+        The window runs from when the copy was first seen, recorded in a
+        sidecar, and never from the copy's own modification time: that is when
+        the store last changed, and copies set aside by earlier builds -- which
+        promised to keep them for inspection -- carry no record of when.
+        Those are simply seen for the first time now, and get a full window.
+
+        Best effort: a failure here never stops startup, and only regular files
+        with the exact set-aside name (and its sidecar) are touched.
         """
 
-        pattern = re.compile(
-            rf"^{re.escape(self.db_path.name)}\.(?:damaged|newer)-[0-9a-f]{{32}}$"
-        )
+        name = re.escape(self.db_path.name)
+        tag = r"(?P<tag>(?:damaged|newer)-[0-9a-f]{32})"
+        copy_pattern = re.compile(rf"^{name}\.{tag}$")
+        marker_pattern = re.compile(rf"^{name}\.seen-{tag}$")
         cutoff = datetime.now(timezone.utc).timestamp() - ASIDE_COPY_RETENTION_SECONDS
         try:
-            candidates = [
-                entry for entry in self.db_path.parent.iterdir() if pattern.fullmatch(entry.name)
-            ]
+            entries = list(self.db_path.parent.iterdir())
         except OSError:
             return
-        for entry in candidates:
+        copies: dict[str, Path] = {}
+        markers: dict[str, Path] = {}
+        for entry in entries:
+            if (match := copy_pattern.fullmatch(entry.name)) is not None:
+                copies[match["tag"]] = entry
+            elif (match := marker_pattern.fullmatch(entry.name)) is not None:
+                markers[match["tag"]] = entry
+        for entry_tag, copy in copies.items():
+            marker = markers.get(entry_tag)
             try:
-                info = entry.lstat()
-                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                    entry.unlink()
+                if not stat.S_ISREG(copy.lstat().st_mode):
+                    continue
+                if marker is None:
+                    self._mark_aside_copy_seen(copy)
+                    continue
+                marker_info = marker.lstat()
+                if stat.S_ISREG(marker_info.st_mode) and marker_info.st_mtime < cutoff:
+                    copy.unlink()
+                    marker.unlink(missing_ok=True)
+            except OSError:
+                continue
+        for entry_tag, marker in markers.items():
+            if entry_tag in copies:
+                continue
+            # The copy is gone; nothing is left for the sidecar to date.
+            try:
+                if stat.S_ISREG(marker.lstat().st_mode):
+                    marker.unlink()
             except OSError:
                 continue
 
