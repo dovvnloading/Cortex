@@ -693,12 +693,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // `notifyOnSuccess`: callers that want their own, more specific success
   // message (e.g. "modelname downloaded and selected") suppress the generic
   // one here instead of showing both.
+  // `onFailure`: receives the specific reason a failed job reports, so a
+  // caller can show it next to the control that started the job as well as in
+  // the toast.
   const runModelJob = async (
     accepted: JobAccepted,
     model = "local model inventory",
-    options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean } = {},
+    options: { checkOllamaConnection?: boolean; notifyOnSuccess?: boolean; onFailure?: (message: string) => void } = {},
   ): Promise<Record<string, unknown> | null> => {
-    const { checkOllamaConnection = true, notifyOnSuccess = true } = options;
+    const { checkOllamaConnection = true, notifyOnSuccess = true, onFailure } = options;
     const generation = ++modelGenerationRef.current;
     const isCurrentModelJob = () => mountedRef.current && modelGenerationRef.current === generation;
     setModelBusy(true);
@@ -729,13 +732,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
 
       if (terminalStatus === "failed" || terminalStatus === "cancelled") {
-        if (isCurrentModelJob()) {
-          notify(
-            failureMessage
-              ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed."),
-            "error",
-          );
-        }
+        const message = failureMessage
+          ?? (terminalStatus === "cancelled" ? "Model operation was cancelled." : "Model operation failed.");
+        onFailure?.(message);
+        if (isCurrentModelJob()) notify(message, "error");
         return null;
       }
       if (terminalStatus !== "succeeded") {
@@ -760,7 +760,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       }
       return completedData;
     } catch (error) {
-      if (isCurrentModelJob()) notify(apiMessage(error, "Model operation failed."), "error");
+      const message = apiMessage(error, "Model operation failed.");
+      onFailure?.(message);
+      if (isCurrentModelJob()) notify(message, "error");
       return null;
     } finally {
       if (isCurrentModelJob()) setModelBusy(false);
@@ -783,14 +785,21 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       accepted = await api.downloadGGUFModel(request);
     } catch (error) {
-      notify(apiMessage(error, "Could not start the model download."), "error");
-      throw error;
+      const message = apiMessage(error, "Could not start the model download.");
+      notify(message, "error");
+      throw new Error(message, { cause: error });
     }
-    const result = await runModelJob(accepted, label, { checkOllamaConnection: false, notifyOnSuccess: false });
+    let failure: string | null = null;
+    const result = await runModelJob(accepted, label, {
+      checkOllamaConnection: false,
+      notifyOnSuccess: false,
+      onFailure: (message) => { failure = message; },
+    });
     const filename = result && typeof result.filename === "string" ? result.filename : null;
     if (!filename) {
-      // runModelJob already showed the specific failure reason as a toast.
-      throw new Error("Model download failed.");
+      // The toast already carries the specific reason, but it is the only
+      // place it would otherwise appear. The form shows it inline as well.
+      throw new Error(failure ?? "Model download failed.");
     }
     const selected = await chooseLocalModel(`gguf:${filename}`);
     if (!selected) {

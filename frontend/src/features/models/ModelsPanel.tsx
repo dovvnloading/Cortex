@@ -171,8 +171,11 @@ function GGUFDownloadForm({ onDownload, busy, directoryDirty }: { onDownload: (r
       setRepoId("");
       setFilename("");
       setUrl("");
-    } catch {
-      setError("The download did not complete. See the notification for details, or check the details above and try again.");
+    } catch (failure) {
+      // App reports why the download failed (a checksum mismatch, a refused
+      // URL) in the rejection, so the reason stays here after any toast is gone.
+      const reason = failure instanceof Error && failure.message.trim() ? failure.message.trim() : "The download did not complete.";
+      setError(`${/[.!?]$/.test(reason) ? reason : `${reason}.`} Check the details above and try again.`);
     }
   };
 
