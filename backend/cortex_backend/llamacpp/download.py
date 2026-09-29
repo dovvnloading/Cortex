@@ -570,7 +570,7 @@ def download_gguf(
         _validate_gguf_file(temp_path)
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
     finally:
-        temp_path.unlink(missing_ok=True)
+        _remove_quietly(temp_path)
     reporter.success(destination.stat().st_size)
     return destination
 
@@ -656,11 +656,14 @@ def download_gguf_set(
             published.append(destination)
         complete = True
     finally:
+        # Best effort, and every file gets its turn: a file that cannot be
+        # removed (antivirus holding it open, say) must neither stop the rest
+        # being removed nor replace the reason the download failed.
         if not complete:
             for path in published:
-                path.unlink(missing_ok=True)
+                _remove_quietly(path)
         for path in staged:
-            path.unlink(missing_ok=True)
+            _remove_quietly(path)
     reporter.success(fetched_bytes)
     return tuple(destinations)
 
@@ -697,7 +700,19 @@ def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
             raise GGUFDownloadError(
                 "Could not save the downloaded model to its destination folder."
             ) from replace_exc
-    staged.unlink(missing_ok=True)
+    # The model is in place from here on. Removing the staging name is only
+    # tidying, and the caller removes it again: if it fails (antivirus can hold
+    # a freshly linked file open on Windows), raising would report a failure for
+    # a file that is published, and a split set would not know to roll it back.
+    _remove_quietly(staged)
+
+
+def _remove_quietly(path: Path) -> None:
+    """Delete ``path`` if it exists; a failure is logged, never raised."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove a temporary download file; it can be deleted by hand.")
 
 
 @dataclass(frozen=True, slots=True)

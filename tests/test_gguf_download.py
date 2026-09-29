@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import socket
 import struct
 import threading
@@ -2230,6 +2231,127 @@ def test_a_part_that_appears_during_the_download_rolls_the_whole_set_back(tmp_pa
 
     assert last.read_bytes() == b"theirs"
     assert sorted(path.name for path in models.iterdir()) == sorted(["other.gguf", server.names[2]])
+
+
+def _deny_unlink(monkeypatch, denied) -> list[Path]:
+    """Make ``Path.unlink`` fail for the paths ``denied`` picks, as antivirus
+    holding a file open does on Windows. Returns the paths that were refused."""
+    refused: list[Path] = []
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if denied(self):
+            refused.append(self)
+            raise PermissionError(13, "The process cannot access the file: it is used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    return refused
+
+
+def _staging_files_linked_to(monkeypatch, destination_name: str) -> set[str]:
+    """Record the staging file that ``os.link`` publishes as ``destination_name``."""
+    linked: set[str] = set()
+    real_link = os.link
+
+    def link(source, destination, *args, **kwargs) -> None:
+        real_link(source, destination, *args, **kwargs)
+        if Path(destination).name == destination_name:
+            linked.add(str(source))
+
+    monkeypatch.setattr(download_module.os, "link", link)
+    return linked
+
+
+def test_a_part_whose_staging_file_cannot_be_removed_is_still_rolled_back(tmp_path: Path, monkeypatch) -> None:
+    """The staging file is deleted right after its part is linked into place,
+    and that delete can fail. The part is already published by then, so a later
+    failure must remove it too, and a failing cleanup must not replace the
+    reason the download failed."""
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, server.names[1])
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+    last = models / server.names[2]
+
+    def someone_else_saves_the_last_part() -> None:
+        last.write_bytes(b"theirs")  # taken while part 3 downloads
+
+    server.on_request[server.names[2]] = someone_else_saves_the_last_part
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused  # the scenario really happened
+    assert last.read_bytes() == b"theirs"  # a file this call did not publish is never removed
+    assert sorted(path.name for path in models.iterdir() if not path.name.startswith(".download-")) == sorted(
+        ["other.gguf", server.names[2]]
+    )
+
+    # Nothing of the failed attempt is left to make a retry refuse as "already exists".
+    last.unlink()
+    server.on_request.clear()
+    retried = download_gguf_set(server.parts(), models, http_client=server.client())
+    assert [path.name for path in retried] == server.names
+
+
+def test_a_set_is_published_even_if_a_staging_file_cannot_be_removed(tmp_path: Path, monkeypatch) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, server.names[1])
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+
+    paths = download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused
+    assert [path.name for path in paths] == server.names
+    for path in paths:
+        assert path.read_bytes() == server.shards[path.name]
+    # Only the file that could not be deleted is left over, and it is not a model.
+    extras = [path.name for path in models.iterdir() if path.name not in {*server.names, "other.gguf"}]
+    assert len(extras) == 1 and extras[0].startswith(".download-") and extras[0].endswith(".part")
+
+
+def test_a_single_model_is_published_even_if_its_staging_file_cannot_be_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    content = _valid_gguf_content(tmp_path)
+    linked = _staging_files_linked_to(monkeypatch, "model.gguf")
+    refused = _deny_unlink(monkeypatch, lambda path: str(path) in linked)
+
+    destination = download_gguf(
+        "https://example.com/model.gguf",
+        "model.gguf",
+        tmp_path,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content))
+        ),
+    )
+
+    assert refused
+    assert destination.read_bytes() == content
+
+
+def test_rollback_keeps_going_when_one_removal_fails(tmp_path: Path, monkeypatch) -> None:
+    """One part that cannot be removed must not stop the others being removed,
+    or hide why the download failed."""
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    first = models / server.names[0]
+    refused = _deny_unlink(monkeypatch, lambda path: path == first)
+    last = models / server.names[2]
+
+    def someone_else_saves_the_last_part() -> None:
+        last.write_bytes(b"theirs")
+
+    server.on_request[server.names[2]] = someone_else_saves_the_last_part
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert refused == [first]
+    assert not (models / server.names[1]).exists()  # removed although the first one could not be
+    assert last.read_bytes() == b"theirs"
 
 
 def test_each_part_of_a_split_model_honours_the_size_ceiling(tmp_path: Path) -> None:
