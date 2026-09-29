@@ -1029,6 +1029,73 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertEqual(streamed_text, "Hello world")
         self.assertEqual(result.response, "translated")
 
+    def test_a_streamed_answer_is_replaced_by_its_translation_with_one_event(self):
+        recorder = _ProgressRecorder()
+        engine = self._StreamingEngine([("content", "Hello "), ("content", "world")])
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        phases = [event.phase for event in recorder.events]
+        replacements = [event for event in recorder.events if event.phase == "content_replace"]
+        self.assertEqual(len(replacements), 1)
+        self.assertEqual(replacements[0].data, {"content": "translated"})
+        self.assertEqual(result.response, "translated")
+        # After the last streamed word and after the translation began, so the
+        # client shows the original while it waits and swaps once.
+        self.assertGreater(phases.index("content_replace"), max(
+            index for index, phase in enumerate(phases) if phase == "content_delta"
+        ))
+        self.assertGreater(phases.index("content_replace"), phases.index("translation"))
+
+    def test_nothing_is_replaced_when_the_answer_was_not_streamed(self):
+        """A non-streaming engine's answer is replayed by the API after it is
+        translated, so there is no untranslated text on screen to replace."""
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: _FakeEngine(),
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        self.assertFalse(result.streamed)
+        self.assertEqual(result.response, "translated")
+        self.assertEqual([e for e in recorder.events if e.phase == "content_replace"], [])
+
+    def test_nothing_is_replaced_when_the_translation_fails_or_is_off(self):
+        for label, snapshot, translation in (
+            ("failed", _snapshot(), TranslationResult.failed("Translation failed.")),
+            ("empty", _snapshot(), TranslationResult.succeeded("   ")),
+            ("off", _snapshot(translation_enabled=False), None),
+        ):
+            with self.subTest(case=label):
+                recorder = _ProgressRecorder()
+                engine = self._StreamingEngine(
+                    [("content", "Hello world")],
+                    **({"translation": translation} if translation is not None else {}),
+                )
+                service = GenerationService(
+                    history_loader=lambda thread_id: [],
+                    memory_loader=lambda: [],
+                    engine_factory=lambda snapshot, engine=engine: engine,
+                )
+
+                result = service.generate(snapshot, progress_sink=recorder)
+
+                self.assertEqual([e for e in recorder.events if e.phase == "content_replace"], [])
+                # The untranslated answer that was streamed is the one kept.
+                self.assertEqual(result.response, "Hello world")
+                if label == "off":
+                    self.assertIsNone(result.translation_error)
+                else:
+                    self.assertIsNotNone(result.translation_error)
+
     def test_an_engine_notice_reaches_the_user_as_a_notice_and_never_as_answer_text(self):
         class _NoticingEngine(self._StreamingEngine):
             def generate(self, **kwargs):

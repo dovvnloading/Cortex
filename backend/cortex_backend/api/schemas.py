@@ -760,6 +760,11 @@ GenerationEventName = Literal[
     "generation.status",
     "generation.thinking_delta",
     "generation.content_delta",
+    # The whole visible answer, replacing what the deltas built up so far. Sent
+    # once when a translation supersedes the untranslated answer that was
+    # streamed live; ``data.content`` is the replacement. A client that does
+    # not know it keeps the streamed text until the saved message loads.
+    "generation.content_replace",
     "generation.translation_started",
     # The answer is kept untranslated; the completion carries translation_error.
     "generation.translation_failed",

@@ -33,6 +33,9 @@ ProgressPhase = Literal[
     # ``context_full``: the runtime reported a prompt that filled the window,
     # so it may have discarded the oldest part of it on its own.
     "context_full",
+    # The translated answer, replacing the untranslated one already streamed.
+    # Mapped to its own event, generation.content_replace.
+    "content_replace",
     # Live model output, published as it arrives. api/routes.py maps these to
     # generation.content_delta / generation.thinking_delta, the event names the
     # frontend already renders incrementally.

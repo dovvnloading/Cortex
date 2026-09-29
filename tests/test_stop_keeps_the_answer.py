@@ -134,6 +134,43 @@ def test_text_written_after_stop_is_not_kept():
         assert chat["messages"][-1]["content"] == SHOWN
 
 
+def test_a_stop_after_a_translation_replaced_the_answer_keeps_the_translation():
+    """What Stop keeps is what the user was last shown.
+
+    The translation replaces the streamed answer on screen (a content_replace
+    event); a Stop pressed after that must save the translation, not the
+    original that is no longer there.
+    """
+    from cortex_backend.api.routes import _ShownAnswer
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.live = True
+
+        def deliver_progress(self, phase, message, *, data=None) -> bool:
+            del phase, message, data
+            return self.live
+
+    sink = _Sink()
+    shown = _ShownAnswer(sink)
+    shown.publish_progress("content_delta", "m", data={"delta": "Hola "})
+    shown.publish_progress("content_delta", "m", data={"delta": "mundo"})
+    assert shown.content == "Hola mundo"
+
+    shown.publish_progress("content_replace", "m", data={"content": "Hello world"})
+    assert shown.content == "Hello world"
+
+    # A replacement with no text is not one.
+    shown.publish_progress("content_replace", "m", data={"content": 5})
+    shown.publish_progress("content_replace", "m", data=None)
+    assert shown.content == "Hello world"
+
+    # One dropped because Stop already landed was never seen, so it is not kept.
+    sink.live = False
+    shown.publish_progress("content_replace", "m", data={"content": "never delivered"})
+    assert shown.content == "Hello world"
+
+
 def test_stopping_a_regeneration_keeps_the_original_answer():
     """A regeneration replaces an answer only when it finishes; a stopped
     attempt leaves the original in place, as any unfinished attempt does."""

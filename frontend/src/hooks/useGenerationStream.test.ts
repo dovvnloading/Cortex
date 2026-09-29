@@ -379,6 +379,57 @@ describe("useGenerationStream", () => {
     ]);
   });
 
+  it("generation.content_replace swaps the streamed answer for its translation", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-replace", "thread-replace", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.content_delta", job_id: "job-replace", thread_id: "thread-replace", data: { delta: "Hola " } });
+      emitEvent({ event_id: 2, event: "generation.content_delta", job_id: "job-replace", thread_id: "thread-replace", data: { delta: "mundo" } });
+      // Straight behind the deltas, before any animation frame could land
+      // them: the buffered text belongs to what is being replaced and must
+      // not be appended to the replacement afterwards.
+      emitEvent({
+        event_id: 3,
+        event: "generation.content_replace",
+        job_id: "job-replace",
+        thread_id: "thread-replace",
+        data: { message: "Translated response available.", content: "Hello world" },
+      });
+    });
+
+    expect(useChatStore.getState().generation.partialContent).toBe("Hello world");
+    // Nothing left in the frame buffer to tack onto it a moment later.
+    await settlePromises();
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    expect(useChatStore.getState().generation.partialContent).toBe("Hello world");
+  });
+
+  it("ignores a content_replace that carries no text", async () => {
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+
+    act(() => {
+      result.current.start("job-noreplace", "thread-noreplace", vi.fn().mockResolvedValue(undefined), vi.fn());
+    });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+
+    act(() => {
+      useChatStore.getState().appendContentToken("job-noreplace", "kept");
+      emitEvent({ event_id: 1, event: "generation.content_replace", job_id: "job-noreplace", thread_id: "thread-noreplace", data: { content: 42 } });
+      emitEvent({ event_id: 2, event: "generation.content_replace", job_id: "job-noreplace", thread_id: "thread-noreplace" });
+    });
+
+    expect(useChatStore.getState().generation.partialContent).toBe("kept");
+  });
+
   it("raises a toast for a notice the backend flags, and only for one it flags", async () => {
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });

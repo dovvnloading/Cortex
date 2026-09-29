@@ -715,6 +715,75 @@ def test_a_streaming_engine_is_not_replayed_on_top_of_its_own_deltas():
     assert "".join(deltas).strip() == completed["data"]["response"].strip()
 
 
+def test_a_translated_streaming_answer_is_replaced_by_one_event_before_it_is_saved():
+    """The untranslated answer streams live; the translation then replaces it once.
+
+    Before this, the translation only appeared when the saved message loaded at
+    the end of the turn, so the user watched the wrong language sit on screen
+    for the whole translation call and then jump.
+    """
+
+    class _StreamingEngine:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def generate(self, *, on_delta=None, **kwargs):
+            answer, thoughts, command, stats = self._inner.generate(**kwargs)
+            if on_delta is not None:
+                for piece in answer.split(" "):
+                    on_delta("content", piece + " ")
+            return answer, thoughts, command, stats
+
+    base = build_demo_dependencies()
+    inner_factory = base.generation._engine_factory
+    base.generation._engine_factory = lambda snapshot: _StreamingEngine(inner_factory(snapshot))
+    deps = replace(
+        base,
+        settings=InMemorySettingsRepository(
+            CortexSettings(translation=TranslationSettings(enabled=True))
+        ),
+    )
+    app = create_app(deps, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": "translated-stream", "user_input": "hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+        with client.stream(
+            "GET", f"/api/v1/generations/{job_id}/events", headers=headers
+        ) as response:
+            events = _events("".join(response.iter_text()))
+        # A reconnect replays the same events, the replacement included.
+        replay = client.get(
+            f"/api/v1/generations/{job_id}/events",
+            headers={**headers, "Last-Event-ID": "0"},
+        )
+        assert [event["event"] for event in _events(replay.text)] == [e["event"] for e in events]
+
+    names = [event["event"] for event in events]
+    assert names.count("generation.content_replace") == 1
+    replace_index = names.index("generation.content_replace")
+    assert names.index("generation.translation_started") < replace_index
+    assert replace_index < names.index("generation.persisting") < names.index("generation.completed")
+    assert max(i for i, name in enumerate(names) if name == "generation.content_delta") < replace_index
+
+    original = "".join(
+        event["data"]["delta"] for event in events if event["event"] == "generation.content_delta"
+    ).strip()
+    completed = events[-1]["data"]
+    replacement = events[replace_index]["data"]["content"]
+    assert original == "Echo: hello"
+    # The replacement is exactly what is saved: what was on screen is what persists.
+    assert replacement == completed["response"] == "[Spanish] Echo: hello"
+
+
 def test_a_failed_translation_keeps_the_stream_alive_and_says_so():
     """A failed translation keeps the answer, and the stream must survive it.
 

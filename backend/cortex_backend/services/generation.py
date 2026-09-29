@@ -558,6 +558,19 @@ class GenerationService:
                     translation_error = "Translation returned an empty result."
                 else:
                     response = translation_result.text or ""
+                    if streamed:
+                        # The untranslated answer is already on the user's
+                        # screen, published live as it was written. Say what
+                        # replaces it; a client that has never heard of the
+                        # event keeps showing the original until the saved
+                        # (translated) message loads at the end of the turn.
+                        self._publish(
+                            sink,
+                            snapshot,
+                            "content_replace",
+                            "Translated response available.",
+                            data={"content": response},
+                        )
 
                 if translation_error is not None:
                     self._publish(
