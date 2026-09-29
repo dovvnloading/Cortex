@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, JobStatusResponse, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SSEEvent, SystemResponse } from "../../../contracts/cortex-api";
 import {
   CortexApi,
@@ -19,6 +19,8 @@ import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
+import { applyStoredTheme, DEFAULT_THEME_PREFERENCE } from "../lib/theme";
+import { useAppliedTheme } from "../hooks/useAppliedTheme";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore, type ModelProgress } from "../stores/useModelStore";
@@ -113,6 +115,14 @@ function scrubLauncherCredentials(): void {
 }
 
 export function App({ api: providedApi }: Props) {
+  // Until settings load (and on the onboarding screen, which never loads them)
+  // the theme is whatever was cached on the last launch. index.html already
+  // painted it before any script ran; this keeps the document in step when that
+  // inline script did not run, and is what the tests exercise. It never writes
+  // the cache -- only a loaded setting does.
+  useLayoutEffect(() => {
+    applyStoredTheme();
+  }, []);
   const [api] = useState(() => providedApi ?? new CortexApi());
   const [sessionReady, setSessionReady] = useState(api.hasSession);
   const [sessionEpoch, setSessionEpoch] = useState(0);
@@ -263,7 +273,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const setModelProgress = useModelStore((state) => state.setModelProgress);
   const setLlamacppStatus = useModelStore((state) => state.setLlamacppStatus);
   const [executionTasks, setExecutionTasks] = useState<ExecutionTaskSummary[]>([]);
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("dark");
+  // What `executionTasks` currently holds, as text. Every poll response is a
+  // freshly parsed array, so comparing references can never say "unchanged";
+  // this can, and lets an idle poll skip the state write (and the whole-shell
+  // render that comes with it). "[]" matches the initial state above.
+  const executionTasksSignatureRef = useRef("[]");
+  // The saved preference lives only in the settings store; the theme is
+  // derived from it (and painted by useAppliedTheme), never copied into state.
+  const theme = settings?.appearance?.theme ?? DEFAULT_THEME_PREFERENCE;
+  useAppliedTheme(settings ? theme : null);
   const chatsRef = useRef(chats);
   const executionTaskRefreshRef = useRef<Promise<void> | null>(null);
   // These guards cover requests whose results are deliberately loaded out of
@@ -331,7 +349,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
           if (isCurrentGroupLoad()) setGroups([]);
         });
       setSettings(settingsResponse.settings);
-      setTheme(settingsResponse.settings.appearance?.theme ?? "dark");
       if (isCurrentModelLoad()) setModels(UNAVAILABLE_MODELS);
       void api.models()
         .then((nextModels) => {
@@ -386,27 +403,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   useEffect(() => {
-    const mediaQuery = theme === "system" && typeof window.matchMedia === "function"
-      ? window.matchMedia("(prefers-color-scheme: dark)")
-      : undefined;
-    const applyTheme = () => {
-      const resolved = theme === "system" ? (mediaQuery?.matches ? "dark" : "light") : theme;
-      document.documentElement.dataset.theme = resolved;
-    };
-
-    applyTheme();
-    if (!mediaQuery) return undefined;
-
-    const handleChange = () => applyTheme();
-    if (typeof mediaQuery.addEventListener === "function") {
-      mediaQuery.addEventListener("change", handleChange);
-      return () => mediaQuery.removeEventListener("change", handleChange);
-    }
-    mediaQuery.addListener?.(handleChange);
-    return () => mediaQuery.removeListener?.(handleChange);
-  }, [theme]);
-
-  useEffect(() => {
     if (route.kind === "not-found") navigate("/chat/new", { replace: true });
   }, [route.kind]);
 
@@ -419,6 +415,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const refresh = Promise.resolve().then(async () => {
       try {
         const response = await api.executionTasks({ includeTerminal: true, limit: 20 });
+        const signature = JSON.stringify(response.tasks);
+        if (signature === executionTasksSignatureRef.current) return;
+        executionTasksSignatureRef.current = signature;
         setExecutionTasks(response.tasks);
       } catch {
         // A failed poll keeps the last list and the next tick retries.
@@ -458,7 +457,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const refreshLlamacppStatus = useCallback(async () => {
     try {
       const response = await api.system();
-      setLlamacppStatus(response.llamacpp ?? null);
+      const next = response.llamacpp ?? null;
+      // Every response parses to a new object, and the store notifies on any
+      // new reference, so an unchanged status would re-render the shell every
+      // two seconds for as long as a GGUF model is selected.
+      if (JSON.stringify(next) !== JSON.stringify(useModelStore.getState().llamacppStatus)) {
+        setLlamacppStatus(next);
+      }
     } catch {
       // Keep the last known status; the next tick retries.
     }
@@ -615,7 +620,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       const response = await api.updateSettings({ settings: next, expected_revision: next.revision });
       setSettings(response.settings);
-      setTheme(response.settings.appearance?.theme ?? "dark");
       notify("Settings saved.", "success");
       return response.settings;
     } catch (error) {
@@ -627,7 +631,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         try {
           const latest = await api.settings();
           setSettings(latest.settings);
-          setTheme(latest.settings.appearance?.theme ?? "dark");
           notify("Settings changed elsewhere. Review the latest values and save again.", "error");
         } catch (refreshError) {
           notify(apiMessage(refreshError, "Could not refresh settings after the conflict."), "error");
@@ -808,7 +811,6 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         expected_revision: current.revision,
       });
       setSettings(response.settings);
-      setTheme(response.settings.appearance?.theme ?? "dark");
       notify(`${displayModelName(model)} is ready for local chat.`, "success");
       return true;
     } catch (error) {

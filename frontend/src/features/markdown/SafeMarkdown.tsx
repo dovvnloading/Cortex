@@ -1,4 +1,4 @@
-import { isValidElement, useState, type ComponentProps, type ReactNode } from "react";
+import { isValidElement, memo, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize from "rehype-sanitize";
@@ -105,13 +105,26 @@ type SafeMarkdownProps = {
   finalized?: boolean;
 };
 
-export function SafeMarkdown({ content, finalized = true }: SafeMarkdownProps) {
-  // Sanitize first, then highlight: rehype-highlight only adds classNames to
-  // an already-safe tree, so there is nothing left for sanitize to strip.
-  const rehypePlugins = finalized ? [rehypeSanitize, rehypeHighlight] : [rehypeSanitize];
+// Sanitize first, then highlight: rehype-highlight only adds classNames to an
+// already-safe tree, so there is nothing left for sanitize to strip.
+const REMARK_PLUGINS = [remarkGfm];
+const FINAL_REHYPE_PLUGINS = [rehypeSanitize, rehypeHighlight];
+const STREAMING_REHYPE_PLUGINS = [rehypeSanitize];
+
+/**
+ * Memoised on `content` and `finalized`, both primitives. Every render of
+ * react-markdown re-runs the whole unified pipeline (parse, transform, render),
+ * so an unchanged message must not be allowed to render at all -- the parent
+ * re-renders far more often than any one message's text changes.
+ */
+export const SafeMarkdown = memo(function SafeMarkdown({ content, finalized = true }: SafeMarkdownProps) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={components}>
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={finalized ? FINAL_REHYPE_PLUGINS : STREAMING_REHYPE_PLUGINS}
+      components={components}
+    >
       {content}
     </ReactMarkdown>
   );
-}
+});

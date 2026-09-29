@@ -73,6 +73,8 @@ describe("App", () => {
     fetcher.mock.calls.filter(([input]) => String(input).endsWith(suffix));
 
   afterEach(() => {
+    window.localStorage.removeItem("cortex.theme");
+    document.documentElement.dataset.theme = "dark";
     useModelStore.getState().setLlamacppStatus(null);
     // A generation kept across a 401 is left tracked on purpose; do not let it
     // leak into the next test.
@@ -850,6 +852,61 @@ describe("App", () => {
     }
   });
 
+  it("applies the cached theme before settings load", async () => {
+    // index.html ships data-theme="dark", so a light-theme user used to see the
+    // dark ground on every launch until /settings answered.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    window.localStorage.setItem("cortex.theme", "light");
+    document.documentElement.dataset.theme = "dark";
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/settings")) {
+        await settingsGate;
+        return respond({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
+      }
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    // Settings have not answered, so this can only be the cached preference.
+    expect(await screen.findByText(/Loading local workspace/)).toBeVisible();
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    releaseSettings();
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    // The loaded setting is authoritative and refreshes the cache for next launch.
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem("cortex.theme")).toBe("dark");
+  });
+
+  it("follows a saved theme change without any separate theme state", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    let stored = { models: { chat: null, title: null }, appearance: { theme: "dark" }, revision: 1 };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/settings") && init?.method === "PUT") {
+        stored = { ...stored, appearance: { theme: "light" }, revision: 2 };
+        return respond({ settings: stored });
+      }
+      if (url.endsWith("/settings")) return respond({ settings: stored });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    const user = userEvent.setup();
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Toggle theme"));
+
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
+    expect(window.localStorage.getItem("cortex.theme")).toBe("light");
+  });
+
   it("keeps the shell selection aligned with browser route changes", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem("cortex.session.token", "local-session");
@@ -1067,8 +1124,12 @@ describe("App", () => {
       // Visible again: the visibilitychange listener refreshes immediately,
       // it doesn't wait for the next 1s tick.
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
-      await waitFor(() => expect(executionTaskCalls).toBe(2));
+      // Not a waitFor: the setInterval spy above also swallows waitFor's own
+      // polling interval, so it could only ever re-check when a re-render
+      // happened to mutate the DOM -- which every poll used to do, and an
+      // unchanged poll no longer does. Flushing the handler is deterministic.
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(executionTaskCalls).toBe(2);
     } finally {
       if (visibilityDescriptor) Object.defineProperty(document, "visibilityState", visibilityDescriptor);
       intervalSpy.mockRestore();
