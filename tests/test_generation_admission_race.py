@@ -191,21 +191,21 @@ def test_sequential_exact_generation_replay_retains_acceptance_metadata():
         )
 
 
-def test_legacy_generation_retry_replays_after_model_inventory_changes():
+def test_generation_retry_replays_after_model_inventory_changes():
     ollama_state = FakeOllamaState()
     app = create_app(
         build_demo_dependencies(ollama_state=ollama_state),
         allowed_hosts=("testserver",),
     )
     payload = {
-        "request_id": "legacy-replay-after-model-change",
+        "request_id": "replay-after-model-change",
         "user_input": "hello",
     }
 
     with TestClient(app) as client:
         headers = _session(client, app)
         original = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json=payload,
             headers=headers,
         )
@@ -221,7 +221,7 @@ def test_legacy_generation_retry_replays_after_model_inventory_changes():
         ollama_state.installed_models.clear()
 
         replay = client.post(
-            "/api/v1/jobs/generation",
+            "/api/v1/generations",
             json=payload,
             headers=headers,
         )

@@ -20,13 +20,11 @@ from cortex_backend.api.routes import (
     _durable_owner,
     _event_cursor,
     _generation_event_name,
-    _generation_snapshot,
     _job_response,
     _job_status,
-    _load_settings,
+    _raise_chat_domain_error,
     _raise_job_error,
     _request_fingerprint,
-    _resolve_generation_attachments,
     _start_generation_job,
 )
 from cortex_backend.api.schemas import (
@@ -90,9 +88,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 status_code=status.HTTP_409_CONFLICT, detail=str(exc)
             ) from exc
         except ChatDomainError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-            ) from exc
+            _raise_chat_domain_error(exc)
         return _accepted(snapshot, user_message_id=user_message_id)
 
 
@@ -181,91 +177,6 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-
-    @router.post(
-        "/jobs/generation",
-        response_model=JobAccepted,
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    async def start_generation(
-        payload: GenerationRequest,
-        request: Request,
-        deps: BackendDependenciesProtocol = Depends(dependencies),
-        principal: SessionPrincipal = Depends(require_session),
-    ) -> JobAccepted:
-        jobs = request.app.state.jobs
-        try:
-            reservation = jobs.reserve(
-                kind="generation",
-                owner=_durable_owner(principal),
-                thread_id=payload.thread_id,
-                request_id=payload.request_id,
-                request_fingerprint=_request_fingerprint("legacy", payload),
-            )
-            if not reservation.created:
-                snapshot, _ = await jobs.wait_until_prepared(
-                    reservation.snapshot.job_id,
-                    owner=_durable_owner(principal),
-                )
-            else:
-                try:
-                    settings = _load_settings(deps)
-                    generation_snapshot = _generation_snapshot(
-                        reservation.snapshot.job_id,
-                        payload,
-                        settings,
-                        deps.models.list_installed(),
-                        attachments=_resolve_generation_attachments(
-                            request,
-                            deps,
-                            principal,
-                            payload.attachments,
-                            settings=settings,
-                        ),
-                    )
-
-                    def runner(sink, cancel_event):
-                        if cancel_event.is_set():
-                            return {"cancelled": True}
-                        result = deps.generation.generate(
-                            generation_snapshot,
-                            progress_sink=sink,
-                            cancellation_event=cancel_event,
-                        )
-                        return {
-                            "response": result.response,
-                            "thoughts": result.thoughts,
-                            "memory_command": {
-                                "additions": list(result.memory_command.additions),
-                                "clear_requested": (
-                                    result.memory_command.clear_requested
-                                ),
-                            },
-                        }
-
-                    snapshot, _ = await jobs.start_reserved(
-                        reservation,
-                        owner=_durable_owner(principal),
-                        runner=runner,
-                    )
-                finally:
-                    jobs.abort_reservation(
-                        reservation,
-                        owner=_durable_owner(principal),
-                    )
-        except JobRegistryClosed as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc),
-            ) from exc
-        except JobConflict as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-            ) from exc
-        except ChatDomainError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return _accepted(snapshot)
 
 
     @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
