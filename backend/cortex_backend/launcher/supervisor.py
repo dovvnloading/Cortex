@@ -123,7 +123,11 @@ class ServerSupervisor:
 
 
 class ChildProcessSupervisor:
-    """Own a development child and terminate its complete Windows tree."""
+    """Own a development child and terminate its complete Windows tree.
+
+    The child also runs in a kill-on-close job object, so the tree ends with
+    this process even when ``stop`` never gets to run.
+    """
 
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str] | None = None):
         self.command = command
