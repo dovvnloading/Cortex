@@ -2340,9 +2340,18 @@ class ExecutionRepository:
           job; and
         * a link, a reparse point or anything of another name is never touched.
 
-        The pass is bounded: it removes at most ``limit`` things and looks at
-        at most ``_SWEEP_ENTRY_BUDGET`` entries, resuming where it stopped on
-        the next call. Best effort: a failure on one entry never stops the pass.
+        The pass is bounded, and the bounds are exact where they matter. It
+        removes at most ``limit`` things, counting every file, every job
+        directory and every staging directory as one; a job directory that
+        would need more than what is left is worked on until the limit is
+        reached and picked up again by the next call, at that same directory.
+        It stops taking on new top-level entries once it has looked at
+        ``_SWEEP_ENTRY_BUDGET`` entries (a directory counts as itself plus the
+        children it reads). That check runs between top-level entries, so a
+        pass can look at up to ``_SWEEP_CHILD_LIMIT`` + 1 entries more than the
+        budget; it never removes more than ``limit``. The next call resumes
+        where this one stopped. Best effort: a failure on one entry never
+        stops the pass.
         """
 
         if isinstance(limit, bool) or not 1 <= limit <= 10_000:
@@ -2365,55 +2374,76 @@ class ExecutionRepository:
                 if removed >= limit or examined >= _SWEEP_ENTRY_BUDGET:
                     finished = False
                     break
-                gone, looked_at = self._sweep_entry(connection, self.artifact_root / name, stale_before)
+                gone, looked_at, complete = self._sweep_entry(
+                    connection, self.artifact_root / name, stale_before, limit - removed
+                )
                 removed += gone
                 examined += looked_at
+                if not complete:
+                    # The limit ran out inside this entry. What it removed is
+                    # gone for good, so the next pass starts here and finishes it.
+                    finished = False
+                    break
                 self._sweep_cursor = name
         if finished:
             self._sweep_cursor = ""
         return removed
 
     def _sweep_entry(
-        self, connection: sqlite3.Connection, entry: Path, stale_before: float
-    ) -> tuple[int, int]:
-        """Sweep one entry directly under the artifact root; return (removed, examined)."""
+        self,
+        connection: sqlite3.Connection,
+        entry: Path,
+        stale_before: float,
+        allowance: int,
+    ) -> tuple[int, int, bool]:
+        """Sweep one entry directly under the artifact root.
+
+        Returns ``(removed, examined, complete)``. ``removed`` never exceeds
+        ``allowance``; ``complete`` is false only when the allowance ran out
+        with more of this entry left to remove, so the caller must come back
+        to it instead of moving on.
+        """
 
         name = entry.name
         try:
             if _is_reparse_point(entry) or not stat.S_ISDIR(entry.lstat().st_mode):
-                return 0, 1
+                return 0, 1, True
         except OSError:
-            return 0, 1
+            return 0, 1, True
         if name == _LEGACY_QUARANTINE_NAME:
-            return int(self._remove_empty_directory(entry)), 1
+            return int(self._remove_empty_directory(entry)), 1, True
         staging = _RECIPE_STAGING_NAME.fullmatch(name)
         if staging is not None:
             job_id = staging["job_id"]
             if _SAFE_NAME.fullmatch(job_id) is None:
-                return 0, 1
+                return 0, 1, True
             job = connection.execute(
                 "SELECT status FROM execution_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
             if job is not None and job["status"] not in TerminalExecutionStatus:
-                return 0, 1  # its worker may still be writing here
+                return 0, 1, True  # its worker may still be writing here
             try:
                 shutil.rmtree(entry)
             except OSError:
-                return 0, 1
-            return 1, 1
+                return 0, 1, True
+            return 1, 1, True
         if name.startswith(".") or _SAFE_NAME.fullmatch(name) is None:
-            return 0, 1
-        return self._sweep_job_directory(connection, entry, stale_before)
+            return 0, 1, True
+        return self._sweep_job_directory(connection, entry, stale_before, allowance)
 
     def _sweep_job_directory(
-        self, connection: sqlite3.Connection, directory: Path, stale_before: float
-    ) -> tuple[int, int]:
+        self,
+        connection: sqlite3.Connection,
+        directory: Path,
+        stale_before: float,
+        allowance: int,
+    ) -> tuple[int, int, bool]:
         removed = 0
         examined = 1
         try:
             children = list(itertools.islice(directory.iterdir(), _SWEEP_CHILD_LIMIT))
         except OSError:
-            return 0, examined
+            return 0, examined, True
         for child in children:
             examined += 1
             try:
@@ -2429,6 +2459,8 @@ class ExecutionRepository:
                     (stored["artifact_id"],),
                 ).fetchone() is not None:
                     continue
+            if removed >= allowance:
+                return removed, examined, False
             try:
                 child.unlink()
             except OSError:
@@ -2437,9 +2469,13 @@ class ExecutionRepository:
         named = connection.execute(
             "SELECT 1 FROM execution_artifacts WHERE job_id = ? LIMIT 1", (directory.name,)
         ).fetchone()
-        if named is None and self._remove_empty_directory(directory):
-            removed += 1
-        return removed, examined
+        if named is None:
+            if removed >= allowance:
+                # The directory may be empty now, and taking it is one more removal.
+                return removed, examined, False
+            if self._remove_empty_directory(directory):
+                removed += 1
+        return removed, examined, True
 
     @staticmethod
     def _encode_event(data: Mapping[str, Any]) -> str:
