@@ -96,6 +96,8 @@ python scripts/check_dev_environment.py
 python -m ruff check backend tests tools main.py app_factory.py
 python -m mypy
 python -m pytest -q
+python -m coverage run -m pytest -q   # full tier, in place of the line above
+python -m coverage report             # full tier: enforces the coverage floor
 python tools/artifact_boundary_review.py --json --strict
 python tools/generate_contracts.py --check
 python -m compileall -q main.py app_factory.py backend   # full tier
@@ -105,6 +107,7 @@ npm ci
 npm run typecheck
 npm run lint
 npm test -- --run
+npm run test:coverage             # full tier, in place of the line above
 npx playwright install chromium   # full tier
 npm run e2e -- --workers=1        # full tier
 npm run build                     # full tier

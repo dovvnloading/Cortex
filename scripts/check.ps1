@@ -10,7 +10,8 @@
       quick  (default) Lint, type check, backend tests, contract drift, the
                        artifact-boundary review, and frontend types/lint/unit
                        tests. This is what the pre-push hook runs.
-      full             Everything in quick, plus compileall, Playwright browser
+      full             Everything in quick, plus compileall, the backend and
+                       frontend coverage floors, Playwright browser
                        installation/e2e tests, and the frontend bundle build.
 
     Deliberately NOT included at any tier: PyInstaller packaging and WebView2
@@ -176,8 +177,17 @@ if (-not $SkipBackend) {
         python -m mypy
     }
 
+    # The full tier measures branch coverage the way CI's `backend` job does, so
+    # the floor in pyproject.toml is enforced before a push rather than after.
+    # The quick tier skips the measurement to stay fast.
     Invoke-Step 'Backend tests (pytest)' {
-        python -m pytest -q
+        if ($Tier -eq 'full') {
+            python -m coverage run -m pytest -q
+            if ($LASTEXITCODE -ne 0) { return }
+            python -m coverage report
+        } else {
+            python -m pytest -q
+        }
     }
 
     Invoke-Step 'Artifact boundary review' {
@@ -204,7 +214,11 @@ if (-not $SkipFrontend) {
 
     Invoke-Step 'Frontend types (tsc)' { & $npm run typecheck } $frontend
     Invoke-Step 'Lint frontend (eslint)' { & $npm run lint } $frontend
-    Invoke-Step 'Frontend unit tests (vitest)' { & $npm test -- --run } $frontend
+    # Same split as the backend tests: the full tier runs the coverage floors CI
+    # enforces (thresholds live in frontend/vitest.config.ts).
+    Invoke-Step 'Frontend unit tests (vitest)' {
+        if ($Tier -eq 'full') { & $npm run test:coverage } else { & $npm test -- --run }
+    } $frontend
 
     if ($Tier -eq 'full') {
         Invoke-Step 'Install Playwright Chromium' {

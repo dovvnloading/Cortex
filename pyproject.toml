@@ -25,6 +25,7 @@ dependencies = [
 dev = [
     "pytest>=8,<10",
     "pytest-timeout>=2.3,<3",
+    "coverage[toml]>=7.10,<8",
     "ruff==0.16.5",
     "mypy==2.3.1",
     "actionlint-py==1.7.12.25",
@@ -85,3 +86,29 @@ addopts = "-ra"
 timeout = 120
 timeout_method = "thread"
 faulthandler_timeout = 100
+
+[tool.coverage.run]
+# Branch coverage over the shipped package only: tests, tools and scripts are
+# not what a user runs. `coverage run -m pytest` is the CI and local entry
+# point; pytest-cov is deliberately not used so the measurement has one owner.
+branch = true
+# A directory, not a package name: the package is put on sys.path by pytest's
+# `pythonpath` setting, after coverage has already resolved `source`.
+source = ["backend/cortex_backend"]
+relative_files = true
+
+[tool.coverage.report]
+# One point below the total measured when this gate was added. It only ratchets
+# up: raise it in the pull request that adds tests, never lower it to make a
+# change pass. Lowering it needs a stated reason in the pull request.
+fail_under = 79
+skip_covered = true
+show_missing = false
+precision = 1
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"

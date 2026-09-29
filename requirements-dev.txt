@@ -1,6 +1,7 @@
 -r requirements.txt
 pytest>=8,<10
 pytest-timeout>=2.3,<3
+coverage[toml]>=7.10,<8
 ruff==0.16.5
 mypy==2.3.1
 actionlint-py==1.7.12.25
