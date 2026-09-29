@@ -101,6 +101,22 @@ def _set_decided_at(repository: ExecutionRepository, job_id: str, value: str | N
         )
 
 
+def _let_the_clock_advance() -> None:
+    """Wait until the system clock reads later than it did on entry.
+
+    Before Python 3.13 the Windows clock moves in steps of about 15.6 ms, so a
+    grant and the "restart" straight after it can carry the same timestamp, and
+    a grant is only refused as a previous process's when it is earlier than the
+    moment this process opened the store. A real restart takes far longer than
+    a clock step; a test that simulates one has to let one pass.
+    """
+
+    started = datetime.now(timezone.utc)
+    wait_until(
+        lambda: datetime.now(timezone.utc) > started, describe="the system clock to advance"
+    )
+
+
 def _assert_lapsed(repository: ExecutionRepository, job_id: str) -> None:
     """The refusal is durable: cancelled, approval expired, and nothing spent or leased."""
     job = repository.get_job(job_id)
@@ -146,6 +162,7 @@ def test_an_approval_is_spent_by_the_launch_that_claims_the_lease(tmp_path: Path
 def test_a_grant_from_a_previous_process_is_refused(tmp_path: Path) -> None:
     first = _repository(tmp_path)
     job, _ = _approved_job(first)
+    _let_the_clock_advance()
 
     restarted = _repository(tmp_path)
     with pytest.raises(ApprovalExpiredError):
@@ -370,6 +387,7 @@ def test_an_approval_granted_before_a_restart_does_not_run_after_it(tmp_path: Pa
     """
     before = _repository(tmp_path)
     job, _ = _approved_job(before, job_id="approved-before-restart")
+    _let_the_clock_advance()
 
     repository, coordinator = _restart(tmp_path)
     try:
