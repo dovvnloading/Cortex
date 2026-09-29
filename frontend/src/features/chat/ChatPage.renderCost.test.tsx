@@ -59,9 +59,7 @@ function renderChat() {
       onSelectModel={async () => true}
       onRescanModels={async () => undefined}
       onThreadCreated={vi.fn()}
-      onChatChanged={vi.fn()}
       onForked={vi.fn()}
-      onSessionExpired={vi.fn()}
     />,
   );
 }

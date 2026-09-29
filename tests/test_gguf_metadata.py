@@ -10,6 +10,7 @@ answers and to its contract: it never raises, whatever the bytes say.
 from __future__ import annotations
 
 import io
+import math
 import struct
 from pathlib import Path
 
@@ -189,3 +190,41 @@ def test_a_last_value_that_runs_off_the_end_is_refused(tmp_path: Path) -> None:
     path.write_bytes(data)
 
     assert read_gguf_metadata(path) is None
+
+
+def _entry(key: str, value_type: int, payload: bytes) -> bytes:
+    raw = key.encode("ascii")
+    return struct.pack("<Q", len(raw)) + raw + struct.pack("<I", value_type) + payload
+
+
+@pytest.mark.parametrize("key", ["llama.context_length", "general.file_type"])
+@pytest.mark.parametrize(
+    ("value_type", "payload"),
+    [
+        (6, struct.pack("<f", math.inf)),
+        (6, struct.pack("<f", -math.inf)),
+        (12, struct.pack("<d", math.inf)),
+    ],
+    ids=["float32-inf", "float32-minus-inf", "float64-inf"],
+)
+def test_an_infinite_number_where_an_integer_belongs_is_not_an_error(
+    tmp_path: Path, key: str, value_type: int, payload: bytes
+) -> None:
+    """``int(float("inf"))`` raises OverflowError, which the coercion let through.
+
+    The reader promises never to raise; a FLOAT32 or FLOAT64 in a key that is
+    meant to hold an integer made it raise from ``read_gguf_metadata`` itself,
+    outside the guarded key-value read. The value is unusable, not fatal: the
+    other keys still describe the file.
+    """
+    architecture = _entry("general.architecture", 8, struct.pack("<Q", 5) + b"llama")
+    entries = [architecture, _entry(key, value_type, payload)]
+    path = tmp_path / "model.gguf"
+    path.write_bytes(GGUF_MAGIC + struct.pack("<IQQ", 3, 0, len(entries)) + b"".join(entries))
+
+    metadata = read_gguf_metadata(path)
+
+    assert metadata is not None
+    assert metadata.architecture == "llama"
+    assert metadata.context_length is None
+    assert metadata.quantization_label is None
