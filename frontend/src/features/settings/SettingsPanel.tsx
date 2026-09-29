@@ -51,6 +51,8 @@ export type SettingsPanelProps = {
   onPullModel: (model: string) => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
   onDownloadGGUF: (request: ModelDownloadRequest) => Promise<void>;
+  /** Stops the loaded local model to free its memory. Leave out where that is not offered. */
+  onUnloadModel?: () => Promise<void>;
   /** Lists a Hugging Face repository's .gguf files; without it the download form only takes a typed file name. */
   onListHuggingFaceFiles?: ListGGUFFiles;
   /** Should leave through `navigate()`: that is where unsaved edits are asked about. */
@@ -58,6 +60,8 @@ export type SettingsPanelProps = {
 };
 
 const DEFAULT_TRANSLATION_MODEL = "translategemma:4b";
+/** What the backend uses when a stored document predates the setting. */
+const DEFAULT_IDLE_UNLOAD_MINUTES = 30;
 
 const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
 
@@ -130,6 +134,7 @@ export function SettingsPanel({
   onPullModel,
   llamacppStatus,
   onDownloadGGUF,
+  onUnloadModel,
   onListHuggingFaceFiles,
   onClose,
 }: SettingsPanelProps) {
@@ -198,6 +203,7 @@ export function SettingsPanel({
   const generation = draft.generation ?? {};
   const execution = draft.execution ?? {};
   const modelSettings = draft.models ?? {};
+  const llamacpp = draft.llamacpp ?? {};
   const memory = draft.memory ?? {};
   const translation = draft.translation ?? {};
   const selectedChatModel = installedModels.includes(modelSettings.chat ?? "")
@@ -488,6 +494,11 @@ export function SettingsPanel({
                 onDownload: onDownloadGGUF,
                 busy: modelBusy,
                 onListFiles: onListHuggingFaceFiles,
+              }}
+              runtime={{
+                idleUnloadMinutes: llamacpp.idle_unload_minutes ?? DEFAULT_IDLE_UNLOAD_MINUTES,
+                onIdleUnloadMinutesChange: (minutes) => update({ llamacpp: { ...llamacpp, idle_unload_minutes: minutes } }),
+                onUnload: onUnloadModel,
               }}
             />
           )}

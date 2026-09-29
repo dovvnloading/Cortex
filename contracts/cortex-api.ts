@@ -393,6 +393,7 @@ export interface LlamaCppRuntimeStatus {
 
 export interface LlamaCppSettings {
   gpu_backend?: "auto" | "vulkan" | "cpu";
+  idle_unload_minutes?: number;
 }
 
 export interface MemoryResponse {

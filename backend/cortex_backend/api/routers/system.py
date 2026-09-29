@@ -17,10 +17,12 @@ from cortex_backend.api.routes import (
 )
 from cortex_backend.api.schemas import (
     DiagnosticsResponse,
+    LlamaCppRuntimeStatus,
     ShutdownResponse,
     SystemResponse,
 )
 from cortex_backend.api.security import SessionPrincipal
+from cortex_backend.llamacpp.errors import LlamaCppError, RuntimeBusyError
 from fastapi import (
     Depends,
     HTTPException,
@@ -70,6 +72,35 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             ollama_setup_url=request.app.state.ollama_setup_url,
             llamacpp=_llamacpp_status(request),
         )
+
+
+    @router.post("/llamacpp/unload", response_model=LlamaCppRuntimeStatus)
+    def unload_llamacpp(
+        request: Request,
+        _: SessionPrincipal = Depends(require_session),
+    ) -> LlamaCppRuntimeStatus:
+        """Stop the loaded local model to free its memory; the next message loads it again.
+
+        Safe to repeat: with nothing loaded it changes nothing and reports the
+        status. Refused with 409 while a response is being generated or a model
+        is loading, because that would cut the answer off.
+        """
+        manager = getattr(request.app.state, "llamacpp_manager", None)
+        unload = getattr(manager, "unload", None)
+        if not callable(unload):
+            raise HTTPException(status_code=409, detail="The local model runtime is unavailable in this preview.")
+        if request.app.state.jobs.active_snapshot(kind="generation") is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A response is being generated. Stop it or wait for it to finish, then unload the model.",
+            )
+        try:
+            unload()
+        except RuntimeBusyError as exc:
+            raise HTTPException(status_code=409, detail=exc.error) from exc
+        except LlamaCppError as exc:
+            raise HTTPException(status_code=500, detail=exc.error) from exc
+        return _llamacpp_status(request)
 
 
     @router.post("/system/shutdown", response_model=ShutdownResponse)

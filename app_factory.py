@@ -128,6 +128,7 @@ def build_app(
         gpu_backend_setting=lambda: settings_repository.load().settings.llamacpp.gpu_backend,
         models_directory=gguf_directory,
         verify=ssl_context,
+        idle_unload_minutes=lambda: settings_repository.load().settings.llamacpp.idle_unload_minutes,
     )
     gguf_model_directory = GGUFModelDirectory(gguf_directory)
     # ollama.Client.pull is overloaded on a Literal `stream`, one overload per

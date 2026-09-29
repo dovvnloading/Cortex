@@ -938,6 +938,10 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .gguf-runtime-directory { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--text-muted); }
 .gguf-runtime-directory input { flex: 1 1 260px; min-width: 0; }
 .gguf-runtime-directory-hint { display: block; margin-top: -4px; color: var(--text-faint); font-size: 0.72rem; }
+.gguf-runtime-memory { display: grid; gap: 12px; }
+.gguf-runtime-field { display: grid; gap: 6px; }
+.gguf-runtime-unload { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.gguf-runtime-unload .gguf-runtime-directory-hint { margin-top: 0; }
 .gguf-download-form { display: grid; gap: 10px; }
 .gguf-download-source-toggle { display: inline-flex; gap: 6px; }
 .gguf-download-fields { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }

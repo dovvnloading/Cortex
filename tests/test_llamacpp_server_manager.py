@@ -23,6 +23,7 @@ from cortex_backend.llamacpp.errors import (
     BinaryVerificationError,
     CrashLoopError,
     LlamaCppError,
+    RuntimeBusyError,
     ServerLaunchError,
     ServerStartTimeoutError,
 )
@@ -253,6 +254,7 @@ def _manager(
     health_timeout_seconds: float = 5.0,
     startup_cap_seconds: float | None = None,
     release=_ANY_RELEASE,
+    **overrides,
 ) -> LlamaServerManager:
     extra = {} if startup_cap_seconds is None else {"startup_cap_seconds": startup_cap_seconds}
     return LlamaServerManager(
@@ -264,7 +266,7 @@ def _manager(
         health_timeout_seconds=health_timeout_seconds,
         launcher=launcher,
         http_client=http_client,
-        **extra,
+        **{**extra, **overrides},
     )
 
 
@@ -2733,3 +2735,328 @@ def test_the_warm_health_retry_passes_the_declared_timeout(tmp_path: Path) -> No
     assert "_HEALTH_RETRY_TIMEOUT_SECONDS" in source, (
         "the retry path must pass the timeout it declares"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unloading the model: on request and after an idle period (RT-07)
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A clock the test moves by hand; nothing here waits for real time."""
+
+    def __init__(self) -> None:
+        self.now = 10_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def idle_managers():
+    """Build managers with an idle setting, and close every one at teardown.
+
+    The idle watcher is a ``cortex-`` thread, so a manager that is not closed
+    fails the session's thread check.
+    """
+    created: list[LlamaServerManager] = []
+
+    def build(tmp_path: Path, *, minutes=lambda: 5, processes=None, clock=None, **overrides):
+        clock = clock or _Clock()
+        launcher = _QueueLauncher(processes if processes is not None else [_FakePopen(), _FakePopen()])
+        manager = _manager(
+            tmp_path,
+            fetcher=_FakeFetcher(),
+            launcher=launcher,
+            http_client=_AlwaysHealthyClient(),
+            idle_unload_minutes=minutes,
+            clock=clock,
+            **overrides,
+        )
+        created.append(manager)
+        return manager, launcher, clock
+
+    yield build
+    for manager in created:
+        manager.close()
+
+
+def test_a_model_idle_for_the_whole_period_is_unloaded_and_the_reason_is_recorded(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(5 * 60 - 1)
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+    clock.advance(1)
+    assert manager.unload_if_idle() is True
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.loaded_model is None
+    assert process.terminated
+    assert status.last_restart_reason == "the model was unloaded after 5 minutes without use"
+    assert status.last_error is None
+
+
+def test_the_next_request_after_an_idle_unload_starts_the_model_again(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    clock.advance(10 * 60)
+    assert manager.unload_if_idle() is True
+
+    handle = manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert handle.model_path == model_path
+    status = manager.status
+    assert status.state == "ready"
+    # The reason the model had to be loaded again is still on record.
+    assert status.last_restart_reason == "the model was unloaded after 5 minutes without use"
+
+
+def test_an_open_request_keeps_the_model_loaded_however_long_it_takes(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with manager.request_scope():
+        clock.advance(3 * 3600)  # a generation far longer than the idle period
+        assert manager.unload_if_idle() is False
+        assert manager.status.state == "ready"
+
+    # The idle period starts when the request ends, not when it began.
+    clock.advance(5 * 60 - 1)
+    assert manager.unload_if_idle() is False
+    clock.advance(1)
+    assert manager.unload_if_idle() is True
+
+
+def test_every_use_restarts_the_idle_period(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    clock.advance(4 * 60)
+    manager.ensure_ready(model_path, num_ctx=4096)  # a warm reuse is a use
+    clock.advance(4 * 60)
+
+    assert manager.unload_if_idle() is False  # eight minutes since it loaded, four since it was used
+    clock.advance(60)
+    assert manager.unload_if_idle() is True
+    assert len(launcher.launch_args) == 1
+
+
+@pytest.mark.parametrize("setting", [0, -3])
+def test_zero_turns_the_idle_unload_off(tmp_path: Path, idle_managers, setting: int) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=lambda: setting)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(30 * 24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+
+def test_a_manager_without_the_setting_never_unloads_and_starts_no_watcher(tmp_path: Path) -> None:
+    clock = _Clock()
+    manager = _manager(
+        tmp_path,
+        fetcher=_FakeFetcher(),
+        launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(),
+        clock=clock,
+    )
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    clock.advance(30 * 24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager._idle_thread is None
+    assert manager.status.state == "ready"
+
+
+def test_the_setting_is_read_at_every_check(tmp_path: Path, idle_managers) -> None:
+    minutes = [30]
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=lambda: minutes[0])
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(6 * 60)
+    assert manager.unload_if_idle() is False
+
+    minutes[0] = 5  # changed in Settings while the model stays loaded
+
+    assert manager.unload_if_idle() is True
+
+
+def test_an_unreadable_setting_means_never_not_unload(tmp_path: Path, idle_managers) -> None:
+    def broken() -> int:
+        raise RuntimeError("settings database unavailable")
+
+    manager, _launcher, clock = idle_managers(tmp_path, minutes=broken)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(24 * 3600)
+
+    assert manager.unload_if_idle() is False
+    assert manager.status.state == "ready"
+
+
+def test_a_load_or_restart_in_flight_is_never_waited_for_or_cut_short(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    clock.advance(60 * 60)
+
+    # The slow-path lock is what a load, a restart or a health check holds.
+    with manager._ensure_lock:
+        assert manager.unload_if_idle() is False
+        assert manager.status.state == "ready"
+
+    assert manager.unload_if_idle() is True
+
+
+def test_a_request_that_arrives_while_the_model_is_being_released_gets_it_loaded_again(
+    tmp_path: Path, idle_managers
+) -> None:
+    """The unload holds the same lock as a load, so a request waits for it and then loads."""
+    manager, launcher, clock = idle_managers(tmp_path)
+    model_path = tmp_path / "model.gguf"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    clock.advance(60 * 60)
+    lock = _ContentionSignallingLock()
+    manager._ensure_lock = lock  # type: ignore[assignment]
+    original = manager._terminate_and_reset
+    request_result: list[object] = []
+    inside_teardown = threading.Event()
+
+    def teardown_that_waits_for_the_request() -> bool:
+        if threading.current_thread() is worker:
+            return original()
+        inside_teardown.set()
+        assert lock.contended.wait(5.0), "the request never queued behind the unload"
+        return original()
+
+    def request() -> None:
+        assert inside_teardown.wait(5.0)
+        request_result.append(manager.ensure_ready(model_path, num_ctx=4096))
+
+    worker = threading.Thread(target=request, name="test-request")
+    manager._terminate_and_reset = teardown_that_waits_for_the_request  # type: ignore[method-assign]
+    worker.start()
+    try:
+        assert manager.unload_if_idle() is True
+    finally:
+        worker.join(timeout=10.0)
+
+    assert not worker.is_alive()
+    assert len(request_result) == 1
+    assert len(launcher.launch_args) == 2
+    assert manager.status.state == "ready"
+
+
+def test_a_manual_unload_stops_the_model_and_is_safe_to_repeat(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert manager.unload() is True
+
+    status = manager.status
+    assert status.state == "idle"
+    assert status.loaded_model is None
+    assert process.terminated
+    assert status.last_restart_reason == "the model was unloaded at your request"
+    assert manager.unload() is False  # nothing left to unload; not an error
+    assert manager.status.state == "idle"
+
+
+def test_a_manual_unload_with_nothing_loaded_changes_nothing(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+
+    assert manager.unload() is False
+
+    assert launcher.launch_args == []
+    assert manager.status.last_restart_reason is None
+
+
+def test_a_manual_unload_is_refused_while_a_request_is_using_the_model(tmp_path: Path, idle_managers) -> None:
+    manager, launcher, _clock = idle_managers(tmp_path)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with manager.request_scope(), pytest.raises(RuntimeBusyError) as refused:
+        manager.unload()
+
+    assert "answering a request" in str(refused.value)
+    assert not process.terminated
+    assert manager.status.state == "ready"
+    assert manager.unload() is True  # once the request ends it goes through
+
+
+def test_a_manual_unload_is_refused_while_a_model_is_loading(
+    tmp_path: Path, idle_managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    monkeypatch.setattr(module, "_UNLOAD_LOCK_TIMEOUT_SECONDS", 0.05)
+    manager, _launcher, _clock = idle_managers(tmp_path)
+
+    with manager._ensure_lock, pytest.raises(RuntimeBusyError) as refused:
+        manager.unload()
+
+    assert "being loaded" in str(refused.value)
+
+
+def test_a_manual_unload_after_the_manager_closed_fails_closed(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path)
+    manager.close()
+
+    with pytest.raises(LlamaCppError, match="closed"):
+        manager.unload()
+
+
+def test_a_process_that_will_not_exit_is_reported_and_not_called_unloaded(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path, processes=[_UnstoppablePopen()])
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    with pytest.raises(LlamaCppError, match="did not exit cleanly"):
+        manager.unload()
+
+    assert manager.status.state == "stopping"
+
+
+def test_the_watcher_unloads_an_idle_model_by_itself_and_is_gone_after_close(tmp_path: Path, idle_managers) -> None:
+    from support import wait_until
+
+    manager, launcher, clock = idle_managers(tmp_path, idle_check_interval_seconds=0.01)
+    process = launcher._processes[0]
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    watcher = manager._idle_thread
+    assert watcher is not None and watcher.name == "cortex-llama-idle-unload"
+
+    clock.advance(6 * 60)
+
+    wait_until(lambda: manager.status.state == "idle", describe="the idle model to be unloaded")
+    assert process.terminated
+    manager.close()
+    watcher.join(timeout=5.0)
+    assert not watcher.is_alive()
+
+
+def test_one_watcher_serves_every_load(tmp_path: Path, idle_managers) -> None:
+    manager, _launcher, _clock = idle_managers(tmp_path)
+    manager.ensure_ready(tmp_path / "first.gguf", num_ctx=4096)
+    first = manager._idle_thread
+    manager.ensure_ready(tmp_path / "second.gguf", num_ctx=4096)
+
+    assert manager._idle_thread is first
+    assert first is not None and first.is_alive()
+
+
+def test_the_default_check_interval_is_well_under_the_smallest_period(tmp_path: Path) -> None:
+    import cortex_backend.llamacpp.server_manager as module
+
+    assert module._IDLE_CHECK_INTERVAL_SECONDS <= 60.0

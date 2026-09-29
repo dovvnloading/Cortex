@@ -10,9 +10,11 @@ an error, until Cortex is restarted.
 Lifecycle policy, stated explicitly because it is the whole point of this
 class: a loaded model stays resident until (a) a different model is
 requested, (b) a larger context window is requested, (c) the app shuts
-down, or (d) the process itself dies.  Nothing here ever unloads a model
-"between messages" -- if that appears to happen, one of those four causes
-fired, and this class records which one (see ``last_restart_reason``).
+down, (d) the process itself dies, (e) the user unloads it, or (f) it has
+sat unused for the configured idle period (never while a request is in
+flight or a model is loading).  Nothing here ever unloads a model "between
+messages" for any other reason -- if that appears to happen, one of those
+causes fired, and this class records which one (see ``last_restart_reason``).
 
 This is a small, dedicated subprocess manager built directly on
 ``subprocess.Popen``. Running a binary Cortex itself downloaded and pinned
@@ -37,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 
 import httpx
 
@@ -57,6 +59,7 @@ from .errors import (
     BinaryVerificationError,
     CrashLoopError,
     LlamaCppError,
+    RuntimeBusyError,
     ServerLaunchError,
     ServerStartTimeoutError,
 )
@@ -120,12 +123,27 @@ _DEFAULT_NUM_CTX = 4096
 # every message, short enough that a driver update or freed VRAM gets a
 # chance to matter within the same day rather than needing a manual reset.
 _KNOWN_BAD_BACKEND_TTL_SECONDS = 24.0 * 3600.0
+# How often the idle watcher looks at the clock. The setting is in whole
+# minutes, so half a minute of slack is invisible, and a wake-up costs one
+# comparison.
+_IDLE_CHECK_INTERVAL_SECONDS = 30.0
+# A manual unload waits this long for the slow-path lock (a health
+# re-verification holds it briefly) before it reports the runtime as busy; a
+# model load holds it for minutes, and answering "busy" is the honest reply.
+_UNLOAD_LOCK_TIMEOUT_SECONDS = 2.0
+_UNLOADED_AT_REQUEST = "the model was unloaded at your request"
+
+
+def _idle_unload_reason(minutes: int) -> str:
+    return f"the model was unloaded after {minutes} minute{'' if minutes == 1 else 's'} without use"
 
 
 def _safe_restart_reason(reason: str) -> str:
     """Classify a restart without retaining model filenames or child text."""
     if reason.startswith("the selected model changed"):
         return "the selected model changed"
+    if reason == _UNLOADED_AT_REQUEST or reason.startswith("the model was unloaded after "):
+        return reason
     if reason.startswith("the context window increased"):
         return reason
     if reason.startswith("the runtime process exited unexpectedly"):
@@ -524,6 +542,9 @@ class LlamaServerManager:
         launcher: ProcessLauncher = default_launcher,
         http_client: httpx.Client | None = None,
         verify: ssl.SSLContext | bool = True,
+        idle_unload_minutes: Callable[[], int] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        idle_check_interval_seconds: float = _IDLE_CHECK_INTERVAL_SECONDS,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._fetcher = fetcher
@@ -548,6 +569,14 @@ class LlamaServerManager:
             verify=verify,
         )
         self._owns_http_client = http_client is None
+        # Read on every check rather than once, so a change in Settings applies
+        # without restarting Cortex. None means this manager never unloads on
+        # its own (and starts no watcher thread).
+        self._idle_unload_minutes = idle_unload_minutes
+        # Only the idle clock reads this; every deadline that guards a launch
+        # keeps using time.monotonic directly. A test moves it by hand.
+        self._clock = clock
+        self._idle_check_interval_seconds = idle_check_interval_seconds
 
         self._ensure_lock = threading.Lock()
         self._state_lock = threading.RLock()
@@ -588,6 +617,13 @@ class LlamaServerManager:
         self._preferred_backend_file = runtime_dir / "preferred_gpu_backend.json"
         self._api_key: str | None = None
         self._scrubbed_env_noted = False
+        # Requests that are using the running server right now (see
+        # request_scope), and when it was last used. Together they decide
+        # whether it may be unloaded for being idle.
+        self._active_requests = 0
+        self._last_used = self._clock()
+        self._idle_stop = threading.Event()
+        self._idle_thread: threading.Thread | None = None
 
     def close(self) -> None:
         """Stop the managed process and close an HTTP client owned here."""
@@ -599,6 +635,12 @@ class LlamaServerManager:
             # starting another child after teardown has begun.
             with self._state_lock:
                 self._closed = True
+            self._idle_stop.set()
+            watcher = self._idle_thread
+            if watcher is not None and watcher is not threading.current_thread():
+                # It exits at its next wake-up; a teardown it is in the middle
+                # of is bounded, and stop() below waits for that lock too.
+                watcher.join(timeout=1.0)
             stop_error: Exception | None = None
             try:
                 self.stop()
@@ -658,7 +700,9 @@ class LlamaServerManager:
                         raise LlamaCppError(
                             "The local model runtime reported a reusable server with no address."
                         )
-                    return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+                    handle = ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
+                self._touch()
+                return handle
 
             with self._state_lock:
                 effective_num_ctx = (
@@ -681,7 +725,10 @@ class LlamaServerManager:
                     "The previous local model runtime did not exit cleanly; restart Cortex before trying again."
                 )
             try:
-                return self._start(model_path, effective_num_ctx, on_status, token)
+                handle = self._start(model_path, effective_num_ctx, on_status, token)
+                self._touch()
+                self._ensure_idle_watcher()
+                return handle
             except LlamaCppError as exc:
                 # A launch that never reaches "ready" -- the child exited
                 # early (ServerLaunchError) or never answered its health
@@ -776,6 +823,130 @@ class LlamaServerManager:
             loaded_context=loaded_context,
             last_failure_code=last_failure_code,
         )
+
+    @contextmanager
+    def request_scope(self) -> Iterator[None]:
+        """Mark the server as in use for as long as the caller is talking to it.
+
+        A generation can outlast any idle period, and the manager cannot see
+        the HTTP request the chat client makes, so the client says so. While
+        any scope is open the server is neither unloaded for being idle nor by
+        a manual unload, and the idle clock restarts when the last one closes.
+        """
+        with self._state_lock:
+            self._active_requests += 1
+        try:
+            yield
+        finally:
+            with self._state_lock:
+                self._active_requests -= 1
+                self._last_used = self._clock()
+
+    def unload(self) -> bool:
+        """Stop the loaded model now to free its memory; the next request loads it again.
+
+        Returns True when a server was stopped and False when none was loaded
+        (an unload is safe to repeat). Raises :class:`RuntimeBusyError` when the
+        server is answering a request or a model is being loaded, and
+        :class:`LlamaCppError` when the process cannot be confirmed gone.
+        """
+        if not self._ensure_lock.acquire(timeout=_UNLOAD_LOCK_TIMEOUT_SECONDS):
+            raise RuntimeBusyError(
+                "The model is being loaded or restarted. Try again when it has finished."
+            )
+        try:
+            with self._state_lock:
+                if self._closed:
+                    raise LlamaCppError("The local model runtime manager is closed.")
+                if self._active_requests > 0:
+                    raise RuntimeBusyError(
+                        "The model is answering a request. Stop it or wait for it to finish, then unload."
+                    )
+                if self._process is None:
+                    return False
+            self._record_unload(_UNLOADED_AT_REQUEST)
+            if not self._terminate_and_reset():
+                raise LlamaCppError(
+                    "The local model runtime did not exit cleanly; restart Cortex before trying again."
+                )
+            return True
+        finally:
+            self._ensure_lock.release()
+
+    def unload_if_idle(self) -> bool:
+        """Unload the model if it has been unused for the configured idle period.
+
+        Returns True when it did. Never waits behind a load or a restart (the
+        next check tries again), never unloads while a request is in flight,
+        and treats a setting it cannot read as "never".
+        """
+        if self._idle_unload_minutes is None:
+            return False
+        try:
+            minutes = int(self._idle_unload_minutes())
+        except Exception:
+            logger.debug("Could not read the idle-unload setting; not unloading.")
+            return False
+        if minutes <= 0:
+            return False
+        if not self._is_idle_for(minutes * 60.0):
+            return False
+        if not self._ensure_lock.acquire(blocking=False):
+            return False
+        try:
+            # Checked again now that the slow-path lock is held: a request that
+            # arrived in between has either bumped the clock or is waiting on
+            # this lock, and must not find its server gone.
+            if not self._is_idle_for(minutes * 60.0) or self._stop_event.is_set():
+                return False
+            self._record_unload(_idle_unload_reason(minutes))
+            return self._terminate_and_reset()
+        finally:
+            self._ensure_lock.release()
+
+    def _is_idle_for(self, seconds: float) -> bool:
+        with self._state_lock:
+            return (
+                not self._closed
+                and self._state == "ready"
+                and self._process is not None
+                and self._active_requests == 0
+                and self._clock() - self._last_used >= seconds
+            )
+
+    def _record_unload(self, reason: str) -> None:
+        with self._state_lock:
+            self._last_restart_reason = reason
+        logger.info("Unloading the local model runtime (%s).", reason)
+
+    def _touch(self) -> None:
+        with self._state_lock:
+            self._last_used = self._clock()
+
+    def _ensure_idle_watcher(self) -> None:
+        """Start the thread that applies the idle period, once a model is loaded."""
+        if self._idle_unload_minutes is None:
+            return
+        with self._state_lock:
+            if self._closed or (self._idle_thread is not None and self._idle_thread.is_alive()):
+                return
+            watcher = threading.Thread(
+                target=self._watch_for_idle, name="cortex-llama-idle-unload", daemon=True
+            )
+            self._idle_thread = watcher
+        try:
+            watcher.start()
+        except Exception:
+            with self._state_lock:
+                self._idle_thread = None
+            logger.exception("Could not start the idle-unload watcher; the model stays loaded.")
+
+    def _watch_for_idle(self) -> None:
+        while not self._idle_stop.wait(self._idle_check_interval_seconds):
+            try:
+                self.unload_if_idle()
+            except Exception:
+                logger.exception("The idle check for the local model runtime failed.")
 
     def stop(self) -> None:
         """Terminate any running process. Idempotent; safe to call from app shutdown."""

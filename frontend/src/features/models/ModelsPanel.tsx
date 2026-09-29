@@ -1,4 +1,5 @@
-import { ExternalLink, FolderOpen, RefreshCw, X } from "lucide-react";
+import { ExternalLink, FolderOpen, PowerOff, RefreshCw, X } from "lucide-react";
+import { useState } from "react";
 import type {
   LlamaCppRuntimeStatus,
   ModelDownloadRequest,
@@ -26,6 +27,15 @@ type GGUFControls = {
   onListFiles?: ListGGUFFiles;
 };
 
+/** How the local runtime uses memory. */
+export type RuntimeControls = {
+  /** Minutes without a request after which the loaded model is released; 0 keeps it loaded. */
+  idleUnloadMinutes: number;
+  onIdleUnloadMinutesChange: (minutes: number) => void;
+  /** Absent when this build cannot unload a model; the button is then left out. */
+  onUnload?: () => Promise<void>;
+};
+
 type Props = {
   models: ModelResponse;
   busy: boolean;
@@ -36,9 +46,10 @@ type Props = {
   onCheck: () => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
   gguf: GGUFControls;
+  runtime?: RuntimeControls;
 };
 
-export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onCheck, llamacppStatus, gguf }: Props) {
+export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
@@ -113,12 +124,12 @@ export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onChec
           </div>
         </div>
       )}
-      <GGUFRuntimeSection llamacppStatus={llamacppStatus} gguf={gguf} />
+      <GGUFRuntimeSection llamacppStatus={llamacppStatus} gguf={gguf} runtime={runtime} />
     </section>
   );
 }
 
-function GGUFRuntimeSection({ llamacppStatus, gguf }: { llamacppStatus: LlamaCppRuntimeStatus; gguf: GGUFControls }) {
+function GGUFRuntimeSection({ llamacppStatus, gguf, runtime }: { llamacppStatus: LlamaCppRuntimeStatus; gguf: GGUFControls; runtime?: RuntimeControls }) {
   return (
     <div className="gguf-runtime">
       <div className="section-heading">
@@ -139,6 +150,7 @@ function GGUFRuntimeSection({ llamacppStatus, gguf }: { llamacppStatus: LlamaCpp
               : ""}
         </p>
       )}
+      {runtime && <RuntimeMemoryControls status={llamacppStatus} runtime={runtime} />}
       <div className="gguf-runtime-directory">
         <FolderOpen aria-hidden="true" size={15} />
         <input
@@ -175,4 +187,84 @@ function GGUFRuntimeSection({ llamacppStatus, gguf }: { llamacppStatus: LlamaCpp
       />
     </div>
   );
+}
+
+const MAX_IDLE_UNLOAD_MINUTES = 1440;
+
+function RuntimeMemoryControls({ status, runtime }: { status: LlamaCppRuntimeStatus; runtime: RuntimeControls }) {
+  const [unloading, setUnloading] = useState(false);
+  const [idleText, setIdleText] = useState(String(runtime.idleUnloadMinutes));
+
+  // Follow a value that changed elsewhere (a save, a reset) without fighting
+  // what is being typed: text that already means the same thing is left alone.
+  // Adjusted while rendering, as the settings panel does, so the field never
+  // shows a stale value for a frame.
+  const [seenMinutes, setSeenMinutes] = useState(runtime.idleUnloadMinutes);
+  if (seenMinutes !== runtime.idleUnloadMinutes) {
+    setSeenMinutes(runtime.idleUnloadMinutes);
+    if (parseIdleMinutes(idleText) !== runtime.idleUnloadMinutes) setIdleText(String(runtime.idleUnloadMinutes));
+  }
+
+  const unload = async () => {
+    if (!runtime.onUnload) return;
+    setUnloading(true);
+    try {
+      await runtime.onUnload();
+    } finally {
+      setUnloading(false);
+    }
+  };
+
+  const loaded = status.state === "ready" && Boolean(status.loaded_model);
+  return (
+    <div className="gguf-runtime-memory">
+      {runtime.onUnload && (
+        <div className="gguf-runtime-unload">
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={() => void unload()}
+            disabled={!loaded || unloading}
+          >
+            <PowerOff aria-hidden="true" size={15} /> {unloading ? "Unloading…" : "Unload model"}
+          </button>
+          <small className="gguf-runtime-directory-hint">
+            {loaded
+              ? "Frees the memory the model is using. It loads again when you send a message."
+              : "No local model is loaded right now."}
+          </small>
+        </div>
+      )}
+      <div className="gguf-runtime-field">
+        <label className="field-label" htmlFor="gguf-idle-unload">
+          Unload an unused model after (minutes)
+          <input
+            id="gguf-idle-unload"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={MAX_IDLE_UNLOAD_MINUTES}
+            step={1}
+            value={idleText}
+            aria-describedby="gguf-idle-unload-hint"
+            onChange={(event) => {
+              setIdleText(event.target.value);
+              const minutes = parseIdleMinutes(event.target.value);
+              if (minutes !== null) runtime.onIdleUnloadMinutesChange(minutes);
+            }}
+          />
+        </label>
+        <small id="gguf-idle-unload-hint" className="gguf-runtime-directory-hint">
+          0 keeps the model loaded until Cortex closes. A response in progress is never interrupted.
+        </small>
+      </div>
+    </div>
+  );
+}
+
+/** A whole number of minutes from 0 to a day, or `null` while the text is not one. */
+function parseIdleMinutes(text: string): number | null {
+  if (!/^\d{1,4}$/.test(text.trim())) return null;
+  const minutes = Number(text.trim());
+  return minutes <= MAX_IDLE_UNLOAD_MINUTES ? minutes : null;
 }

@@ -348,6 +348,39 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
   });
 
+  it("unloads the local model with an authenticated POST and returns the new runtime status", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      state: "idle",
+      binary_present: true,
+      models_directory: "C:/synthetic/models",
+      last_restart_reason: "the model was unloaded at your request",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+
+    const status = await api.unloadLlamaCpp();
+
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/llamacpp/unload", expect.objectContaining({ method: "POST" }));
+    const request = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-1");
+    expect(status.state).toBe("idle");
+    expect(status.last_restart_reason).toBe("the model was unloaded at your request");
+  });
+
+  it("reports a refused unload with the backend's own sentence", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({ detail: "A response is being generated. Stop it or wait for it to finish, then unload the model." }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const api = new CortexApi("/api/v1", fetcher);
+
+    await expect(api.unloadLlamaCpp()).rejects.toMatchObject({
+      status: 409,
+      detail: expect.stringContaining("being generated"),
+    });
+  });
+
   it("starts a typed recipe request on the recipe route", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       job_id: "recipe-job",

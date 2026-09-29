@@ -35,6 +35,14 @@ class LlamaCppError(RuntimeError):
         return self.error
 
 
+class RuntimeBusyError(LlamaCppError):
+    """Raised when the runtime cannot be unloaded because it is in use or loading.
+
+    Its message is already user-facing (written by the manager, never taken
+    from the child), and the API reports it as a conflict.
+    """
+
+
 class BinaryVerificationError(LlamaCppError):
     """Raised when a downloaded/cached llama-server binary fails verification."""
 

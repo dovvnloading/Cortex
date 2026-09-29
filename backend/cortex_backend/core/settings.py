@@ -47,6 +47,11 @@ class LlamaCppSettings(_SettingsModel):
     # "auto" tries Vulkan (broad GPU support, no extra toolkit) first and
     # falls back to the CPU build if Vulkan can't launch on this machine.
     gpu_backend: Literal["auto", "vulkan", "cpu"] = "auto"
+    # Minutes without a request after which the loaded model is released, so a
+    # 20 GB model does not keep its memory while the machine is used for
+    # something else. The next message loads it again. 0 keeps it loaded until
+    # Cortex exits or another model is chosen.
+    idle_unload_minutes: int = Field(default=30, ge=0, le=1440)
 
 
 class GenerationSettings(_SettingsModel):
