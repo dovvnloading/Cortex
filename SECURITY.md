@@ -38,7 +38,15 @@ tokens, or local database files.
 - Ollama endpoints should remain local unless remote access is intentional and
   trusted.
 - User data is stored under `%APPDATA%\ChatLLM\ChatLLM-Assistant`; protect the
-  Windows account and back up this directory before upgrades.
+  Windows account and back up this directory before upgrades. Downloaded models,
+  the llama.cpp runtime and the WebView profile of a new install are under
+  `%LOCALAPPDATA%\ChatLLM\ChatLLM-Assistant` with the same per-user permissions.
+- Cortex does not log prompts, responses, memories or credentials. As a second
+  line of defence its runtime log (`logs\cortex.log`) and startup log redact
+  values that follow credential-like or content-like names (`token=`, `prompt=`,
+  `Authorization: Bearer ...` and similar), keep each record to one bounded line,
+  and stay bounded in size. That filter matches names, not meaning: free-form
+  text a future change logged carelessly would not be caught.
 - External links and rendered model content are validated by the frontend.
 - Model-produced memory actions are validated and destructive clears require
   explicit user confirmation. A memory the model proposes is only shown under

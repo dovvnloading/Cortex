@@ -98,7 +98,7 @@ body:
     attributes:
       label: Startup log
       description: |
-        If Cortex failed to start, paste `startup.log` from your data folder (`%APPDATA%\ChatLLM\ChatLLM-Assistant`, or the folder you gave `--data-dir`). Cortex writes it only when startup fails and keeps prompts and credentials out of it, but read it before you paste it.
+        If Cortex failed to start or misbehaved after starting, paste `startup.log` from your data folder (`%APPDATA%\ChatLLM\ChatLLM-Assistant`, or the folder you gave `--data-dir`) and the newest lines of `logs\cortex.log` beside it. Cortex keeps prompts and credentials out of both, but read them before you paste.
       render: text
     validations:
       required: false
