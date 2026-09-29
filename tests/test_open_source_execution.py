@@ -283,6 +283,7 @@ def test_local_profile_runs_scratch_and_fixed_image_recipe_end_to_end(tmp_path):
         )
         assert download.status_code == 200
         assert download.headers["content-type"].startswith("image/png")
+        assert download.headers["x-content-type-options"] == "nosniff"
         assert download.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 

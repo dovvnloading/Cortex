@@ -367,6 +367,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             headers={
                 "Cache-Control": "no-store",
                 "Content-Disposition": f'attachment; filename="cortex-result.{suffix}"',
+                # The type comes from the stored artifact, not from what the
+                # bytes look like; keep a browser from second-guessing it.
+                "X-Content-Type-Options": "nosniff",
             },
         )
 
