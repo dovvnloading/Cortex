@@ -5,12 +5,14 @@ from __future__ import annotations
 import itertools
 import os
 import socket
+import ssl
 import struct
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpcore
 import httpx
 import pytest
 from pydantic import ValidationError
@@ -1896,6 +1898,126 @@ def test_a_mistyped_host_fails_at_once_instead_of_retrying(tmp_path: Path, monke
     with pytest.raises(GGUFDownloadError, match="Could not resolve"):
         download_gguf("https://exmaple.invalid/model.gguf", "model.gguf", tmp_path)
     assert lookups == 1
+
+
+# A TLS failure reaches the caller as httpx.ConnectError with the ssl error
+# somewhere down its cause chain. The certificate text below is synthetic and
+# stands for whatever a hostile or misconfigured server makes Python report.
+_CERTIFICATE_TEXT = "certificate is not valid for 'synthetic-host.example.net'"
+
+
+def _tls_connect_error(request: httpx.Request, how: str = "direct", cause: BaseException | None = None):
+    """A ``ConnectError`` caused by a TLS error, wired the way each layer wires it."""
+    tls = cause or ssl.SSLCertVerificationError(
+        1, f"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: {_CERTIFICATE_TEXT}"
+    )
+    error = httpx.ConnectError(f"[SSL: CERTIFICATE_VERIFY_FAILED] {_CERTIFICATE_TEXT}", request=request)
+    if how == "direct":
+        error.__cause__ = tls
+    elif how == "via-httpcore":  # httpx wraps httpcore's error, which wraps the ssl one
+        inner = httpcore.ConnectError("connect failed")
+        inner.__cause__ = tls
+        error.__cause__ = inner
+    else:  # raised while handling the ssl error, without an explicit cause
+        try:
+            raise tls
+        except ssl.SSLError:
+            try:
+                raise error
+            except httpx.ConnectError as raised:
+                return raised
+    return error
+
+
+@pytest.mark.parametrize("how", ["direct", "via-httpcore", "implicit-context"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        None,  # a rejected certificate
+        ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),  # a handshake the server refused
+    ],
+)
+def test_a_tls_failure_fails_at_once_without_leaking_certificate_text(
+    tmp_path: Path, how: str, cause: BaseException | None
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise _tls_connect_error(request, how, cause)
+
+    with pytest.raises(GGUFDownloadError) as raised:
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    message = str(raised.value)
+    assert calls == 1  # not five attempts and half a minute of waiting
+    assert "secure connection" in message and "could not be verified" in message
+    assert "internet connection" not in message  # the old, misleading advice
+    assert "Gave up" not in message
+    assert _CERTIFICATE_TEXT not in message and "CERTIFICATE_VERIFY_FAILED" not in message
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__  # no certificate text rides along
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.usefixtures("small_reads")
+def test_a_tls_failure_on_a_resume_also_fails_at_once(tmp_path: Path) -> None:
+    """A server whose identity can no longer be verified is not carried on with,
+    however many bytes are already stored."""
+    content = _valid_gguf_content(tmp_path)
+    server = _FlakyServer(tmp_path, content, plans=[100])
+    real_respond = server.respond
+
+    def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
+        if request.headers.get("range"):
+            raise _tls_connect_error(request)
+        return real_respond(request, drop_after)
+
+    server.respond = respond  # type: ignore[method-assign]
+
+    with pytest.raises(GGUFDownloadError, match="could not be verified"):
+        _fetch(tmp_path, server)
+    assert len(server.requests) == 2  # the first request and the one resume, not five
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("cause", [ssl.SSLEOFError(8, "EOF occurred in violation of protocol"), ssl.SSLZeroReturnError()])
+def test_a_tls_connection_that_is_merely_dropped_is_still_retried(tmp_path: Path, cause: BaseException) -> None:
+    """Only a failure to *verify* the server is final: a handshake cut off by
+    the network is the same transient failure as a refused connection."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise _tls_connect_error(request, cause=cause)
+
+    with pytest.raises(GGUFDownloadError, match="Gave up after 5 attempts"):
+        download_gguf(
+            "https://example.com/model.gguf",
+            "model.gguf",
+            tmp_path,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls == 5
+
+
+def test_listing_reports_a_tls_failure_as_such() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise _tls_connect_error(request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError) as raised:
+            list_huggingface_gguf_files("owner/model", http_client=client)
+
+    assert "could not be verified" in str(raised.value)
+    assert "internet connection" not in str(raised.value)
+    assert _CERTIFICATE_TEXT not in str(raised.value)
 
 
 @pytest.mark.usefixtures("small_reads")

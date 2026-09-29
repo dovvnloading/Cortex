@@ -14,6 +14,7 @@ import queue
 import re
 import shutil
 import socket
+import ssl
 import struct
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -472,8 +473,38 @@ def _explain_http_status(status_code: int, *, url: httpx.URL) -> str:
     return f"The download server answered with an unexpected error (HTTP {status_code})."
 
 
+_TLS_FAILURE_MESSAGE = (
+    "The secure connection to the server could not be verified, so nothing was downloaded. "
+    "Check the link and your computer's clock, and whether a proxy or security software "
+    "is intercepting HTTPS traffic."
+)
+_MAX_CAUSE_DEPTH = 8
+
+
+def _tls_failure(exc: BaseException) -> ssl.SSLError | None:
+    """The TLS error behind ``exc`` when the server's identity or handshake was rejected.
+
+    Certificate and handshake failures reach the caller as a plain
+    ``httpx.ConnectError`` with the ``ssl`` error somewhere down its cause chain
+    (httpx wraps httpcore's error, which wraps the ssl one). They are final: the
+    same server presents the same certificate on the next attempt. A handshake
+    that was merely cut off (``SSLEOFError``, ``SSLZeroReturnError``) is the
+    network dropping the connection and stays retryable like any other.
+    """
+    cause: BaseException | None = exc
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if cause is None:
+            return None
+        if isinstance(cause, ssl.SSLError) and not isinstance(cause, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+            return cause
+        cause = cause.__cause__ or cause.__context__
+    return None
+
+
 def _explain_transport_error(exc: httpx.TransportError) -> str:
     """A specific, safe-to-show reason for a network-level failure."""
+    if isinstance(exc, httpx.ConnectError) and _tls_failure(exc) is not None:
+        return _TLS_FAILURE_MESSAGE
     if isinstance(exc, httpx.TimeoutException):
         return "The connection timed out. Check your internet connection and try again."
     if isinstance(exc, httpx.ConnectError):
@@ -797,6 +828,15 @@ class _GGUFTransfer:
                     raise GGUFDownloadError(reason) from exc
                 failure, retry_after = exc, _retry_after_seconds(exc.response)
             except httpx.TransportError as exc:
+                tls_error = _tls_failure(exc) if isinstance(exc, httpx.ConnectError) else None
+                if tls_error is not None:
+                    # Final, so not retried (five attempts and half a minute of
+                    # waiting would only end in advice about the internet
+                    # connection). Only the error's class is logged and nothing of
+                    # it is shown: its text is whatever the server's certificate
+                    # says, and it is not part of the raised error.
+                    logger.info("GGUF download stopped: TLS verification failed (%s).", type(tls_error).__name__)
+                    raise GGUFDownloadError(_TLS_FAILURE_MESSAGE) from None
                 failure, reason = exc, _explain_transport_error(exc)
             except _DownloadStalled as exc:
                 failure, reason = exc, str(exc)
