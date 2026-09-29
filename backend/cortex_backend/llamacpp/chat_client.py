@@ -128,6 +128,7 @@ class LlamaCppChatClient:
         options: dict,
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         self._ensure_open()
         model_path = resolve_gguf_path(self._models_directory(), model)
@@ -167,7 +168,9 @@ class LlamaCppChatClient:
             )
         started = time.monotonic()
         if cancellation_event is None and on_delta is None:
-            return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
+            return self._chat_blocking(
+                handle.base_url, messages, options, started, handle.api_key, think=think
+            )
         # Streaming serves both features: the abortable path is what reads the
         # response incrementally, which is also what makes live deltas
         # possible. A caller that wants deltas but has no cancellation of its
@@ -180,16 +183,23 @@ class LlamaCppChatClient:
             cancellation_event if cancellation_event is not None else Event(),
             handle.api_key,
             on_delta=on_delta,
+            think=think,
         )
 
     def _chat_blocking(
-        self, base_url: str, messages: list[dict], options: dict, started: float, api_key: str | None
+        self,
+        base_url: str,
+        messages: list[dict],
+        options: dict,
+        started: float,
+        api_key: str | None,
+        think: bool | None = None,
     ) -> dict:
         """Single request/response call, unchanged from before cancellation
         support existed. Used whenever the caller has no cancellation_event
         to honor (title and translation calls, and anything else that isn't
         the main chat turn)."""
-        body = _build_request_body(messages, options, stream=False)
+        body = _build_request_body(messages, options, stream=False, think=think)
         self._begin_http_request()
         try:
             response = self._http.post(
@@ -226,6 +236,7 @@ class LlamaCppChatClient:
         cancellation_event: Event,
         api_key: str | None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         """Streamed request that stops promptly when the caller asks to stop.
 
@@ -234,7 +245,7 @@ class LlamaCppChatClient:
         closing is what unblocks a read already in flight -- waiting for the
         next chunk to arrive would make Stop as slow as the model.
         """
-        body = _build_request_body(messages, options, stream=True)
+        body = _build_request_body(messages, options, stream=True, think=think)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         usage: dict | None = None
@@ -404,11 +415,25 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key is not None else {}
 
 
-def _build_request_body(messages: list[dict], options: dict, *, stream: bool) -> dict[str, Any]:
+def _build_request_body(
+    messages: list[dict],
+    options: dict,
+    *,
+    stream: bool,
+    think: bool | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": _strip_unsupported_fields(messages),
         "stream": stream,
     }
+    if think is not None:
+        # llama-server's per-request switch for a chat template with a
+        # reasoning mode (Qwen3 and its relatives read ``enable_thinking``). A
+        # template with no such variable ignores it, so it is safe to send for
+        # any model, and being per-request it needs no relaunch of the server:
+        # the launch flags are shared by every call and a title call must not
+        # change them.
+        body["chat_template_kwargs"] = {"enable_thinking": think}
     if stream:
         # OpenAI-compatible streaming convention llama-server also follows:
         # without this, per-chunk usage/timings are commonly omitted

@@ -22,21 +22,29 @@ from cortex_backend.testing.fake_llamacpp import FakeLlamaCppState, create_fake_
 class _RecordingOllamaClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.think_values: list[bool | None] = []
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
+    def chat(
+        self, *, model: str, messages: list[dict], options: dict, think: bool | None = None
+    ) -> dict:
         del messages, options
         self.calls.append(model)
+        self.think_values.append(think)
         return {"message": {"content": f"ollama:{model}"}}
 
 
 class _RecordingLlamaCppClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.think_values: list[bool | None] = []
         self.status_callback = None
 
-    def chat(self, *, model: str, messages: list[dict], options: dict) -> dict:
+    def chat(
+        self, *, model: str, messages: list[dict], options: dict, think: bool | None = None
+    ) -> dict:
         del messages, options
         self.calls.append(model)
+        self.think_values.append(think)
         return {"message": {"content": f"gguf:{model}"}}
 
     def set_status_callback(self, callback) -> None:
@@ -1090,3 +1098,98 @@ def test_routing_forwards_on_delta_to_the_selected_backend() -> None:
 
     router.chat(model="gguf:model.gguf", messages=[], options={}, on_delta=lambda *_: None)
     assert llamacpp.saw_on_delta is True
+
+
+def test_auxiliary_calls_disable_thinking_on_both_backends() -> None:
+    """A title or a translation must not pay for a reasoning pass.
+
+    A Qwen3 or DeepSeek-R1 class model thinks for hundreds of tokens before it
+    writes three words, which on a CPU is longer than the title's whole time
+    budget. Title and translation therefore ask for ``think=False`` on either
+    runtime, while the user's own turn leaves the model's default alone.
+    """
+    ollama = _RecordingOllamaClient()
+    llamacpp = _RecordingLlamaCppClient()
+    router = RoutingChatClient(ollama, llamacpp)
+
+    # Title on llama.cpp, translation on Ollama: one agent, two backends.
+    agent = SynthesisAgent("gguf:local.gguf", "gguf:local.gguf", "translategemma:4b", router)
+    agent.generate_chat_title("User: hi\nAssistant: hello")
+    agent.translate_text("Hello", "Spanish")
+    agent.generate("Hello", "No history available.", [], False, None)
+    assert llamacpp.think_values == [False, None]
+    assert ollama.think_values == [False]
+
+    # And the other way round: the title on Ollama, translation on llama.cpp.
+    ollama, llamacpp = _RecordingOllamaClient(), _RecordingLlamaCppClient()
+    agent = SynthesisAgent("qwen3:8b", "qwen3:8b", "gguf:translate.gguf", RoutingChatClient(ollama, llamacpp))
+    agent.generate_chat_title("User: hi\nAssistant: hello")
+    agent.translate_text("Hello", "Spanish")
+    assert ollama.think_values == [False]
+    assert llamacpp.think_values == [False]
+
+
+def test_the_llamacpp_request_carries_the_thinking_switch_only_when_asked(tmp_path: Path) -> None:
+    """On the wire: ``think=False`` becomes llama-server's per-request template
+    switch, on the blocking and the streamed request alike, and a call that
+    expressed no preference sends nothing extra."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body["stream"]:
+            return httpx.Response(
+                200,
+                content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+                headers={"Content-Type": "text/event-stream"},
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"), models_directory=lambda: tmp_path, http_client=http_client
+    )
+    model = f"gguf:{model_path.name}"
+    messages = [{"role": "user", "content": "hi"}]
+
+    client.chat(model=model, messages=messages, options={}, think=False)
+    client.chat(model=model, messages=messages, options={}, think=False, cancellation_event=Event())
+    client.chat(model=model, messages=messages, options={})
+    client.chat(model=model, messages=messages, options={}, cancellation_event=Event())
+
+    assert [body["stream"] for body in bodies] == [False, True, False, True]
+    assert bodies[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert bodies[1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in bodies[2]
+    assert "chat_template_kwargs" not in bodies[3]
+
+
+def test_the_ollama_request_carries_think_only_when_asked() -> None:
+    """``think`` reaches the ollama client on both paths, and is absent -- not
+    ``None`` -- when nobody asked, so a client or server that predates the
+    keyword sees exactly the request it always did."""
+    seen: list[dict] = []
+
+    class _Recording:
+        def chat(self, *, model, messages, options, stream=False, **extra):
+            del model, messages, options
+            seen.append({"stream": stream, **extra})
+            if not stream:
+                return {"message": {"content": "ok", "thinking": None}}
+            return iter([{"message": {"content": "ok"}, "done": True}])
+
+    client = OllamaChatClient(_Recording())
+    client.chat(model="m", messages=[], options={}, think=False)
+    client.chat(model="m", messages=[], options={}, think=False, cancellation_event=Event())
+    client.chat(model="m", messages=[], options={})
+    client.chat(model="m", messages=[], options={}, cancellation_event=Event())
+
+    assert seen == [
+        {"stream": False, "think": False},
+        {"stream": True, "think": False},
+        {"stream": False},
+        {"stream": True},
+    ]

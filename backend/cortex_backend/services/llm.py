@@ -1252,6 +1252,10 @@ class SynthesisAgent:
                 "model": self.gen_model,
                 "messages": messages,
                 "options": options,
+                # The reply is one small JSON block. A reasoning model would
+                # otherwise think its way through the whole conversation again
+                # to write it, on top of the pass that produced the answer.
+                "think": False,
             }
             if cancellation_event is not None:
                 chat_kwargs["cancellation_event"] = cancellation_event
@@ -1358,6 +1362,7 @@ class SynthesisAgent:
                 "model": self.translation_model,
                 "messages": [{'role': 'user', 'content': prompt}],
                 "options": self._auxiliary_options(options, temperature=0.1),
+                "think": False,
             }
             # Forwarded only when set, the same way ``generate`` and the
             # proposal-repair call do it, so a ChatClient double written
@@ -1598,6 +1603,7 @@ class SynthesisAgent:
                 "model": self.title_model,
                 "messages": prompt_messages,
                 "options": self._auxiliary_options(options, temperature=0.2),
+                "think": False,
             }
             # Forwarded only when set, like every other call here, so a
             # ChatClient double written against the original call keeps working.

@@ -69,6 +69,12 @@ class ChatClient(Protocol):
     this is what lets a caller see it rather than only the joined result. The
     return value is unchanged either way, so a caller that passes nothing
     behaves exactly as before.
+
+    ``think`` is a request about reasoning, not an option a caller may rely
+    on: ``False`` asks a thinking model to answer without its reasoning pass,
+    ``None`` (the default) leaves the model's own default alone. Calls that
+    want three words back -- a title, a translation -- pass ``False``; a
+    runtime or model with no such switch simply ignores it.
     """
 
     def chat(
@@ -79,6 +85,7 @@ class ChatClient(Protocol):
         options: dict,
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         ...
 
@@ -97,12 +104,18 @@ class OllamaChatClient:
         options: dict,
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         # Rebound once up front so both the streaming and non-streaming
         # branches below are guaranteed to send the filtered mapping.
         options = _without_llamacpp_only_options(options)
+        # Sent only when the caller made a choice, so the request an ordinary
+        # chat turn produces is exactly what it was before ``think`` existed.
+        # Only ``False`` is ever sent today: a request to turn reasoning off,
+        # which asks nothing of a model that has no reasoning mode.
+        extra: dict[str, Any] = {} if think is None else {"think": think}
         if cancellation_event is None and on_delta is None:
-            return self._client.chat(model=model, messages=messages, options=options)
+            return self._client.chat(model=model, messages=messages, options=options, **extra)
         if cancellation_event is not None and cancellation_event.is_set():
             # Already cancelled, so do not open a request at all. Otherwise
             # this waits for the model's first token before noticing -- the
@@ -121,7 +134,9 @@ class OllamaChatClient:
         # GeneratorExit at its suspended yield point, which unwinds that
         # ``with`` block and releases the connection -- the same mechanism
         # LlamaCppChatClient uses for the local runtime.
-        chunks = self._client.chat(model=model, messages=messages, options=options, stream=True)
+        chunks = self._client.chat(
+            model=model, messages=messages, options=options, stream=True, **extra
+        )
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         final: dict = {}
@@ -175,6 +190,7 @@ class RoutingChatClient:
         options: dict,
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         target = self._llamacpp if model.startswith(GGUF_PREFIX) else self._ollama
         # Only forward the optional keywords when they are actually set, so
@@ -185,6 +201,8 @@ class RoutingChatClient:
             extra["cancellation_event"] = cancellation_event
         if on_delta is not None:
             extra["on_delta"] = on_delta
+        if think is not None:
+            extra["think"] = think
         return target.chat(model=model, messages=messages, options=options, **extra)
 
     def set_status_callback(self, callback: Any) -> None:

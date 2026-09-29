@@ -287,8 +287,8 @@ class GenerationServiceTests(unittest.TestCase):
         seen: dict = {}
 
         class _Client:
-            def chat(self, *, model, messages, options, cancellation_event=None):
-                del messages, options
+            def chat(self, *, model, messages, options, cancellation_event=None, think=None):
+                del messages, options, think
                 seen["model"] = model
                 seen["cancellation_event"] = cancellation_event
                 return {"message": {"content": "bonjour"}}
@@ -336,8 +336,8 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertIs(seen["engine"], event)
 
         class _Client:
-            def chat(self, *, model, messages, options, cancellation_event=None):
-                del messages, options
+            def chat(self, *, model, messages, options, cancellation_event=None, think=None):
+                del messages, options, think
                 seen["client_model"] = model
                 seen["client"] = cancellation_event
                 return {"message": {"content": "A title"}}
