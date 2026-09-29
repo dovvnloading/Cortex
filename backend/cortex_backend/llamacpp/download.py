@@ -15,14 +15,14 @@ import shutil
 import socket
 import struct
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -53,6 +53,16 @@ _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0
 _HF_API_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 _HF_REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+$")
 _SAFE_FILENAME_PATTERN = re.compile(r"^[\w.\-]+\.gguf$", re.IGNORECASE)
+_SAFE_SEGMENT_PATTERN = re.compile(r"^[\w.\-]+$")
+# A file inside a repository may sit in sub-folders (``Q4_K_M/model.gguf``).
+_MAX_REPO_PATH_SEGMENTS = 8
+# A split model: ``name-00001-of-00003.gguf``. Mirrors the pattern the folder
+# scan in ``model_directory.py`` uses to recognise a set, so what is downloaded
+# here is exactly what is listed there once every part is present.
+_SPLIT_NAME_PATTERN = re.compile(
+    r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})(?P<suffix>\.gguf)$", re.IGNORECASE
+)
+_MAX_SPLIT_PARTS = 256
 _HF_BLOB_URL_PATTERN = re.compile(r"^(https://huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
 # The one host that ever receives a Hugging Face access token. Its file CDN
 # (``cdn-lfs.huggingface.co`` and friends) is deliberately a different host and
@@ -205,6 +215,33 @@ class _ProgressReporter:
         )
 
 
+class _Progress(Protocol):
+    """What a transfer reports to: one file's reporter, or one part of a set's view."""
+
+    def downloading(self, completed: int, total: int | None, *, final: bool = False) -> None: ...
+
+    def retrying(self, completed: int, total: int | None) -> None: ...
+
+
+class _PartProgress:
+    """One part's progress, reported as progress through the whole split model."""
+
+    def __init__(self, whole: _ProgressReporter, finished: int, parts_left: int) -> None:
+        self._whole = whole
+        self._finished = finished  # bytes of the parts already complete
+        self._parts_left = parts_left  # this part and every one after it
+
+    def _whole_total(self, total: int | None) -> int | None:
+        # The parts after this one are assumed to be as large as this one.
+        return None if total is None else self._finished + total * self._parts_left
+
+    def downloading(self, completed: int, total: int | None, *, final: bool = False) -> None:
+        self._whole.downloading(self._finished + completed, self._whole_total(total), final=final)
+
+    def retrying(self, completed: int, total: int | None) -> None:
+        self._whole.retrying(self._finished + completed, self._whole_total(total))
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadSource:
     source: Literal["url", "huggingface"]
@@ -237,11 +274,16 @@ def resolve_download_url(request: DownloadSource) -> tuple[str, str]:
             or _HF_REPO_PATTERN.fullmatch(request.repo_id) is None
         ):
             raise GGUFDownloadError("A Hugging Face repo id must look like 'owner/name'.")
-        filename = request.filename or ""
-        if not isinstance(filename, str) or _SAFE_FILENAME_PATTERN.fullmatch(filename) is None:
-            raise GGUFDownloadError("The requested file must be a plain '.gguf' filename.")
-        url = f"https://huggingface.co/{request.repo_id}/resolve/main/{filename}"
-        return url, filename
+        repo_path = _repo_file_path(request.filename)
+        if repo_path is None:
+            raise GGUFDownloadError(
+                "The requested file must be a '.gguf' filename, optionally inside plain sub-folders "
+                "(for example 'folder/model.gguf')."
+            )
+        # Fetched from its path in the repository, saved under its basename: the
+        # models folder is flat, so a file in a sub-folder lands beside the rest
+        # (and a second file with the same basename is refused, never overwritten).
+        return f"https://huggingface.co/{request.repo_id}/resolve/main/{repo_path}", repo_path.rsplit("/", 1)[-1]
 
     if request.source == "url":
         if not isinstance(request.url, str) or not request.url:
@@ -258,6 +300,55 @@ def resolve_download_url(request: DownloadSource) -> tuple[str, str]:
         return normalized_url, filename
 
     raise GGUFDownloadError(f"Unsupported download source '{request.source}'.")
+
+
+def _repo_file_path(name: object) -> str | None:
+    """``name`` if it is a ``.gguf`` file, possibly in sub-folders, made only of plain names.
+
+    Every segment must be a plain name (no ``.``/``..``, empty segment, absolute
+    path or separator other than ``/``), so the value is safe to put in a
+    resolve URL and its basename is safe to use as a file name.
+    """
+    if not isinstance(name, str) or _contains_control_character(name):
+        return None
+    segments = name.split("/")
+    if len(segments) > _MAX_REPO_PATH_SEGMENTS:
+        return None
+    if any(
+        segment in (".", "..") or _SAFE_SEGMENT_PATTERN.fullmatch(segment) is None
+        for segment in segments
+    ):
+        return None
+    if _SAFE_FILENAME_PATTERN.fullmatch(segments[-1]) is None:
+        return None
+    return name
+
+
+def split_gguf_parts(url: str, filename: str) -> tuple[tuple[str, str], ...] | None:
+    """Every ``(url, filename)`` of the split model ``filename`` is one part of.
+
+    A large model is often published as ``name-00001-of-00003.gguf`` ...
+    ``name-00003-of-00003.gguf``, and no single part is usable alone. Given the
+    URL and file name of any one part this names all of them, in order, with the
+    other parts' URLs built by swapping the part number in the URL's last path
+    segment. ``None`` means an ordinary single file (including a name that only
+    looks like a part but is not consistent, such as part 5 of 3).
+    """
+    match = _SPLIT_NAME_PATTERN.fullmatch(filename)
+    if match is None:
+        return None
+    count, index = int(match.group("total")), int(match.group("index"))
+    if not 2 <= count <= _MAX_SPLIT_PARTS or not 1 <= index <= count:
+        return None
+    parts = urlsplit(url)
+    directory, _, tail = parts.path.rpartition("/")
+    if tail != filename:
+        return None
+    result = []
+    for number in range(1, count + 1):
+        name = f"{match.group('stem')}-{number:05d}-of-{count:05d}{match.group('suffix')}"
+        result.append((urlunsplit(parts._replace(path=f"{directory}/{name}")), name))
+    return tuple(result)
 
 
 def _normalize_huggingface_blob_url(url: str) -> str:
@@ -407,8 +498,7 @@ def list_huggingface_gguf_files(repo_id: str, *, http_client: httpx.Client | Non
         entry["rfilename"]
         for entry in siblings
         if isinstance(entry, dict)
-        and isinstance(entry.get("rfilename"), str)
-        and _SAFE_FILENAME_PATTERN.fullmatch(entry["rfilename"]) is not None
+        and _repo_file_path(entry.get("rfilename")) is not None
     )
     return tuple(names)
 
@@ -430,12 +520,7 @@ def download_gguf(
         raise GGUFDownloadError("The target filename must be a plain '.gguf' filename.")
     if not isinstance(url, str) or _contains_control_character(url):
         raise GGUFDownloadError("The download URL contains invalid control characters.")
-    maximum = MAX_DOWNLOAD_BYTES if max_download_bytes is None else max_download_bytes
-    reserve = MIN_FREE_SPACE_BYTES if min_free_space_bytes is None else min_free_space_bytes
-    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < _GGUF_HEADER_BYTES:
-        raise GGUFDownloadError("The download byte ceiling is invalid.")
-    if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
-        raise GGUFDownloadError("The download free-space reserve is invalid.")
+    maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / target_filename
     if destination.exists() and not allow_overwrite:
@@ -461,6 +546,96 @@ def download_gguf(
         temp_path.unlink(missing_ok=True)
     reporter.success(destination.stat().st_size)
     return destination
+
+
+def _checked_limits(max_download_bytes: int | None, min_free_space_bytes: int | None) -> tuple[int, int]:
+    """The byte ceiling and free-space reserve to enforce, defaulted and validated."""
+    maximum = MAX_DOWNLOAD_BYTES if max_download_bytes is None else max_download_bytes
+    reserve = MIN_FREE_SPACE_BYTES if min_free_space_bytes is None else min_free_space_bytes
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < _GGUF_HEADER_BYTES:
+        raise GGUFDownloadError("The download byte ceiling is invalid.")
+    if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
+        raise GGUFDownloadError("The download free-space reserve is invalid.")
+    return maximum, reserve
+
+
+def download_gguf_set(
+    parts: Sequence[tuple[str, str]],
+    directory: Path,
+    *,
+    progress_callback: Callable[[GGUFDownloadProgress], None] | None = None,
+    cancellation_event: Event | None = None,
+    http_client: httpx.Client | None = None,
+    max_download_bytes: int | None = None,
+    min_free_space_bytes: int | None = None,
+) -> tuple[Path, ...]:
+    """Fetch every ``(url, filename)`` part of a split model, all or nothing.
+
+    Parts download one after another into staging files, each validated as it
+    arrives, and are moved into ``directory`` only once every one is complete. A
+    failure at any point -- a network error after retries, a part that is not a
+    GGUF, cancellation, a name that appeared meanwhile -- leaves no part of the
+    set behind, and a file that was already in ``directory`` is never replaced
+    (the set is refused up front if any of its names is taken).
+
+    Progress covers the whole set. The size of a part is only known once its
+    response arrives, so until the last part starts the total is an estimate
+    that assumes the remaining parts are as large as the current one, which
+    holds for the equal-sized splits ``llama-gguf-split`` writes; the
+    ``success`` event carries the exact figure. Each part's own byte ceiling,
+    free-space and retry rules are those of ``download_gguf``.
+    """
+    if not parts or len(parts) > _MAX_SPLIT_PARTS:
+        raise GGUFDownloadError("A split model must have between one and 256 parts.")
+    names = [name for _url, name in parts]
+    for url, name in parts:
+        if not isinstance(name, str) or _SAFE_FILENAME_PATTERN.fullmatch(name) is None:
+            raise GGUFDownloadError("The target filename must be a plain '.gguf' filename.")
+        if not isinstance(url, str) or _contains_control_character(url):
+            raise GGUFDownloadError("The download URL contains invalid control characters.")
+    if len({name.casefold() for name in names}) != len(names):
+        raise GGUFDownloadError("The parts of a split model must have different file names.")
+    maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
+    directory.mkdir(parents=True, exist_ok=True)
+    destinations = [directory / name for name in names]
+    if any(destination.exists() for destination in destinations):
+        raise GGUFDownloadError(
+            "A file of this split model already exists in the models folder; refusing to overwrite it."
+        )
+    reporter = _ProgressReporter(progress_callback or (lambda progress: None), names[0])
+    reporter.starting()
+    staged: list[Path] = []
+    published: list[Path] = []
+    fetched_bytes = 0
+    complete = False
+    try:
+        for position, (url, _name) in enumerate(parts):
+            staging_path = directory / f".download-{uuid4().hex}.part"
+            staged.append(staging_path)
+            _GGUFTransfer(
+                url=url,
+                directory=directory,
+                staging_path=staging_path,
+                client=http_client or httpx,
+                limit=maximum,
+                reserve=reserve,
+                cancellation_event=cancellation_event,
+                reporter=_PartProgress(reporter, fetched_bytes, len(parts) - position),
+            ).run()
+            _validate_gguf_file(staging_path)
+            fetched_bytes += staging_path.stat().st_size
+        for staging_path, destination in zip(staged, destinations, strict=True):
+            _publish(staging_path, destination, allow_overwrite=False)
+            published.append(destination)
+        complete = True
+    finally:
+        if not complete:
+            for path in published:
+                path.unlink(missing_ok=True)
+        for path in staged:
+            path.unlink(missing_ok=True)
+    reporter.success(fetched_bytes)
+    return tuple(destinations)
 
 
 def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
@@ -539,7 +714,7 @@ class _GGUFTransfer:
         limit: int,
         reserve: int,
         cancellation_event: Event | None,
-        reporter: _ProgressReporter,
+        reporter: _Progress,
     ) -> None:
         self._url = url
         self._directory = directory

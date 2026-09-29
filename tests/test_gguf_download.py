@@ -24,10 +24,13 @@ from cortex_backend.llamacpp.download import (
     GGUFDownloadError,
     GGUFDownloadProgress,
     download_gguf,
+    download_gguf_set,
     list_huggingface_gguf_files,
     resolve_download_url,
+    split_gguf_parts,
 )
 from support import session_headers as _session
+from support import wait_until
 
 
 @pytest.fixture(autouse=True)
@@ -712,9 +715,15 @@ def test_huggingface_file_listing_only_advertises_resolver_safe_filenames() -> N
                 "siblings": [
                     {"rfilename": "weights/model.gguf"},
                     {"rfilename": "../escape.gguf"},
+                    {"rfilename": "weights/../escape.gguf"},
+                    {"rfilename": "/absolute.gguf"},
+                    {"rfilename": "weights//model.gguf"},
+                    {"rfilename": "weights\\model.gguf"},
+                    {"rfilename": "a/b/c/d/e/f/g/h/too-deep.gguf"},
                     {"rfilename": "model.gguf\n"},
                     {"rfilename": "model.gguf"},
                     {"rfilename": "README.md"},
+                    {"rfilename": "weights/notes.txt"},
                     {"rfilename": 123},
                     {},
                 ]
@@ -722,7 +731,13 @@ def test_huggingface_file_listing_only_advertises_resolver_safe_filenames() -> N
         )
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        assert list_huggingface_gguf_files("owner/model", http_client=client) == ("model.gguf",)
+        # A file in a sub-folder is advertised (the resolver can fetch it);
+        # anything that could escape the folder, or that the resolver would
+        # refuse, is not.
+        assert list_huggingface_gguf_files("owner/model", http_client=client) == (
+            "model.gguf",
+            "weights/model.gguf",
+        )
 
 
 @pytest.mark.parametrize("siblings", [None, 123])
@@ -1001,7 +1016,7 @@ def test_download_progress_is_throttled(tmp_path: Path, monkeypatch) -> None:
     chunk_count = len(content) // 1024
     downloading = [event for event in events if event.status == "downloading"]
     assert chunk_count > 2000
-    assert len(downloading) <= 103
+    assert 90 <= len(downloading) <= 103  # the percentage moved ~100 times, and only those were reported
     assert events[0].status == "starting"
     assert downloading[0].completed == 1024  # the first chunk is always reported
     assert downloading[-1].completed == len(content)  # ...and so is the last
@@ -1255,18 +1270,21 @@ def test_a_weak_etag_is_not_used_to_resume(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("small_reads")
 @pytest.mark.parametrize(
-    "content_range",
+    ("content_range", "etag"),
     [
-        "bytes 0-255/256",  # starts at the beginning, not where the file ends
-        "bytes 32-255/256",  # starts inside the stored bytes
-        "bytes 96-255/999",  # a different total than the first response gave
-        "bytes 96-95/256",  # inverted
-        "garbage",
-        None,
+        ("bytes 0-255/256", '"v1"'),  # starts at the beginning, not where the file ends
+        ("bytes 32-255/256", '"v1"'),  # starts inside the stored bytes
+        ("bytes 96-255/999", '"v1"'),  # a different total than the first response gave
+        ("bytes 96-95/256", '"v1"'),  # inverted
+        ("garbage", '"v1"'),
+        (None, '"v1"'),
+        # A well-formed continuation of a different version of the file: a
+        # server that ignored If-Range and answered 206 anyway.
+        ("bytes 96-255/256", '"v2"'),
     ],
 )
 def test_a_partial_answer_that_does_not_continue_the_file_is_refused(
-    tmp_path: Path, content_range: str | None
+    tmp_path: Path, content_range: str | None, etag: str
 ) -> None:
     content = _valid_gguf_content(tmp_path)
     server = _FlakyServer(tmp_path, content, plans=[100])
@@ -1274,7 +1292,7 @@ def test_a_partial_answer_that_does_not_continue_the_file_is_refused(
 
     def respond(request: httpx.Request, drop_after: int | None) -> httpx.Response:
         if request.headers.get("range"):
-            headers = {"ETag": '"v1"', "Content-Length": str(len(content) - 96)}
+            headers = {"ETag": etag, "Content-Length": str(len(content) - 96)}
             if content_range is not None:
                 headers["Content-Range"] = content_range
             return httpx.Response(206, headers=headers, content=content[96:])
@@ -1692,3 +1710,355 @@ def test_transport_failures_mid_body_name_the_cause_when_retries_run_out(tmp_pat
     assert calls == 5  # no validator, so each attempt restarts and none makes net progress
     assert isinstance(raised.value.__cause__, httpx.ReadError)
     assert _leftovers(tmp_path) == []
+
+
+# -- sub-folders and split models ---------------------------------------------
+
+
+def test_resolve_download_url_accepts_a_file_in_a_repository_subfolder() -> None:
+    url, filename = resolve_download_url(
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="Q4_K_M/deep/model.Q4_K_M.gguf")
+    )
+    assert url == "https://huggingface.co/owner/name/resolve/main/Q4_K_M/deep/model.Q4_K_M.gguf"
+    assert filename == "model.Q4_K_M.gguf"  # saved under its basename
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape.gguf",
+        "a/../escape.gguf",
+        "a/./b.gguf",
+        "/absolute.gguf",
+        "a//b.gguf",
+        "a\\b.gguf",
+        "a/b/",
+        "a/notes.txt",
+        "a/.gguf",
+        "a/model.gguf\n",
+        "a/b/c/d/e/f/g/h/i.gguf",
+    ],
+)
+def test_resolve_download_url_rejects_unsafe_repository_paths(filename: str) -> None:
+    with pytest.raises(GGUFDownloadError):
+        resolve_download_url(DownloadSource(source="huggingface", repo_id="owner/name", filename=filename))
+
+
+def test_a_subfolder_download_lands_under_its_basename(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    content = _valid_gguf_content(tmp_path / "src")
+    models = tmp_path / "models"
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=content)
+
+    url, filename = resolve_download_url(
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="Q4_K_M/model.gguf")
+    )
+    destination = download_gguf(
+        url, filename, models, http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    assert requested == ["/owner/name/resolve/main/Q4_K_M/model.gguf"]
+    assert destination == models / "model.gguf"
+    assert [path.name for path in models.iterdir()] == ["model.gguf"]  # no sub-folder was created
+
+
+def test_two_subfolder_files_with_one_basename_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    content = _valid_gguf_content(tmp_path / "src")
+    models = tmp_path / "models"
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)))
+    first_url, name = resolve_download_url(
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="Q4/model.gguf")
+    )
+    second_url, second_name = resolve_download_url(
+        DownloadSource(source="huggingface", repo_id="owner/name", filename="Q8/model.gguf")
+    )
+    assert name == second_name
+
+    download_gguf(first_url, name, models, http_client=client)
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf(second_url, second_name, models, http_client=client)
+
+
+def test_split_gguf_parts_names_every_part_in_order() -> None:
+    parts = split_gguf_parts(
+        "https://example.com/repo/Q4/model-00002-of-00003.gguf?download=true", "model-00002-of-00003.gguf"
+    )
+    assert parts == tuple(
+        (f"https://example.com/repo/Q4/model-0000{n}-of-00003.gguf?download=true", f"model-0000{n}-of-00003.gguf")
+        for n in (1, 2, 3)
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "filename"),
+    [
+        ("https://example.com/model.gguf", "model.gguf"),
+        ("https://example.com/model-00001-of-00001.gguf", "model-00001-of-00001.gguf"),  # one part is one file
+        ("https://example.com/model-00005-of-00003.gguf", "model-00005-of-00003.gguf"),  # part 5 of 3
+        ("https://example.com/model-00000-of-00003.gguf", "model-00000-of-00003.gguf"),
+        ("https://example.com/model-00001-of-00999.gguf", "model-00001-of-00999.gguf"),  # over the cap
+        ("https://example.com/model-1-of-3.gguf", "model-1-of-3.gguf"),  # not the five-digit form
+        ("https://example.com/elsewhere/other.gguf", "model-00001-of-00003.gguf"),  # url is not this file
+    ],
+)
+def test_split_gguf_parts_leaves_ordinary_files_alone(url: str, filename: str) -> None:
+    assert split_gguf_parts(url, filename) is None
+
+
+def test_split_gguf_parts_keeps_the_suffix_case_of_the_given_name() -> None:
+    parts = split_gguf_parts("https://example.com/M-00001-of-00002.GGUF", "M-00001-of-00002.GGUF")
+    assert parts is not None and [name for _url, name in parts] == ["M-00001-of-00002.GGUF", "M-00002-of-00002.GGUF"]
+
+
+class _ShardServer:
+    """Serves the three shards of ``model`` by file name; records what was asked for."""
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self.shards = {
+            f"model-{number:05d}-of-00003.gguf": _valid_gguf_content(root, tensor_shape=shape)
+            for number, shape in enumerate([(2, 2), (2, 4), (4, 4)], start=1)
+        }
+        self.names = list(self.shards)
+        self.asked: list[str] = []
+        self.on_request: dict[str, object] = {}
+
+    def parts(self) -> tuple[tuple[str, str], ...]:
+        return tuple((f"https://example.com/repo/{name}", name) for name in self.names)
+
+    def client(self) -> httpx.Client:
+        def handler(request: httpx.Request) -> httpx.Response:
+            name = request.url.path.rsplit("/", 1)[-1]
+            self.asked.append(name)
+            hook = self.on_request.get(name)
+            if callable(hook):
+                override = hook()
+                if override is not None:
+                    return override
+            if name not in self.shards:
+                return httpx.Response(404)
+            return httpx.Response(200, content=self.shards[name])
+
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _models_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "models"
+    directory.mkdir()
+    (directory / "other.gguf").write_bytes(b"someone else's model")
+    return directory
+
+
+def _only_the_unrelated_model_remains(directory: Path) -> bool:
+    return sorted(path.name for path in directory.iterdir()) == ["other.gguf"] and (
+        directory / "other.gguf"
+    ).read_bytes() == b"someone else's model"
+
+
+def test_a_split_model_downloads_every_part_with_aggregate_progress(tmp_path: Path) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    events: list[GGUFDownloadProgress] = []
+
+    paths = download_gguf_set(
+        server.parts(), models, progress_callback=events.append, http_client=server.client()
+    )
+
+    assert [path.name for path in paths] == server.names
+    for path in paths:
+        assert path.read_bytes() == server.shards[path.name]
+    assert server.asked == server.names  # one request each, in order
+    assert sorted(path.name for path in models.iterdir()) == sorted([*server.names, "other.gguf"])
+
+    everything = sum(len(content) for content in server.shards.values())
+    downloading = [event for event in events if event.status == "downloading"]
+    assert {event.filename for event in events} == {server.names[0]}  # one job, named for the first part
+    assert events[0].status == "starting"
+    assert events[-1].status == "success"
+    assert events[-1].completed == events[-1].total == everything
+    completed = [event.completed for event in downloading]
+    assert completed == sorted(completed) and completed[-1] == everything
+    assert downloading[0].total == len(server.shards[server.names[0]]) * 3  # an estimate until sizes are known
+    assert downloading[-1].total == everything  # exact once the last part is under way
+    assert all(event.total is None or event.total >= (event.completed or 0) for event in downloading)
+
+
+@pytest.mark.parametrize("failure", ["missing", "not-a-gguf", "cut-inside-tensor-data"])
+def test_a_split_model_leaves_nothing_behind_when_a_part_fails(tmp_path: Path, failure: str) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    second = server.names[1]
+    if failure == "missing":
+        del server.shards[second]
+    elif failure == "not-a-gguf":
+        server.shards[second] = b"<html>not a model</html>" * 20
+    else:
+        server.shards[second] = server.shards[second][:-24]
+
+    with pytest.raises(GGUFDownloadError):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert _only_the_unrelated_model_remains(models)
+    assert server.names[2] not in server.asked  # it stopped at the failing part
+
+
+def test_a_split_model_is_cancellable_and_leaves_nothing_behind(tmp_path: Path) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    cancel = threading.Event()
+    server.on_request[server.names[1]] = lambda: cancel.set()  # Stop pressed as part 2 starts
+
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf_set(server.parts(), models, cancellation_event=cancel, http_client=server.client())
+
+    assert _only_the_unrelated_model_remains(models)
+    assert server.asked == server.names[:2]
+
+
+def test_a_split_model_is_refused_if_any_part_already_exists(tmp_path: Path) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    (models / server.names[1]).write_bytes(b"mine")
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert server.asked == []  # refused before any network traffic
+    assert (models / server.names[1]).read_bytes() == b"mine"
+    assert not any(path.name.startswith(".download-") for path in models.iterdir())
+
+
+def test_a_part_that_appears_during_the_download_rolls_the_whole_set_back(tmp_path: Path) -> None:
+    """Publishing is where a name can be taken: parts already moved into place
+    must be removed again, and the file that was in the way must survive."""
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    last = models / server.names[2]
+
+    def someone_else_saves_the_last_part() -> None:
+        last.write_bytes(b"theirs")
+
+    server.on_request[server.names[2]] = someone_else_saves_the_last_part
+
+    with pytest.raises(GGUFDownloadError, match="already exists"):
+        download_gguf_set(server.parts(), models, http_client=server.client())
+
+    assert last.read_bytes() == b"theirs"
+    assert sorted(path.name for path in models.iterdir()) == sorted(["other.gguf", server.names[2]])
+
+
+def test_each_part_of_a_split_model_honours_the_size_ceiling(tmp_path: Path) -> None:
+    server = _ShardServer(tmp_path / "src")
+    models = _models_dir(tmp_path)
+    ceiling = len(server.shards[server.names[0]])  # part 2 is larger than part 1
+
+    with pytest.raises(GGUFDownloadError, match="larger than the"):
+        download_gguf_set(server.parts(), models, max_download_bytes=ceiling, http_client=server.client())
+
+    assert _only_the_unrelated_model_remains(models)
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        (),
+        (("https://example.com/a.gguf", "a.gguf"), ("https://example.com/b.gguf", "A.GGUF")),
+        (("https://example.com/a.gguf", "../a.gguf"),),
+        (("https://example.com/a.gguf\n", "a.gguf"),),
+    ],
+)
+def test_download_gguf_set_rejects_a_malformed_part_list(tmp_path: Path, parts) -> None:
+    with pytest.raises(GGUFDownloadError):
+        download_gguf_set(parts, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _download_job(client: TestClient, headers: dict[str, str], payload: dict[str, str]) -> dict:
+    accepted = client.post("/api/v1/models/gguf/downloads", json=payload, headers=headers)
+    assert accepted.status_code == 202
+    job_id = accepted.json()["job_id"]
+    body: dict = {}
+
+    def finished() -> bool:
+        nonlocal body
+        body = client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()
+        return body["status"] in {"succeeded", "failed", "cancelled"}
+
+    wait_until(finished, describe="the download job to finish")
+    return body
+
+
+def test_the_download_route_fetches_a_split_model_as_one_job(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_download_gguf_set(parts, directory, *, progress_callback=None, cancellation_event=None):
+        del cancellation_event
+        captured["parts"], captured["directory"] = parts, Path(directory)
+        assert progress_callback is not None
+        progress_callback(GGUFDownloadProgress(filename=parts[0][1], status="success", completed=6, total=6))
+        return tuple(Path(directory) / name for _url, name in parts)
+
+    def single_file_download_must_not_run(*args, **kwargs):
+        raise AssertionError("a split model must not be fetched as a single file")
+
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf_set", fake_download_gguf_set)
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", single_file_download_must_not_run)
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path)
+    with TestClient(app) as client:
+        body = _download_job(
+            client,
+            _session(client, app),
+            {"source": "huggingface", "repo_id": "owner/name", "filename": "Q4/model-00002-of-00003.gguf"},
+        )
+
+    assert body["status"] == "succeeded"
+    assert body["result"] == {"filename": "model-00001-of-00003.gguf", "parts": 3}
+    assert captured["parts"] == tuple(
+        (
+            f"https://huggingface.co/owner/name/resolve/main/Q4/model-0000{n}-of-00003.gguf",
+            f"model-0000{n}-of-00003.gguf",
+        )
+        for n in (1, 2, 3)
+    )
+    assert captured["directory"] == tmp_path
+
+
+def test_the_download_route_saves_a_subfolder_file_under_its_basename(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+        del progress_callback, cancellation_event
+        captured.update(url=url, filename=filename, directory=Path(directory))
+        return Path(directory) / filename
+
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path)
+    with TestClient(app) as client:
+        body = _download_job(
+            client,
+            _session(client, app),
+            {"source": "huggingface", "repo_id": "owner/name", "filename": "Q4/model.gguf"},
+        )
+
+    assert body["status"] == "succeeded" and body["result"] == {"filename": "model.gguf"}
+    assert captured == {
+        "url": "https://huggingface.co/owner/name/resolve/main/Q4/model.gguf",
+        "filename": "model.gguf",
+        "directory": tmp_path,
+    }
+
+
+def test_the_download_route_rejects_a_path_that_escapes_the_repository(tmp_path: Path) -> None:
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models/gguf/downloads",
+            json={"source": "huggingface", "repo_id": "owner/name", "filename": "a/../../escape.gguf"},
+            headers=_session(client, app),
+        )
+    assert response.status_code == 400
