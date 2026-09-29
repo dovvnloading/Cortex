@@ -1101,7 +1101,7 @@ def _in_units(pieces: Iterator[bytes], size: int) -> Iterator[bytes]:
     for piece in pieces:
         offset = 0
         if pending:
-            offset = min(len(piece), size - len(pending))
+            offset = size - len(pending)  # what this piece must give to complete the chunk
             pending += piece[:offset]
             if len(pending) < size:
                 continue
