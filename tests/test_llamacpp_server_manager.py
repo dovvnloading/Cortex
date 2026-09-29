@@ -745,6 +745,64 @@ def test_ensure_ready_reports_status_only_while_actually_starting(tmp_path: Path
     assert messages == []
 
 
+class _StateRecordingFetcher(_FakeFetcher):
+    """Records the state the manager publishes while each fetcher call runs.
+
+    Reads the private field rather than ``status``: ``status`` itself asks the
+    fetcher whether a binary is cached, which would recurse into this class.
+    """
+
+    def __init__(self, *, cached: bool) -> None:
+        super().__init__()
+        if cached:
+            self._cached.add("cpu")
+        self.manager: LlamaServerManager | None = None
+        self.states: list[tuple[str, str]] = []
+
+    def _record(self, call: str) -> None:
+        assert self.manager is not None
+        with self.manager._state_lock:
+            self.states.append((call, self.manager._state))
+
+    def is_cached(self, release, backend: str, *, cancellation_event=None) -> bool:
+        self._record("is_cached")
+        return super().is_cached(release, backend, cancellation_event=cancellation_event)
+
+    def ensure_binary(self, release, backend: str, *, cancellation_event=None) -> Path:
+        self._record("ensure_binary")
+        return super().ensure_binary(release, backend, cancellation_event=cancellation_event)
+
+
+def test_a_cached_binary_never_reports_downloading(tmp_path: Path) -> None:
+    """Publishing "downloading_binary" before asking the cache made every
+    launch with a runtime already on disk flash "Downloading runtime..."."""
+    fetcher = _StateRecordingFetcher(cached=True)
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]), http_client=_AlwaysHealthyClient()
+    )
+    fetcher.manager = manager
+    messages: list[str] = []
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096, on_status=messages.append)
+
+    assert fetcher.states == [("is_cached", "starting"), ("ensure_binary", "starting")]
+    assert not any("Downloading" in message for message in messages)
+    assert manager.status.state == "ready"
+
+
+def test_an_uncached_binary_reports_downloading_only_while_it_downloads(tmp_path: Path) -> None:
+    fetcher = _StateRecordingFetcher(cached=False)
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]), http_client=_AlwaysHealthyClient()
+    )
+    fetcher.manager = manager
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert fetcher.states == [("is_cached", "starting"), ("ensure_binary", "downloading_binary")]
+    assert manager.status.state == "ready"
+
+
 def test_ensure_ready_restarts_when_num_ctx_changes(tmp_path: Path) -> None:
     fetcher = _FakeFetcher()
     launcher = _QueueLauncher([_FakePopen(), _FakePopen()])

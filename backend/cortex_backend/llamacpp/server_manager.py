@@ -1,8 +1,11 @@
 """Owns at most one running ``llama-server`` subprocess at a time.
 
-State machine: ``idle -> downloading_binary -> starting -> ready`` on
-success, or ``-> failed`` on any error; ``stopping`` is reachable from any
-non-idle state and always returns to ``idle``.
+State machine: ``idle -> starting -> ready`` on success, with
+``downloading_binary`` published between two ``starting`` states only when the
+runtime is not cached yet, or ``-> failed`` on any error; ``stopping`` is
+reachable from any non-idle state and returns to ``idle`` once the child is
+confirmed gone. When it cannot be confirmed, ``stopping`` stays, together with
+an error, until Cortex is restarted.
 
 Lifecycle policy, stated explicitly because it is the whole point of this
 class: a loaded model stays resident until (a) a different model is
@@ -1242,8 +1245,11 @@ class LlamaServerManager:
         on_status: StatusCallback | None,
         cancellation_event: _CancellationToken,
     ) -> ServerHandle:
+        # "starting" while the cache is checked: publishing "downloading_binary"
+        # first made every launch with a cached runtime flash "Downloading
+        # runtime..." in the UI for as long as verification took.
         with self._state_lock:
-            self._state = "downloading_binary"
+            self._state = "starting"
         if self._release is None:
             raise LlamaCppError("No pinned runtime release is selected.")
         try:
@@ -1256,8 +1262,14 @@ class LlamaServerManager:
             if cancellation_event.is_set():
                 raise LlamaCppError("The local model runtime startup was cancelled.") from exc
             raise
-        if not cached and on_status is not None:
-            on_status("Downloading the local model runtime (one-time setup)...")
+        if not cached:
+            with self._state_lock:
+                # A stop() that landed during the check has already published
+                # "stopping"; the cancellation check below unwinds this start.
+                if not cancellation_event.is_set():
+                    self._state = "downloading_binary"
+            if on_status is not None:
+                on_status("Downloading the local model runtime (one-time setup)...")
         self._raise_if_stopping(cancellation_event)
         try:
             executable = self._fetcher.ensure_binary(
