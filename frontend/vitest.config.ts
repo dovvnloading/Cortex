@@ -7,6 +7,12 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // Vitest replaces every stylesheet with an empty module, including a
+    // `?raw` import. The design-token tests read the real source of
+    // tokens.css (contrast, font-size floor, forced-colors coverage), so that
+    // one file is let through. No component imports it, so nothing else in the
+    // suite is affected.
+    css: { include: [/\/styles\/tokens\.css/] },
     restoreMocks: true,
     clearMocks: true,
     // The default (5000ms) leaves no headroom over an inner explicit
