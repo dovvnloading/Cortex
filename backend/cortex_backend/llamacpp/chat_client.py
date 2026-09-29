@@ -17,10 +17,12 @@ import ssl
 import time
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock
 from typing import Any
 
 import httpx
+
+from cortex_backend.services.chat_client import close_when_cancelled
 
 from .errors import LlamaCppError
 from .model_directory import resolve_gguf_path
@@ -128,6 +130,7 @@ class LlamaCppChatClient:
         options: dict,
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         self._ensure_open()
         model_path = resolve_gguf_path(self._models_directory(), model)
@@ -167,7 +170,9 @@ class LlamaCppChatClient:
             )
         started = time.monotonic()
         if cancellation_event is None and on_delta is None:
-            return self._chat_blocking(handle.base_url, messages, options, started, handle.api_key)
+            return self._chat_blocking(
+                handle.base_url, messages, options, started, handle.api_key, think=think
+            )
         # Streaming serves both features: the abortable path is what reads the
         # response incrementally, which is also what makes live deltas
         # possible. A caller that wants deltas but has no cancellation of its
@@ -180,16 +185,23 @@ class LlamaCppChatClient:
             cancellation_event if cancellation_event is not None else Event(),
             handle.api_key,
             on_delta=on_delta,
+            think=think,
         )
 
     def _chat_blocking(
-        self, base_url: str, messages: list[dict], options: dict, started: float, api_key: str | None
+        self,
+        base_url: str,
+        messages: list[dict],
+        options: dict,
+        started: float,
+        api_key: str | None,
+        think: bool | None = None,
     ) -> dict:
         """Single request/response call, unchanged from before cancellation
         support existed. Used whenever the caller has no cancellation_event
         to honor (title and translation calls, and anything else that isn't
         the main chat turn)."""
-        body = _build_request_body(messages, options, stream=False)
+        body = _build_request_body(messages, options, stream=False, think=think)
         self._begin_http_request()
         try:
             response = self._http.post(
@@ -226,24 +238,23 @@ class LlamaCppChatClient:
         cancellation_event: Event,
         api_key: str | None,
         on_delta: Callable[[str, str], None] | None = None,
+        think: bool | None = None,
     ) -> dict:
         """Streamed request that stops promptly when the caller asks to stop.
 
         The stream is consumed on this thread. A single watcher thread does
         nothing but close the response when cancellation fires, because
         closing is what unblocks a read already in flight -- waiting for the
-        next chunk to arrive would make Stop as slow as the model.
+        next chunk to arrive would make Stop as slow as the model. The watcher
+        is shared with the Ollama client (``close_when_cancelled``).
         """
-        body = _build_request_body(messages, options, stream=True)
+        body = _build_request_body(messages, options, stream=True, think=think)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         usage: dict | None = None
         timings: dict | None = None
+        finish_reason: str | None = None
         self._begin_http_request()
-        watcher: Thread | None = None
-        # Set on every exit path so the watcher retires immediately after a
-        # normal completion instead of lingering until the next cancellation.
-        finished = Event()
         try:
             with self._http.stream(
                 "POST",
@@ -260,62 +271,56 @@ class LlamaCppChatClient:
                         status_code=exc.response.status_code,
                     ) from exc
 
-                def close_on_cancel() -> None:
-                    while not finished.is_set():
-                        if cancellation_event.wait(0.05):
-                            # Releases llama-server's slot and unblocks the
-                            # read below, whether or not a token ever arrived.
-                            response.close()
-                            return
-
-                watcher = Thread(
-                    target=close_on_cancel,
-                    name="llama-chat-cancel-watch",
-                    daemon=True,
-                )
-                watcher.start()
-                try:
-                    for line in response.iter_lines():
-                        if cancellation_event.is_set():
-                            break
-                        if not line or not line.startswith("data:"):
-                            continue
-                        payload = line[len("data:"):].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(payload)
-                        except ValueError:
-                            continue
-                        stream_error = chunk.get("error")
-                        if stream_error:
-                            raise LlamaCppError(_stream_error_detail(stream_error))
-                        choices = chunk.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            content_piece = delta.get("content")
-                            if content_piece:
-                                content_parts.append(content_piece)
-                                if on_delta is not None:
-                                    on_delta("content", content_piece)
-                            reasoning_piece = delta.get("reasoning_content")
-                            if reasoning_piece:
-                                reasoning_parts.append(reasoning_piece)
-                                if on_delta is not None:
-                                    on_delta("thinking", reasoning_piece)
-                        if chunk.get("usage"):
-                            usage = chunk["usage"]
-                        if chunk.get("timings"):
-                            timings = chunk["timings"]
-                except Exception:
-                    # Closing the response mid-read is how cancellation works,
-                    # and the read reports that however the transport chooses.
-                    # Anything raised after the caller asked to stop is that,
-                    # not a failure worth surfacing.
-                    if not cancellation_event.is_set():
-                        raise
-                finally:
-                    finished.set()
+                # Closing the response releases llama-server's slot and
+                # unblocks the read below, whether or not a token ever arrived.
+                with close_when_cancelled(
+                    cancellation_event, response.close, name="llama-chat-cancel-watch"
+                ):
+                    try:
+                        for line in response.iter_lines():
+                            if cancellation_event.is_set():
+                                break
+                            if not line or not line.startswith("data:"):
+                                continue
+                            payload = line[len("data:"):].strip()
+                            if payload == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(payload)
+                            except ValueError:
+                                continue
+                            stream_error = chunk.get("error")
+                            if stream_error:
+                                raise LlamaCppError(_stream_error_detail(stream_error))
+                            choices = chunk.get("choices") or []
+                            if choices:
+                                # Arrives once, on the last content chunk; the
+                                # usage-only chunk after it has no choices.
+                                if choices[0].get("finish_reason"):
+                                    finish_reason = choices[0]["finish_reason"]
+                                delta = choices[0].get("delta") or {}
+                                content_piece = delta.get("content")
+                                if content_piece:
+                                    content_parts.append(content_piece)
+                                    if on_delta is not None:
+                                        on_delta("content", content_piece)
+                                reasoning_piece = delta.get("reasoning_content")
+                                if reasoning_piece:
+                                    reasoning_parts.append(reasoning_piece)
+                                    if on_delta is not None:
+                                        on_delta("thinking", reasoning_piece)
+                            if chunk.get("usage"):
+                                usage = chunk["usage"]
+                            if chunk.get("timings"):
+                                timings = chunk["timings"]
+                    except Exception:
+                        # Closing the response mid-read is how cancellation
+                        # works, and the read reports that however the
+                        # transport chooses. Anything raised after the caller
+                        # asked to stop is that, not a failure worth
+                        # surfacing.
+                        if not cancellation_event.is_set():
+                            raise
         except httpx.TransportError as exc:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."
@@ -327,9 +332,6 @@ class LlamaCppChatClient:
                 "The local llama.cpp chat client is unavailable; restart Cortex."
             ) from exc
         finally:
-            finished.set()
-            if watcher is not None:
-                watcher.join(timeout=2.0)
             self._end_http_request()
         # Reuse the existing non-streamed adapter by handing it a payload
         # shaped the same way -- accumulated deltas standing in for the
@@ -340,6 +342,7 @@ class LlamaCppChatClient:
                     "content": "".join(content_parts),
                     "reasoning_content": "".join(reasoning_parts) or None,
                 },
+                "finish_reason": finish_reason,
             }],
             "usage": usage,
             "timings": timings,
@@ -404,11 +407,25 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key is not None else {}
 
 
-def _build_request_body(messages: list[dict], options: dict, *, stream: bool) -> dict[str, Any]:
+def _build_request_body(
+    messages: list[dict],
+    options: dict,
+    *,
+    stream: bool,
+    think: bool | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": _strip_unsupported_fields(messages),
         "stream": stream,
     }
+    if think is not None:
+        # llama-server's per-request switch for a chat template with a
+        # reasoning mode (Qwen3 and its relatives read ``enable_thinking``). A
+        # template with no such variable ignores it, so it is safe to send for
+        # any model, and being per-request it needs no relaunch of the server:
+        # the launch flags are shared by every call and a title call must not
+        # change them.
+        body["chat_template_kwargs"] = {"enable_thinking": think}
     if stream:
         # OpenAI-compatible streaming convention llama-server also follows:
         # without this, per-chunk usage/timings are commonly omitted
@@ -471,7 +488,7 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
         # approximate eval duration from the call's own wall-clock latency
         # rather than surfacing no stats at all.
         predicted_ms = elapsed_seconds * 1000
-    return {
+    adapted: dict[str, Any] = {
         "message": {
             "content": message.get("content") or "",
             "thinking": message.get("reasoning_content"),
@@ -482,3 +499,12 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
         "eval_duration": int(predicted_ms * 1_000_000),
         "total_duration": int(((prompt_ms or 0) + predicted_ms) * 1_000_000),
     }
+    # llama-server's ``finish_reason`` is Ollama's ``done_reason``: "stop" for a
+    # finished answer, "length" for one cut off by the context ceiling. Carried
+    # under Ollama's name so the code that reads stats never has to ask which
+    # runtime answered. Left out when the server said nothing (a cancelled
+    # stream, an older build), so the dict keeps its old shape in that case.
+    finish_reason = choices[0].get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason:
+        adapted["done_reason"] = finish_reason
+    return adapted

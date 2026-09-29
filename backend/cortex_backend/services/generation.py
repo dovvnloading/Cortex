@@ -70,6 +70,13 @@ def _call_with_optional_kwargs(func: Callable[..., Any], *args: Any, **kwargs: A
 _DELTA_FLUSH_CHARS = 80
 _DELTA_FLUSH_SECONDS = 0.08
 
+# What the user is told when the model ran into the context ceiling. Kept here,
+# not in the API layer, because the service is what decides that it happened.
+TRUNCATED_ANSWER_MESSAGE = (
+    "The answer was cut short by the context limit. "
+    "Start a new chat, or raise the context window in Settings."
+)
+
 
 class GenerationEngine(Protocol):
     """Model-facing operations required by the generation use case.
@@ -146,8 +153,14 @@ class GenerationEngine(Protocol):
         chat_history: str,
         *,
         options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
-        """Title a thread using the chat model's own context sizing."""
+        """Title a thread using the chat model's own context sizing.
+
+        ``cancellation_event`` matters as much here as it does for ``generate``:
+        a title the caller has given up on must stop generating, or it keeps
+        the model runtime busy while the user's next turn waits behind it.
+        """
 
     def fit_attachments_to_context(
         self,
@@ -418,6 +431,20 @@ class GenerationService:
                     "Generation returned an invalid memory command.",
                     operation="generation",
                 )
+            # An answer the context ceiling cut off looks exactly like a
+            # finished one, and on a reasoning model it can be empty: the
+            # thinking used up what was left. The runtime says so
+            # (``done_reason`` / ``finish_reason``); tell the user, beside the
+            # answer, while there is still a live stream to tell them on. The
+            # stats saved with the message carry the same reason.
+            if stats is not None and stats.stop_reason == "length":
+                self._publish(
+                    sink,
+                    snapshot,
+                    "answer_truncated",
+                    TRUNCATED_ANSWER_MESSAGE,
+                    data={"truncated": True, "stop_reason": stats.stop_reason},
+                )
             if not snapshot.memories_enabled:
                 memory_command = MemoryCommand()
 
@@ -513,6 +540,8 @@ class GenerationService:
         self,
         snapshot: GenerationSnapshot,
         response: str,
+        *,
+        cancellation_event: Event | None = None,
     ) -> str | None:
         """Generate an optional title after response content is available.
 
@@ -520,16 +549,27 @@ class GenerationService:
         publish the answer deltas and persist the assistant turn before the
         lightweight title model runs.  A title-model outage therefore cannot
         stall or invalidate an otherwise successful response.
+
+        ``cancellation_event`` is how the caller abandons a title that is
+        taking too long: the API sets it when its own time limit runs out, and
+        the engine stops the model call instead of letting it run to the end.
         """
         engine = self._engine_factory(snapshot)
+        title_kwargs: dict[str, Any] = {
+            # The title reuses the chat model, so it must also reuse the
+            # chat's context sizing -- otherwise the runtime is asked for
+            # a differently-configured copy of a model it already has
+            # loaded, and reloads it.
+            "options": dict(snapshot.model_options),
+        }
+        # Forwarded only when set, the same way ``generate`` does it, so an
+        # engine that has no use for it keeps its narrower signature.
+        if cancellation_event is not None:
+            title_kwargs["cancellation_event"] = cancellation_event
         try:
             return engine.generate_chat_title(
                 self._title_history(snapshot.user_input, response),
-                # The title reuses the chat model, so it must also reuse the
-                # chat's context sizing -- otherwise the runtime is asked for
-                # a differently-configured copy of a model it already has
-                # loaded, and reloads it.
-                options=dict(snapshot.model_options),
+                **title_kwargs,
             )
         except Exception as exc:  # defensive boundary for optional work
             logging.warning(
@@ -556,6 +596,7 @@ class GenerationService:
         snapshot: GenerationSnapshot,
         phase: ProgressPhase,
         message: str,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
         sink.publish(
             ProgressEvent(
@@ -563,6 +604,7 @@ class GenerationService:
                 thread_id=snapshot.thread_id,
                 phase=phase,
                 message=message,
+                data=data,
             )
         )
 

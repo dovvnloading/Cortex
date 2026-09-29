@@ -131,16 +131,24 @@ EXECUTION_STREAM_HEARTBEAT_SECONDS = 15.0
 CHAT_TITLE_TIMEOUT_SECONDS = 20.0
 
 
-def _call_with_timeout(func, *args, timeout: float, **kwargs):
+def _call_with_timeout(
+    func, *args, timeout: float, cancel: ThreadEvent | None = None, **kwargs
+):
     """Run ``func`` in a daemon thread and wait at most ``timeout`` seconds.
 
     For optional, best-effort work that must not block its caller -- or
     process shutdown -- if the underlying call hangs. A plain daemon thread
     is used rather than ``concurrent.futures.ThreadPoolExecutor``: that
     module registers an ``atexit`` hook which joins every worker thread it
-    has ever created, which would defeat the point of this helper. A call
-    that times out keeps running in the background and is simply abandoned
-    (and dropped) at process exit.
+    has ever created, which would defeat the point of this helper.
+
+    A call that times out is abandoned by the caller, but it is not left
+    running when it can be told to stop: ``cancel`` is set the moment the wait
+    runs out. The caller passes the same event to ``func`` (as whatever
+    keyword it reads it from), so a model call that honours it releases the
+    runtime instead of generating a result nobody will read while the user's
+    next message queues behind it. A ``func`` that ignores it is dropped at
+    process exit, as before.
     """
     outcome: list[Any] = []
     failure: list[BaseException] = []
@@ -156,6 +164,8 @@ def _call_with_timeout(func, *args, timeout: float, **kwargs):
 
     Thread(target=_run, name="cortex-bounded-call", daemon=True).start()
     if not done.wait(timeout):
+        if cancel is not None:
+            cancel.set()
         raise TimeoutError(f"call exceeded {timeout}s and was abandoned")
     if failure:
         raise failure[0]
@@ -579,6 +589,12 @@ async def _start_generation_job(
                     deps.generation, "generate_chat_title", None
                 )
                 if callable(title_generator):
+                    # Its own event, not the job's cancel_event: the job is past
+                    # begin_commit, so Stop no longer applies. Only the timeout
+                    # below sets it, and it exists so that a title that ran out
+                    # of time is actually stopped rather than left generating
+                    # on a single-slot runtime the user's next turn needs.
+                    title_cancel = ThreadEvent()
                     try:
                         # Bounded: this call runs past begin_commit, with no
                         # cancel_event and no unbounded wait from
@@ -588,6 +604,8 @@ async def _start_generation_job(
                             generation_snapshot,
                             result.response,
                             timeout=CHAT_TITLE_TIMEOUT_SECONDS,
+                            cancel=title_cancel,
+                            cancellation_event=title_cancel,
                         )
                     except Exception as exc:  # optional title work must not fail a chat
                         logging.warning(

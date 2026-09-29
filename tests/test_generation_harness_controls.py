@@ -7,15 +7,27 @@ import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
+import pytest
 
 from cortex_backend.api import create_app
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.api.routes import _merged_model_options
+from cortex_backend.core.generation import GenerationSnapshot
 from cortex_backend.core.settings import CortexSettings, GenerationOptionsOverride
+from cortex_backend.llamacpp.chat_client import LlamaCppChatClient, _adapt_to_ollama_shape
+from cortex_backend.llamacpp.server_manager import ServerHandle
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.storage import DatabaseManager
-from cortex_backend.services.llm import _extract_stats
-from cortex_backend.testing.fake_ollama import FAKE_GENERATION_STATS
+from cortex_backend.services.chat_client import OllamaChatClient
+from cortex_backend.services.generation import (
+    TRUNCATED_ANSWER_MESSAGE,
+    GenerationService,
+    GenerationServiceResult,
+)
+from cortex_backend.services.llm import SynthesisAgent, _extract_stats
+from cortex_backend.services.progress import ProgressEvent
+from cortex_backend.testing.fake_llamacpp import FakeLlamaCppState, create_fake_llamacpp_app
+from cortex_backend.testing.fake_ollama import FAKE_GENERATION_STATS, FakeOllamaState
 from support import parse_sse_events as _events
 from support import session_headers as _session
 
@@ -146,6 +158,30 @@ class ExtractStatsTests(unittest.TestCase):
         assert stats is not None
         assert stats.eval_count == 10
         assert stats.tokens_per_second is None
+
+    def test_carries_the_reason_the_model_stopped(self):
+        usage = {"eval_count": 5, "total_duration": 100}
+        for reason in ("length", "stop"):
+            stats = _extract_stats({**usage, "done_reason": reason})
+            assert stats is not None
+            assert stats.stop_reason == reason
+        stats = _extract_stats(usage)
+        assert stats is not None
+        assert stats.stop_reason is None
+
+    def test_ignores_a_reason_that_is_not_a_non_empty_string(self):
+        for junk in (3, None, "", ["length"]):
+            stats = _extract_stats({"eval_count": 5, "done_reason": junk})
+            assert stats is not None
+            assert stats.stop_reason is None
+
+    def test_a_cut_off_answer_keeps_its_stats_even_without_usage_numbers(self):
+        stats = _extract_stats({"done_reason": "length"})
+        assert stats is not None
+        assert stats.stop_reason == "length"
+        assert stats.eval_count is None
+        # An ordinary finish with nothing else to report still reports nothing.
+        assert _extract_stats({"done_reason": "stop"}) is None
 
 
 class GenerationStatsPersistenceTests(unittest.TestCase):
@@ -324,6 +360,9 @@ def test_generation_stats_flow_from_engine_through_sse_and_persistence():
             "eval_duration_ms": FAKE_GENERATION_STATS.eval_duration_ms,
             "total_duration_ms": FAKE_GENERATION_STATS.total_duration_ms,
             "tokens_per_second": FAKE_GENERATION_STATS.tokens_per_second,
+            # The fake engine reports no reason; a runtime that did would be
+            # carried here (see the truncation tests below).
+            "stop_reason": None,
         }
         assert completed["data"]["stats"] == expected_stats
 
@@ -356,3 +395,219 @@ def test_generation_request_options_override_reaches_the_snapshot():
         # this point, which is exactly what GenerationOptionsOverride's
         # field bounds (shared with GenerationSettings) are for.
         assert accepted.status_code == 202
+
+
+class _ProgressRecorder:
+    def __init__(self) -> None:
+        self.events: list[ProgressEvent] = []
+
+    def publish(self, event: ProgressEvent) -> None:
+        self.events.append(event)
+
+    def truncation_notices(self) -> list[ProgressEvent]:
+        return [event for event in self.events if event.phase == "answer_truncated"]
+
+
+class _StreamingOllamaStub:
+    """An ollama client whose one streamed reply ends for the given reason."""
+
+    def __init__(self, done_reason: str) -> None:
+        self._done_reason = done_reason
+
+    def chat(self, *, model, messages, options, stream=False, **extra):
+        del model, messages, options, extra
+        assert stream is True, "the user's turn streams"
+        return iter(
+            [
+                {"message": {"content": "A cut-off "}, "done": False},
+                {
+                    "message": {"content": "answer"},
+                    "done": True,
+                    "done_reason": self._done_reason,
+                    "prompt_eval_count": 40,
+                    "eval_count": 7,
+                    "eval_duration": 700_000_000,
+                    "total_duration": 900_000_000,
+                },
+            ]
+        )
+
+
+class _ReadyProvider:
+    """A llama.cpp provider that is always up, at a fixed address."""
+
+    def __init__(self, model_path: Path) -> None:
+        self._model_path = model_path
+
+    def ensure_ready(self, model_path, *, num_ctx, on_status=None, cancellation_event=None):
+        del model_path, num_ctx, on_status, cancellation_event
+        return ServerHandle(base_url="http://fakellama", model_path=self._model_path)
+
+
+def _generate_through(chat_client, model: str) -> tuple[GenerationServiceResult, _ProgressRecorder]:
+    service = GenerationService(
+        history_loader=lambda thread_id: [],
+        memory_loader=lambda: [],
+        engine_factory=lambda snapshot: SynthesisAgent(
+            snapshot.model, snapshot.title_model, snapshot.translation_model, chat_client
+        ),
+    )
+    recorder = _ProgressRecorder()
+    result = service.generate(
+        GenerationSnapshot(
+            job_id="job-1",
+            thread_id="thread-1",
+            user_input="hello",
+            model=model,
+            title_model=model,
+            translation_model=model,
+            model_options={"num_ctx": 4096},
+            memories_enabled=False,
+            translation_enabled=False,
+            target_language="English",
+            user_system_instructions=None,
+        ),
+        progress_sink=recorder,
+    )
+    return result, recorder
+
+
+def _through_ollama(reason: str, tmp_path: Path):
+    del tmp_path
+    return _generate_through(OllamaChatClient(_StreamingOllamaStub(reason)), "qwen3:8b")
+
+
+def _through_llamacpp(reason: str, tmp_path: Path):
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    app = create_fake_llamacpp_app(
+        FakeLlamaCppState(generation_response="A cut-off answer", finish_reason=reason)
+    )
+    client = LlamaCppChatClient(
+        _ReadyProvider(model_path),
+        models_directory=lambda: tmp_path,
+        http_client=TestClient(app, base_url="http://fakellama"),
+    )
+    return _generate_through(client, f"gguf:{model_path.name}")
+
+
+@pytest.mark.parametrize("runtime", [_through_ollama, _through_llamacpp], ids=["ollama", "llamacpp"])
+def test_a_length_stop_reason_is_surfaced_in_stats_and_progress(runtime, tmp_path: Path):
+    """An answer the context ceiling cut off must not look like a finished one.
+
+    Both runtimes say so -- Ollama as ``done_reason``, llama-server as
+    ``finish_reason`` -- and nothing read it: the stats dropped it, the adapter
+    dropped it, and a reasoning model that spent the whole reserve thinking
+    produced an empty or clipped answer with no explanation. The reason now
+    reaches the stats saved with the message, and the user is told beside the
+    answer, which is kept.
+    """
+    result, recorder = runtime("length", tmp_path)
+
+    assert result.response == "A cut-off answer", "the truncated text is still the answer"
+    assert result.stats is not None
+    assert result.stats.stop_reason == "length"
+    notices = recorder.truncation_notices()
+    assert len(notices) == 1
+    assert notices[0].message == TRUNCATED_ANSWER_MESSAGE
+    assert notices[0].data == {"truncated": True, "stop_reason": "length"}
+
+
+@pytest.mark.parametrize("runtime", [_through_ollama, _through_llamacpp], ids=["ollama", "llamacpp"])
+def test_a_finished_answer_is_recorded_as_finished_and_not_flagged(runtime, tmp_path: Path):
+    result, recorder = runtime("stop", tmp_path)
+
+    assert result.stats is not None
+    assert result.stats.stop_reason == "stop"
+    assert recorder.truncation_notices() == []
+
+
+def test_a_length_reason_survives_a_response_with_no_usage_numbers(tmp_path: Path):
+    """The marker is the one field worth keeping when nothing else was sent."""
+
+    class _BareOllama:
+        def chat(self, *, model, messages, options, stream=False, **extra):
+            del model, messages, options, extra
+            assert stream is True
+            return iter(
+                [{"message": {"content": "partial"}, "done": True, "done_reason": "length"}]
+            )
+
+    result, recorder = _generate_through(OllamaChatClient(_BareOllama()), "qwen3:8b")
+
+    assert result.stats is not None and result.stats.stop_reason == "length"
+    assert len(recorder.truncation_notices()) == 1
+
+
+def test_the_llamacpp_adapter_names_the_finish_reason_the_way_ollama_does():
+    length = _adapt_to_ollama_shape(
+        {"choices": [{"message": {"content": "x"}, "finish_reason": "length"}]},
+        elapsed_seconds=0.1,
+    )
+    assert length["done_reason"] == "length"
+
+    # A server that said nothing (a cancelled stream, an older build) leaves
+    # the response exactly as it was before the reason existed.
+    silent = _adapt_to_ollama_shape(
+        {"choices": [{"message": {"content": "x"}, "finish_reason": None}]},
+        elapsed_seconds=0.1,
+    )
+    assert "done_reason" not in silent
+    assert "done_reason" not in _adapt_to_ollama_shape({"choices": []}, elapsed_seconds=0.1)
+
+
+def test_a_truncated_answer_is_reported_on_the_event_stream_and_kept_in_the_message():
+    """End to end through the API: the live notice, the completion payload and
+    the persisted message all carry the same marker, so a reload of the chat
+    still knows the answer was cut off."""
+    app = create_app(
+        build_demo_dependencies(ollama_state=FakeOllamaState(generation_stop_reason="length")),
+        allowed_hosts=("testserver",),
+    )
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        job = client.post(
+            "/api/v1/generations",
+            json={"request_id": "truncated-flow", "user_input": "write a long story"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET", f"/api/v1/generations/{job['job_id']}/events", headers=headers
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        notices = [
+            event
+            for event in events
+            if event["event"] == "generation.status" and event["data"].get("truncated")
+        ]
+        assert len(notices) == 1
+        assert notices[0]["data"]["message"] == TRUNCATED_ANSWER_MESSAGE
+        assert notices[0]["data"]["stop_reason"] == "length"
+        assert events[-1]["event"] == "generation.completed"
+        assert events[-1]["data"]["stats"]["stop_reason"] == "length"
+
+        chat = client.get(f"/api/v1/chats/{job['thread_id']}", headers=headers).json()
+        assistant = chat["messages"][-1]
+        assert assistant["role"] == "assistant"
+        assert assistant["content"], "the truncated answer is kept, not discarded"
+        assert assistant["stats"]["stop_reason"] == "length"
+
+
+def test_an_ordinary_answer_carries_no_truncation_marker():
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        job = client.post(
+            "/api/v1/generations",
+            json={"request_id": "not-truncated", "user_input": "hello"},
+            headers=headers,
+        ).json()
+        with client.stream(
+            "GET", f"/api/v1/generations/{job['job_id']}/events", headers=headers
+        ) as response:
+            events = _events("".join(response.iter_text()))
+
+        assert not [event for event in events if event["data"].get("truncated")]
+        chat = client.get(f"/api/v1/chats/{job['thread_id']}", headers=headers).json()
+        assert chat["messages"][-1]["stats"]["stop_reason"] is None

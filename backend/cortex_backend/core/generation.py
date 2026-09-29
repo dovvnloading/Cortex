@@ -120,6 +120,12 @@ class GenerationStats:
     eval_duration_ms: float | None = None
     total_duration_ms: float | None = None
     tokens_per_second: float | None = None
+    # Why the model stopped, in the runtime's own words: ``"stop"`` when it
+    # finished, ``"length"`` when it ran into the context ceiling (or an output
+    # limit) and the answer is cut off. Both runtimes report it -- Ollama as
+    # ``done_reason``, llama-server as ``finish_reason`` -- and the adapters
+    # normalize it to this one field. ``None`` when the runtime said nothing.
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)

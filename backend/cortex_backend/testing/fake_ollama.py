@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from threading import Event
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import time
 from typing import Any
@@ -52,6 +52,10 @@ class FakeOllamaState:
     malformed_stream: bool = False
     generation_response: str | None = None
     generation_thoughts: str | None = None
+    # When set, FakeGenerationEngine reports it as the reason the model
+    # stopped ("length" is a real Ollama's way of saying the context ceiling
+    # cut the answer off), so the truncation path can be driven end to end.
+    generation_stop_reason: str | None = None
     title_response: str | None = None
     disconnect_after_chunks: int | None = None
     fail_pull_stream: bool = False
@@ -289,7 +293,12 @@ class FakeGenerationEngine:
         if query.strip() == "!clear-memory":
             return "Echo: clear request", None, MemoryCommand(clear_requested=True), FAKE_GENERATION_STATS
         response = self.state.generation_response or f"Echo: {query}"
-        return response, self.state.generation_thoughts, MemoryCommand(), FAKE_GENERATION_STATS
+        stats = (
+            FAKE_GENERATION_STATS
+            if self.state.generation_stop_reason is None
+            else replace(FAKE_GENERATION_STATS, stop_reason=self.state.generation_stop_reason)
+        )
+        return response, self.state.generation_thoughts, MemoryCommand(), stats
 
     def translate_text(
         self,
@@ -316,8 +325,9 @@ class FakeGenerationEngine:
         chat_history: str,
         *,
         options: dict[str, Any] | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
-        del chat_history, options
+        del chat_history, options, cancellation_event
         return self.state.title_response
 
 

@@ -67,11 +67,20 @@ def _extract_stats(response: dict) -> GenerationStats | None:
     Ollama reports these fields at the top level of the response, not under
     ``message``. A fresh/unsupported backend may omit them entirely, in
     which case there is nothing meaningful to show and this returns None.
+
+    ``done_reason`` is why the model stopped. The llama.cpp adapter reports
+    its ``finish_reason`` under the same name, so nothing here needs to know
+    which runtime answered. ``"length"`` -- the answer hit the context ceiling
+    -- is kept even when no usage numbers came with it.
     """
     eval_count = response.get("eval_count")
     eval_duration = response.get("eval_duration")
     total_duration = response.get("total_duration")
-    if eval_count is None and total_duration is None:
+    reason = response.get("done_reason")
+    stop_reason = reason if isinstance(reason, str) and reason else None
+    # A cut-off answer is worth reporting even when the runtime sent no usage
+    # numbers with it; an ordinary finish with no numbers still is not.
+    if eval_count is None and total_duration is None and stop_reason != "length":
         return None
     tokens_per_second = None
     if isinstance(eval_count, (int, float)) and isinstance(eval_duration, (int, float)) and eval_duration:
@@ -83,6 +92,7 @@ def _extract_stats(response: dict) -> GenerationStats | None:
         eval_duration_ms=_ns_to_ms(eval_duration),
         total_duration_ms=_ns_to_ms(total_duration),
         tokens_per_second=tokens_per_second,
+        stop_reason=stop_reason,
     )
 
 
@@ -1252,6 +1262,10 @@ class SynthesisAgent:
                 "model": self.gen_model,
                 "messages": messages,
                 "options": options,
+                # The reply is one small JSON block. A reasoning model would
+                # otherwise think its way through the whole conversation again
+                # to write it, on top of the pass that produced the answer.
+                "think": False,
             }
             if cancellation_event is not None:
                 chat_kwargs["cancellation_event"] = cancellation_event
@@ -1358,6 +1372,7 @@ class SynthesisAgent:
                 "model": self.translation_model,
                 "messages": [{'role': 'user', 'content': prompt}],
                 "options": self._auxiliary_options(options, temperature=0.1),
+                "think": False,
             }
             # Forwarded only when set, the same way ``generate`` and the
             # proposal-repair call do it, so a ChatClient double written
@@ -1564,7 +1579,11 @@ class SynthesisAgent:
         return MemoryCommand(tuple(validated), clear_requested)
 
     def generate_chat_title(
-        self, chat_history: str, *, options: dict | None = None
+        self,
+        chat_history: str,
+        *,
+        options: dict | None = None,
+        cancellation_event: Event | None = None,
     ) -> str | None:
         """
         Generates a concise title for a chat conversation.
@@ -1574,6 +1593,11 @@ class SynthesisAgent:
             options (dict | None): Runtime options to carry over from the turn
                 that produced the chat -- above all ``num_ctx``. See
                 :meth:`_auxiliary_options` for why omitting it is harmful.
+            cancellation_event (Event | None): When given, lets the caller
+                stop the model call early. The API sets it once its time
+                limit for the (optional) title has run out, so a title nobody
+                will use does not keep a single-slot runtime busy while the
+                user's next message waits behind it.
 
         Returns:
             A string containing the generated title, or None if an error occurs
@@ -1585,11 +1609,17 @@ class SynthesisAgent:
         prompt_messages = PromptTemplate.build_chat_title_prompt(chat_history)
         logging.info(f"Generating chat title using model '{self.title_model}'...")
         try:
-            response = self.chat_client.chat(
-                model=self.title_model,
-                messages=prompt_messages,
-                options=self._auxiliary_options(options, temperature=0.2),
-            )
+            chat_kwargs: dict[str, Any] = {
+                "model": self.title_model,
+                "messages": prompt_messages,
+                "options": self._auxiliary_options(options, temperature=0.2),
+                "think": False,
+            }
+            # Forwarded only when set, like every other call here, so a
+            # ChatClient double written against the original call keeps working.
+            if cancellation_event is not None:
+                chat_kwargs["cancellation_event"] = cancellation_event
+            response = self.chat_client.chat(**chat_kwargs)
             title = self.normalize_title(response['message']['content'])
             logging.info("Generated chat title with %s characters.", len(title))
             return title

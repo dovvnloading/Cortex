@@ -115,6 +115,23 @@ def test_the_repair_turn_quotes_the_specific_validator_complaint() -> None:
     assert "for v in [1, 2, 3]" in client.calls[1]["messages"][-2]["content"]
 
 
+def test_the_repair_turn_does_not_pay_for_a_second_reasoning_pass() -> None:
+    """The corrected block is a few lines of JSON. The turn that produced the
+    answer already reasoned; a repair that reasons again doubles the cost of
+    every rejected proposal on a thinking model."""
+
+    client = _ScriptedClient(
+        "Sure.\n" + _envelope("for v in [1, 2, 3]:\n    print(v)"),
+        _envelope("for i in range(3):\n    print(i)"),
+    )
+    agent = _agent(client)
+    _generate(agent)
+
+    assert len(client.calls) == 2
+    assert "think" not in client.calls[0], "the user's own turn keeps the model's default"
+    assert client.calls[1]["think"] is False
+
+
 def test_an_unrepairable_refusal_never_spends_a_second_turn() -> None:
     """Process access does not exist; no correction can conjure it."""
 

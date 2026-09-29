@@ -18,9 +18,11 @@ class _CapturingClient:
     def __init__(self, message: dict):
         self.message = message
         self.last_options: dict | None = None
+        self.last_think: bool | None = None
 
-    def chat(self, *, model, messages, options):
+    def chat(self, *, model, messages, options, think=None):
         self.last_options = options
+        self.last_think = think
         return {"message": self.message}
 
 
@@ -296,6 +298,23 @@ class ChatCorrectnessTests(unittest.TestCase):
         # And omitting options entirely must not invent a num_ctx.
         agent.generate_chat_title("User: hi\nAssistant: hello")
         self.assertNotIn("num_ctx", client.last_options)
+
+    def test_only_the_side_calls_switch_reasoning_off(self):
+        """Title and translation want a few words back, not a reasoning pass.
+        The user's own answer must keep the model's default, or a thinking
+        model would lose the reasoning the user asked it to show."""
+        client = _CapturingClient({"content": "Some answer"})
+        agent = SynthesisAgent("chat", "chat", "translate", client)
+
+        agent.generate("question", "No history available.", [], False, None)
+        self.assertIsNone(client.last_think)
+
+        agent.generate_chat_title("User: hi\nAssistant: hello")
+        self.assertIs(client.last_think, False)
+
+        client.last_think = None
+        agent.translate_text("hello", "Spanish")
+        self.assertIs(client.last_think, False)
 
 
 if __name__ == "__main__":
