@@ -52,3 +52,35 @@ def test_text_that_cannot_be_encoded_is_a_malformed_program_not_a_crash(source: 
     with pytest.raises(CodeExecutionError) as refused:
         CodeExecutionRequest(owner="tester", request_id="request-1", source=source, intent_summary="probe")
     assert refused.value.code == "syntax_invalid"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "for i in range(11):\n    t = [p for p in range(10000)]\n",
+        "for i in range(11):\n    t = sum(p for p in range(10000))\n",
+        "for i in range(2):\n    for j in range(6):\n        t = {p for p in range(10000)}\n",
+        "t = [[q for q in range(1000)] for p in range(101)]\n",
+        "t = [[q for q in range(10000) for r in range(2)] for p in range(6)]\n",
+    ],
+)
+def test_a_comprehension_counts_toward_the_work_of_every_loop_around_it(source: str) -> None:
+    """Each range was within its own limit, and only the generators of one
+    comprehension were multiplied, so 110,000 or 101,000 iterations got through
+    a contract that promises no more than 100,000 for nested loops.
+    """
+
+    assert _code(source) == "loop_work_too_large"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "for i in range(10):\n    t = [p for p in range(10000)]\n",
+        "t = [[q for q in range(1000)] for p in range(100)]\n",
+        "for i in range(10):\n    t = [[q for q in range(10)] for p in range(1000)]\n",
+        "for i in range(0):\n    t = [p for p in range(10000)]\n",
+    ],
+)
+def test_nested_work_exactly_at_the_limit_is_still_accepted(source: str) -> None:
+    assert _code(source) is None
