@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import time
 from pathlib import Path
 from threading import Event
@@ -1020,3 +1021,49 @@ def test_a_broker_object_left_in_the_result_or_printed_reaches_no_output_with_an
     assert result.stdout.strip() == result.value
     for text in (result.stdout, str(result.value), str(payload)):
         assert not _reveals_process_internals(text)
+
+
+def test_a_request_parses_its_source_once_and_the_capability_scan_accepts_a_tree(monkeypatch) -> None:
+    """The same source was parsed up to four times per request.
+
+    The request's own validation parsed it, and then the capability scan
+    validated it again and parsed it a second time.
+    """
+
+    source = "total = 0\nfor i in range(4):\n    total += i\n_result = total"
+    real_parse = ast.parse
+    parses: list[int] = []
+
+    def counting_parse(text, *args, **kwargs):
+        if text == source:
+            parses.append(1)
+        return real_parse(text, *args, **kwargs)
+
+    monkeypatch.setattr(code_execution.ast, "parse", counting_parse)
+
+    CodeExecutionRequest(
+        owner="owner-a",
+        request_id="request-a",
+        source=source,
+        intent_summary="Add up four numbers.",
+    )
+    assert len(parses) == 1
+
+    parses.clear()
+    code_execution.capabilities_required_by_source(source)
+    assert len(parses) == 1
+
+    parses.clear()
+    tree = real_parse(source)
+    assert code_execution.capabilities_required_by_tree(tree) == CodeCapabilities()
+    assert parses == []
+
+
+def test_the_capability_scan_finds_the_same_namespaces_from_a_tree_as_from_source() -> None:
+    source = "a = cortex.fs.listdir('.')\nb = cortex.net.get('https://example.com')"
+
+    from_source = code_execution.capabilities_required_by_source(source)
+    from_tree = code_execution.capabilities_required_by_tree(ast.parse(source))
+
+    assert from_source == from_tree == CodeCapabilities(filesystem=True, network=True)
+    assert code_execution.capabilities_required_by_tree(ast.parse("x = 1")) == CodeCapabilities()
