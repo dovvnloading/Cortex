@@ -105,3 +105,15 @@ def test_each_resource_module_registers_at_least_one_route() -> None:
 )
 def test_a_representative_route_from_every_resource_is_present(path: str) -> None:
     assert path in {route.path for route in _routes()}
+
+
+def test_legacy_generation_route_is_gone() -> None:
+    """POST /jobs/generation never saved the turn and blocked the event loop.
+
+    /generations is the one route that admits a turn, persists it, and streams
+    it; the legacy path must not come back as a second, weaker way to start one.
+    """
+    table = {(method, route.path) for route in _routes() for method in route.methods}
+
+    assert ("POST", "/jobs/generation") not in table
+    assert ("POST", "/generations") in table
