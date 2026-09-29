@@ -374,8 +374,6 @@ class LocalExecutionCoordinator:
                 code_attempt = self._code_attempts.get(job_id)
             if code_event is not None:
                 code_event.set()
-                # Wakes the job if it is still asleep waiting for approval.
-                self.repository.approval_changes.bump()
             if code_attempt is not None:
                 code_attempt.cancel()
             return self.repository.request_cancel(job_id)
@@ -562,10 +560,11 @@ class LocalExecutionCoordinator:
         which a decision or an expiry moves, and otherwise wakes at its own
         approval's deadline to persist the expiry -- so a pending approval still
         expires during a live coordinator, not only at startup, at the moment it
-        lapses rather than a poll later. Cancellation and shutdown move the same
-        signal. A bounded recheck is a safety net for a change made behind the
-        repository's back (another process, a clock that jumped); it costs one
-        read, never a write, and is never what wakes a normal decision.
+        lapses rather than a poll later. Cancelling a pending job is a denial,
+        which moves the signal, and shutdown moves it too. A bounded recheck is
+        a safety net for a change made behind the repository's back (another
+        process, a clock that jumped); it costs one read, never a write, and is
+        never what wakes a normal decision.
 
         Returns the job as last read, or ``None`` when it no longer exists.
         """

@@ -112,6 +112,38 @@ def test_a_decision_wakes_the_waiter_without_waiting_for_a_recheck(
     assert completed.result is not None and completed.result["value"] == 7
 
 
+def test_a_decision_landing_between_the_read_and_the_wait_is_not_slept_through(
+    coordinator: LocalExecutionCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counter is read before the state it guards, so this race cannot lose a wake-up.
+
+    The decision is made from inside the waiter, after it has read the counter and
+    the still-pending job and before it sleeps. If the waiter read the counter
+    later, the bump would already be behind it and the job would sit out the whole
+    recheck.
+    """
+
+    monkeypatch.setattr(local_runtime, "_APPROVAL_RECHECK_SECONDS", 60.0)
+    repository = coordinator.repository
+    owner = repository.installation_principal_id
+    original_seconds = repository.pending_approval_seconds
+    decided: list[str] = []
+
+    def decide_then_report(job_id: str) -> float | None:
+        if not decided:
+            decided.append(job_id)
+            repository.decide_approval(job_id, owner=owner, decision="approved")
+        return original_seconds(job_id)
+
+    monkeypatch.setattr(repository, "pending_approval_seconds", decide_then_report)
+    job = _submit(coordinator, "wait-race-not-slept-through")
+
+    completed = coordinator.wait(job.job_id, timeout=5.0)
+
+    assert decided == [job.job_id]
+    assert completed.status == "succeeded"
+
+
 def test_a_denial_wakes_the_waiter_and_nothing_runs(
     coordinator: LocalExecutionCoordinator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
