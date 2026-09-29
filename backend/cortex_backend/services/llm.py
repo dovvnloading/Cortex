@@ -17,6 +17,8 @@ from collections.abc import Callable, Mapping, Sequence
 from threading import Event
 from typing import Any
 
+import httpx
+
 from cortex_backend.core.generation import (
     CodeExecutionProposal,
     CodeProposalRejection,
@@ -83,6 +85,20 @@ def _extract_stats(response: dict) -> GenerationStats | None:
     )
 
 
+# The failures that mean "nothing is answering" or "it did not answer in time"
+# whatever their text says. The installed ``ollama`` client turns a refused
+# connection into a builtin ``ConnectionError``, and httpx raises its own
+# timeout and transport errors; none of them carries the ``.error`` attribute
+# the keyword classification below reads, so without this the two most common
+# support cases fell through to the generic message.
+_RUNTIME_UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, httpx.TimeoutException)
+
+
 def _generation_failure_message(exc: Exception) -> tuple[str, str]:
     """Turn a model-runtime failure into safe, actionable user-facing guidance.
 
@@ -90,6 +106,8 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
     here: a provider error can contain request-derived content.  Classifying
     only the known operational cases gives the user a useful next step
     without leaking chat text into a notification, event stream, or log.
+    Connection and timeout failures are recognised by exception type, so that
+    classification never reads the exception's text at all.
 
     Copy is backend-aware: an exception carrying ``backend == "llamacpp"``
     (see ``cortex_backend.llamacpp.errors``) gets runtime-neutral guidance
@@ -108,6 +126,16 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
     runtime_name = "Ollama" if backend == "ollama" else "the local model runtime"
     runtime_name_title = "Ollama" if backend == "ollama" else "The local model runtime"
     error_prefix = "ollama" if backend == "ollama" else "llamacpp"
+    # Reached by exception type and by the runtime's own wording, so the copy
+    # is written once.
+    runtime_unavailable = (
+        f"Cortex lost its connection to {runtime_name}. Start or restart {runtime_name}, then retry the message.",
+        "runtime_unavailable",
+    )
+    model_timeout = (
+        f"The local model did not respond in time. Retry the message or restart {runtime_name} if it keeps happening.",
+        "model_timeout",
+    )
 
     # Keyword classification below exists for a runtime's *own* text, which
     # Cortex does not control. A message Cortex wrote is already specific and
@@ -120,6 +148,11 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
             return guidance, str(
                 getattr(exc, "guidance_code", f"{error_prefix}_guidance")
             )
+
+    if isinstance(exc, _RUNTIME_UNAVAILABLE_ERRORS):
+        return runtime_unavailable
+    if isinstance(exc, _TIMEOUT_ERRORS):
+        return model_timeout
 
     if status == 404 or "model not found" in text or "not found" in text:
         return (
@@ -163,15 +196,9 @@ def _generation_failure_message(exc: Exception) -> tuple[str, str]:
             "model_memory",
         )
     if "timeout" in text or "timed out" in text:
-        return (
-            f"The local model did not respond in time. Retry the message or restart {runtime_name} if it keeps happening.",
-            "model_timeout",
-        )
+        return model_timeout
     if "connection refused" in text or "connection reset" in text:
-        return (
-            f"Cortex lost its connection to {runtime_name}. Start or restart {runtime_name}, then retry the message.",
-            "runtime_unavailable",
-        )
+        return runtime_unavailable
     if isinstance(status, int):
         # 5xx is the runtime failing, not the message being refused. Saying
         # "rejected this request" for a server fault sends people looking for
