@@ -202,7 +202,7 @@ class CodeExecutionRequest:
             raise ValueError("request_id is invalid")
         if not isinstance(self.source, str) or not self.source.strip():
             raise CodeExecutionError("source_empty")
-        if len(self.source.encode("utf-8")) > MAX_CODE_SOURCE_BYTES:
+        if _source_size(self.source) > MAX_CODE_SOURCE_BYTES:
             raise CodeExecutionError("source_too_large")
         if not isinstance(self.intent_summary, str) or not self.intent_summary.strip():
             raise CodeExecutionError("intent_invalid")
@@ -787,10 +787,25 @@ def _constant_range_bound(node: ast.Call) -> int | None:
     return length if length <= MAX_CODE_LOOP_ITERATIONS else None
 
 
+def _source_size(source: str) -> int:
+    """The size of ``source`` in UTF-8 bytes, which is how the budget counts it.
+
+    A str can hold an unpaired surrogate -- a JSON ``"\\ud800"`` escape decodes to
+    one -- and that cannot be encoded, stored or hashed. It is a malformed
+    program, not a crash: the ``UnicodeEncodeError`` used to escape the validator
+    instead of the typed error every caller handles.
+    """
+
+    try:
+        return len(source.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise CodeExecutionError("syntax_invalid") from None
+
+
 def validate_code_source(source: str) -> str:
     if not isinstance(source, str) or not source.strip():
         raise CodeExecutionError("source_empty")
-    if len(source.encode("utf-8")) > MAX_CODE_SOURCE_BYTES:
+    if _source_size(source) > MAX_CODE_SOURCE_BYTES:
         raise CodeExecutionError("source_too_large")
     if "\x00" in source or source.count("\n") > 2_048:
         raise CodeExecutionError("source_too_complex")
