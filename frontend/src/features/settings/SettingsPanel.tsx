@@ -18,7 +18,9 @@ import {
   SeedField,
   type GenerationPatch,
 } from "../generation/GenerationControls";
+import type { ModelProgress } from "../../stores/useModelStore";
 import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
+import type { ListGGUFFiles } from "../models/GGUFDownloadForm";
 import { ModelsPanel } from "../models/ModelsPanel";
 
 type SettingsSection = "general" | "model" | "memory" | "translation" | "system";
@@ -41,12 +43,16 @@ export type SettingsPanelProps = {
   onClearMemory: () => Promise<void>;
   models: ModelResponse;
   modelBusy: boolean;
-  modelProgress: { model: string; status: string; percent: number | null } | null;
+  modelProgress: ModelProgress | null;
+  /** Stops the model operation whose progress is shown; without it the row has no Cancel. */
+  onCancelModelJob?: () => void;
   setupUrl: string;
   onCheckModels: () => Promise<void>;
   onPullModel: (model: string) => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
   onDownloadGGUF: (request: ModelDownloadRequest) => Promise<void>;
+  /** Lists a Hugging Face repository's .gguf files; without it the download form only takes a typed file name. */
+  onListHuggingFaceFiles?: ListGGUFFiles;
   /** Should leave through `navigate()`: that is where unsaved edits are asked about. */
   onClose: () => void;
 };
@@ -118,11 +124,13 @@ export function SettingsPanel({
   models,
   modelBusy,
   modelProgress,
+  onCancelModelJob,
   setupUrl,
   onCheckModels,
   onPullModel,
   llamacppStatus,
   onDownloadGGUF,
+  onListHuggingFaceFiles,
   onClose,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
@@ -469,6 +477,7 @@ export function SettingsPanel({
               models={models}
               busy={modelBusy}
               progress={modelProgress}
+              onCancel={onCancelModelJob}
               setupUrl={setupUrl}
               onCheck={onCheckModels}
               llamacppStatus={llamacppStatus}
@@ -478,6 +487,7 @@ export function SettingsPanel({
                 onDirectoryChange: (value) => update({ models: { ...modelSettings, gguf_directory: value || null } }),
                 onDownload: onDownloadGGUF,
                 busy: modelBusy,
+                onListFiles: onListHuggingFaceFiles,
               }}
             />
           )}

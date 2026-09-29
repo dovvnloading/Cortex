@@ -86,7 +86,10 @@ transcript.](.github/images/workspace-light.png)
   `auto` (try Vulkan, fall back to CPU), `vulkan`, or `cpu`.
 - **Bring your own GGUF.** Download a model into the local folder by direct URL
   or Hugging Face repo, then select it from the same picker as everything else.
-  The folder is searched a few levels deep, so the one-folder-per-repository
+  For a repository, Settings can list its `.gguf` files (with sizes, folders
+  shown, a split model as one entry) to pick from, or take a typed file name. A
+  running download can be cancelled from Settings, and a reload picks its
+  progress back up. The folder is searched a few levels deep, so the one-folder-per-repository
   layout downloaders use works as-is; a file appears as `gguf:<path>`, e.g.
   `gguf:Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf`. A download that drops resumes from
   the bytes already stored, a split model (`-00001-of-00003`) is fetched whole or

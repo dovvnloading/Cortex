@@ -2016,9 +2016,44 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HuggingFaceFileEntry": {
+        "additionalProperties": false,
+        "description": "One ``.gguf`` file in a repository; ``size`` is in bytes, absent when Hugging Face did not report it.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "HuggingFaceFileEntry",
+        "type": "object"
+      },
       "HuggingFaceFileListResponse": {
         "additionalProperties": false,
         "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/HuggingFaceFileEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
           "files": {
             "default": [],
             "items": {

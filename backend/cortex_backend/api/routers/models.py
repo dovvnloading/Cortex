@@ -23,6 +23,7 @@ from cortex_backend.api.routes import (
     _model_sets,
 )
 from cortex_backend.api.schemas import (
+    HuggingFaceFileEntry,
     HuggingFaceFileListResponse,
     JobAccepted,
     ModelDownloadRequest,
@@ -35,7 +36,7 @@ from cortex_backend.llamacpp.download import (
     GGUFDownloadError,
     download_gguf,
     download_gguf_set,
-    list_huggingface_gguf_files,
+    list_huggingface_gguf_entries,
     resolve_download_url,
     split_gguf_parts,
 )
@@ -190,10 +191,18 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> HuggingFaceFileListResponse:
         try:
-            files = list_huggingface_gguf_files(repo_id)
+            entries = list_huggingface_gguf_entries(repo_id)
         except GGUFDownloadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return HuggingFaceFileListResponse(repo_id=repo_id, files=files)
+            # A failure the user can act on carries its class beside the
+            # sentence (``detail.code``); every other refusal stays a plain
+            # sentence, as before.
+            detail = str(exc) if exc.code is None else {"message": str(exc), "code": exc.code}
+            raise HTTPException(status_code=400, detail=detail) from exc
+        return HuggingFaceFileListResponse(
+            repo_id=repo_id,
+            files=tuple(entry.path for entry in entries),
+            entries=tuple(HuggingFaceFileEntry(path=entry.path, size=entry.size) for entry in entries),
+        )
 
 
     @router.post(

@@ -403,9 +403,17 @@ class ModelDownloadRequest(APIModel):
         return self
 
 
+class HuggingFaceFileEntry(APIModel):
+    """One ``.gguf`` file in a repository; ``size`` is in bytes, absent when Hugging Face did not report it."""
+
+    path: str
+    size: int | None = Field(default=None, ge=0)
+
+
 class HuggingFaceFileListResponse(APIModel):
     repo_id: str
     files: tuple[str, ...] = ()
+    entries: tuple[HuggingFaceFileEntry, ...] = ()
 
 
 ExecutionStatus = Literal[

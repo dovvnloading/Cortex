@@ -337,9 +337,15 @@ export interface HealthResponse {
   status?: "ok";
 }
 
+export interface HuggingFaceFileEntry {
+  path: string;
+  size?: number | null;
+}
+
 export interface HuggingFaceFileListResponse {
   repo_id: string;
   files?: Array<string>;
+  entries?: Array<HuggingFaceFileEntry>;
 }
 
 export interface ImageTransformPlan {

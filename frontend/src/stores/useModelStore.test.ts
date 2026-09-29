@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it } from "vitest";
-import { useModelStore } from "./useModelStore";
+import { readStoredModelJob, useModelStore } from "./useModelStore";
 
 describe("useModelStore", () => {
   beforeEach(() => {
@@ -19,5 +19,15 @@ describe("useModelStore", () => {
     expect(useModelStore.getState().modelBusy).toBe(true);
     expect(useModelStore.getState().modelProgress).toEqual({ model: "qwen3:8b", status: "Downloading...", percent: 42 });
     expect(useModelStore.getState().models).toBeNull();
+  });
+
+  it("follows a job without any browser storage to mirror it to", () => {
+    // This file runs without a DOM, so there is no `window` at all.
+    useModelStore.getState().setActiveJob({ jobId: "job-1", kind: "gguf_download", model: "a.gguf", lastEventId: 0 });
+    useModelStore.getState().advanceActiveJob("job-1", 4);
+    expect(useModelStore.getState().activeJob).toEqual({ jobId: "job-1", kind: "gguf_download", model: "a.gguf", lastEventId: 4 });
+    expect(readStoredModelJob()).toBeNull();
+    useModelStore.getState().setActiveJob(null);
+    expect(useModelStore.getState().activeJob).toBeNull();
   });
 });

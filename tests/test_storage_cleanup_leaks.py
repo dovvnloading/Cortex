@@ -110,7 +110,14 @@ def _repository(tmp_path: Path) -> ExecutionRepository:
 def _expired_artifact(
     repository: ExecutionRepository, job_id: str, *, name: str = "out.txt"
 ) -> ExecutionArtifact:
-    """A terminal job holding one artifact that is already past its retention."""
+    """A terminal job holding one artifact that cleanup will treat as past its retention.
+
+    Retention is an hour, not a second: ``_cleanup`` passes ``now=_FAR_FUTURE``, so the
+    artifact expires for the cleanup pass, but ``get_artifact`` reads the real clock and
+    reports an expired artifact as absent. With a one-second retention the assertions
+    that a deferred row is "still there" only held while the test finished within a
+    second of publishing, which a slow CI runner does not guarantee.
+    """
     job, _ = repository.create_job(
         job_id=job_id,
         owner=repository.installation_principal_id,
@@ -119,7 +126,7 @@ def _expired_artifact(
         payload={},
     )
     artifact = repository.publish_artifact(
-        job.job_id, name=name, content=b"synthetic", mime_type="text/plain", retention_seconds=1
+        job.job_id, name=name, content=b"synthetic", mime_type="text/plain", retention_seconds=3600
     )
     repository.transition(job.job_id, status="succeeded", event="completed")
     return artifact

@@ -26,8 +26,10 @@ from cortex_backend.llamacpp.download import (
     DownloadSource,
     GGUFDownloadError,
     GGUFDownloadProgress,
+    HuggingFaceGGUFFile,
     download_gguf,
     download_gguf_set,
+    list_huggingface_gguf_entries,
     list_huggingface_gguf_files,
     resolve_download_url,
     split_gguf_parts,
@@ -718,8 +720,11 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
 
 def test_huggingface_file_listing_route(monkeypatch) -> None:
     monkeypatch.setattr(
-        "cortex_backend.api.routers.models.list_huggingface_gguf_files",
-        lambda repo_id: ("model.Q4_K_M.gguf", "model.Q8_0.gguf"),
+        "cortex_backend.api.routers.models.list_huggingface_gguf_entries",
+        lambda repo_id: (
+            HuggingFaceGGUFFile("model.Q4_K_M.gguf", 4_000_000_000),
+            HuggingFaceGGUFFile("weights/model.Q8_0.gguf", None),
+        ),
     )
     app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
     with TestClient(app) as client:
@@ -732,7 +737,118 @@ def test_huggingface_file_listing_route(monkeypatch) -> None:
         assert response.status_code == 200
         payload = response.json()
         assert payload["repo_id"] == "bartowski/tiny-model-GGUF"
-        assert payload["files"] == ["model.Q4_K_M.gguf", "model.Q8_0.gguf"]
+        assert payload["files"] == ["model.Q4_K_M.gguf", "weights/model.Q8_0.gguf"]
+        assert payload["entries"] == [
+            {"path": "model.Q4_K_M.gguf", "size": 4_000_000_000},
+            {"path": "weights/model.Q8_0.gguf", "size": None},
+        ]
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (401, "gated"),
+        (403, "gated"),
+        (404, "not_found"),
+        (429, "rate_limited"),
+        (503, "unavailable"),
+    ],
+)
+def test_huggingface_file_listing_route_names_the_failure_class(status: int, code: str, monkeypatch) -> None:
+    """The screen picks its next step from ``detail.code``, not from the wording of the sentence."""
+    monkeypatch.setattr(
+        "cortex_backend.api.routers.models.list_huggingface_gguf_entries",
+        lambda repo_id: list_huggingface_gguf_entries(repo_id, http_client=_status_client(status)),
+    )
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/models/gguf/huggingface-files",
+            params={"repo_id": "owner/model"},
+            headers=_session(client, app),
+        )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert detail["message"]
+    assert "owner/model" not in detail["message"]
+
+
+def test_huggingface_file_listing_route_keeps_a_plain_sentence_for_a_bad_repo_id() -> None:
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/models/gguf/huggingface-files",
+            params={"repo_id": "not a repo id"},
+            headers=_session(client, app),
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "A Hugging Face repo id must look like 'owner/name'."
+
+
+def test_huggingface_file_listing_carries_sizes_and_asks_for_them() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(
+            200,
+            json={
+                "siblings": [
+                    {"rfilename": "plain.gguf", "size": 1234},
+                    {"rfilename": "stored/lfs.gguf", "size": None, "lfs": {"size": 9_000_000_000}},
+                    {"rfilename": "unknown.gguf"},
+                    {"rfilename": "negative.gguf", "size": -5},
+                    {"rfilename": "boolean.gguf", "size": True},
+                    {"rfilename": "text.gguf", "size": "1234"},
+                    {"rfilename": "README.md", "size": 10},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        entries = list_huggingface_gguf_entries("owner/model", http_client=client)
+
+    assert seen["blobs"] == "true"
+    assert {entry.path: entry.size for entry in entries} == {
+        "boolean.gguf": None,
+        "negative.gguf": None,
+        "plain.gguf": 1234,
+        "stored/lfs.gguf": 9_000_000_000,
+        "text.gguf": None,
+        "unknown.gguf": None,
+    }
+    assert [entry.path for entry in entries] == sorted(entry.path for entry in entries)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(lambda: httpx.Response(200, content=b"not-json"), id="not-json"),
+        pytest.param(lambda: httpx.Response(200, json={"siblings": 7}), id="siblings-not-a-list"),
+    ],
+)
+def test_huggingface_file_listing_names_an_unusable_answer(answer) -> None:
+    with httpx.Client(transport=httpx.MockTransport(lambda request: answer())) as client:
+        with pytest.raises(GGUFDownloadError) as raised:
+            list_huggingface_gguf_entries("owner/model", http_client=client)
+    assert raised.value.code == "unavailable"
+
+
+def test_huggingface_file_listing_names_a_network_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GGUFDownloadError, match="timed out") as raised:
+            list_huggingface_gguf_entries("owner/model", http_client=client)
+    assert raised.value.code == "network"
+
+
+def test_a_refusal_that_is_not_a_failure_class_has_no_code() -> None:
+    with pytest.raises(GGUFDownloadError) as raised:
+        list_huggingface_gguf_entries("not a repo id")
+    assert raised.value.code is None
 
 
 def test_huggingface_file_listing_rejects_malformed_api_response() -> None:
