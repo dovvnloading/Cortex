@@ -715,6 +715,86 @@ def _stray_files(directory: Path) -> list[str]:
     return sorted(entry.name for entry in directory.iterdir() if entry.name.endswith((".old", ".tmp")))
 
 
+def test_a_backup_that_cannot_take_its_place_keeps_both_generations_where_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting .bak aside means renaming it over .bak.1, which used to destroy the
+    older generation for good: when the new snapshot was then refused its name,
+    .bak came back but .bak.1 did not, and the older verified copy was gone."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    newest_before = Path(manager.backup_path).read_bytes()
+    older_before = Path(manager.previous_backup_path).read_bytes()
+    assert newest_before != older_before
+    real_replace = os.replace
+    refused: list[str] = []
+    backup = os.path.normcase(os.path.abspath(manager.backup_path))
+
+    def replace(source, destination, *args, **kwargs):
+        if (
+            os.path.normcase(os.path.abspath(destination)) == backup
+            and str(source).endswith(".tmp")
+            and not refused
+        ):
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert refused
+    assert reopened.backup_status[0] == "failed"
+    assert Path(manager.backup_path).read_bytes() == newest_before
+    assert Path(manager.previous_backup_path).read_bytes() == older_before
+    assert _stray_files(tmp_path) == []
+
+    # The next launch rotates as usual, and the older generation is then let go.
+    assert _reopen(manager).backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == newest_before
+    assert _stray_files(tmp_path) == []
+
+
+def test_rotation_still_works_where_the_file_system_cannot_make_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    newest_before = Path(manager.backup_path).read_bytes()
+
+    def no_hard_links(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "This file system does not support hard links")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.previous_backup_path).read_bytes() == newest_before
+    assert DatabaseManager._database_is_valid(manager.backup_path)
+    assert _stray_files(tmp_path) == []
+
+
+def test_a_backup_that_cannot_be_set_aside_leaves_the_older_generation_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    newest_before = Path(manager.backup_path).read_bytes()
+    older_before = Path(manager.previous_backup_path).read_bytes()
+    _refuse_renames(monkeypatch, source=manager.backup_path)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert reopened.backup_status[0] == "failed"
+    assert Path(manager.backup_path).read_bytes() == newest_before
+    assert Path(manager.previous_backup_path).read_bytes() == older_before
+    assert _stray_files(tmp_path) == []
+
+
 def test_a_rotted_newest_backup_does_not_displace_the_older_verified_generation(
     tmp_path: Path,
 ) -> None:

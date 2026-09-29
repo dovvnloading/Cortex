@@ -418,6 +418,15 @@ class DatabaseManager:
         copy, and only after the new file has been written and verified, so a
         snapshot that fails leaves both files where they were. If the new file
         then cannot take its place, the old one is put back.
+
+        Renaming onto a file that already exists replaces it for good, so when
+        ``displace_existing_to`` is taken the file there is given a second name
+        (a hard link) for the length of the swap. That name is dropped once the
+        swap has succeeded and used to put the older file back if it has not, so
+        both generations end up where they were. A crash in between leaves the
+        second name beside the others rather than losing the file. Where the
+        file system cannot make a hard link the swap goes ahead without that
+        protection.
         """
         temporary_path: str | None = None
         try:
@@ -433,8 +442,14 @@ class DatabaseManager:
             if not cls._database_is_valid(temporary_path, quick=True):
                 raise OSError("database copy failed integrity validation")
             displaced_to: str | None = None
+            older_file_kept_as: str | None = None
             if displace_existing_to is not None and os.path.exists(destination):
-                os.replace(destination, displace_existing_to)
+                older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
+                try:
+                    os.replace(destination, displace_existing_to)
+                except OSError:
+                    cls._drop_spare_name(older_file_kept_as)
+                    raise
                 displaced_to = displace_existing_to
             try:
                 os.replace(temporary_path, destination)
@@ -444,7 +459,11 @@ class DatabaseManager:
                         os.replace(displaced_to, destination)
                     except OSError:
                         logging.warning("Could not return a displaced database file to its name.")
+                    else:
+                        # Only now is the name free for the older file again.
+                        cls._restore_from_spare_name(older_file_kept_as, displaced_to)
                 raise
+            cls._drop_spare_name(older_file_kept_as)
             # _database_is_valid opened the copy, so SQLite created
             # "<temp>-wal" and "<temp>-shm" beside it. os.replace moves only
             # the file itself, leaving those two behind under a name nothing
@@ -467,6 +486,48 @@ class DatabaseManager:
                         operation="backup",
                         cause=exc,
                     ) from exc
+
+    @staticmethod
+    def _link_to_spare_name(path: str) -> str | None:
+        """Give an existing file a second name beside it and return that name.
+
+        ``os.replace`` onto ``path`` would otherwise destroy the file. Nothing
+        is moved, so ``path`` is where it always was; returns None when there is
+        no file, or when the file system cannot make a hard link.
+        """
+        if not os.path.exists(path):
+            return None
+        spare = os.path.join(
+            os.path.dirname(path) or ".", f".{os.path.basename(path)}.{uuid4().hex}.old"
+        )
+        try:
+            os.link(path, spare)
+        except (OSError, NotImplementedError):
+            logging.warning(
+                "Could not protect the older database backup while rotating; carrying on without."
+            )
+            return None
+        return spare
+
+    @staticmethod
+    def _drop_spare_name(spare: str | None) -> None:
+        """Remove a name made by ``_link_to_spare_name``; the file keeps its other one."""
+        if spare is None:
+            return
+        try:
+            os.unlink(spare)
+        except OSError:
+            logging.warning("Could not remove a temporary database backup link.")
+
+    @staticmethod
+    def _restore_from_spare_name(spare: str | None, path: str) -> None:
+        """Put a file back under ``path`` after its name was taken; a failure leaves it as ``spare``."""
+        if spare is None:
+            return
+        try:
+            os.replace(spare, path)
+        except OSError:
+            logging.warning("Could not return an older database backup to its name.")
 
     def _prepare_primary(self) -> bool:
         """Validate the primary before backup rotation, recovering if needed.
