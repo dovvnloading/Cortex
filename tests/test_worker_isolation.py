@@ -55,7 +55,7 @@ from cortex_backend.execution.local_recipe_attempt import (
 from cortex_backend.execution.local_scratch_attempt import SCRATCH_WORKER_JOB_LIMITS, LocalScratchAttempt
 from cortex_backend.execution.recipe_coordinator import RecipeExecutionError
 from cortex_backend.execution.recipes import parse_image_transform
-from support import wait_until
+from support import real_interpreter, wait_until
 import job_probe
 import worker_probes
 
@@ -94,10 +94,12 @@ def _run_in_job(limits: JobLimits, *arguments: str) -> str:
 
     The child waits for one line on stdin before it does anything, so the job is
     attached first; that is the whole point of holding a worker at a checkpoint.
+    The child is the interpreter itself, not a virtual environment's redirector
+    (see ``real_interpreter``), so the job is attached to the process that runs.
     """
 
     child = subprocess.Popen(
-        [sys.executable, *arguments],
+        [real_interpreter(), *arguments],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
@@ -112,6 +114,23 @@ def _run_in_job(limits: JobLimits, *arguments: str) -> str:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=30)
+
+
+def test_the_interpreter_the_job_tests_start_is_the_process_that_runs():
+    """The process handed to the job is the one that executes the test's code.
+
+    Under a Windows virtual environment ``sys.executable`` fails this: the
+    process started is a redirector and the code runs in its child.
+    """
+
+    child = subprocess.Popen(
+        [real_interpreter(), "-c", "import os; print(os.getpid())"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    output, _ = child.communicate(timeout=60)
+
+    assert int(output) == child.pid
 
 
 @windows_only
