@@ -23,6 +23,7 @@ from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import HTTPException, Request, status
+from pydantic import ValidationError
 
 from cortex_backend.core.generation import ConnectionResult, GenerationAttachment, GenerationSnapshot
 from cortex_backend.services.chat import (
@@ -323,10 +324,10 @@ async def _start_generation_job(
     validate the target, and ``transcript_revision``, the revision that read
     returned (a regeneration changes a message without changing how many there
     are, so the revision cannot be derived from the transcript), so the chat is
-    not read again. A new turn passes neither: admission needs only the chat's
-    overview, and preparation reads the transcript once, because the model
-    needs it as history. Either way the generation service is handed its
-    history and never loads it itself.
+    not read again. A new turn passes neither: admission reads the chat's
+    overview and then the transcript once, only the fields history is built
+    from. Either way the generation service is handed its history and never
+    loads it itself.
     """
     regenerating = target_message_id is not None
     if regenerating != (transcript is not None) or regenerating != (transcript_revision is not None):
@@ -358,6 +359,8 @@ async def _start_generation_job(
     try:
         target_position = -1
         target_role = ""
+        # A new turn's transcript, read below; None while the chat does not exist.
+        earlier_messages: list[dict[str, Any]] | None = None
         if (
             transcript is not None
             and target_message_id is not None
@@ -380,6 +383,23 @@ async def _start_generation_job(
                 # always matches) is about to become a new chat's primary key.
                 _reject_invalid_new_chat_thread_id(thread_id)
             admission_revision = int(overview["revision"]) if overview is not None else 0
+            if overview is not None:
+                # The one transcript read of a new turn, and only the fields
+                # history is built from. It is taken at admission rather than
+                # in prepare(): a follow-up needs the documents of the message
+                # before it resolved like any attachment, before the job
+                # starts. prepare() appends the user turn guarded by the
+                # revision above, so a write that lands after this read fails
+                # that append instead of being answered around.
+                earlier_messages = await asyncio.to_thread(
+                    deps.chats.get_messages, thread_id, columns=HISTORY_MESSAGE_FIELDS
+                )
+                if earlier_messages is None:
+                    # Deleted between the two reads.
+                    raise ChatDomainError(
+                        "This chat changed. Reload it before generating again.",
+                        code="stale_revision",
+                    )
         if (
             payload.base_revision is not None
             and admission_revision != payload.base_revision
@@ -391,18 +411,27 @@ async def _start_generation_job(
 
         settings = await asyncio.to_thread(_load_settings, deps)
         attachment_refs = list(payload.attachments)
-        if transcript is not None and not attachment_refs:
-            # A dangling user turn's own attachments are the ones to resend; an
-            # assistant reply being regenerated has none of its own, so fall
-            # back to the user turn before it instead.
+        # Everything the user and the model said before the turn being answered.
+        conversation_so_far: Sequence[Mapping[str, Any]] = earlier_messages or ()
+        if transcript is not None:
+            # A dangling user turn is itself the turn to answer; an assistant
+            # reply being regenerated answers the user turn before it.
             source_position = (
                 target_position if target_role == "user" else target_position - 1
             )
-            if source_position >= 0:
+            conversation_so_far = transcript[: max(source_position, 0)]
+            if not attachment_refs and source_position >= 0:
+                # That turn's own attachments are the ones to resend.
                 attachment_refs = [
                     ChatAttachment.model_validate(item)
                     for item in (transcript[source_position].get("attachments") or [])
                 ]
+        # A turn that attaches nothing keeps the documents of the message before
+        # it: "summarise this", then "now list its headings". Never persisted on
+        # this turn, which the user did not attach them to.
+        earlier_documents = (
+            [] if attachment_refs else _previous_turn_documents(conversation_so_far)
+        )
         generation_payload = payload.model_copy(
             update={"thread_id": thread_id, "attachments": attachment_refs}
         )
@@ -438,6 +467,10 @@ async def _start_generation_job(
             attachment_refs,
             settings=settings,
         )
+        if earlier_documents:
+            resolved_attachments += await asyncio.to_thread(
+                _resolve_earlier_documents, request, deps, principal, earlier_documents
+            )
         generation_snapshot = _generation_snapshot(
             reservation.snapshot.job_id,
             generation_payload,
@@ -486,25 +519,13 @@ async def _start_generation_job(
                     )
                 prepared_revision = admission_revision
                 return {"user_message_id": None}
-            # The one transcript read of a new turn: the model needs it as
-            # history, so it is taken here rather than by the generation
-            # service afterwards -- and only the fields history is built from,
-            # not the reasoning, sources and stats kept on every reply.
-            existing_messages = deps.chats.get_messages(
-                thread_id, columns=HISTORY_MESSAGE_FIELDS
-            )
-            if existing_messages is None and admission_revision != 0:
-                # Admitted against a chat that has since been deleted.
-                raise ChatDomainError(
-                    "This chat changed. Reload it before generating again.",
-                    code="stale_revision",
-                )
-            existing = existing_messages or []
+            existing = list(earlier_messages or ())
             try:
                 # Guarded by the revision the chat was admitted at: a write
                 # that landed since, including one between that check and the
-                # read above, fails this append instead of being answered
-                # around. So the history read above is the chat as admitted.
+                # transcript read, fails this append instead of being answered
+                # around. So the history read at admission is the chat as
+                # admitted.
                 user_message_id = deps.chats.add_message(
                     thread_id,
                     "user",
@@ -513,7 +534,7 @@ async def _start_generation_job(
                         attachment.model_dump(mode="json")
                         for attachment in attachment_refs
                     ],
-                    thread_title="New Chat" if existing_messages is None else None,
+                    thread_title="New Chat" if earlier_messages is None else None,
                     expected_revision=admission_revision,
                 )
             except ChatNotFound as exc:
@@ -1783,6 +1804,90 @@ def _resolve_generation_attachments(
                 text_content=item.text_content,
                 image_base64=item.image_base64,
             )
+        )
+    return tuple(resolved)
+
+
+def _previous_turn_documents(
+    messages: Sequence[Mapping[str, Any]],
+) -> list[ChatAttachment]:
+    """The documents attached to the user's most recent message, as stored.
+
+    Only that one message: a document comes back for the follow-up right after
+    it, not for every later turn, so its text does not ride along -- and cost
+    a re-read of the whole prompt -- long after the conversation moved on.
+    Images stay with the turn they were sent on. Metadata that no longer
+    validates is skipped, and the set is held to what one message may carry.
+    """
+    previous = next(
+        (message for message in reversed(messages) if message.get("role") == "user"),
+        None,
+    )
+    stored = previous.get("attachments") if previous is not None else None
+    if not isinstance(stored, list):
+        return []
+    documents: list[ChatAttachment] = []
+    total = 0
+    for item in stored:
+        if not isinstance(item, Mapping) or item.get("kind") != "document":
+            continue
+        try:
+            reference = ChatAttachment.model_validate(item)
+        except ValidationError:
+            continue
+        if (
+            len(documents) == MAX_CHAT_ATTACHMENTS
+            or total + reference.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES
+        ):
+            break
+        documents.append(reference)
+        total += reference.size
+    return documents
+
+
+def _resolve_earlier_documents(
+    request: Request,
+    deps: BackendDependenciesProtocol,
+    principal: SessionPrincipal,
+    references: Sequence[ChatAttachment],
+) -> tuple[GenerationAttachment, ...]:
+    """Resolve the previous message's documents, leaving out any that are gone.
+
+    Unlike the user's own attachments, which refuse the turn when one cannot
+    be resolved, these were not asked for: a document deleted or expired since
+    simply does not come back, and the history still names it on the turn it
+    was attached to. Ownership and integrity are checked exactly as for a new
+    attachment. Only a count is logged, never a name or any text.
+    """
+    try:
+        service = _chat_attachment_service(request, deps)
+    except HTTPException:
+        return ()
+    owner = _attachment_owner(request, principal)
+    resolved: list[GenerationAttachment] = []
+    unavailable = 0
+    for reference in references:
+        try:
+            item = service.resolve(owner=owner, descriptor=reference.model_dump(mode="json"))
+        except ChatAttachmentError:
+            unavailable += 1
+            continue
+        if item.descriptor.kind != "document" or item.text_content is None:
+            continue
+        resolved.append(
+            GenerationAttachment(
+                attachment_id=item.descriptor.attachment_id,
+                filename=item.descriptor.filename,
+                mime_type=item.descriptor.mime_type,
+                kind="document",
+                text_content=item.text_content,
+                from_earlier_message=True,
+            )
+        )
+    if unavailable:
+        logger.info(
+            "Left %d document(s) from the previous message out of a follow-up: no longer available.",
+            unavailable,
         )
     return tuple(resolved)
 
