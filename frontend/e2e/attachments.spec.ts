@@ -57,7 +57,7 @@ async function stubWorkspace(page: Page) {
 
 test("a file dropped on the window is kept out of the navigation path, and one dropped on the composer is attached", async ({ page }) => {
   const { staged } = await stubWorkspace(page);
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   const url = page.url();
 
@@ -90,7 +90,7 @@ test("a file dropped on the window is kept out of the navigation path, and one d
 
 test("pasting a screenshot attaches it and pasting text does not", async ({ page }) => {
   const { staged } = await stubWorkspace(page);
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   const composer = page.getByLabel("Message Cortex");
   await composer.focus();
 
@@ -114,7 +114,7 @@ test("pasting a screenshot attaches it and pasting text does not", async ({ page
 
 test("settings asks before edits are lost and keeps them when told to keep editing", async ({ page }) => {
   await stubWorkspace(page);
-  await page.goto("/settings?bootstrap=launcher-token");
+  await page.goto("/settings#bootstrap=launcher-token");
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Save settings" })).toBeDisabled();
 

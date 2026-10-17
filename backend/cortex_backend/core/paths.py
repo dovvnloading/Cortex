@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import PureWindowsPath
 
+from .win_paths import system32
+
 
 ORGANIZATION_NAME = "ChatLLM"
 APPLICATION_NAME = "ChatLLM-Assistant"
@@ -97,7 +99,7 @@ def secure_private_path(path: str | os.PathLike[str], *, directory: bool) -> Pat
             rights = "(OI)(CI)F" if directory else "F"
             result = subprocess.run(
                 [
-                    "icacls",
+                    system32("icacls.exe"),
                     str(target),
                     "/inheritance:r",
                     "/grant:r",

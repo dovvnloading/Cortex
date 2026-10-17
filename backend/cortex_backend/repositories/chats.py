@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Protocol
+
+
+# The fields a stored message has, as get_chat returns them. get_messages reads
+# any subset of them and refuses anything else.
+MESSAGE_FIELDS = (
+    "id",
+    "role",
+    "content",
+    "sources",
+    "thoughts",
+    "attachments",
+    "stats",
+    "original_content",
+    "timestamp",
+)
 
 
 class ChatRepositoryError(RuntimeError):
@@ -39,6 +55,35 @@ def _sanitize_chat_messages(chat: dict[str, Any] | None) -> dict[str, Any] | Non
     return chat
 
 
+def _message_fields(columns: Sequence[str]) -> tuple[str, ...]:
+    """The requested message fields, once each, or ValueError for an unknown one."""
+    fields = tuple(dict.fromkeys(columns))
+    if not fields or any(name not in MESSAGE_FIELDS for name in fields):
+        raise ValueError("columns must name one or more message fields")
+    return fields
+
+
+def _fields_to_read(fields: tuple[str, ...]) -> tuple[str, ...]:
+    """``fields``, plus the role when reasoning is asked for: it decides who may carry it."""
+    return (*fields, "role") if "thoughts" in fields and "role" not in fields else fields
+
+
+def _sanitize_messages(
+    messages: list[dict[str, Any]], fields: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """get_chat's rule for a partial read: reasoning stays on assistant rows only.
+
+    The role read only to apply it is dropped again, so a row carries exactly
+    the fields that were asked for.
+    """
+    for message in messages:
+        if "thoughts" in fields and message.get("role") != "assistant":
+            message["thoughts"] = None
+        if "role" not in fields:
+            message.pop("role", None)
+    return messages
+
+
 class ChatGroupNotFound(ChatRepositoryError):
     """The referenced group does not exist."""
 
@@ -64,6 +109,20 @@ class ChatRepository(Protocol):
 
     def get_chat_overview(self, thread_id: str) -> dict[str, Any] | None:
         """Title, timestamp and revision without materialising the messages."""
+        ...
+
+    def get_messages(
+        self, thread_id: str, *, columns: Sequence[str]
+    ) -> list[dict[str, Any]] | None:
+        """The chat's messages carrying only ``columns``; None when there is no such chat.
+
+        For a caller that needs a few fields of every message: the others are
+        not read or decoded. ``columns`` are names from ``MESSAGE_FIELDS``.
+        """
+        ...
+
+    def chat_exists(self, thread_id: str) -> bool:
+        """Whether the chat exists, without reading anything of it."""
         ...
 
     def create_chat(self, thread_id: str, title: str) -> None: ...
@@ -167,6 +226,16 @@ class LegacyDatabaseChatRepository:
 
     def get_chat_overview(self, thread_id: str) -> dict[str, Any] | None:
         return self._database.load_chat_overview(thread_id)
+
+    def get_messages(
+        self, thread_id: str, *, columns: Sequence[str]
+    ) -> list[dict[str, Any]] | None:
+        fields = _message_fields(columns)
+        messages = self._database.load_messages(thread_id, columns=_fields_to_read(fields))
+        return _sanitize_messages(messages, fields) if messages is not None else None
+
+    def chat_exists(self, thread_id: str) -> bool:
+        return bool(self._database.chat_exists(thread_id))
 
     def create_chat(self, thread_id: str, title: str) -> None:
         self._database.create_chat(thread_id, title)
@@ -371,6 +440,27 @@ class InMemoryChatRepository:
                 "group_id": chat.get("group_id"),
                 "revision": chat["revision"],
             }
+
+    def get_messages(
+        self, thread_id: str, *, columns: Sequence[str]
+    ) -> list[dict[str, Any]] | None:
+        fields = _message_fields(columns)
+        read = _fields_to_read(fields)
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None:
+                return None
+            return _sanitize_messages(
+                [
+                    {name: deepcopy(message.get(name)) for name in read}
+                    for message in chat["messages"]
+                ],
+                fields,
+            )
+
+    def chat_exists(self, thread_id: str) -> bool:
+        with self._lock:
+            return thread_id in self._chats
 
     def create_chat(self, thread_id: str, title: str) -> None:
         with self._lock:

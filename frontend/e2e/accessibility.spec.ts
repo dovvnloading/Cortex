@@ -37,7 +37,7 @@ async function openWorkspace(page: Page, path: string) {
   await page.route("**/api/v1/models", async (route) => {
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
-  await page.goto(`${path}?bootstrap=launcher-token`);
+  await page.goto(`${path}#bootstrap=launcher-token`);
 }
 
 /** Move focus onto `target` the way a keyboard does, so :focus-visible applies to buttons too. */
