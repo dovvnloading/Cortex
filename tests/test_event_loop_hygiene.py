@@ -149,12 +149,12 @@ def test_a_new_turn_reads_the_transcript_once_and_off_the_loop() -> None:
             client, headers, request_id="hygiene-new-2", thread_id=thread_id, user_input="again"
         )
 
-    # One transcript read per turn, and a partial one: the full read decodes
-    # the reasoning, sources and stats of every reply, none of which history
-    # uses.
+    # At most one transcript read per turn, and a partial one: the full read
+    # decodes the reasoning, sources and stats of every reply, none of which
+    # history uses. A chat that does not exist yet has nothing to read.
     assert first_turn["chats.get_chat"] == 0, first_turn
     assert probe.calls["chats.get_chat"] == 0, probe.calls
-    assert first_turn["chats.get_messages"] == 1, first_turn
+    assert first_turn["chats.get_messages"] == 0, first_turn
     assert probe.calls["chats.get_messages"] == 1, probe.calls
     assert first_turn_history_loads == [] and probe.history_loads == []
     assert first_turn_on_loop == [] and probe.on_loop == []
