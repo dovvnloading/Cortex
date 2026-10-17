@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterator
 import ctypes
+import errno
 import http.client
 import io
 import json
@@ -37,7 +38,8 @@ from cortex_backend.launcher import supervisor as supervisor_module
 from cortex_backend.launcher import webview_runtime as runtime_module
 from cortex_backend.launcher.desktop import DesktopWindowConfig, DesktopWindowError, WindowActivation
 from cortex_backend.launcher.frontend import FrontendBuildError, FrontendManifest
-from cortex_backend.launcher.instance import InstanceLock, InstanceRecord
+from cortex_backend.launcher import instance as instance_module
+from cortex_backend.launcher.instance import InstanceLock, InstanceLockError, InstanceRecord
 from cortex_backend.launcher.webview_runtime import WebViewRuntimeError
 
 
@@ -2144,6 +2146,88 @@ def test_instance_lock_does_not_follow_a_record_to_an_arbitrary_secret(tmp_path:
         lock.release()
 
 
+def _fail_lock_call(monkeypatch: pytest.MonkeyPatch, error_number: int) -> None:
+    """Make the OS lock call itself fail with ``error_number``."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(error_number, os.strerror(error_number))
+
+    if instance_module.msvcrt is not None:
+        fake = SimpleNamespace(
+            LK_NBLCK=instance_module.msvcrt.LK_NBLCK,
+            LK_UNLCK=instance_module.msvcrt.LK_UNLCK,
+            locking=refuse,
+        )
+        monkeypatch.setattr(instance_module, "msvcrt", fake)
+    else:  # pragma: no cover - Windows is the supported launcher target
+        fake = SimpleNamespace(LOCK_EX=0, LOCK_NB=0, LOCK_UN=0, flock=refuse)
+        monkeypatch.setattr(instance_module, "fcntl", fake)
+
+
+def test_instance_lock_distinguishes_contention_from_setup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only a lock another process holds is contention; anything else is a failure.
+
+    Every failure used to come back as ``None``, exactly like "already running",
+    so a lock file that could not even be opened sent the launch looking for a
+    running instance that did not exist.
+    """
+    # Genuine contention: another holder has the lock.
+    holder = InstanceLock(tmp_path)
+    assert holder.acquire(port=8765) is not None
+    try:
+        assert InstanceLock(tmp_path).acquire(port=8766) is None
+    finally:
+        holder.release()
+
+    with monkeypatch.context() as patched:
+        _fail_lock_call(patched, errno.EACCES)
+        assert InstanceLock(tmp_path).acquire(port=8766) is None, "EACCES is a held lock"
+
+    # A profile folder that cannot be secured.
+    with monkeypatch.context() as patched:
+
+        def refuse_acl(_path, *, directory):
+            raise AppPathError("Cortex could not secure its private data permissions.")
+
+        patched.setattr(instance_module, "secure_private_path", refuse_acl)
+        with pytest.raises(InstanceLockError, match="instance folder"):
+            InstanceLock(tmp_path).acquire(port=8766)
+
+    # A lock file that cannot be opened.
+    lock_path = InstanceLock(tmp_path).lock_path
+    real_open = os.open
+
+    def refuse_lock_file(path, *args, **kwargs):
+        if Path(path) == lock_path:
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(instance_module.os, "open", refuse_lock_file)
+        with pytest.raises(InstanceLockError, match=r"open its instance lock file \(PermissionError\)"):
+            InstanceLock(tmp_path).acquire(port=8766)
+
+    # A lock call that fails for a reason other than another holder.
+    with monkeypatch.context() as patched:
+        _fail_lock_call(patched, errno.EBADF)
+        with pytest.raises(InstanceLockError, match="lock its instance lock file"):
+            InstanceLock(tmp_path).acquire(port=8766)
+
+    # A record that cannot be written: the lock is given back, no secret is left.
+    blocker = tmp_path / "cortex.instance.json.tmp"
+    blocker.mkdir()
+    failing = InstanceLock(tmp_path)
+    with pytest.raises(InstanceLockError, match="publish its instance record"):
+        failing.acquire(port=8766)
+    assert not failing.secret_path.exists()
+    blocker.rmdir()
+    recovered = InstanceLock(tmp_path)
+    assert recovered.acquire(port=8767) is not None, "a failed acquire kept the lock"
+    recovered.release()
+
+
 def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _frontend_fixture(tmp_path)
     monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
@@ -3843,6 +3927,158 @@ def test_second_headless_launch_reports_the_running_instance_without_waiting(
 
     assert attempts == []
     assert "already running on loopback port 5555" in capsys.readouterr().out
+
+
+def _lock_that_cannot_be_set_up(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    class BrokenInstance:
+        def __init__(self, _profile_dir):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            pass
+
+        def acquire(self, *, port):
+            raise InstanceLockError("Cortex could not open its instance lock file (PermissionError).")
+
+    _LaunchFakes(monkeypatch, tmp_path, instance_class=BrokenInstance)
+    return []
+
+
+def _lock_held_with_no_record(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    _second_launch(monkeypatch, tmp_path, activations=[WindowActivation.ACTIVATED], existing=None)
+    return []
+
+
+def _dead_holders_lock_never_frees(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        alive=[False],
+        acquired=[False],
+        wait=0.05,
+    )
+    return []
+
+
+def _handoff_secret_unreadable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    held = _held_instance_class([True], existing=None)
+    held.read_secret = lambda _self, _record: None  # type: ignore[method-assign]
+    _LaunchFakes(monkeypatch, tmp_path, instance_class=held)
+    return []
+
+
+def _explicit_port_taken(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def taken(_port):
+        raise OSError(errno.EADDRINUSE, "address in use")
+
+    monkeypatch.setattr(launcher_main, "_reserve_port", taken)
+    return ["--port", "50123"]
+
+
+def _headless_frontend_preparation_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(*_args, **_kwargs):
+        raise FrontendBuildError("The packaged application is missing its frontend bundle.")
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", refuse)
+    return ["--headless"]
+
+
+def _headless_backend_stops_by_itself(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def ready_then_gone(url, **_kwargs):
+        # Ready once, then the server thread ends without an error or a request to stop.
+        fakes.backends[-1].running = False
+        return True
+
+    monkeypatch.setattr(launcher_main, "wait_for_http", ready_then_gone)
+    return ["--headless"]
+
+
+def _native_window_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    fakes = _LaunchFakes(monkeypatch, tmp_path)
+
+    def failing_window(_config, _worker):
+        raise DesktopWindowError("synthetic window failure")
+
+    fakes.on_window = failing_window
+    return []
+
+
+def _forced_frontend_build_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    _LaunchFakes(monkeypatch, tmp_path)
+
+    def refuse(*_args, **_kwargs):
+        raise FrontendBuildError("Frontend command failed with exit code 1.")
+
+    monkeypatch.setattr(launcher_main, "ensure_frontend", refuse)
+    return ["--build-frontend"]
+
+
+def _unexpected_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    def explode(_data_dir):
+        raise ValueError("synthetic failure")
+
+    monkeypatch.setattr(launcher_main, "_resolve_paths", explode)
+    return []
+
+
+@pytest.mark.parametrize(
+    ("arrange", "stage", "code"),
+    [
+        pytest.param(_lock_that_cannot_be_set_up, "instance lock", 2, id="lock-setup"),
+        pytest.param(_lock_held_with_no_record, "instance lock", 2, id="held-no-record"),
+        pytest.param(_dead_holders_lock_never_frees, "instance lock", 2, id="lock-never-free"),
+        pytest.param(_handoff_secret_unreadable, "handoff secret", 2, id="handoff-secret"),
+        pytest.param(_explicit_port_taken, "backend port reservation", 1, id="port"),
+        pytest.param(_headless_frontend_preparation_fails, "frontend preparation", 2, id="frontend"),
+        pytest.param(_headless_backend_stops_by_itself, "desktop startup/runtime", 1, id="headless-stop"),
+        pytest.param(_native_window_fails, "desktop startup/runtime", 1, id="window"),
+        pytest.param(_forced_frontend_build_fails, "frontend build", 2, id="build-frontend"),
+        pytest.param(_unexpected_exception, "uncaught startup", 1, id="uncaught"),
+    ],
+)
+def test_every_failure_exit_writes_a_startup_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arrange: Callable[[pytest.MonkeyPatch, Path], list[str]],
+    stage: str,
+    code: int,
+):
+    """A failing exit always leaves a record, so the dialog is never wrong about it.
+
+    Several exits printed to a console a windowed build does not have and
+    returned, and the dialog that followed said the diagnostic log "could not
+    be written" -- when nothing had tried to write one.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    extra = arrange(monkeypatch, data_dir)
+    shown = _record_startup_dialogs(monkeypatch, data_dir)
+
+    assert launcher_main.main(["--data-dir", str(data_dir), *extra]) == code
+
+    log_path = data_dir.resolve() / launcher_main.STARTUP_LOG_NAME
+    assert log_path.is_file(), "the failure left no startup diagnostic"
+    assert f"stage={stage} " in log_path.read_text(encoding="utf-8")
+    assert len(shown) == 1
+    assert str(log_path) in shown[0]
+    assert "could not write" not in shown[0]
+
+
+def test_the_dialog_only_says_the_log_could_not_be_written_when_a_write_was_tried():
+    assert "could not write" in launcher_main._startup_dialog_message(None, attempted=True)
+    untried = launcher_main._startup_dialog_message(None, attempted=False)
+    assert "Cortex could not start." in untried
+    assert "log" not in untried
 
 
 class _FakeUser32:
