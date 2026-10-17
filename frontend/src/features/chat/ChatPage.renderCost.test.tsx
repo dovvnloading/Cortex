@@ -178,16 +178,26 @@ describe("ChatPage while a reply streams", () => {
     // "instant" restarts an animation on every streamed frame.
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollTo });
+    // The bubble shows streamed text through a timer-driven throttle, so each
+    // step waits until its text is on screen. Clicking while a delivery is
+    // still pending let that delivery land in the same act as the click, after
+    // the jump had put the reader back at the end, and follow it with a second
+    // (correct) instant scroll: the test failed under load, not the product.
+    const bubble = () => screen.getByLabelText("Cortex response in progress");
     try {
       await openChatAndStartStreaming();
       stream("tok ");
-      await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+      await waitFor(() => expect(bubble()).toHaveTextContent("tok"));
+      expect(scrollTo).toHaveBeenCalled();
       for (const [options] of scrollTo.mock.calls) expect(options).toEqual({ top: 1000, behavior: "instant" });
 
       // Scrolled away: the next frame offers the jump instead of following.
       fireEvent.scroll(document.querySelector(".transcript")!);
-      stream("more ");
       scrollTo.mockClear();
+      stream("more ");
+      await waitFor(() => expect(bubble()).toHaveTextContent("tok more"));
+      expect(scrollTo).not.toHaveBeenCalled();
+
       fireEvent.click(await screen.findByRole("button", { name: "Jump to latest" }));
 
       expect(scrollTo).toHaveBeenCalledTimes(1);
