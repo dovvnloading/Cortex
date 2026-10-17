@@ -338,6 +338,18 @@ describe("ChatPage response announcements", () => {
     await waitFor(() => expect(announcer()).toHaveTextContent(/^Response complete$/));
   });
 
+  it("says a response was cut short when the context limit ended it, and shows why under the answer", async () => {
+    const user = userEvent.setup();
+    const { api, finishWith } = harness();
+    renderChat(api);
+    await sendPrompt(user);
+
+    await finishWith("generation.completed", { assistant_message_id: "assistant-1" }, savedAnswer({ eval_count: 900, stop_reason: "length" }));
+
+    await waitFor(() => expect(announcer()).toHaveTextContent(/^Response cut short by the context limit$/));
+    expect(await screen.findByText(/This answer was cut short by the context limit/)).toBeVisible();
+  });
+
   it("says a response stopped after the person stopped it and the answer was kept", async () => {
     const user = userEvent.setup();
     const { api, finishWith } = harness();

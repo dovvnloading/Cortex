@@ -92,4 +92,34 @@ describe("MessageCard", () => {
     expect(screen.queryByRole("region", { name: "Cortex suggests remembering" })).toBeNull();
     expect(screen.getByText("Noted.")).toBeInTheDocument();
   });
+
+  it("notes under an answer the context limit cut short, and says what helps", () => {
+    renderCard({
+      id: "assistant-1",
+      role: "assistant",
+      content: "The three steps are: first, open the",
+      stats: { eval_count: 512, tokens_per_second: 24.5, stop_reason: "length" },
+    });
+
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent("This answer was cut short by the context limit.");
+    expect(note).toHaveTextContent("Raising the Context window gives answers more room.");
+    // The partial answer and its usage are still shown as they were.
+    expect(screen.getByText("The three steps are: first, open the")).toBeInTheDocument();
+    expect(screen.getByText(/512 tok/)).toBeInTheDocument();
+  });
+
+  it("still says why when the limit left only reasoning and no answer", () => {
+    renderCard({ id: "assistant-1", role: "assistant", content: "", thoughts: "Let me think about this carefully.", stats: { stop_reason: "length" } });
+
+    expect(screen.getByRole("note")).toHaveTextContent("cut short by the context limit");
+  });
+
+  it("adds no note to an answer that finished on its own, one with no reason recorded, or a person's message", () => {
+    renderCard({ id: "assistant-1", role: "assistant", content: "Done.", stats: { eval_count: 3, tokens_per_second: 30, stop_reason: "stop" } });
+    renderCard({ id: "assistant-2", role: "assistant", content: "Older answer.", stats: { eval_count: 3, tokens_per_second: 30 } });
+    renderCard({ id: "user-1", role: "user", content: "Question?", stats: { stop_reason: "length" } });
+
+    expect(screen.queryByText(/cut short by the context limit/)).toBeNull();
+  });
 });

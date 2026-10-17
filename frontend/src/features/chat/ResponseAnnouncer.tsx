@@ -4,12 +4,14 @@ import { useChatStore } from "../../stores/useChatStore";
 
 /**
  * What to tell someone who cannot see the answer arrive, once it is saved:
- * whether it finished or was stopped, and how long it was when that is known.
+ * whether it finished, was stopped, or was cut off by the context limit, and
+ * how long it was when that is known.
  */
 function describeFinishedResponse(chat: ChatResponse | null): string {
   const lastAssistant = [...(chat?.messages ?? [])].reverse().find((message) => message.role === "assistant");
   const stats = lastAssistant?.stats;
   if (stats?.stopped) return "Response stopped";
+  if (stats?.stop_reason === "length") return "Response cut short by the context limit";
   const tokens = stats?.eval_count;
   if (typeof tokens === "number" && tokens > 0) {
     return `Response complete, ${tokens.toLocaleString()} ${tokens === 1 ? "token" : "tokens"}`;
