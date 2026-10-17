@@ -5,6 +5,13 @@ with fixed bytes and temporary files only.  It accepts no user/model input, neve
 executes a file, and reports stable case names/categories rather than paths or
 operating-system details.  A missing Windows link primitive is a blocked release
 gate, not a silent pass.
+
+The overall status is ``failed`` when any case observed the boundary doing the
+wrong thing, ``blocked`` when nothing failed but a case could not run on this
+host, and ``passed`` only when every case ran and passed.  Anything but
+``passed`` exits non-zero: 1 for failed, 2 for blocked.  ``--strict`` is the
+default and is still accepted for existing callers.  ``--json`` prints the
+machine-readable result instead of the readable summary.
 """
 
 from __future__ import annotations
@@ -12,10 +19,12 @@ from __future__ import annotations
 import argparse
 from functools import partial
 from hashlib import sha256
+import inspect
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from typing import cast
 from collections.abc import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,20 +46,6 @@ from cortex_backend.execution.repository import (  # noqa: E402
 _OWNER = "review-owner"
 _TURN = "review-turn"
 _PNG = b"\x89PNG\r\n\x1a\nreview-bytes"
-_CASE_NAMES = (
-    "copy_in_preserves_source",
-    "copy_in_owner_binding",
-    "copy_in_ads_path",
-    "copy_in_untyped_grant",
-    "copy_in_hardlink",
-    "copy_in_symlink",
-    "mime_active_and_nonfinite_corpus",
-    "output_exact_claims_and_quarantine",
-    "output_symlink_rejection",
-    "output_hardlink_rejection",
-    "output_publication_rollback",
-    "repository_size_integrity",
-)
 
 
 class _ReviewFailure(Exception):
@@ -273,7 +268,11 @@ def _case_repository_size_integrity(root: Path, repository: ExecutionRepository,
     raise _ReviewFailure("database_size_tamper_accepted")
 
 
-_CASES: tuple[tuple[str, Callable[[Path, ExecutionRepository, ArtifactBoundary, str], None]], ...] = (
+_CaseFunction = Callable[[Path, ExecutionRepository, ArtifactBoundary, str], None]
+
+# The corpus that runs. The digest is computed from this tuple, so it cannot
+# drift from what actually executes.
+_CASES: tuple[tuple[str, _CaseFunction], ...] = (
     ("copy_in_preserves_source", _case_copy_in_preserves_source),
     ("copy_in_owner_binding", _case_copy_in_owner_binding),
     ("copy_in_ads_path", _case_copy_in_ads_path),
@@ -288,14 +287,35 @@ _CASES: tuple[tuple[str, Callable[[Path, ExecutionRepository, ArtifactBoundary, 
     ("repository_size_integrity", _case_repository_size_integrity),
 )
 
+# The shared setup every case runs through. A change here changes what each
+# case exercises, so it is part of the digest too.
+_HARNESS: tuple[Callable[..., object], ...] = (_fixture, _grant, _expect_boundary_error)
+
+
+def _corpus_digest(cases: tuple[tuple[str, _CaseFunction], ...]) -> str:
+    """Fingerprint the code that runs, not a list of names kept beside it.
+
+    The digest covers each case's name and source, in run order, plus the
+    shared harness, so deleting, reordering, renaming or editing a case --
+    or the setup it runs through -- changes it.
+    """
+
+    material = [
+        ["harness", [inspect.getsource(helper) for helper in _HARNESS]],
+        *([name, inspect.getsource(case)] for name, case in cases),
+    ]
+    encoded = json.dumps(material, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return sha256(encoded).hexdigest()[:16]
+
 
 def run_review() -> dict[str, object]:
     """Run the fixed corpus in a disposable directory and return safe evidence."""
 
+    cases = _CASES
     outcomes: list[dict[str, str]] = []
     with TemporaryDirectory(prefix="cortex-artifact-review-") as temporary:
         root = Path(temporary)
-        for name, case in _CASES:
+        for name, case in cases:
             try:
                 case_root, repository, boundary, job_id = _fixture(root, name)
                 case(case_root, repository, boundary, job_id)
@@ -310,11 +330,19 @@ def run_review() -> dict[str, object]:
     passed = sum(outcome["status"] == "passed" for outcome in outcomes)
     blocked = sum(outcome["status"] == "blocked" for outcome in outcomes)
     failed = sum(outcome["status"] == "failed" for outcome in outcomes)
-    corpus_digest = sha256(json.dumps(_CASE_NAMES, separators=(",", ":")).encode("ascii")).hexdigest()[:16]
+    # A wrong answer from the boundary is a failure, never a host limitation:
+    # "blocked" is reserved for a case that could not run at all. A corpus
+    # that ran nothing proved nothing, so it cannot pass either.
+    if failed or not outcomes:
+        status = "failed"
+    elif blocked:
+        status = "blocked"
+    else:
+        status = "passed"
     return {
-        "status": "passed" if failed == 0 and blocked == 0 else "blocked",
+        "status": status,
         "corpus": "artifact-boundary-review.v1",
-        "corpus_digest": corpus_digest,
+        "corpus_digest": _corpus_digest(cases),
         "cases": len(outcomes),
         "passed": passed,
         "blocked": blocked,
@@ -323,14 +351,39 @@ def run_review() -> dict[str, object]:
     }
 
 
+_EXIT_CODES = {"passed": 0, "failed": 1, "blocked": 2}
+
+
+def _summary(result: dict[str, object]) -> str:
+    lines = [
+        f"Artifact boundary review: {result['status']}",
+        f"  corpus {result['corpus']} (digest {result['corpus_digest']})",
+        f"  {result['cases']} cases: {result['passed']} passed, "
+        f"{result['blocked']} blocked, {result['failed']} failed",
+    ]
+    for outcome in cast("list[dict[str, str]]", result["outcomes"]):
+        if outcome["status"] != "passed":
+            lines.append(f"  {outcome['status']:<7} {outcome['case']} ({outcome['reason']})")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--strict", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--json", action="store_true", help="print the result as compact JSON")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="accepted for existing callers; strict is the default and cannot be turned off",
+    )
     args = parser.parse_args(argv)
     result = run_review()
-    print(json.dumps(result, sort_keys=True, separators=(",", ":") if args.json else None))
-    return 2 if args.strict and result["status"] != "passed" else 0
+    if args.json:
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        print(_summary(result))
+    # Strict always: the module promises a blocked release gate, not a silent
+    # pass, and a gate that exits zero on a total failure is not one.
+    return _EXIT_CODES.get(str(result["status"]), 1)
 
 
 if __name__ == "__main__":
