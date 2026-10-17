@@ -78,7 +78,7 @@ test("does not replay old completions and groups repeated task notifications", a
     } });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
   const tray = page.getByRole("complementary", { name: "Task activity" });

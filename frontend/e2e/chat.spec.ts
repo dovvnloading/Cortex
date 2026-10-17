@@ -40,7 +40,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
     await route.fulfill({ status: 200, contentType: "text/event-stream", body: events });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await expect(page.getByText("What will you make today?")).toHaveCount(0);
   await expect(page.getByText("LOCAL, PRIVATE, YOURS")).toHaveCount(0);
@@ -113,7 +113,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
     await route.fulfill({ status: 200, contentType: "text/event-stream", body: event });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByLabel("Message Cortex").fill("fail");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -165,7 +165,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
     await route.fulfill({ status: 200, contentType: "text/event-stream", body: 'id: 1\nevent: progress\ndata: {"id":1,"job_id":"job-model","kind":"progress","status":"running","phase":"model_pull","data":{"model":"nemotron-3-nano:4b","message":"pulling","percent":50}}\n\nid: 2\nevent: completed\ndata: {"id":2,"job_id":"job-model","kind":"completed","status":"succeeded","data":{}}\n\n' });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
   await page.getByRole("button", { name: "Select a local model" }).click();
   await page.getByRole("option", { name: /local-chat:7b/i }).click();
@@ -251,7 +251,7 @@ test("renders a structured workbench transcript with markdown and code blocks", 
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
 
-  await page.goto("/chat/rich-thread?bootstrap=launcher-token");
+  await page.goto("/chat/rich-thread#bootstrap=launcher-token");
   await expect(page.getByText("The local calculation is complete.")).toBeVisible();
   // The speaker is carried by form and by each article's accessible name, not
   // by a repeated visible nameplate above every turn.

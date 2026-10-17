@@ -67,7 +67,7 @@ test("keeps the workspace and composer picker usable when the inventory is talle
 
   await page.setViewportSize({ width: 800, height: 500 });
   await stubWorkspace(page, { models, selectedModel: null });
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
 
   await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
@@ -91,7 +91,7 @@ test("keeps the workspace and composer picker usable when the inventory is talle
 
 test("renders chat parameters above the composer surface", async ({ page }) => {
   await stubWorkspace(page);
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
 
   await page.getByRole("button", { name: "Generation parameters for this chat" }).click();
   await expect(page.getByRole("dialog", { name: "Generation parameters" })).toBeVisible();
@@ -137,7 +137,7 @@ test("keeps a multiline draft when generation acceptance fails", async ({ page }
     await route.fulfill({ status: 503, json: { detail: "Local runtime is unavailable." } });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   const composer = page.getByLabel("Message Cortex");
   await expect(composer).toBeVisible();
 
@@ -155,7 +155,7 @@ test("keeps a multiline draft when generation acceptance fails", async ({ page }
 
 test("selects and persists a model from the composer picker", async ({ page }) => {
   await stubWorkspace(page);
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
 
   const trigger = page.getByRole("button", { name: "Selected local model: local-chat:7b" });
   await expect(trigger).toBeVisible();
@@ -177,7 +177,7 @@ test("selects and persists a model from the composer picker", async ({ page }) =
 test("keeps composer model options inside a compact viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await stubWorkspace(page);
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
 
   const trigger = page.getByRole("button", { name: "Selected local model: local-chat:7b" });
   await expect(trigger).toBeVisible();
@@ -225,7 +225,7 @@ test("keeps a next draft available while a response is stopped", async ({ page }
     });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   const composer = page.getByLabel("Message Cortex");
   await composer.fill("Start a response");
   await composer.press("Enter");
@@ -254,7 +254,7 @@ test.describe("compact window", () => {
     // its own on mousedown and lift the toolbar before mouseup, so the click
     // landed on empty space and nothing opened.
     await stubWorkspace(page, { models: ["local-chat:7b"] });
-    await page.goto("/?bootstrap=launcher-token");
+    await page.goto("/#bootstrap=launcher-token");
 
     const trigger = page.getByRole("button", { name: "Generation parameters for this chat" });
     const before = await trigger.boundingBox();
@@ -267,7 +267,7 @@ test.describe("compact window", () => {
 
   test("keeps the composer usable without horizontal overflow", async ({ page }) => {
     await stubWorkspace(page, { models: ["local-chat:7b"] });
-    await page.goto("/?bootstrap=launcher-token");
+    await page.goto("/#bootstrap=launcher-token");
     await expect(page.getByRole("button", { name: "Show chat history" })).toBeVisible();
 
     const composer = page.getByLabel("Message Cortex");
@@ -292,7 +292,7 @@ test("clips a long runtime status before the send control", async ({ page }) => 
     connectionSuccess: false,
     connectionMessage: "Could not connect to Ollama. Please start Ollama and retry this local runtime connection.",
   });
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
 
   const surface = page.locator(".composer-surface");
   const meta = page.locator(".composer-toolbar-trailing");
@@ -332,7 +332,7 @@ test("stages a document as a composer chip and sends only its opaque metadata", 
     await route.fulfill({ status: 503, json: { detail: "Local runtime is unavailable." } });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await page.getByLabel("Attach images or documents").setInputFiles({
     name: "notes.md",
     mimeType: "text/markdown",
@@ -369,7 +369,7 @@ test("explains when the selected model cannot accept an image attachment", async
     });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await page.getByLabel("Attach images or documents").setInputFiles({
     name: "photo.png",
     mimeType: "image/png",

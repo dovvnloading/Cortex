@@ -118,8 +118,28 @@ describe("App", () => {
     expect(fetcher.mock.calls.some(([input]) => String(input).endsWith("/session/exchange"))).toBe(false);
   });
 
+  it("never uses launcher credentials from the query string, only from the fragment", async () => {
+    // The launcher puts them in the fragment, which never reaches a server. A
+    // query-string copy used to be honoured too, for no flow that sends one.
+    window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/?bootstrap=query-token&handoff=query-handoff&view=compact");
+    const { fetcher, exchanged } = bootstrapBackend(
+      ["query-token"],
+      { status: 401, detail: "Cortex bootstrap token invalid or already used." },
+    );
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+
+    expect(screen.getByRole("heading", { name: "Start local workspace" })).toBeVisible();
+    await waitFor(() => expect(window.location.search).toBe("?view=compact"));
+    expect(exchanged).toEqual([]);
+    expect(callsTo(fetcher, "/session/handoff")).toHaveLength(0);
+    expect(window.sessionStorage.getItem("cortex.session.handoff")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect workspace" })).not.toBeInTheDocument();
+  });
+
   it("does not reuse a consumed bootstrap token after the local session expires", async () => {
-    window.history.replaceState({}, "", "/?bootstrap=desktop-handoff");
+    window.history.replaceState({}, "", "/#bootstrap=desktop-handoff");
     const fetcher = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
       const url = String(input);
       if (url.endsWith("/session/exchange")) {
