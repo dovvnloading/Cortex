@@ -36,12 +36,14 @@ from cortex_backend.services.chat import (
 from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, ollama_keep_alive
 from cortex_backend.services.code_feedback import format_execution_observation
 from cortex_backend.services.code_prompt import should_offer_code_execution
+from cortex_backend.services.generation import HISTORY_MESSAGE_FIELDS
 from cortex_backend.core.settings import (
     CortexSettings,
     GENERATION_OVERRIDE_FIELDS,
     GenerationOptionsOverride,
 )
 from cortex_backend.repositories.chats import (
+    ChatNotFound,
     ChatRepositoryError,
 )
 from cortex_backend.repositories.settings import (
@@ -484,28 +486,42 @@ async def _start_generation_job(
                     )
                 prepared_revision = admission_revision
                 return {"user_message_id": None}
-            # The one full read of a new turn: the model needs the transcript
-            # as history, so it is taken here rather than by the generation
-            # service afterwards. It is read before the user turn is written,
-            # and that write is guarded by the revision it was read at.
-            current_chat = deps.chats.get_chat(thread_id)
-            existing = list(current_chat.get("messages", ())) if current_chat else []
-            if (chat_revision(current_chat) if current_chat else 0) != admission_revision:
+            # The one transcript read of a new turn: the model needs it as
+            # history, so it is taken here rather than by the generation
+            # service afterwards -- and only the fields history is built from,
+            # not the reasoning, sources and stats kept on every reply.
+            existing_messages = deps.chats.get_messages(
+                thread_id, columns=HISTORY_MESSAGE_FIELDS
+            )
+            if existing_messages is None and admission_revision != 0:
+                # Admitted against a chat that has since been deleted.
                 raise ChatDomainError(
                     "This chat changed. Reload it before generating again.",
                     code="stale_revision",
                 )
-            user_message_id = deps.chats.add_message(
-                thread_id,
-                "user",
-                payload.user_input,
-                attachments=[
-                    attachment.model_dump(mode="json")
-                    for attachment in attachment_refs
-                ],
-                thread_title="New Chat" if current_chat is None else None,
-                expected_revision=admission_revision,
-            )
+            existing = existing_messages or []
+            try:
+                # Guarded by the revision the chat was admitted at: a write
+                # that landed since, including one between that check and the
+                # read above, fails this append instead of being answered
+                # around. So the history read above is the chat as admitted.
+                user_message_id = deps.chats.add_message(
+                    thread_id,
+                    "user",
+                    payload.user_input,
+                    attachments=[
+                        attachment.model_dump(mode="json")
+                        for attachment in attachment_refs
+                    ],
+                    thread_title="New Chat" if existing_messages is None else None,
+                    expected_revision=admission_revision,
+                )
+            except ChatNotFound as exc:
+                # An empty chat (revision 0) deleted since it was admitted.
+                raise ChatDomainError(
+                    "This chat changed. Reload it before generating again.",
+                    code="stale_revision",
+                ) from exc
             # Only the revision is needed here, so read the overview
             # rather than every message of what may be a long thread.
             overview = deps.chats.get_chat_overview(thread_id)

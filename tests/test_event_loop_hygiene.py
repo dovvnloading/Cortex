@@ -23,7 +23,7 @@ import pytest
 from cortex_backend.api import create_app
 from cortex_backend.repositories.chats import ChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.storage import DatabaseManager
-from cortex_backend.services.generation import GenerationService
+from cortex_backend.services.generation import HISTORY_MESSAGE_FIELDS, GenerationService
 from cortex_backend.testing import (
     DurableFakeCoordinator,
     build_demo_dependencies,
@@ -149,10 +149,47 @@ def test_a_new_turn_reads_the_transcript_once_and_off_the_loop() -> None:
             client, headers, request_id="hygiene-new-2", thread_id=thread_id, user_input="again"
         )
 
-    assert first_turn["chats.get_chat"] == 1, first_turn
-    assert probe.calls["chats.get_chat"] == 1, probe.calls
+    # One transcript read per turn, and a partial one: the full read decodes
+    # the reasoning, sources and stats of every reply, none of which history
+    # uses.
+    assert first_turn["chats.get_chat"] == 0, first_turn
+    assert probe.calls["chats.get_chat"] == 0, probe.calls
+    assert first_turn["chats.get_messages"] == 1, first_turn
+    assert probe.calls["chats.get_messages"] == 1, probe.calls
     assert first_turn_history_loads == [] and probe.history_loads == []
     assert first_turn_on_loop == [] and probe.on_loop == []
+
+
+class _ColumnsSeen:
+    """Note the fields each partial transcript read asked for."""
+
+    def __init__(self, inner: ChatRepository) -> None:
+        self.inner = inner
+        self.columns: list[tuple[str, ...]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def get_messages(self, thread_id: str, *, columns: Sequence[str]) -> Any:
+        self.columns.append(tuple(columns))
+        return self.inner.get_messages(thread_id, columns=columns)
+
+
+def test_a_new_turn_reads_only_the_fields_its_history_is_built_from(tmp_path: Path) -> None:
+    seen = _ColumnsSeen(
+        LegacyDatabaseChatRepository(DatabaseManager(db_path=str(tmp_path / "chats.sqlite")))
+    )
+    app, probe = _probed_app(chats=seen)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        first = _send(client, headers, request_id="fields-1", user_input="one")
+        probe.reset()
+        _send(client, headers, request_id="fields-2", thread_id=first["thread_id"], user_input="two")
+
+    assert seen.columns[-1] == HISTORY_MESSAGE_FIELDS
+    assert not {"thoughts", "sources", "stats"} & set(seen.columns[-1])
+    # And the history is complete with them: the earlier exchange arrives whole.
+    assert _roles(probe.engine_histories[0]) == [("user", "one"), ("assistant", "Echo: one")]
 
 
 def test_a_regeneration_reads_the_transcript_once_and_off_the_loop() -> None:
@@ -261,6 +298,11 @@ def test_existence_checks_do_not_read_the_transcript() -> None:
             f"/api/v1/chats/{thread_id}", json={"title": "Renamed"}, headers=headers
         )
         rename_reads = probe.calls["chats.get_chat"]
+        rename_existence_checks = {
+            name: count
+            for name, count in probe.calls.items()
+            if name in {"chats.chat_exists", "chats.get_chat_overview", "chats.get_messages"}
+        }
 
         probe.reset()
         filed = client.patch(
@@ -279,8 +321,46 @@ def test_existence_checks_do_not_read_the_transcript() -> None:
     # The response of a rename is the chat itself, so that one read is the point
     # of the call; the existence check before it must not add another.
     assert rename_reads == 1
+    assert rename_existence_checks == {"chats.chat_exists": 1}
     assert file_reads == 0
     assert list_reads == 0
+
+
+def test_a_fork_checks_its_message_without_reading_the_whole_transcript() -> None:
+    app, probe = _probed_app()
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        accepted = _send(client, headers, request_id="hygiene-fork", user_input="hello")
+        thread_id = accepted["thread_id"]
+        messages = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()["messages"]
+
+        probe.reset()
+        forked = client.post(
+            f"/api/v1/chats/{thread_id}/forks",
+            json={"message_id": messages[0]["id"]},
+            headers=headers,
+        )
+        fork_reads = Counter(probe.calls)
+
+        missing = client.post(
+            f"/api/v1/chats/{thread_id}/forks",
+            json={"message_id": "no-such-message"},
+            headers=headers,
+        )
+        unknown_chat = client.post(
+            "/api/v1/chats/no-such-chat/forks",
+            json={"message_id": messages[0]["id"]},
+            headers=headers,
+        )
+
+    assert forked.status_code == 201, forked.text
+    assert [message["content"] for message in forked.json()["messages"]] == ["hello"]
+    # The one full read left is of the new fork, which is the response.
+    assert fork_reads["chats.get_chat"] == 1, fork_reads
+    assert fork_reads["chats.get_messages"] == 1, fork_reads
+    assert missing.status_code == 404
+    assert unknown_chat.status_code == 404
+    assert unknown_chat.json()["detail"] == "Chat not found."
 
 
 def _history_after(setup: Callable[[TestClient, dict[str, str]], str], **turn: Any) -> list[tuple[str, str]]:
