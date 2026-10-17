@@ -95,15 +95,18 @@ type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
  *
  * Storing the secret is a side effect, so it happens in the same effect that
  * scrubs the URL -- see below for why an initialiser must stay pure.
+ *
+ * Both are read from the fragment only, which is the one place the launcher
+ * puts them: a fragment is never sent to a server, so it cannot reach a
+ * request line, a proxy or a log. A credential in the query string is not
+ * used (it is still scrubbed from the address bar, below).
  */
 function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
-  const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
   return {
-    bootstrapToken: search.get("bootstrap") || hash.get("bootstrap") || "",
-    handoffSecret:
-      search.get("handoff") || hash.get("handoff") || readPersistedHandoffSecret(),
+    bootstrapToken: hash.get("bootstrap") || "",
+    handoffSecret: hash.get("handoff") || readPersistedHandoffSecret(),
   };
 }
 

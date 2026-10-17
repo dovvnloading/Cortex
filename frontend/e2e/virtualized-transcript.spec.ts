@@ -38,7 +38,7 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
 
-  await page.goto(`/chat/${threadId}?bootstrap=launcher-token`);
+  await page.goto(`/chat/${threadId}#bootstrap=launcher-token`);
 
   // The virtualized container is in play, not the plain scrollable transcript.
   await expect(page.locator(".transcript-virtual")).toBeVisible();
