@@ -16,6 +16,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from cortex_backend.core.win_paths import system32
+
 
 WEBVIEW2_CLIENT_ID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 WEBVIEW2_BOOTSTRAPPER = "MicrosoftEdgeWebview2Setup.exe"
@@ -113,7 +115,8 @@ def _verify_microsoft_signature(bootstrapper: Path) -> None:
     try:
         result = subprocess.run(
             [
-                "powershell.exe",
+                # Windows' own PowerShell, not whichever comes first on PATH.
+                system32("powershell.exe"),
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy",

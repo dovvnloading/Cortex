@@ -16,6 +16,7 @@ from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from cortex_backend.core.win_jobs import JobObjectError, KillOnCloseJob
+from cortex_backend.core.win_paths import system32
 
 
 DEV_SERVER_ID_HEADER = "X-Cortex-Dev-Server"
@@ -201,7 +202,7 @@ class ChildProcessSupervisor:
             return
         if os.name == "nt":
             subprocess.run(
-                ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                [system32("taskkill.exe"), "/PID", str(self.process.pid), "/T", "/F"],
                 capture_output=True,
                 check=False,
             )

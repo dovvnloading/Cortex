@@ -28,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 import main as launcher_main
 from cortex_backend.api import create_app
 from cortex_backend.core import paths as paths_module
+from cortex_backend.core import win_paths as win_paths_module
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.testing import build_demo_dependencies
 from cortex_backend.launcher import frontend as frontend_module
@@ -1878,6 +1879,12 @@ def test_webview2_signature_check_uses_noninteractive_powershell(
     bootstrapper = tmp_path / "MicrosoftEdgeWebview2Setup.exe"
     bootstrapper.write_bytes(b"signed")
     calls: list[tuple[list[str], dict[str, object]]] = []
+    # Windows' own PowerShell runs the check, not whichever is first on PATH.
+    system = tmp_path / "System32"
+    powershell = system / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    powershell.parent.mkdir(parents=True)
+    powershell.write_bytes(b"")
+    monkeypatch.setattr(win_paths_module, "system_directory", lambda: system)
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -1887,7 +1894,7 @@ def test_webview2_signature_check_uses_noninteractive_powershell(
 
     runtime_module._verify_microsoft_signature(bootstrapper)
 
-    assert calls[0][0][0] == "powershell.exe"
+    assert calls[0][0][0] == str(powershell)
     assert "-NoProfile" in calls[0][0]
     assert "-NonInteractive" in calls[0][0]
     assert "-Command" in calls[0][0]
