@@ -11,7 +11,7 @@ migration path DatabaseManager offers, not what this module is.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -83,6 +83,42 @@ def _as_utc_iso(value: object) -> object:
     if parsed.tzinfo is not None:
         return value
     return parsed.replace(tzinfo=timezone.utc).isoformat()
+
+
+# Every field load_chat returns for a message, and the column that holds it.
+# ``stats`` is the one stored under another name. load_messages accepts only
+# these names: they are written into its SELECT, so nothing else may reach it.
+_MESSAGE_FIELD_COLUMNS: dict[str, str] = {
+    "id": "id",
+    "role": "role",
+    "content": "content",
+    "sources": "sources",
+    "thoughts": "thoughts",
+    "attachments": "attachments",
+    "stats": "generation_stats_json",
+    "original_content": "original_content",
+    "timestamp": "timestamp",
+}
+
+
+def _message_select_list(fields: Sequence[str]) -> str:
+    """The SELECT list for ``fields``, each column named as load_chat names its field."""
+    return ", ".join(
+        column if column == name else f"{column} AS {name}"
+        for name, column in ((name, _MESSAGE_FIELD_COLUMNS[name]) for name in fields)
+    )
+
+
+def _decode_message_row(message: dict) -> dict:
+    """Decode the stored JSON and timestamp fields a message row carries, as load_chat does."""
+    if "timestamp" in message:
+        message["timestamp"] = _as_utc_iso(message["timestamp"])
+    for name in ("sources", "attachments"):
+        if message.get(name):
+            message[name] = json.loads(message[name])
+    if "stats" in message:
+        message["stats"] = json.loads(message["stats"]) if message["stats"] else None
+    return message
 
 
 class PersistenceError(RuntimeError):
@@ -1541,23 +1577,13 @@ class DatabaseManager:
                 chat_data['revision'] = int(chat_data['revision'])
                 
                 cursor.execute(
-                    "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp FROM messages "
+                    f"SELECT {_message_select_list(tuple(_MESSAGE_FIELD_COLUMNS))} FROM messages "
                     "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
                     (thread_id,)
                 )
-                messages = []
-                for msg_row in cursor.fetchall():
-                    msg_dict = dict(msg_row)
-                    msg_dict['timestamp'] = _as_utc_iso(msg_dict.get('timestamp'))
-                    if msg_dict.get('sources'):
-                        msg_dict['sources'] = json.loads(msg_dict['sources'])
-                    if msg_dict.get('attachments'):
-                        msg_dict['attachments'] = json.loads(msg_dict['attachments'])
-                    stats_json = msg_dict.pop('generation_stats_json', None)
-                    msg_dict['stats'] = json.loads(stats_json) if stats_json else None
-                    messages.append(msg_dict)
-                
-                chat_data['messages'] = messages
+                chat_data['messages'] = [
+                    _decode_message_row(dict(msg_row)) for msg_row in cursor.fetchall()
+                ]
                 return chat_data
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1569,6 +1595,72 @@ class DatabaseManager:
             raise PersistenceError(
                 f"Stored data for chat {thread_id} is invalid.",
                 operation="load_chat",
+                cause=exc,
+            ) from exc
+
+    def load_messages(
+        self,
+        thread_id: str,
+        *,
+        columns: Sequence[str] = tuple(_MESSAGE_FIELD_COLUMNS),
+    ) -> list[dict] | None:
+        """A chat's messages with only the fields named in ``columns``, or None when there is no such chat.
+
+        load_chat reads every column of every message and JSON-decodes three of
+        them. A caller that wants the conversation as model history needs five
+        fields; the rest -- the reasoning a thinking model leaves on every
+        reply, often longer than the reply itself, the sources, the stats --
+        were copied out of SQLite and decoded only to be dropped. Fields left
+        out here are not selected at all.
+
+        Fields are named as load_chat names them (``stats``, not its column) and
+        decoded the same way, and the messages come in the same order. A name
+        outside that set is a ValueError: the names are written into the
+        statement, so nothing else is ever passed to SQL.
+        """
+        fields = tuple(dict.fromkeys(columns))
+        unknown = [name for name in fields if name not in _MESSAGE_FIELD_COLUMNS]
+        if not fields or unknown:
+            raise ValueError("columns must name one or more message fields")
+        try:
+            with self.connect() as conn:
+                # One read transaction, so the chat cannot vanish between the
+                # check that it exists and the read of its rows.
+                conn.execute("BEGIN")
+                if conn.execute(
+                    "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone() is None:
+                    return None
+                rows = conn.execute(
+                    f"SELECT {_message_select_list(fields)} FROM messages "
+                    "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
+                    (thread_id,),
+                ).fetchall()
+            return [_decode_message_row(dict(row)) for row in rows]
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to load messages for chat {thread_id}.",
+                operation="load_messages",
+                cause=exc,
+            ) from exc
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise PersistenceError(
+                f"Stored data for chat {thread_id} is invalid.",
+                operation="load_messages",
+                cause=exc,
+            ) from exc
+
+    def chat_exists(self, thread_id: str) -> bool:
+        """Whether a chat with this id exists, without reading anything of it."""
+        try:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone() is not None
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"Failed to look up chat {thread_id}.",
+                operation="chat_exists",
                 cause=exc,
             ) from exc
 

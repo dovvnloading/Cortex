@@ -33,6 +33,7 @@ from cortex_backend.repositories.chats import (
     ChatRevisionConflict,
     InMemoryChatRepository,
     LegacyDatabaseChatRepository,
+    MESSAGE_FIELDS,
     MessageNotFound,
 )
 from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
@@ -152,6 +153,135 @@ def test_the_overview_agrees_with_the_full_chat(repository: ChatRepository) -> N
     for field in ("id", "title", "timestamp", "group_id"):
         assert overview[field] == chat[field], field
     assert overview["group_id"] == "g1"
+
+
+# -- partial reads ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [MESSAGE_FIELDS, ("id",), ("role", "content"), ("id", "role", "content", "original_content", "attachments"),
+     ("thoughts", "stats", "sources"), ("timestamp",)],
+    ids=["every-field", "ids", "words", "history", "reply-metadata", "times"],
+)
+def test_a_partial_read_is_the_full_chat_with_only_the_fields_asked_for(
+    repository: ChatRepository, columns: tuple[str, ...]
+) -> None:
+    _a_turn(repository)
+    repository.add_message("t1", "user", "follow-up")
+
+    partial = repository.get_messages("t1", columns=columns)
+
+    assert partial == [
+        {name: message[name] for name in columns} for message in _messages(repository, "t1")
+    ]
+
+
+def test_a_partial_read_keeps_reasoning_off_user_rows(repository: ChatRepository) -> None:
+    repository.create_chat("t1", "Topic")
+    repository.add_message("t1", "user", "question", thoughts="must not persist")
+    repository.add_message("t1", "assistant", "answer", thoughts="kept")
+
+    assert repository.get_messages("t1", columns=("role", "thoughts")) == [
+        {"role": "user", "thoughts": None},
+        {"role": "assistant", "thoughts": "kept"},
+    ]
+
+
+def test_reasoning_an_older_build_left_on_a_user_row_is_dropped_by_a_partial_read_too(
+    tmp_path: Path,
+) -> None:
+    """get_chat drops it, so a read of the same field without the role must as well."""
+    database = DatabaseManager(
+        db_path=str(tmp_path / "chats.sqlite"),
+        legacy_history_dir=str(tmp_path / "legacy"),
+    )
+    repository = LegacyDatabaseChatRepository(database)
+    _a_turn(repository)
+    with database.connect() as connection:
+        connection.execute("UPDATE messages SET thoughts = 'legacy' WHERE role = 'user'")
+
+    assert repository.get_messages("t1", columns=("thoughts",)) == [
+        {"thoughts": None},
+        {"thoughts": "reasoning"},
+    ]
+
+
+def test_a_partial_read_of_an_unknown_chat_is_none_and_of_an_empty_one_is_empty(
+    repository: ChatRepository,
+) -> None:
+    repository.create_chat("empty", "Nothing yet")
+
+    assert repository.get_messages("missing", columns=("id",)) is None
+    assert repository.get_messages("empty", columns=("id",)) == []
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [(), ("generation_stats_json",), ("id", "content FROM messages; --"), ("revision",)],
+    ids=["nothing", "a-column-name", "sql", "a-chat-field"],
+)
+def test_a_partial_read_refuses_anything_but_message_fields(
+    repository: ChatRepository, columns: tuple[str, ...]
+) -> None:
+    _a_turn(repository)
+
+    with pytest.raises(ValueError):
+        repository.get_messages("t1", columns=columns)
+
+
+def test_a_partial_read_returns_copies(repository: ChatRepository) -> None:
+    _a_turn(repository)
+
+    (user, _assistant) = repository.get_messages("t1", columns=("attachments",)) or []
+    user["attachments"].append({"filename": "injected"})
+
+    assert repository.get_messages("t1", columns=("attachments",)) == [
+        {"attachments": [ATTACHMENT]},
+        {"attachments": None},
+    ]
+
+
+def test_existence_follows_create_and_delete(repository: ChatRepository) -> None:
+    assert repository.chat_exists("t1") is False
+
+    repository.create_chat("t1", "Topic")
+    assert repository.chat_exists("t1") is True
+
+    repository.delete_chat("t1")
+    assert repository.chat_exists("t1") is False
+
+
+def test_both_stores_accept_the_same_message_fields() -> None:
+    assert tuple(storage._MESSAGE_FIELD_COLUMNS) == MESSAGE_FIELDS
+
+
+def test_the_sqlite_partial_read_never_decodes_a_field_it_was_not_asked_for(tmp_path: Path) -> None:
+    """What a partial read is for: the columns left out are not even decoded.
+
+    A reply whose stored stats are not valid JSON makes the full read fail, so
+    a read that still succeeds without the field cannot have decoded it.
+    """
+    database = DatabaseManager(
+        db_path=str(tmp_path / "chats.sqlite"),
+        legacy_history_dir=str(tmp_path / "legacy"),
+    )
+    repository = LegacyDatabaseChatRepository(database)
+    _a_turn(repository)
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE messages SET generation_stats_json = ?, sources = ? WHERE role = 'assistant'",
+            ("{not json", "[not json"),
+        )
+
+    with pytest.raises(PersistenceError):
+        repository.get_chat("t1")
+    assert repository.get_messages("t1", columns=("role", "content")) == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    with pytest.raises(PersistenceError):
+        repository.get_messages("t1", columns=("content", "stats"))
 
 
 # -- listing order ---------------------------------------------------------------

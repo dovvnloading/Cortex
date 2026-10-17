@@ -126,7 +126,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            if deps.chats.get_chat_overview(thread_id) is None:
+            if not deps.chats.chat_exists(thread_id):
                 raise HTTPException(status_code=404, detail="Chat not found.")
             deps.chats.rename_chat(thread_id, payload.title.strip())
             chat = deps.chats.get_chat(thread_id)
@@ -268,10 +268,14 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            source = deps.chats.get_chat(thread_id)
-            if source is None:
+            # Only the ids are needed to check the message is in this chat.
+            # The fork itself copies every field, but reading and decoding the
+            # whole transcript here as well was a second full read for one
+            # membership test.
+            source_ids = deps.chats.get_messages(thread_id, columns=("id",))
+            if source_ids is None:
                 raise HTTPException(status_code=404, detail="Chat not found.")
-            message_position(source, payload.message_id)
+            message_position({"messages": source_ids}, payload.message_id)
             new_thread_id = uuid4().hex
             deps.chats.fork_chat(thread_id, payload.message_id, new_thread_id)
             forked = deps.chats.get_chat(new_thread_id)
