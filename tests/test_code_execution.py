@@ -740,7 +740,10 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     assert coordinator._supervisor_thread is not old_thread
 
 
-def test_foreign_live_job_lease_does_not_mark_code_as_failed(coordinator) -> None:
+def test_foreign_live_job_lease_does_not_mark_code_as_failed(
+    coordinator, frozen_clock
+) -> None:
+    # Freezing repository time keeps the foreign lease live on slow CI runners.
     repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
