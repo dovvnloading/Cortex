@@ -743,8 +743,7 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
 def test_foreign_live_job_lease_does_not_mark_code_as_failed(
     coordinator, frozen_clock
 ) -> None:
-    # Keep the foreign lease live even when CI stalls between approval and claim.
-    # The repository clock is frozen until this test explicitly releases it.
+    # Freezing repository time keeps the foreign lease live on slow CI runners.
     repository = coordinator.repository
     owner = repository.installation_principal_id
     job = coordinator.start_code(
