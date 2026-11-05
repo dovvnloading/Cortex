@@ -1049,8 +1049,8 @@ def _code_execution_observations(
                 value=result.get("value"),
                 truncated=bool(result.get("truncated")),
                 duration_ms=(
-                    int(result["duration_ms"])
-                    if isinstance(result.get("duration_ms"), (int, float))
+                    result["duration_ms"]
+                    if type(result.get("duration_ms")) is int and result["duration_ms"] >= 0
                     else None
                 ),
                 error=job.error,
