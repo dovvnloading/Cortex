@@ -237,7 +237,11 @@ def _capture_files(root: Path) -> tuple[Mapping[str, WorkspaceFile], int, int, i
         for entry in sorted(items, key=lambda item: (item.name.casefold(), item.name)):
             scanned += 1
             try:
-                info = entry.stat(follow_symlinks=False)
+                # Windows/Python 3.11 DirEntry.stat() reports zero for st_dev
+                # and st_ino, while fstat() on the opened handle has real file
+                # identity. Use a fresh lstat() so the identity comparison
+                # below has matching data and ordinary files are not skipped.
+                info = Path(entry.path).lstat()
             except OSError:
                 skipped += 1
                 continue
