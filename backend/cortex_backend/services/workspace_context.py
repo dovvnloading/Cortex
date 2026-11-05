@@ -74,6 +74,10 @@ class WorkspaceAccessError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class WorkspaceFile:
     path: str
+    # Exact UTF-8 content including CRLF, final newline and optional BOM.
+    # Patch preview must not silently rewrite line endings or otherwise
+    # change bytes outside the replacement the model proposed.
+    text: str
     lines: tuple[str, ...]
     sha256: str
 
@@ -250,13 +254,14 @@ def _capture_files(root: Path) -> tuple[Mapping[str, WorkspaceFile], int, int, i
                 truncated = True
                 break
             try:
-                content = data.decode("utf-8-sig")
+                content = data.decode("utf-8")
             except UnicodeError:
                 skipped += 1
                 continue
             relative = Path(entry.path).relative_to(root).as_posix()
             files[relative] = WorkspaceFile(
                 path=relative,
+                text=content,
                 lines=tuple(content.splitlines()),
                 sha256=hashlib.sha256(data).hexdigest(),
             )
