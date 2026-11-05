@@ -206,3 +206,16 @@ def test_permission_errors_never_echo_a_private_host_path(tmp_path) -> None:
         )
     assert private not in str(error.value)
     assert error.value.code == "invalid_root"
+
+
+def test_control_char_or_bidi_filename_cannot_forge_a_diff_path(tmp_path) -> None:
+    root = _repo(tmp_path)
+    weird = ("fake\n+++ b/forged.py", "other\u202ename.py", "bad:name.py", "slash\\evil.py")
+    for index, name in enumerate(weird):
+        try:
+            (root / name).write_text(f"secret marker {index}\n", encoding="utf-8")
+        except (OSError, ValueError):
+            continue  # Some names are not expressible on Windows.
+    snapshot = _capture(ws.WorkspaceSnapshotRegistry(), root)
+    assert not any("fake" in path or "other" in path or "bad:name" in path or "slash" in path for path in snapshot.files)
+    assert all("secret marker" not in "\n".join(file.lines) for file in snapshot.files.values())
