@@ -1615,6 +1615,58 @@ class SynthesisAgent:
             count,
         )
 
+    def _bounded_repair_context(
+        self,
+        prompt_messages: list[dict],
+        latest_answer: str,
+        rejection: CodeProposalRejection,
+        api_options: Mapping[str, Any],
+        cancellation_event: Event | None,
+    ) -> list[dict] | None:
+        """Construct a repair turn that cannot silently evict its own contract.
+
+        Replaying the entire visible answer is unnecessary: the model needs its
+        rejected request and the specific validator feedback. An answer can be
+        much larger than its request, and adding it to an already-full context
+        used to overflow before even the first repair began.
+
+        Old answered exchanges go first, never the system contract or the live
+        user task. If those fixed parts still do not fit, recovery is skipped:
+        the original answer and rejection remain available to the user.
+        """
+        blocks, _ = extract_tag_blocks(latest_answer, "code_execution_request")
+        if len(blocks) == 1:
+            block = blocks[0]
+            excerpt = "<code_execution_request>" + block.payload
+            if block.closed:
+                excerpt += "</code_execution_request>"
+        else:
+            # An incomplete or multiply-tagged response is still useful
+            # evidence, but cannot grow without bound in a retry.
+            excerpt = head_tail_truncate(latest_answer, MAX_CODE_SOURCE_BYTES + 2048)[0]
+
+        system_count = int(bool(prompt_messages) and prompt_messages[0].get("role") == "system")
+        system = [dict(item) for item in prompt_messages[:system_count]]
+        history = [dict(item) for item in prompt_messages[system_count:-1]]
+        current_user = dict(prompt_messages[-1])
+        correction = {"role": "user", "content": repair_prompt(rejection)}
+        previous = {"role": "assistant", "content": excerpt}
+        num_ctx = int(api_options.get("num_ctx", DEFAULT_NUM_CTX))
+        limit = max(256, num_ctx) - self.output_token_reservation(num_ctx)
+
+        while True:
+            candidate = [*system, *history, current_user, previous, correction]
+            estimate = self.estimate_prompt_tokens(candidate, self.gen_model)
+            if estimate <= limit:
+                measured = self._exact_prompt_tokens(
+                    candidate, api_options, cancellation_event
+                )
+                if measured is None or measured + self._image_tokens(candidate) <= limit:
+                    return candidate
+            if not history:
+                return None
+            history = drop_oldest_exchange(history)
+
     def _repair_code_proposal(
         self,
         prompt_messages: list[dict],
@@ -1640,7 +1692,6 @@ class SynthesisAgent:
 
         if not self.code_execution_eligible:
             return
-        messages = list(prompt_messages)
         latest_answer = first_answer
         for _ in range(MAX_PROPOSAL_REPAIR_ATTEMPTS):
             rejection = self.last_code_rejection
@@ -1649,11 +1700,12 @@ class SynthesisAgent:
             if cancellation_event is not None and cancellation_event.is_set():
                 return
 
-            messages = [
-                *messages,
-                {"role": "assistant", "content": latest_answer},
-                {"role": "user", "content": repair_prompt(rejection)},
-            ]
+            messages = self._bounded_repair_context(
+                prompt_messages, latest_answer, rejection, api_options, cancellation_event
+            )
+            if messages is None:
+                logging.info("Skipping optional code repair: correction prompt exceeds context budget.")
+                return
             reply = self._request_repaired_envelope(messages, api_options, cancellation_event)
             if reply is None:
                 return
