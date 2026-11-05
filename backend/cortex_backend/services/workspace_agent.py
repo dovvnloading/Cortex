@@ -255,6 +255,9 @@ class WorkspaceReadAgent:
         invalid_replies = 0
         omitted = 0
         paths: set[str] = set()
+        # A search match is not a read. Require a successful, explicit read of
+        # the baseline and its digest before accepting an edit proposal.
+        read_paths: set[str] = set()
         staged: WorkspacePatchPreview | None = None
         try:
             stager = (
@@ -357,6 +360,7 @@ class WorkspaceReadAgent:
                         owner=owner, snapshot_id=snapshot_id, **payload
                     )
                     paths.add(excerpt.path)
+                    read_paths.add(excerpt.path)
                     result = {
                         "path": excerpt.path,
                         "start_line": excerpt.start_line,
@@ -370,16 +374,19 @@ class WorkspaceReadAgent:
                     # Parsing a valid replacement only happens when the user
                     # enabled preview mode. The host never writes to disk.
                     assert stager is not None
-                    staged = stager.replace(**payload)
-                    paths.update(staged.paths)
-                    result = {
-                        "staged": True,
-                        "applied_to_checkout": False,
-                        "replacements": staged.replacements,
-                        "paths": staged.paths,
-                        "diff_excerpt": staged.diff[:1800],
-                        "diff_truncated": len(staged.diff) > 1800,
-                    }
+                    if payload["path"] not in read_paths:
+                        result = {"error": "read_required"}
+                    else:
+                        staged = stager.replace(**payload)
+                        paths.update(staged.paths)
+                        result = {
+                            "staged": True,
+                            "applied_to_checkout": False,
+                            "replacements": staged.replacements,
+                            "paths": staged.paths,
+                            "diff_excerpt": staged.diff[:1800],
+                            "diff_truncated": len(staged.diff) > 1800,
+                        }
             except WorkspacePatchError as exc:
                 result = {"error": exc.code}
             except WorkspaceAccessError as exc:
