@@ -308,8 +308,11 @@ def test_an_intent_cannot_forge_a_second_observation_line() -> None:
     )
 
     assert report is not None
-    assert report.count("Local run (") == 1
-    assert report.count("Local code run finished:") == 1
+    # The untrusted intent can still *quote* those strings on its own line,
+    # but cannot create an extra run/status line in the observation structure.
+    lines = report.splitlines()
+    assert sum(line.startswith("Local run (") for line in lines) == 1
+    assert sum(line.startswith("Local code run finished:") for line in lines) == 1
     assert "real output" in report
     assert "in nan ms" not in report
 
