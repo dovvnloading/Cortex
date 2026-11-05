@@ -186,3 +186,13 @@ def test_discard_forgets_the_proposal_without_changing_source(tmp_path):
     assert stager.preview().diff == ""
     assert stager.preview().replacements == 0
     assert "return 42" in file.read_text(encoding="utf-8")
+
+
+def test_unpaired_surrogate_in_model_replacement_is_a_typed_rejection(tmp_path):
+    registry, snapshot, file = _context(tmp_path)
+    stager = _stager(registry, snapshot)
+    with pytest.raises(patch.WorkspacePatchError) as error:
+        _replace(stager, snapshot, after="return '\ud800'")
+    assert error.value.code == "invalid_replacement"
+    assert stager.preview().diff == ""
+    assert b"return 42" in file.read_bytes()
