@@ -48,6 +48,10 @@ def _parser() -> argparse.ArgumentParser:
     modes.add_argument("--question", metavar="TEXT", help="Ask a local Ollama model using read-only tools")
     parser.add_argument("--model", help="Installed local Ollama model tag (required for --question)")
     parser.add_argument(
+        "--preview-patch", action="store_true",
+        help="Allow the local model to stage review-only in-memory replacements (never write to checkout)",
+    )
+    parser.add_argument(
         "--context", type=int, default=DEFAULT_NUM_CTX,
         help="Context window for local model calls",
     )
@@ -76,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--allow-read-only is required before any source is inspected")
     if args.question and not args.model:
         parser.error("--model is required for --question")
+    if args.preview_patch and args.question is None:
+        parser.error("--preview-patch only applies to --question")
     if args.context < 1024 or args.context > 65536:
         parser.error("--context must be between 1024 and 65536")
 
@@ -119,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                 chat_client=_local_client(),
                 model=args.model,
                 options={"num_ctx": args.context},
+                allow_patch_preview=args.preview_patch,
             )
             response = agent.run(
                 owner=owner,
@@ -131,7 +138,18 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(result.get("answer") or f"Read-only research did not complete ({result['status']}).")
-        return 0 if not args.question or result["status"] == "completed" else 1
+            if args.preview_patch:
+                diff = result.get("preview_diff")
+                if diff:
+                    print("\n--- Proposed patch (NOT applied to checkout) ---\n")
+                    print(diff)
+                else:
+                    print("No patch was staged.", file=sys.stderr)
+        succeeded = not args.question or (
+            result["status"] == "completed"
+            and (not args.preview_patch or bool(result.get("preview_diff")))
+        )
+        return 0 if succeeded else 1
     except WorkspaceAccessError as exc:
         # Paths and source contents are never carried into error text.
         print(f"Workspace operation unavailable ({exc.code}).", file=sys.stderr)
