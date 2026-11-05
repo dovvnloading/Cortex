@@ -54,8 +54,23 @@ _DIRECT_EXECUTION_RE = re.compile(
 _NEGATED_EXECUTION_RE = re.compile(
     r"\b(?:do not|don't|never|without)\s+(?:run|execute|launch|invoke|start)\b"
 )
+# Educational questions are about what the *user is asking us to do*, not
+# about the mere presence of a word. An imperative "run tests and explain the
+# failures" must still get the execution contract. Conversely "how do I run
+# these tests?" is a question about the procedure, not authorization to run.
 _EXPLANATION_ONLY_RE = re.compile(
-    r"\b(?:explain|describe|what is|what does|how do i|how can i|why does)\b"
+    r"^(?:(?:please|could you|can you|would you|i want you to|i need you to)\s+)*"
+    r"(?:explain|describe|what is|what does|how do i|how can i|why does|"
+    r"how should i|how would i|tell me how to|show me how to)\b"
+)
+# An explicitly sequenced action overrides an educational lead-in. The normal
+# concrete-target checks below still decide eligibility: "explain X, then
+# run through the reasoning" must never look like "run the tests".
+_SEQUENCED_ACTION_RE = re.compile(
+    r"\b(?:and(?:\s+then)?|then|after that|afterwards?|followed by)\s+"
+    r"(?:please\s+)?(?:run|execute|launch|invoke|start|use|calculate|compute|"
+    r"process|transform|automate|analyze|analyse|inspect|fetch|download|parse|"
+    r"convert|rename|read|write|modify|edit|create|generate|save|print|output)\b"
 )
 
 
@@ -74,10 +89,13 @@ def should_offer_code_execution(query: str) -> bool:
         return False
     if _NEGATED_EXECUTION_RE.search(normalized):
         return False
-    # This has to come before the positive branches. It used to sit after all
-    # of them, where every path had already returned, so it could never change
-    # the outcome: "Explain how to read a CSV file in Python" was admitted.
-    if _EXPLANATION_ONLY_RE.search(normalized):
+    # Educational *lead-ins* exclude execution unless the user separately
+    # gives an imperative action after "then"/"and"/etc. A later "explain"
+    # does not veto an initial explicit command ("run the tests and explain").
+    # The positive checks below still require a concrete target or code task.
+    if _EXPLANATION_ONLY_RE.search(normalized) and not _SEQUENCED_ACTION_RE.search(
+        normalized
+    ):
         return False
 
     direct_execution = bool(
