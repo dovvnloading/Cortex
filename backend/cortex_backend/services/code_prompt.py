@@ -67,7 +67,7 @@ _EXPLANATION_ONLY_RE = re.compile(
 # concrete-target checks below still decide eligibility: "explain X, then
 # run through the reasoning" must never look like "run the tests".
 _SEQUENCED_ACTION_RE = re.compile(
-    r"\b(?:and(?:\s+then)?|then|after that|afterwards?|followed by)\s+"
+    r"(?:\b(?:and(?:\s+then)?|then|after that|afterwards?|followed by)\s+|[;,.]\s+)"
     r"(?:please\s+)?(?:run|execute|launch|invoke|start|use|calculate|compute|"
     r"process|transform|automate|analyze|analyse|inspect|fetch|download|parse|"
     r"convert|rename|read|write|modify|edit|create|generate|save|print|output)\b"
