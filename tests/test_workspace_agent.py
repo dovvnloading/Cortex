@@ -277,3 +277,91 @@ def test_large_tool_observation_keeps_valid_json_and_explicit_truncation():
     assert parsed["truncated"] is True
     assert "excerpt" in parsed
     assert len(raw) <= agent_module.MAX_TOOL_OBSERVATION_CHARS
+
+
+def test_preview_mode_stages_a_model_edit_only_in_memory(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+    file = tmp_path / "repo" / "solution.py"
+    original = file.read_bytes()
+    digest = snapshot.files["solution.py"].sha256
+    client = ScriptedClient(
+        {"action": "read", "path": "solution.py"},
+        {
+            "action": "replace",
+            "path": "solution.py",
+            "expected_sha256": digest,
+            "old_text": "return 42",
+            "new_text": "return 43",
+        },
+        {"action": "final", "answer": "Proposed replacing the return value; the checkout is unchanged."},
+    )
+    result = agent_module.WorkspaceReadAgent(
+        registry=registry,
+        chat_client=client,
+        model="local-chat",
+        options={"num_ctx": 8192},
+        allow_patch_preview=True,
+    ).run(
+        owner="session-owner",
+        snapshot_id=snapshot.snapshot_id,
+        question="Propose changing the return value to 43.",
+    )
+
+    assert result.status == "completed"
+    assert result.tool_calls == 2
+    assert result.model_calls == 3
+    assert result.preview_replacements == 1
+    assert result.preview_paths == ("solution.py",)
+    assert result.applied_to_checkout is False
+    assert result.preview_diff is not None
+    assert "-    return 42" in result.preview_diff
+    assert "+    return 43" in result.preview_diff
+    assert file.read_bytes() == original
+    assert '"staged": true' in client.calls[-1]["messages"][-1]["content"].lower()
+    assert '"applied_to_checkout": false' in client.calls[-1]["messages"][-1]["content"].lower()
+    assert "OPTIONAL PATCH PREVIEW" in client.calls[0]["messages"][0]["content"]
+
+
+def test_default_read_mode_cannot_accept_edit_proposals(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+    digest = snapshot.files["solution.py"].sha256
+    client = ScriptedClient(
+        {
+            "action": "replace",
+            "path": "solution.py",
+            "expected_sha256": digest,
+            "old_text": "return 42",
+            "new_text": "return 43",
+        },
+        {"action": "final", "answer": "No edits were made."},
+    )
+    result = _run(registry, snapshot, client)
+    assert result.status == "completed"
+    assert result.tool_calls == 0
+    assert result.preview_diff is None
+    assert result.applied_to_checkout is False
+    assert "return 42" in (tmp_path / "repo" / "solution.py").read_text()
+
+
+def test_wrong_hash_rejected_in_preview_mode_and_proposal_not_claimed(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+    client = ScriptedClient(
+        {
+            "action": "replace",
+            "path": "solution.py",
+            "expected_sha256": "0" * 64,
+            "old_text": "return 42",
+            "new_text": "return 43",
+        },
+        {"action": "final", "answer": "The patch was rejected."},
+    )
+    result = agent_module.WorkspaceReadAgent(
+        registry=registry, chat_client=client, model="local-chat",
+        options={"num_ctx": 8192}, allow_patch_preview=True,
+    ).run(
+        owner="session-owner", snapshot_id=snapshot.snapshot_id, question="Propose a change."
+    )
+    assert result.status == "completed"
+    assert result.preview_diff is None
+    assert result.preview_replacements == 0
+    assert "stale_source" in client.calls[-1]["messages"][-1]["content"]
