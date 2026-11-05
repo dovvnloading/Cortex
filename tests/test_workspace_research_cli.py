@@ -87,3 +87,75 @@ def test_question_requires_an_explicit_local_model(tmp_path):
             "--root", str(tmp_path), "--allow-read-only", "--question", "Analyze this.",
         ])
     assert error.value.code == 2
+
+
+def test_cli_patch_preview_returns_a_diff_without_modifying_checkout(tmp_path, monkeypatch, capsys):
+    from hashlib import sha256
+
+    root = _project(tmp_path)
+    file = root / "api.py"
+    original = file.read_bytes()
+    digest = sha256(original).hexdigest()
+
+    class PatchScript:
+        def __init__(self):
+            self.step = 0
+
+        def chat(self, *, model, messages, options, **kwargs):
+            self.step += 1
+            if self.step == 1:
+                action = {"action": "read", "path": "api.py"}
+            elif self.step == 2:
+                action = {
+                    "action": "replace",
+                    "path": "api.py",
+                    "expected_sha256": digest,
+                    "old_text": "return 42",
+                    "new_text": "return 43",
+                }
+            else:
+                action = {"action": "final", "answer": "Proposed changing the return value."}
+            return {"message": {"content": json.dumps(action)}}
+
+    monkeypatch.setattr(workspace_research, "_local_client", PatchScript)
+    assert workspace_research.main([
+        "--root", str(root), "--allow-read-only", "--model", "fake-local",
+        "--question", "Propose changing return 42 to 43.", "--preview-patch",
+        "--json",
+    ]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "completed"
+    assert data["preview_replacements"] == 1
+    assert data["applied_to_checkout"] is False
+    assert "return 43" in data["preview_diff"]
+    assert file.read_bytes() == original
+
+
+def test_cli_patch_preview_is_an_explicit_question_only_option(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        workspace_research.main([
+            "--root", str(tmp_path),
+            "--allow-read-only",
+            "--list",
+            "--preview-patch",
+        ])
+    assert error.value.code == 2
+
+
+def test_cli_does_not_report_success_if_no_patch_was_staged_in_preview_mode(
+    tmp_path, monkeypatch, capsys,
+):
+    root = _project(tmp_path)
+
+    class NoChanges:
+        def chat(self, *, model, messages, options, **kwargs):
+            return {"message": {"content": '{"action":"final","answer":"Nothing to change."}'}}
+
+    monkeypatch.setattr(workspace_research, "_local_client", NoChanges)
+    assert workspace_research.main([
+        "--root", str(root), "--allow-read-only", "--model", "fake-local",
+        "--question", "Propose a code change.", "--preview-patch",
+    ]) == 1
+    printed = capsys.readouterr()
+    assert "No patch was staged" in printed.err
+    assert (root / "api.py").read_text(encoding="utf-8").endswith("return 42\n")
