@@ -323,6 +323,22 @@ execution: approval-gated code in a restricted Python subset, safe computation,
 and fixed-function image recipes. Nothing here enables arbitrary workspace or
 shell authority.
 
+The backend also ships a deterministic trajectory evaluator that exercises
+code-proposal admission, validation, bounded repair, cancellation, contextual
+history, untrusted tool output, and feedback handoff against **scripted**
+model replies. It performs no model download or code execution, and is part of
+the local quick gate and Windows CI:
+
+```powershell
+python tools/harness_eval.py --check --json
+python tools/harness_eval.py --case approved-result-feedback --json
+```
+
+Its pass rate measures harness contracts, **not** real-model task success or
+state-of-the-art coding performance. A future live-model benchmark must report
+model identifiers, hardware, corpus, tokens, time, and approval outcomes
+separately; never report the deterministic score as an agent benchmark.
+
 To run them automatically before every push:
 
 ```powershell
