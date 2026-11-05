@@ -132,7 +132,11 @@ transcript.](.github/images/workspace-light.png)
   shortcuts reference. The sidebar also supports searching chats by title.
 - **Durable context.** Threads live in SQLite; permanent memories use atomic
   local JSON storage. Existing JSON chat history and Windows settings are read
-  additively during migration without rewriting the legacy source.
+  additively during migration without rewriting the legacy source. For a managed
+  llama.cpp model, Cortex remeasures shortened prompts with the runtime's tokenizer
+  before generation instead of trusting a character-ratio estimate. If even the
+  history-free prompt is too large, it refuses the turn rather than knowingly
+  sending text the runtime would silently truncate.
 - **Exact arithmetic.** An explicit calculation ("what is 17.5% of 2,340?") is
   checked by a deterministic local calculator before the model answers, so the
   figure in the reply is computed rather than guessed.
