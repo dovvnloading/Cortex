@@ -147,7 +147,13 @@ class WorkspacePatchStager:
                 # which occurrence to edit is not acceptable for a coding agent.
                 raise WorkspacePatchError("match_not_unique")
             after = before.replace(old_text, new_text, 1)
-            if len(after.encode("utf-8")) > MAX_WORKSPACE_FILE_BYTES:
+            try:
+                encoded = after.encode("utf-8")
+            except UnicodeError:
+                # A lone surrogate from malformed model JSON is not UTF-8.
+                # Keep it out of the stage and report a stable rejection.
+                raise WorkspacePatchError("invalid_replacement") from None
+            if len(encoded) > MAX_WORKSPACE_FILE_BYTES:
                 raise WorkspacePatchError("file_too_large")
 
             candidate = {**self._staged, relative: after}
