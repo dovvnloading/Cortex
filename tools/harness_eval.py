@@ -22,7 +22,8 @@ import json
 from pathlib import Path
 import sys
 from threading import Event
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # An invocation as a script has tools/, not backend/, on sys.path.
 _BACKEND = Path(__file__).resolve().parents[1] / "backend"
