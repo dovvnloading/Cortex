@@ -326,6 +326,7 @@ def test_real_local_tasks_still_receive_the_contract(query: str) -> None:
         "What does this code do? Then run it.",
         "Can you run the Python code and explain each step?",
         "Explain which tests failed, run the tests.",
+        "Explain how to download the file; then download the CSV.",
     ),
 )
 def test_mixed_explanation_and_explicit_execution_is_admitted(query: str) -> None:
@@ -353,6 +354,8 @@ def test_mixed_explanation_and_explicit_execution_is_admitted(query: str) -> Non
         "Please do not run the tests; explain the failures.",
         "Never execute this script, just describe it.",
         "How can I download the CSV and parse it?",
+        "Explain how to download the CSV and parse the JSON.",
+        "Describe how to run the tests and inspect the logs.",
     ),
 )
 def test_explanations_and_explicit_prohibitions_do_not_admit_execution(query: str) -> None:
