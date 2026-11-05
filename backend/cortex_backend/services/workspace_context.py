@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import secrets
 import stat
 from threading import RLock
+import unicodedata
 import time
 from types import MappingProxyType
 
@@ -149,8 +150,19 @@ def _safe_root(value: str) -> Path:
 
 
 def _permitted_name(name: str, *, directory: bool) -> bool:
+    # A filename is later emitted as an exact identifier, a model citation or
+    # a unified-diff header. Reject invisible/bidi controls and separators
+    # rather than letting one file forge an additional path or diff hunk.
+    if (
+        not name or len(name) > 120 or name != name.strip()
+        or any(
+            char in ":\\\\/" or unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in name
+        )
+    ):
+        return False
     lowered = name.casefold()
-    if not name or name.startswith(".") and name not in {".github", ".githooks", ".gitignore"}:
+    if name.startswith(".") and name not in {".github", ".githooks", ".gitignore"}:
         return False
     if directory:
         return lowered not in _EXCLUDED_DIRECTORIES
