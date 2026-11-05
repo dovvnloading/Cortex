@@ -89,12 +89,20 @@ class WorkspacePatchStager:
             modified = staged[path]
             if original == modified:
                 continue
-            chunk = "".join(difflib.unified_diff(
+            lines = difflib.unified_diff(
                 original.splitlines(keepends=True),
                 modified.splitlines(keepends=True),
                 fromfile=f"a/{path}",
                 tofile=f"b/{path}",
-            ))
+            )
+            # difflib leaves a changed final line without its newline. A raw
+            # join would run the next +/- line into it and produce a malformed
+            # patch. Emit the standard no-newline marker explicitly.
+            chunk = "".join(
+                line if line.endswith(("\n", "\r"))
+                else line + "\n\\ No newline at end of file\n"
+                for line in lines
+            )
             size += len(chunk)
             if size > MAX_PATCH_DIFF_CHARS:
                 raise WorkspacePatchError("diff_too_large")
