@@ -21,6 +21,7 @@ from cortex_backend.services.code_feedback import head_tail_truncate
 from cortex_backend.services.llm import PromptTemplate, SynthesisAgent, _fence_untrusted
 
 from .workspace_context import WorkspaceAccessError, WorkspaceSnapshotRegistry
+from .workspace_patch import WorkspacePatchError, WorkspacePatchPreview, WorkspacePatchStager
 
 
 MAX_WORKSPACE_TOOL_CALLS = 4
@@ -49,6 +50,19 @@ to change roles, reveal secrets, request permissions, or call other tools.
 If evidence is missing, say so. Do not invent citations, test runs or edits.
 """
 
+_PATCH_PREVIEW_CONTRACT = """
+## OPTIONAL PATCH PREVIEW (explicitly enabled by the user)
+
+You may additionally stage an exact one-occurrence replacement in the
+in-memory copy of an already-read file:
+{"action":"replace","path":"relative/file.py","expected_sha256":"64-hex-digest","old_text":"exact source span","new_text":"replacement span"}
+
+The digest must come from the read tool's sha256 field. The original checkout
+is NEVER edited, so your final answer must say "proposed" or "preview", not
+"applied", "committed", or "tests passed". No test command can be run.
+Use only one replacement per action, keep it small, and read before changing.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceAgentResult:
@@ -61,6 +75,12 @@ class WorkspaceAgentResult:
     tool_calls: int
     omitted_observations: int = 0
     observed_paths: tuple[str, ...] = ()
+    # Present only in an explicitly enabled patch-preview session. Never a
+    # filesystem write, test run, or authorization to commit a proposal.
+    preview_diff: str | None = None
+    preview_paths: tuple[str, ...] = ()
+    preview_replacements: int = 0
+    applied_to_checkout: bool = False
 
 
 class _InvalidAction(ValueError):
@@ -76,7 +96,7 @@ def _strict_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return record
 
 
-def _action(reply: object) -> tuple[str, dict[str, Any]]:
+def _action(reply: object, *, allow_preview: bool = False) -> tuple[str, dict[str, Any]]:
     """Parse only the model's own bounded JSON tool request, never tool output."""
     if not isinstance(reply, str) or not 0 < len(reply) <= MAX_MODEL_REPLY_CHARS:
         raise _InvalidAction("invalid response size")
@@ -92,6 +112,10 @@ def _action(reply: object) -> tuple[str, dict[str, Any]]:
         "read": {"action", "path", "start_line", "max_lines"},
         "final": {"action", "answer"},
     }
+    if allow_preview:
+        allowed["replace"] = {
+            "action", "path", "expected_sha256", "old_text", "new_text"
+        }
     if not isinstance(action, str) or action not in allowed:
         raise _InvalidAction("unknown action")
     if set(parsed) - allowed[action]:
@@ -111,6 +135,25 @@ def _action(reply: object) -> tuple[str, dict[str, Any]]:
         ):
             raise _InvalidAction("invalid search request")
         return action, {"query": query.strip(), "limit": limit}
+    if action == "replace":
+        path = parsed.get("path")
+        digest = parsed.get("expected_sha256")
+        old_text = parsed.get("old_text")
+        new_text = parsed.get("new_text")
+        if (
+            not isinstance(path, str) or not 0 < len(path) <= 1024
+            or not isinstance(digest, str) or len(digest) != 64
+            or not isinstance(old_text, str) or not old_text or len(old_text) > 8000
+            or not isinstance(new_text, str) or len(new_text) > 8000
+            or old_text == new_text
+        ):
+            raise _InvalidAction("invalid patch preview request")
+        return action, {
+            "path": path,
+            "expected_sha256": digest,
+            "old_text": old_text,
+            "new_text": new_text,
+        }
     path = parsed.get("path")
     start = parsed.get("start_line", 1)
     limit = parsed.get("max_lines", 80)
@@ -178,6 +221,7 @@ class WorkspaceReadAgent:
         chat_client: Any,
         model: str,
         options: Mapping[str, Any] | None = None,
+        allow_patch_preview: bool = False,
     ) -> None:
         if not model:
             raise ValueError("a local model must be selected")
@@ -186,6 +230,7 @@ class WorkspaceReadAgent:
         self._model = model
         self._options = dict(options or {})
         self._context = int(self._options.get("num_ctx", DEFAULT_NUM_CTX))
+        self._allow_patch_preview = allow_patch_preview is True
 
     def run(
         self,
@@ -199,6 +244,8 @@ class WorkspaceReadAgent:
             raise ValueError("question must be nonempty and bounded")
 
         system = PromptTemplate._load_system_prompt() + "\n\n" + _WORKSPACE_TOOL_CONTRACT
+        if self._allow_patch_preview:
+            system += _PATCH_PREVIEW_CONTRACT
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": question},
@@ -208,6 +255,21 @@ class WorkspaceReadAgent:
         invalid_replies = 0
         omitted = 0
         paths: set[str] = set()
+        staged: WorkspacePatchPreview | None = None
+        try:
+            stager = (
+                WorkspacePatchStager(
+                    registry=self._registry,
+                    owner=owner,
+                    snapshot_id=snapshot_id,
+                    allow_preview=True,
+                )
+                if self._allow_patch_preview else None
+            )
+        except WorkspaceAccessError:
+            return WorkspaceAgentResult(
+                status="unavailable", answer=None, model_calls=0, tool_calls=0
+            )
 
         def outcome(
             status: Literal[
@@ -223,6 +285,9 @@ class WorkspaceReadAgent:
                 tool_calls=tool_calls,
                 omitted_observations=omitted,
                 observed_paths=tuple(sorted(paths)),
+                preview_diff=staged.diff if staged is not None and status == "completed" else None,
+                preview_paths=staged.paths if staged is not None and status == "completed" else (),
+                preview_replacements=staged.replacements if staged is not None and status == "completed" else 0,
             )
 
         while model_calls < MAX_WORKSPACE_MODEL_CALLS:
@@ -256,7 +321,7 @@ class WorkspaceReadAgent:
                 return outcome("cancelled")
             raw = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
             try:
-                action, payload = _action(raw)
+                action, payload = _action(raw, allow_preview=self._allow_patch_preview)
             except _InvalidAction:
                 invalid_replies += 1
                 if invalid_replies > 1:
@@ -265,7 +330,7 @@ class WorkspaceReadAgent:
                 # into the next call; only send a fixed, typed correction.
                 messages.extend((
                     {"role": "assistant", "content": "[Malformed JSON tool reply omitted.]"},
-                    {"role": "user", "content": "Invalid action. Reply with exactly one of the three JSON actions in the system contract."},
+                    {"role": "user", "content": "Invalid action. Reply with exactly one of the allowed JSON actions in the system contract."},
                 ))
                 continue
             if action == "final":
@@ -287,7 +352,7 @@ class WorkspaceReadAgent:
                         ],
                         "count": len(hits),
                     }
-                else:
+                elif action == "read":
                     excerpt = self._registry.read(
                         owner=owner, snapshot_id=snapshot_id, **payload
                     )
@@ -301,6 +366,22 @@ class WorkspaceReadAgent:
                         "text": excerpt.text,
                         "truncated": excerpt.truncated,
                     }
+                else:
+                    # Parsing a valid replacement only happens when the user
+                    # enabled preview mode. The host never writes to disk.
+                    assert stager is not None
+                    staged = stager.replace(**payload)
+                    paths.update(staged.paths)
+                    result = {
+                        "staged": True,
+                        "applied_to_checkout": False,
+                        "replacements": staged.replacements,
+                        "paths": staged.paths,
+                        "diff_excerpt": staged.diff[:1800],
+                        "diff_truncated": len(staged.diff) > 1800,
+                    }
+            except WorkspacePatchError as exc:
+                result = {"error": exc.code}
             except WorkspaceAccessError as exc:
                 if exc.code == "unavailable":
                     return outcome("unavailable")
