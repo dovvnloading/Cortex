@@ -17,7 +17,7 @@ from threading import Event
 from typing import Any, Literal
 
 from cortex_backend.core.settings import DEFAULT_NUM_CTX
-from cortex_backend.services import token_budget
+from cortex_backend.services.code_feedback import head_tail_truncate
 from cortex_backend.services.llm import PromptTemplate, SynthesisAgent, _fence_untrusted
 
 from .workspace_context import WorkspaceAccessError, WorkspaceSnapshotRegistry
@@ -136,7 +136,7 @@ def _fit_messages(
             return None, dropped
         del compact[2:4]
         dropped += 1
-        if dropped == 1:
+        if dropped == 1 and note not in compact[1]["content"]:
             compact[1]["content"] += note
     return compact, dropped
 
@@ -145,9 +145,21 @@ def _observation(action: str, payload: dict[str, Any]) -> str:
     """Bounded, fenced lower-trust data; never interpolate as system policy."""
     body = json.dumps({"kind": action, **payload}, ensure_ascii=True, sort_keys=True)
     if len(body) > MAX_TOOL_OBSERVATION_CHARS:
-        body = body[: MAX_TOOL_OBSERVATION_CHARS - 100] + (
-            ' [Cortex: result shortened; read a smaller range to see more.]'
-        )
+        # Do not cut the serialized JSON in half: a small model then sees
+        # broken syntax rather than an honest statement that output was
+        # shortened. Re-encode a valid object with a bounded head/tail excerpt.
+        budget = MAX_TOOL_OBSERVATION_CHARS - 200
+        while True:
+            excerpt, _ = head_tail_truncate(body, budget, head_ratio=0.25)
+            compact = json.dumps(
+                {"kind": action, "truncated": True, "excerpt": excerpt},
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            if len(compact) <= MAX_TOOL_OBSERVATION_CHARS:
+                body = compact
+                break
+            budget = max(0, budget // 2)
     return (
         "## WORKSPACE TOOL OBSERVATION\n"
         + _fence_untrusted(
@@ -221,7 +233,7 @@ class WorkspaceReadAgent:
             except WorkspaceAccessError:
                 return outcome("unavailable")
             fitted, dropped = _fit_messages(messages, self._model, self._context)
-            omitted = max(omitted, dropped)
+            omitted += dropped
             if fitted is None:
                 return outcome("context_overflow")
             messages = fitted
