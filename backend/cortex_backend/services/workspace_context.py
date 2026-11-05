@@ -177,8 +177,22 @@ def _read_regular_source(path: Path, info: os.stat_result) -> bytes | None:
             or _is_reparse(before)
         ):
             return None
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            data = handle.read(MAX_WORKSPACE_FILE_BYTES + 1)
+        # Read the already-verified descriptor directly. On Windows the
+        # stdio wrapper around an existing CRT descriptor can have different
+        # lifetime/close behavior from the underlying file handle; there is
+        # no reason to involve a second buffering layer for a 256 KiB file.
+        chunks: list[bytes] = []
+        received = 0
+        while received <= MAX_WORKSPACE_FILE_BYTES:
+            block = os.read(
+                descriptor,
+                min(65536, MAX_WORKSPACE_FILE_BYTES + 1 - received),
+            )
+            if not block:
+                break
+            chunks.append(block)
+            received += len(block)
+        data = b"".join(chunks)
         after = os.fstat(descriptor)
         if (
             len(data) > MAX_WORKSPACE_FILE_BYTES
