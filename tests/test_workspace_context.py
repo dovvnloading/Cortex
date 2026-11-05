@@ -140,7 +140,8 @@ def test_snapshot_is_immutable_after_original_file_is_changed_or_deleted(tmp_pat
 def test_snapshot_is_owner_scoped_revocable_and_expires(tmp_path) -> None:
     ticks = [100.0]
     registry = ws.WorkspaceSnapshotRegistry(clock=lambda: ticks[0])
-    snapshot = _capture(registry, _repo(tmp_path), owner="owner-one")
+    root = _repo(tmp_path)
+    snapshot = _capture(registry, root, owner="owner-one")
     with pytest.raises(ws.WorkspaceAccessError) as error:
         registry.read(owner="owner-two", snapshot_id=snapshot.snapshot_id, path="README.md")
     assert error.value.code == "unavailable"
@@ -149,7 +150,7 @@ def test_snapshot_is_owner_scoped_revocable_and_expires(tmp_path) -> None:
         registry.get(owner="owner-one", snapshot_id=snapshot.snapshot_id)
     assert error.value.code == "unavailable"
 
-    snapshot = _capture(registry, _repo(tmp_path), owner="owner-one")
+    snapshot = _capture(registry, root, owner="owner-one")
     registry.revoke(owner="owner-one", snapshot_id=snapshot.snapshot_id)
     with pytest.raises(ws.WorkspaceAccessError):
         registry.get(owner="owner-one", snapshot_id=snapshot.snapshot_id)
@@ -206,3 +207,12 @@ def test_permission_errors_never_echo_a_private_host_path(tmp_path) -> None:
         )
     assert private not in str(error.value)
     assert error.value.code == "invalid_root"
+
+
+def test_verified_regular_descriptor_reader_works_without_staging(tmp_path) -> None:
+    """A Windows file id / CRT descriptor mismatch must not discard all source."""
+    file = tmp_path / "file.py"
+    content = b"def demo():\r\n    return 42\r\n"
+    file.write_bytes(content)
+    info = file.stat()
+    assert ws._read_regular_source(file, info) == content
