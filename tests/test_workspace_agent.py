@@ -346,6 +346,7 @@ def test_default_read_mode_cannot_accept_edit_proposals(tmp_path):
 def test_wrong_hash_rejected_in_preview_mode_and_proposal_not_claimed(tmp_path):
     registry, snapshot = _snapshot(tmp_path)
     client = ScriptedClient(
+        {"action": "read", "path": "solution.py"},
         {
             "action": "replace",
             "path": "solution.py",
@@ -365,3 +366,31 @@ def test_wrong_hash_rejected_in_preview_mode_and_proposal_not_claimed(tmp_path):
     assert result.preview_diff is None
     assert result.preview_replacements == 0
     assert "stale_source" in client.calls[-1]["messages"][-1]["content"]
+
+
+def test_preview_requires_an_actual_read_even_when_model_knows_digest(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+    file = tmp_path / "repo" / "solution.py"
+    before = file.read_bytes()
+    client = ScriptedClient(
+        {
+            "action": "replace",
+            "path": "solution.py",
+            "expected_sha256": snapshot.files["solution.py"].sha256,
+            "old_text": "return 42",
+            "new_text": "return 43",
+        },
+        {"action": "final", "answer": "I cannot propose that change without reading the source."},
+    )
+    result = agent_module.WorkspaceReadAgent(
+        registry=registry, chat_client=client,
+        model="local-chat", options={"num_ctx": 8192},
+        allow_patch_preview=True,
+    ).run(
+        owner="session-owner", snapshot_id=snapshot.snapshot_id, question="Propose a change."
+    )
+    assert result.status == "completed"
+    assert result.preview_diff is None
+    assert result.preview_replacements == 0
+    assert "read_required" in client.calls[-1]["messages"][-1]["content"]
+    assert file.read_bytes() == before
