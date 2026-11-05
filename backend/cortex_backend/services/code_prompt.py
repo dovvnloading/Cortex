@@ -63,6 +63,21 @@ _EXPLANATION_ONLY_RE = re.compile(
     r"(?:explain|describe|what is|what does|how do i|how can i|why does|"
     r"how should i|how would i|tell me how to|show me how to)\b"
 )
+# A "how do I ... and ..." question is still one educational question:
+# conjunction does not turn its second infinitive into authorization to act.
+# Require an explicit next step ("then", "and then", or a new sentence) when
+# the lead-in asks for a procedure or an explanation of a procedure.
+_PROCEDURAL_QUESTION_RE = re.compile(
+    r"^(?:(?:please|could you|can you|would you|i want you to|i need you to)\s+)*"
+    r"(?:how do i|how can i|how should i|how would i|what is|what does|why does|"
+    r"(?:explain|describe|tell me|show me)\s+how(?:\s+to)?\b)"
+)
+_CLEAR_NEXT_ACTION_RE = re.compile(
+    r"(?:\b(?:and\s+then|then|after that|afterwards?|followed by)\s+|[;.]\s+)"
+    r"(?:please\s+)?(?:run|execute|launch|invoke|start|use|calculate|compute|"
+    r"process|transform|automate|analyze|analyse|inspect|fetch|download|parse|"
+    r"convert|rename|read|write|modify|edit|create|generate|save|print|output)\b"
+)
 # An explicitly sequenced action overrides an educational lead-in. The normal
 # concrete-target checks below still decide eligibility: "explain X, then
 # run through the reasoning" must never look like "run the tests".
@@ -93,10 +108,14 @@ def should_offer_code_execution(query: str) -> bool:
     # gives an imperative action after "then"/"and"/etc. A later "explain"
     # does not veto an initial explicit command ("run the tests and explain").
     # The positive checks below still require a concrete target or code task.
-    if _EXPLANATION_ONLY_RE.search(normalized) and not _SEQUENCED_ACTION_RE.search(
-        normalized
-    ):
-        return False
+    if _EXPLANATION_ONLY_RE.search(normalized):
+        # A second verb can be part of "how to download and parse a CSV", not
+        # a separate instruction. Only an explicit next step overrides that.
+        if _PROCEDURAL_QUESTION_RE.search(normalized):
+            if not _CLEAR_NEXT_ACTION_RE.search(normalized):
+                return False
+        elif not _SEQUENCED_ACTION_RE.search(normalized):
+            return False
 
     direct_execution = bool(
         _REFERENTIAL_EXECUTION_RE.search(normalized)
