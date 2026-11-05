@@ -1366,6 +1366,8 @@ class SynthesisAgent:
                     turns=history_messages,
                     build_prompt=build_prompt,
                     num_ctx=num_ctx,
+                    api_options=api_options,
+                    cancellation_event=cancellation_event,
                 )
                 if dropped:
                     # Counts only: nothing of the conversation goes in a log.
@@ -1443,6 +1445,10 @@ class SynthesisAgent:
             )
             return self._format_response(final_answer), thoughts, commands, stats
 
+        except ModelOperationError:
+            # A measured context refusal is a deliberate harness decision,
+            # not a runtime transport error to classify as a model failure.
+            raise
         except Exception as e:
             user_message, error_details = _generation_failure_message(e)
             logging.error(
@@ -1500,50 +1506,85 @@ class SynthesisAgent:
         turns: Sequence[Mapping[str, Any]] | None,
         build_prompt: Callable[[Sequence[Mapping[str, Any]] | None], list[dict]],
         num_ctx: int,
+        api_options: Mapping[str, Any],
+        cancellation_event: Event | None,
     ) -> tuple[list[dict], int]:
-        """Calibrate on the measured count, then drop history until the prompt fits it.
+        """Keep the largest *measured* suffix of history that fits the window.
 
-        History selection sizes candidates from an estimate, and this is the one
-        place the real number is known before anything is sent. It always feeds
-        the ratio registry, so the turn after this one starts from the truth.
-        If the prompt still does not fit the window -- an estimate that was too
-        low by more than the safety margin -- whole exchanges are dropped from
-        the old end, as history selection does, and the count is returned so
-        the caller can say so. Nothing else is trimmed: attachments and memories
-        were already sized against the same estimate, and a prompt with no
-        history left that still does not fit is reported by the runtime.
+        A single tokenizer reading for the original prompt cannot certify a
+        shorter, different prompt. Scaling a character estimate by that reading
+        fails when older exchanges are cheap prose and the newest ones are
+        token-dense code or CJK. The runtime then silently drops the beginning
+        of the context, including potentially the system instructions.
+
+        A fit that is already measured is free; only overflow takes this path.
+        Binary search checks successive suffixes using the model's own
+        tokenizer, preserving complete, contiguous exchanges and the omission
+        note. It costs O(log exchanges) additional counts, never model calls.
+        Even the history-free prompt is checked: if fixed content or documents
+        alone exceed the window, refuse instead of sending known overflow.
         """
-        texts = [str(message.get("content", "")) for message in prompt_messages]
-        # Learning keeps its guards: a reading that no tokenizer could produce is
-        # not turned into a ratio.
-        token_budget.TOKEN_RATIOS.observe(self.gen_model, texts, measured_tokens)
-        limit = max(256, num_ctx) - self.output_token_reservation(num_ctx)
-        # The tokenizer counts the text of the prompt and nothing else, so the
-        # images in it are added at the allowance: a prompt with a picture in it
-        # can pass on its text and still not fit.
-        image_tokens = self._image_tokens(prompt_messages)
-        total_tokens = measured_tokens + image_tokens
-        if total_tokens <= limit or not turns:
+        token_budget.TOKEN_RATIOS.observe(
+            self.gen_model,
+            [str(message.get("content", "")) for message in prompt_messages],
+            measured_tokens,
+        )
+        limit = max(256, int(num_ctx)) - self.output_token_reservation(num_ctx)
+        if measured_tokens + self._image_tokens(prompt_messages) <= limit:
             return prompt_messages, 0
-        # The count is exact, so it is believed however far the estimate was off.
-        # It used to be turned into a characters-per-token ratio for ordinary
-        # text and thrown away when that ratio looked implausible -- which is
-        # exactly what CJK and emoji on a byte-fallback vocabulary produce, so
-        # the prompts the estimate was worst for were sent whole and unannounced.
-        # What each shorter prompt would cost is still an estimate; it is scaled
-        # by how far off the estimate was for this one.
-        ratio = token_budget.TOKEN_RATIOS.chars_per_token(self.gen_model)
-        scale = measured_tokens / self._raw_prompt_tokens(prompt_messages, ratio)
-        remaining: list[dict[str, Any]] = [dict(turn) for turn in turns]
-        dropped = 0
-        while remaining and total_tokens > limit:
-            remaining = drop_oldest_exchange(remaining)
-            dropped += 1
-            prompt_messages = build_prompt(remaining)
-            total_tokens = token_budget.with_safety_margin(
-                math.ceil(scale * self._raw_prompt_tokens(prompt_messages, ratio)) + image_tokens
+
+        def cannot_fit() -> ModelOperationError:
+            return ModelOperationError(
+                prompt_too_long_message(num_ctx),
+                operation="generation",
+                error_details="prompt_too_long",
             )
-        return prompt_messages, dropped
+
+        # fit_history returns alternating answered turns. A manually supplied
+        # history may have fewer, but never treat that as a reason to send a
+        # prompt whose measured size is already over the limit.
+        exchanges = sum(1 for turn in (turns or ()) if turn.get("role") == "assistant")
+        if exchanges == 0:
+            raise cannot_fit()
+
+        measured_candidates: dict[int, tuple[list[dict], int]] = {}
+
+        def count_after(dropped: int) -> tuple[list[dict], int]:
+            cached = measured_candidates.get(dropped)
+            if cached is not None:
+                return cached
+            remaining = [dict(turn) for turn in (turns or ())]
+            for _ in range(dropped):
+                remaining = drop_oldest_exchange(remaining)
+            candidate = build_prompt(remaining)
+            count = self._exact_prompt_tokens(candidate, api_options, cancellation_event)
+            if count is None:
+                # We know the original prompt overflowed. A missing second
+                # reading must not turn an unverified guess into permission to
+                # send it, but ordinary turns without a tokenizer still work.
+                raise ModelOperationError(
+                    "Cortex could not verify that the shortened prompt fits the "
+                    "model's context window. Try again or raise the context size.",
+                    operation="generation",
+                    error_details="prompt_measurement_unavailable",
+                )
+            result = (candidate, count + self._image_tokens(candidate))
+            measured_candidates[dropped] = result
+            return result
+
+        # Check the minimum possible prompt first. It has no history to lose,
+        # and a failure here cannot be fixed by further context trimming.
+        if count_after(exchanges)[1] > limit:
+            raise cannot_fit()
+
+        low, high = 1, exchanges
+        while low < high:
+            middle = (low + high) // 2
+            if count_after(middle)[1] <= limit:
+                high = middle
+            else:
+                low = middle + 1
+        return count_after(low)[0], low
 
     def _learn_token_ratio(
         self,
