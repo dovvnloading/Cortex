@@ -196,3 +196,12 @@ def test_unpaired_surrogate_in_model_replacement_is_a_typed_rejection(tmp_path):
     assert error.value.code == "invalid_replacement"
     assert stager.preview().diff == ""
     assert b"return 42" in file.read_bytes()
+
+
+def test_unified_diff_marks_missing_final_newline_without_changing_file(tmp_path):
+    registry, snapshot, file = _context(tmp_path, source=b"answer = 42")
+    stager = _stager(registry, snapshot)
+    preview = _replace(stager, snapshot, before="answer = 42", after="answer = 43")
+    assert "-answer = 42\n\\ No newline at end of file\n" in preview.diff
+    assert "+answer = 43\n\\ No newline at end of file\n" in preview.diff
+    assert file.read_bytes() == b"answer = 42"
