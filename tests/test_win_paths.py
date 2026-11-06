@@ -44,15 +44,18 @@ def test_tools_resolve_to_absolute_paths_under_the_system_directory(
     )
 
 
-def test_a_tool_missing_from_the_system_directory_falls_back_to_its_bare_name(
+def test_a_missing_windows_system_tool_fails_without_searching_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(win_paths.sys, "platform", "win32")
     _system_directory(tmp_path, monkeypatch)
 
-    assert win_paths.system32("icacls.exe") == "icacls.exe"
+    with pytest.raises(OSError, match="Required Windows system tool"):
+        win_paths.system32("icacls.exe")
 
     monkeypatch.setattr(win_paths, "system_directory", lambda: None)
-    assert win_paths.system32("powershell.exe") == "powershell.exe"
+    with pytest.raises(OSError, match="Windows system directory"):
+        win_paths.system32("powershell.exe")
 
 
 def test_the_system_directory_is_asked_of_windows_before_the_environment(
@@ -65,13 +68,13 @@ def test_the_system_directory_is_asked_of_windows_before_the_environment(
 
     assert win_paths.system_directory() == api_answer
 
-    # Only when Windows does not answer does the variable count.
+    # Environment-controlled directories are never substituted for the OS.
     monkeypatch.setattr(win_paths, "_system_directory_from_api", lambda: None)
-    assert win_paths.system_directory() == tmp_path / "Planted" / "System32"
+    assert win_paths.system_directory() is None
 
     monkeypatch.delenv("SystemRoot")
     monkeypatch.setenv("windir", str(tmp_path / "Windir"))
-    assert win_paths.system_directory() == tmp_path / "Windir" / "System32"
+    assert win_paths.system_directory() is None
 
     monkeypatch.delenv("windir")
     assert win_paths.system_directory() is None

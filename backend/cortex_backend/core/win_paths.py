@@ -13,7 +13,6 @@ system directory instead.
 from __future__ import annotations
 
 import ctypes
-import os
 from pathlib import Path
 import sys
 
@@ -38,39 +37,35 @@ def _system_directory_from_api() -> Path | None:
 
 
 def system_directory() -> Path | None:
-    """The Windows system directory (normally ``C:\\Windows\\System32``).
+    """Resolve the Windows system directory from the OS, never environment variables.
 
-    Asked of Windows first, because ``%SystemRoot%`` is an environment variable
-    like ``PATH``; the variable (or ``%windir%``) is only the fallback. ``None``
-    off Windows, or when neither answers with an absolute path.
+    A modified SystemRoot/windir must not redirect executables used for
+    signature checks or private-folder permissions. If Windows does not
+    identify its system directory, callers fail closed rather than using PATH.
     """
     if sys.platform != "win32":
         return None
     directory = _system_directory_from_api()
-    if directory is not None and directory.is_absolute():
-        return directory
-    for variable in ("SystemRoot", "windir"):
-        root = os.environ.get(variable, "").strip()
-        if root and Path(root).is_absolute():
-            return Path(root) / "System32"
-    return None
+    return directory if directory is not None and directory.is_absolute() else None
 
 
 def system32(name: str) -> str:
-    """The absolute path of the Windows tool ``name`` (for example ``"icacls.exe"``).
+    """Return an absolute Windows system-tool path or fail without searching PATH.
 
-    PowerShell is found in its ``WindowsPowerShell\\v1.0`` folder. When the
-    absolute path does not exist (off Windows, or an unusual installation) the
-    bare ``name`` comes back, so the tool is still found the way it always was
-    rather than not at all.
+    Off Windows there is no system directory; only development/test callers
+    there retain the historical bare-name behavior.
     """
+    if name not in ("powershell.exe", "icacls.exe", "taskkill.exe"):
+        raise ValueError("Unknown Windows system tool.")
     directory = system_directory()
     if directory is None:
-        return name
+        if sys.platform != "win32":
+            return name
+        raise OSError("Windows system directory is unavailable.")
     candidate = directory.joinpath(*_SUBDIRECTORIES.get(name.lower(), ()), name)
     try:
         if candidate.is_file():
             return str(candidate)
     except OSError:
         pass
-    return name
+    raise OSError("Required Windows system tool is unavailable.")
