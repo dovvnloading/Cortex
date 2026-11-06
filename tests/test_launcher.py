@@ -2908,6 +2908,12 @@ class _LaunchFakes:
                 fakes.calls.append("ready")
             return True
 
+        # This is a fully synthetic launcher, not an ACL integration test.
+        # Isolate setup from the host runner's Windows file permissions; the
+        # actual icacls resolution and failure cases have dedicated tests.
+        monkeypatch.setattr(
+            paths_module, "secure_private_path", lambda path, *, directory: Path(path)
+        )
         monkeypatch.setattr(launcher_main, "InstanceLock", instance_class or FakeInstance)
         monkeypatch.setattr(launcher_main, "ensure_frontend", lambda *_a, **_k: tmp_path)
         monkeypatch.setattr(launcher_main, "build_app", lambda **_kwargs: app)
