@@ -7,6 +7,7 @@ other test module imports.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import sqlite3
 
@@ -33,6 +34,38 @@ def volume_without_write_ahead_logging(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def connect(*args, **kwargs):
         kwargs.setdefault("factory", NoWalConnection)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+
+def disk_full_when(monkeypatch: pytest.MonkeyPatch, matches: Callable[[str], bool]) -> None:
+    """Make every statement ``matches`` accepts fail as SQLite does on a full volume.
+
+    The error is the one SQLite raises for SQLITE_FULL, at the statement that
+    needed a new page, so whatever the caller had already done in the same
+    transaction is left for it to roll back -- which is the point of the tests
+    that use this.
+    """
+
+    def out_of_space() -> sqlite3.OperationalError:
+        return sqlite3.OperationalError("database or disk is full")
+
+    class FullDiskConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if matches(sql):
+                raise out_of_space()
+            return super().execute(sql, *args)
+
+        def executemany(self, sql, *args):
+            if matches(sql):
+                raise out_of_space()
+            return super().executemany(sql, *args)
+
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        kwargs.setdefault("factory", FullDiskConnection)
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", connect)

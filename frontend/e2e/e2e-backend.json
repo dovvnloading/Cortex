@@ -1,0 +1,5 @@
+{
+  "port": 8798,
+  "markerHeader": "X-Cortex-E2E-Backend",
+  "marker": "scripts/e2e_backend.py"
+}

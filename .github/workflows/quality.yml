@@ -210,6 +210,9 @@ jobs:
       - name: Run the artifact boundary review
         run: python tools/artifact_boundary_review.py --json --strict
 
+      - name: Check deterministic harness trajectories
+        run: python tools/harness_eval.py --check --json
+
   frontend:
     name: Frontend checks
     needs: changes

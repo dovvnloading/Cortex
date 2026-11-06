@@ -41,6 +41,24 @@ export function isThemePreference(value: unknown): value is ThemePreference {
   return value === "light" || value === "dark" || value === "system";
 }
 
+const THEME_CYCLE: readonly ThemePreference[] = ["system", "light", "dark"];
+
+/**
+ * The preference a "change theme" command moves to: system, then light, then
+ * dark, then back to system. "System" is a choice of its own, not a shorthand
+ * for dark, so a person who follows Windows is not silently pinned to dark by
+ * the first press.
+ */
+export function nextThemePreference(preference: ThemePreference): ThemePreference {
+  return THEME_CYCLE[(THEME_CYCLE.indexOf(preference) + 1) % THEME_CYCLE.length];
+}
+
+export const THEME_LABELS: Record<ThemePreference, string> = {
+  system: "System",
+  light: "Light",
+  dark: "Dark",
+};
+
 export function resolveTheme(preference: ThemePreference, systemPrefersDark: boolean): ResolvedTheme {
   if (preference === "system") return systemPrefersDark ? "dark" : "light";
   return preference;

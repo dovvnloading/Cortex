@@ -11,9 +11,11 @@ import pytest
 
 from cortex_backend.repositories import sqlite_backup
 from cortex_backend.repositories.sqlite_backup import (
+    REPLACE_ATTEMPTS,
     failure_detail,
     move_sidecars,
     put_sidecars_back,
+    replace_with_retry,
     snapshot_database,
 )
 
@@ -182,3 +184,68 @@ def test_put_sidecars_back_never_overwrites_a_file_at_the_original_name(tmp_path
     assert Path(f"{destination}-wal").read_bytes() == b"write-ahead log"
     # The other sidecar had no such conflict and still went back.
     assert Path(f"{database}-shm").read_bytes() == b"shared memory"
+
+
+# -- replace_with_retry --------------------------------------------------------
+
+
+def _refuse_replacing_until(monkeypatch: pytest.MonkeyPatch, *, refusals: int, error=PermissionError):
+    """Make os.replace fail ``refusals`` times, then work; record the waits between tries."""
+    real_replace = os.replace
+    calls: list[str] = []
+    waits: list[float] = []
+
+    def replace(source, destination, *args, **kwargs):
+        calls.append(str(destination))
+        if len(calls) <= refusals:
+            raise error(13, "The process cannot access the file because it is being used")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(time, "sleep", waits.append)
+    return calls, waits
+
+
+def test_a_sharing_violation_that_lifts_is_waited_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, destination = tmp_path / "new", tmp_path / "current"
+    source.write_bytes(b"new")
+    destination.write_bytes(b"current")
+    calls, waits = _refuse_replacing_until(monkeypatch, refusals=2)
+
+    replace_with_retry(source, destination)
+
+    assert destination.read_bytes() == b"new"
+    assert not source.exists()
+    assert len(calls) == 3
+    assert waits == [0.05, 0.1]  # doubling, and only between tries
+
+
+def test_a_sharing_violation_that_does_not_lift_is_raised_after_a_bounded_number_of_tries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = tmp_path / "new", tmp_path / "current"
+    source.write_bytes(b"new")
+    destination.write_bytes(b"current")
+    calls, waits = _refuse_replacing_until(monkeypatch, refusals=10_000)
+
+    with pytest.raises(PermissionError):
+        replace_with_retry(source, destination)
+
+    assert len(calls) == REPLACE_ATTEMPTS
+    assert len(waits) == REPLACE_ATTEMPTS - 1
+    assert sum(waits) < 1.0  # a lock that stays is reported promptly
+    # Nothing was moved: the file that was there is intact and so is the new one.
+    assert destination.read_bytes() == b"current"
+    assert source.read_bytes() == b"new"
+
+
+def test_an_error_other_than_a_sharing_violation_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, waits = _refuse_replacing_until(monkeypatch, refusals=10_000, error=FileNotFoundError)
+
+    with pytest.raises(FileNotFoundError):
+        replace_with_retry(tmp_path / "missing", tmp_path / "current")
+
+    assert len(calls) == 1
+    assert waits == []

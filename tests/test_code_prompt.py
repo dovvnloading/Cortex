@@ -314,3 +314,79 @@ def test_the_explanation_guard_is_reachable(query: str) -> None:
 )
 def test_real_local_tasks_still_receive_the_contract(query: str) -> None:
     assert should_offer_code_execution(query) is True
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Run the tests and explain the failures.",
+        "Please execute this Python code, then describe the output.",
+        "Explain this script, then run the tests.",
+        "Describe the error; execute the Python script and report what happened.",
+        "Explain the calculation and then use Python to compute the result.",
+        "What does this code do? Then run it.",
+        "Can you run the Python code and explain each step?",
+        "Explain which tests failed, run the tests.",
+        "Explain how to download the file; then download the CSV.",
+    ),
+)
+def test_mixed_explanation_and_explicit_execution_is_admitted(query: str) -> None:
+    """A request to both run and explain is not an explanation-only request.
+
+    Admission is still just a prompt gate: code runs only after validation and
+    explicit approval, never because this detector alone matched a verb.
+    """
+    assert should_offer_code_execution(query) is True
+    prompt = PromptTemplate.build_synthesis_prompt(query, "No history available.", [], False, None)
+    assert "LOCAL CODE EXECUTION" in prompt[0]["content"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Explain how to run the tests.",
+        "Please explain how to run this Python code and describe its output.",
+        "Can you describe how to execute a script and explain the risks?",
+        "What does the command 'run the tests' do?",
+        "How should I run the tests and interpret errors?",
+        "Tell me how to write a JSON file.",
+        "Show me how to execute Python code.",
+        "Explain this file, then run through the reasoning again.",
+        "Please do not run the tests; explain the failures.",
+        "Never execute this script, just describe it.",
+        "How can I download the CSV and parse it?",
+        "Explain how to download the CSV and parse the JSON.",
+        "Describe how to run the tests and inspect the logs.",
+    ),
+)
+def test_explanations_and_explicit_prohibitions_do_not_admit_execution(query: str) -> None:
+    assert should_offer_code_execution(query) is False
+    prompt = PromptTemplate.build_synthesis_prompt(query, "No history available.", [], False, None)
+    assert "LOCAL CODE EXECUTION" not in prompt[0]["content"]
+
+
+def test_snapshot_routes_a_mixed_request_to_the_code_profile_only_when_enabled() -> None:
+    """The JIT prompt and sampler must share one immutable admission decision."""
+    settings = CortexSettings(
+        models=ModelSettings(chat="local-chat"),
+        execution=ExecutionSettings(code_execution_enabled=True),
+    )
+    query = "Run the tests and explain the failures."
+    enabled = _generation_snapshot(
+        "mixed-enabled",
+        GenerationRequest(user_input=query),
+        settings,
+        ("local-chat",),
+    )
+    disabled = _generation_snapshot(
+        "mixed-disabled",
+        GenerationRequest(user_input=query),
+        settings.model_copy(
+            update={"execution": ExecutionSettings(code_execution_enabled=False)},
+        ),
+        ("local-chat",),
+    )
+    assert enabled.code_execution_eligible is True
+    assert enabled.model_options["temperature"] <= 0.3
+    assert enabled.model_options["repeat_penalty"] == 1.0
+    assert disabled.code_execution_eligible is False
+    assert disabled.model_options["temperature"] == settings.generation.temperature

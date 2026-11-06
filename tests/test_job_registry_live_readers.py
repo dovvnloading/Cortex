@@ -92,3 +92,75 @@ def test_a_reader_that_stops_reading_cannot_pin_memory_forever() -> None:
             )
 
     assert len(record.events) <= 8 * LIVE_READER_EVENT_HEADROOM
+
+
+def test_detaching_a_reader_releases_the_headroom() -> None:
+    """The headroom is for the attached reader, not for the job record.
+
+    Eviction ran only when an event was appended, so once the reader left, a
+    job that published nothing more -- every finished job -- kept the whole
+    live-reader headroom for as long as it stayed in the registry.
+    """
+    registry = JobRegistry(max_event_count=8)
+    owner = "owner-1"
+    job_id = registry.reserve(
+        kind="generation", owner=owner, thread_id="thread-1"
+    ).snapshot.job_id
+    record = registry._records[job_id]
+
+    def publish(index: int) -> None:
+        with registry._lock:
+            registry._append_event(
+                record, kind="progress", status="running", data={"delta": str(index)}
+            )
+
+    async def exercise() -> tuple[int, int]:
+        publish(0)
+        stream = registry.events(job_id, owner=owner)
+        # Taking the first event attaches the reader; it then stays parked at
+        # that event while the producer runs ahead of it.
+        first = await stream.__anext__()
+        assert first.sequence == 1
+        for index in range(1, 40):
+            publish(index)
+        held_while_attached = len(record.events)
+        await stream.aclose()
+        return held_while_attached, len(record.events)
+
+    held_while_attached, held_after_detach = asyncio.run(exercise())
+
+    assert held_while_attached > 8, "the reader's unread events were not protected"
+    assert record.live_cursors == {}
+    assert held_after_detach <= 8
+
+
+def test_an_attached_reader_does_not_lift_the_byte_cap() -> None:
+    """The live-reader ceiling bounds bytes as well as events.
+
+    Each retained event may be up to max_event_bytes, so a count-only ceiling
+    let one stalled reader pin max_event_count * headroom of them.
+    """
+    from cortex_backend.api.jobs import LIVE_READER_EVENT_HEADROOM
+
+    registry = JobRegistry(max_event_count=256, max_event_bytes=1_000)
+    owner = "owner-1"
+    job_id = registry.reserve(
+        kind="generation", owner=owner, thread_id="thread-1"
+    ).snapshot.job_id
+    record = registry._records[job_id]
+    # An attached reader that has read nothing at all.
+    record.live_cursors[1] = 0
+
+    for index in range(200):
+        with registry._lock:
+            registry._append_event(
+                record,
+                kind="progress",
+                status="running",
+                data={"delta": f"{index:04d}" + "x" * 96},
+            )
+
+    # Well inside the count ceiling (2048), far past the byte one.
+    assert len(record.events) < 256 * LIVE_READER_EVENT_HEADROOM
+    assert record.event_bytes <= 1_000 * LIVE_READER_EVENT_HEADROOM
+    assert record.events[-1].sequence == record.sequence

@@ -173,6 +173,40 @@ describe("ChatPage while a reply streams", () => {
     expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
   });
 
+  it("follows streamed output instantly, and animates only the jump the reader asks for", async () => {
+    // `.transcript` has `scroll-behavior: smooth`, so a follow that does not say
+    // "instant" restarts an animation on every streamed frame.
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollTo });
+    // The bubble shows streamed text through a timer-driven throttle, so each
+    // step waits until its text is on screen. Clicking while a delivery is
+    // still pending let that delivery land in the same act as the click, after
+    // the jump had put the reader back at the end, and follow it with a second
+    // (correct) instant scroll: the test failed under load, not the product.
+    const bubble = () => screen.getByLabelText("Cortex response in progress");
+    try {
+      await openChatAndStartStreaming();
+      stream("tok ");
+      await waitFor(() => expect(bubble()).toHaveTextContent("tok"));
+      expect(scrollTo).toHaveBeenCalled();
+      for (const [options] of scrollTo.mock.calls) expect(options).toEqual({ top: 1000, behavior: "instant" });
+
+      // Scrolled away: the next frame offers the jump instead of following.
+      fireEvent.scroll(document.querySelector(".transcript")!);
+      scrollTo.mockClear();
+      stream("more ");
+      await waitFor(() => expect(bubble()).toHaveTextContent("tok more"));
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      fireEvent.click(await screen.findByRole("button", { name: "Jump to latest" }));
+
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" });
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
+    }
+  });
+
   it("does not react to another thread's generation", async () => {
     renderChat();
     await waitFor(() => expect(parsesOf(PERSISTED[0])).toBeGreaterThan(0));

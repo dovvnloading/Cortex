@@ -302,6 +302,11 @@ class JobRegistry:
         self._reader_ids = count(1)
         self._max_live_reader_events = max_event_count * LIVE_READER_EVENT_HEADROOM
         self._max_event_bytes = max_event_bytes
+        # The same ceiling in bytes. Each retained event may be up to
+        # max_event_bytes, so a count-only ceiling let an attached reader hold
+        # LIVE_READER_EVENT_HEADROOM * max_event_count of them -- gigabytes at
+        # the defaults -- while the byte cap was never consulted.
+        self._max_live_reader_bytes = max_event_bytes * LIVE_READER_EVENT_HEADROOM
         self._records: dict[str, _JobRecord] = {}
         self._active: dict[JobKind, str] = {}
         self._request_index: dict[tuple[JobKind, str, str], str] = {}
@@ -634,6 +639,11 @@ class JobRegistry:
         finally:
             with self._lock:
                 record.live_cursors.pop(reader_id, None)
+                # The headroom existed only for this reader. Without a re-trim
+                # a finished job kept up to the live-reader ceiling for as long
+                # as it stayed in the registry, because only a new event (which
+                # a terminal job never publishes) ran the eviction.
+                self._trim(record)
 
     async def _drain(
         self,
@@ -925,12 +935,22 @@ class JobRegistry:
         )
         record.events.append(event)
         record.event_bytes += retained_bytes
+        self._trim(record)
+        return event
+
+    def _trim(self, record: _JobRecord) -> None:
+        """Evict the oldest retained events until the record is within limits.
+
+        Called with the registry lock held, after an event is appended and
+        after a reader detaches.
+        """
         # A producer can publish a long run of deltas without ever yielding to
         # the event loop, so an attached reader parked in its poll sleep could
         # have the events it had not read yet evicted out from under it -- on a
         # connection that never dropped. Hold the line at the slowest attached
-        # reader, but only up to a ceiling: a reader that falls this far behind
-        # is not keeping up, and memory matters more than its replay.
+        # reader, but only up to a ceiling, in events and in bytes: a reader
+        # that falls this far behind is not keeping up, and memory matters
+        # more than its replay.
         slowest = min(record.live_cursors.values(), default=None)
         protected_from = (
             bisect_right(record.events, slowest, key=lambda item: item.sequence)
@@ -941,19 +961,22 @@ class JobRegistry:
             len(record.events) > self._max_event_count
             or record.event_bytes > self._max_event_bytes
         ):
-            # Keep at least the newest event.  Since terminal status is set
-            # before this method returns, this also guarantees that a
-            # terminal event survives aggressive retention settings.
+            # Keep at least the newest event.  A terminal event is the last
+            # one a job publishes, so this also guarantees that it survives
+            # aggressive retention settings.
             if len(record.events) == 1:
                 break
-            if protected_from <= 0 and len(record.events) <= self._max_live_reader_events:
+            if (
+                protected_from <= 0
+                and len(record.events) <= self._max_live_reader_events
+                and record.event_bytes <= self._max_live_reader_bytes
+            ):
                 # Everything left is still unread by an attached reader, and
                 # the buffer is inside its headroom. Keep it.
                 break
             evicted = record.events.pop(0)
             protected_from = max(0, protected_from - 1)
             record.event_bytes -= _event_data_bytes(evicted.data) or 0
-        return event
 
     @staticmethod
     def _snapshot(record: _JobRecord) -> JobSnapshot:

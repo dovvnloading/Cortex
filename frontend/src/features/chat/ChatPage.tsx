@@ -8,6 +8,7 @@ import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readC
 import { useShallow } from "zustand/react/shallow";
 import { useFileDropZone } from "../../hooks/useFileDropZone";
 import { trackGeneration } from "../../hooks/useGenerationStream";
+import { usePageEscape } from "../../hooks/usePageEscape";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { useUiStore } from "../../stores/useUiStore";
@@ -16,16 +17,7 @@ import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { NewChatGuide } from "./NewChatGuide";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
-
-const DEFAULT_GENERATION_SETTINGS = {
-  temperature: 0.7,
-  top_p: 0.9,
-  top_k: 40,
-  repeat_penalty: 1.1,
-  num_ctx: 8192,
-  seed: -1,
-  system_instructions: "",
-};
+import { ResponseAnnouncer } from "./ResponseAnnouncer";
 
 type Props = {
   api: CortexApi;
@@ -111,7 +103,10 @@ export function ChatPage({
   })));
   const generationOptionsByThread = useChatStore((state) => state.generationOptionsByThread);
   const setThreadOptions = useChatStore((state) => state.setThreadOptions);
-  const generationDefaults = useSettingsStore((state) => state.settings?.generation) ?? DEFAULT_GENERATION_SETTINGS;
+  // Until the settings load there are none; the composer then falls back to the
+  // one set of built-in defaults (lib/generationParams), instead of this page
+  // keeping a second copy of them.
+  const generationDefaults = useSettingsStore((state) => state.settings?.generation);
   // How the last generation ended, published by GenerationStreamHost -- which
   // keeps consuming the stream while this page is not mounted. Handled by the
   // two effects further down.
@@ -638,6 +633,14 @@ export function ChatPage({
     }
   };
 
+  // Escape stops a response from anywhere on the page, not only from the
+  // composer -- which is where focus is not, for a person who is reading the
+  // answer. Dialogs, menus and other text fields keep their own Escape, and the
+  // composer's own handling (which prevents default) is not repeated here.
+  // Only while a response is actually running: Stopping and Finishing have
+  // nothing left to stop.
+  usePageEscape(() => { void cancel(); }, composerPhase === "generating");
+
   const retryLastPrompt = async (): Promise<boolean> => {
     if (!lastPrompt) return false;
     // A failed send deliberately leaves the text in the composer ("Your
@@ -873,7 +876,8 @@ export function ChatPage({
   };
 
   const jumpToLatest = () => {
-    messageListRef.current?.scrollToBottom();
+    // The one scroll the reader asked for, so the one that may animate.
+    messageListRef.current?.scrollToBottom("smooth");
     isNearTranscriptEnd.current = true;
     setShowJumpToLatest(false);
   };
@@ -893,6 +897,7 @@ export function ChatPage({
         </div>
       )}
       <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
+      <ResponseAnnouncer threadId={displayedThreadId} />
       <MessageList
         ref={messageListRef}
         messages={messages}

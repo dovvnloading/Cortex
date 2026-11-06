@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import json
+import os
+import sys
 import threading
 import time
 from typing import Any
@@ -58,6 +60,27 @@ def wait_until(
             what = describe() if callable(describe) else describe
             raise AssertionError(f"timed out after {timeout:g}s waiting for {what}")
         time.sleep(0.005)
+
+
+def real_interpreter() -> str:
+    """The Python interpreter itself, for a child a test places in a job object.
+
+    Inside a Windows virtual environment ``sys.executable`` is a small
+    redirector that starts the base interpreter as its own child, in a job
+    object of its own. A test that puts ``sys.executable`` in a job and asks the
+    child which job it is in then reads the redirector's job, and a job limited
+    to one process refuses the interpreter as the second. The workers are not
+    affected: ``multiprocessing`` starts the base interpreter directly for the
+    same reason. The base interpreter does not see the virtual environment's
+    packages, so run only standard-library code with it. Outside a virtual
+    environment this is ``sys.executable``.
+    """
+
+    if os.name == "nt":
+        base = getattr(sys, "_base_executable", None)
+        if base and os.path.isfile(base):
+            return str(base)
+    return sys.executable
 
 
 def live_cortex_threads(baseline: set[threading.Thread]) -> list[threading.Thread]:

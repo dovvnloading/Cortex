@@ -28,6 +28,7 @@ from cortex_backend.execution.code_execution import (
     CodeExecutionError,
 )
 import job_probe
+from support import real_interpreter
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="uses Windows job objects")
 
@@ -187,7 +188,7 @@ def test_a_brokered_process_reads_back_the_job_it_was_placed_in():
     """Run through the real broker: the child's first act is to ask which job it is in."""
 
     result = code_execution._run_brokered_process(
-        [sys.executable, str(Path(job_probe.__file__))], workspace=Path.cwd(), timeout=60
+        [real_interpreter(), str(Path(job_probe.__file__))], workspace=Path.cwd(), timeout=60
     )
 
     assert result["returncode"] == 0

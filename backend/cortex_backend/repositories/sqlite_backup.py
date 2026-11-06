@@ -7,6 +7,8 @@ backups. The parts of that which are easy to get subtly wrong live here once:
 * ``snapshot_database`` copies a live database through SQLite's online backup
   API, so the copy includes commits that are still only in the ``-wal``
   sidecar.
+* ``replace_with_retry`` publishes a file over another one, waiting out the
+  short sharing violations Windows reports while a scanner has the target open.
 * ``open_at_rest`` / ``quick_check_at_rest`` read a backup that nothing is
   writing without leaving ``-wal`` and ``-shm`` files beside it, and bound the
   time a check may take.
@@ -40,6 +42,10 @@ from typing import Literal, NamedTuple
 SNAPSHOT_WAIT_SECONDS = 10.0
 
 SIDECAR_SUFFIXES = ("-wal", "-shm")
+
+# How often replace_with_retry tries, and how long it first waits between tries.
+REPLACE_ATTEMPTS = 4
+REPLACE_RETRY_DELAY_SECONDS = 0.05
 
 # SQLite result codes (sqlite3.SQLITE_BUSY / SQLITE_LOCKED only exist from
 # Python 3.11, and this project supports 3.10).
@@ -98,6 +104,35 @@ def failure_detail(message: str, cause: BaseException | None) -> str:
     so only the exception's type is kept alongside the store's own message.
     """
     return f"{message} ({type(cause).__name__})" if cause is not None else message
+
+
+def replace_with_retry(
+    source: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+    *,
+    attempts: int = REPLACE_ATTEMPTS,
+    delay: float = REPLACE_RETRY_DELAY_SECONDS,
+) -> None:
+    """``os.replace`` that waits out a target another program is briefly holding.
+
+    On Windows a virus scanner, search indexer or backup agent can have the
+    target open without ``FILE_SHARE_DELETE`` for a few tens of milliseconds,
+    and renaming over it then fails with ``PermissionError`` -- a sharing
+    violation that is almost always gone by the next try. Only that error is
+    retried, at most ``attempts`` times in all with the wait doubling from
+    ``delay`` (about a third of a second by default), so a lock that does not
+    lift is still reported promptly and unchanged: nothing has been moved when
+    ``os.replace`` raises. Any other ``OSError`` is raised at once. The retry
+    is not limited to Windows; where nothing holds files open it never fires.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay * 2 ** (attempt - 1))
 
 
 def snapshot_database(

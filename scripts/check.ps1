@@ -193,6 +193,10 @@ if (-not $SkipBackend) {
         }
     }
 
+    Invoke-Step 'Harness trajectory contracts' {
+        python tools/harness_eval.py --check --json
+    }
+
     Invoke-Step 'Artifact boundary review' {
         python tools/artifact_boundary_review.py --json --strict
     }

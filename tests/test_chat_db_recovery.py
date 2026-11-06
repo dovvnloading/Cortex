@@ -16,7 +16,7 @@ import sys
 import pytest
 
 from sqlite_faults import volume_without_write_ahead_logging
-from cortex_backend.repositories import storage
+from cortex_backend.repositories import sqlite_reclaim, storage
 from cortex_backend.repositories.storage import DatabaseManager, PersistenceError
 
 
@@ -719,8 +719,9 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
         if (
             os.path.normcase(os.path.abspath(destination)) == backup
             and str(source).endswith(".tmp")
-            and not refused
         ):
+            # Refused on every try: a lock that lifts is retried and succeeds
+            # (see tests/test_persistence.py), so this one has to stay.
             refused.append(str(source))
             raise PermissionError(errno.EACCES, "The process cannot access the file")
         return real_replace(source, destination, *args, **kwargs)
@@ -736,6 +737,72 @@ def test_a_backup_that_cannot_take_its_place_puts_the_old_one_back(
     assert DatabaseManager._database_is_valid(manager.backup_path)
     assert _leftover_temporaries(tmp_path) == []
     assert _reopen(manager).backup_status == ("ok", None)
+
+
+def _files_beside(directory: Path) -> dict[str, bytes]:
+    """Every file in the data directory but SQLite's transient -wal and -shm, with its bytes."""
+    return {
+        entry.name: entry.read_bytes()
+        for entry in directory.iterdir()
+        if entry.is_file() and not entry.name.endswith(("-wal", "-shm"))
+    }
+
+
+def test_a_database_from_a_newer_build_is_refused_without_being_modified(tmp_path: Path) -> None:
+    """Downgrading must not half-modify the file it cannot read: no index, no
+    journal-mode switch, no backup rotated over the older generations, no
+    snapshot -- nothing but the refusal."""
+    manager, _ = _manager_with_data(tmp_path)
+    stamp = sqlite3.connect(manager.db_path)
+    stamp.execute("PRAGMA user_version = 99")
+    stamp.commit()
+    stamp.close()
+    before = _files_beside(tmp_path)
+    assert Path(manager.backup_path).name in before
+
+    with pytest.raises(PersistenceError, match=r"schema version 99; this release reads up to"):
+        DatabaseManager(db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir)
+
+    assert _files_beside(tmp_path) == before
+    probe = sqlite3.connect(manager.db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 99
+    finally:
+        probe.close()
+
+
+def test_a_backup_held_briefly_by_another_program_is_still_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scanner holding the backup for a few milliseconds is not a failed backup."""
+    manager, _ = _manager_with_data(tmp_path)
+    manager.update_chat_title("thread-1", "Changed after the last backup")
+    backup_before = Path(manager.backup_path).read_bytes()
+    real_replace = os.replace
+    backup = os.path.normcase(os.path.abspath(manager.backup_path))
+    refused: list[str] = []
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    def replace(source, destination, *args, **kwargs):
+        if (
+            os.path.normcase(os.path.abspath(destination)) == backup
+            and str(source).endswith(".tmp")
+            and len(refused) < 2
+        ):
+            refused.append(str(source))
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    reopened = _reopen(manager)
+    monkeypatch.undo()
+
+    assert len(refused) == 2
+    assert reopened.backup_status == ("ok", None)
+    assert Path(manager.backup_path).read_bytes() != backup_before
+    assert reopened.load_chat("thread-1")["title"] == "Changed after the last backup"
+    assert DatabaseManager._database_is_valid(manager.backup_path)
 
 
 def _stray_files(directory: Path) -> list[str]:
@@ -762,8 +829,9 @@ def test_a_backup_that_cannot_take_its_place_keeps_both_generations_where_they_w
         if (
             os.path.normcase(os.path.abspath(destination)) == backup
             and str(source).endswith(".tmp")
-            and not refused
         ):
+            # Refused on every try: a lock that lifts is retried and succeeds
+            # (see tests/test_persistence.py), so this one has to stay.
             refused.append(str(source))
             raise PermissionError(errno.EACCES, "The process cannot access the file")
         return real_replace(source, destination, *args, **kwargs)
@@ -1077,3 +1145,172 @@ def test_adoption_never_overwrites_a_log_already_beside_the_quarantined_file(tmp
     assert Path(f"{report.quarantined_path}-wal").read_bytes() == b"the log of the primary being quarantined now"
     assert report.adopted_sidecars == ()
     assert orphan.read_bytes() == b"stranded by an earlier attempt"
+
+
+# -- returning the disk space of deleted history ----------------------------------
+
+
+def _space_facts(path: str) -> dict[str, int]:
+    """Free pages, auto-vacuum mode and file size once the write-ahead log is folded in."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        return {
+            "free_pages": connection.execute("PRAGMA freelist_count").fetchone()[0],
+            "auto_vacuum": connection.execute("PRAGMA auto_vacuum").fetchone()[0],
+            "bytes": os.path.getsize(path),
+        }
+    finally:
+        connection.close()
+
+
+def _fill_then_delete(manager: DatabaseManager, *, keep: int) -> dict[str, dict]:
+    """40 chats of 12 messages of about 4 KB, of which all but ``keep`` are deleted."""
+    turns = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"{index:02d} " + "y" * 4000}
+        for index in range(12)
+    ]
+    for number in range(40):
+        manager.create_chat_from_messages(f"chat-{number}", f"Chat {number}", turns)
+    for number in range(keep, 40):
+        manager.delete_chat(f"chat-{number}")
+    return {f"chat-{number}": manager.load_chat(f"chat-{number}") for number in range(keep)}
+
+
+def _reclaimable_paths(tmp_path: Path) -> tuple[str, str]:
+    return str(tmp_path / "chat.sqlite"), str(tmp_path / "legacy")
+
+
+def test_startup_reclaims_free_pages_after_large_deletes(tmp_path: Path) -> None:
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["auto_vacuum"] == 2  # a new database is created reclaimable
+    kept = _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+    assert before["free_pages"] > 300
+
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    after = _space_facts(db_path)
+    assert after["free_pages"] == 0
+    assert after["bytes"] < before["bytes"] / 4
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert reopened.backup_status == ("ok", None)
+    assert DatabaseManager._database_is_valid(reopened.backup_path)
+    assert DatabaseManager._database_is_valid(db_path)
+
+
+def _database_without_auto_vacuum(db_path: str) -> None:
+    """An empty current-schema database as a release before auto-vacuum created it."""
+    connection = sqlite3.connect(db_path)
+    for step in range(1, DatabaseManager.SCHEMA_VERSION + 1):
+        storage._MIGRATIONS[step](connection)
+    connection.execute(f"PRAGMA user_version = {DatabaseManager.SCHEMA_VERSION}")
+    connection.commit()
+    connection.close()
+
+
+def test_startup_converts_an_existing_database_once_most_of_it_is_free(tmp_path: Path) -> None:
+    """A file made before this release has no auto-vacuum; one rewrite fixes that."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    _database_without_auto_vacuum(db_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["auto_vacuum"] == 0  # an existing file is not silently altered
+    kept = _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    after = _space_facts(db_path)
+    assert (after["free_pages"], after["auto_vacuum"]) == (0, 2)
+    assert after["bytes"] < before["bytes"] / 4
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert DatabaseManager._database_is_valid(db_path)
+
+
+def test_a_rewrite_that_failed_at_one_launch_is_not_retried_at_the_next_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file whose rewrite cannot finish in the time limit must not cost every launch that limit."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    _database_without_auto_vacuum(db_path)
+    kept = _fill_then_delete(
+        DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir), keep=3
+    )
+    before = _space_facts(db_path)
+    marker = Path(f"{db_path}.reclaim-backoff")
+
+    # A launch whose rewrite cannot finish (out of time or out of room, as SQLite
+    # reports it): it is rolled back, and the launch carries on regardless.
+    def cannot_finish(_connection: sqlite3.Connection):
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(sqlite_reclaim, "_rewrite", cannot_finish)
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    monkeypatch.undo()
+    assert _space_facts(db_path) == before
+    assert marker.exists()
+
+    # The launches after it leave the file alone, however much time they would have had.
+    rewrites: list[str] = []
+    real_rewrite = sqlite_reclaim._rewrite
+
+    def counted(connection: sqlite3.Connection):
+        rewrites.append("ran")
+        return real_rewrite(connection)
+
+    monkeypatch.setattr(sqlite_reclaim, "_rewrite", counted)
+    for _launch in range(3):
+        DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert rewrites == []
+    assert _space_facts(db_path) == before
+
+    # Once the back-off is over (the marker holds only the time of the failure) it is tried again.
+    marker.write_text("0\n", encoding="ascii")
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert rewrites == ["ran"]
+    after = _space_facts(db_path)
+    assert (after["free_pages"], after["auto_vacuum"]) == (0, 2)
+    assert {chat_id: reopened.load_chat(chat_id) for chat_id in kept} == kept
+    assert not marker.exists()
+
+
+def test_a_database_that_is_mostly_in_use_is_not_touched_at_startup(tmp_path: Path) -> None:
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    _fill_then_delete(manager, keep=38)
+    before = _space_facts(db_path)
+
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+
+    assert _space_facts(db_path) == before
+
+
+def test_free_pages_are_left_alone_when_the_startup_backup_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite is only ever done with a backup of the same content taken first."""
+    db_path, legacy_dir = _reclaimable_paths(tmp_path)
+    manager = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    _fill_then_delete(manager, keep=3)
+    before = _space_facts(db_path)
+    attempts: list[str] = []
+
+    def reclaim(*_args, **_kwargs):
+        attempts.append("ran")
+        return "trimmed"
+
+    def no_backup(self, **_kwargs):
+        raise PersistenceError("injected: the disk is full", operation="backup")
+
+    monkeypatch.setattr(storage, "reclaim_free_space", reclaim)
+    monkeypatch.setattr(DatabaseManager, "_create_backup", no_backup)
+    reopened = DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    monkeypatch.undo()
+
+    assert reopened.backup_status[0] == "failed"
+    assert attempts == []
+    assert _space_facts(db_path) == before
+    # The next launch, with a backup, does it.
+    DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
+    assert _space_facts(db_path)["free_pages"] == 0

@@ -282,17 +282,21 @@ await settingsSection("System", "settings-system");
 // ---------------------------------------------------------------------------
 // Light theme
 // ---------------------------------------------------------------------------
-const toggleTheme = async () => {
+// One press of "Change theme" moves the preference on: system, light, dark, and
+// round again. From dark, one press is "system" (which the light colour-scheme
+// emulation below turns into the light theme) and two more return to dark. The
+// item also carries a "Next: ..." hint, so it is matched by a fragment of its text.
+const changeTheme = async () => {
   await page.keyboard.press("Control+k");
   await page.waitForTimeout(400);
-  await page.getByText("Toggle theme", { exact: true }).click();
+  await page.getByText("Change theme").click();
   await page.waitForTimeout(800);
 };
 
 await page.goto(`${base}/`);
 await page.getByLabel("Message Cortex").waitFor({ state: "visible" });
 await page.waitForTimeout(400);
-await toggleTheme();
+await changeTheme(); // dark -> system
 await page.emulateMedia({ colorScheme: "light" });
 
 await openChat("Reading a 4 GB CSV without exhausting memory");
@@ -307,7 +311,8 @@ await shot("command-palette-light");
 await closeOverlay();
 
 // Back to dark for the remaining shots.
-await toggleTheme();
+await changeTheme(); // system -> light
+await changeTheme(); // light -> dark
 await page.emulateMedia({ colorScheme: "dark" });
 await page.waitForTimeout(500);
 

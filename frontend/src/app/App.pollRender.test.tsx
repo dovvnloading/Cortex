@@ -3,6 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionTaskSummary } from "../../../contracts/cortex-api";
 import { CortexApi } from "../api/client";
+import { useChatStore } from "../stores/useChatStore";
 import { useModelStore } from "../stores/useModelStore";
 import { App } from "./App";
 import { ToastProvider } from "./ToastProvider";
@@ -41,17 +42,20 @@ type Backend = {
   llamacpp: Record<string, unknown>;
 };
 
-/** A workspace with the execution tray and a GGUF model selected, so both polls are live. */
-function backend(state: Backend) {
+/** A workspace with the execution tray and a GGUF model (unless another is given) selected, so both polls are live. */
+function backend(state: Backend, chatModel = "gguf:demo.Q4_K_M.gguf") {
   return vi.fn<typeof fetch>(async (input) => {
     const url = String(input);
     if (url.endsWith("/system")) {
       return respond({ status: "ok", preview: true, session_required: true, execution_preview_available: true, started_at: "2026-07-21T18:00:00Z", llamacpp: state.llamacpp });
     }
     if (url.includes("/execution/tasks")) return respond({ tasks: state.tasks });
+    // A generation the store is told about stays open: the stream host attaches
+    // to it, and a job that answered 404 would be ended by the host at once.
+    if (url.includes("/generations/") && url.endsWith("/events")) return new Promise<Response>(() => undefined);
     if (url.endsWith("/chat-groups")) return respond([]);
     if (url.endsWith("/chats")) return respond([]);
-    if (url.endsWith("/settings")) return respond({ settings: { models: { chat: "gguf:demo.Q4_K_M.gguf", title: null }, appearance: { theme: "dark" } } });
+    if (url.endsWith("/settings")) return respond({ settings: { models: { chat: chatModel, title: null }, appearance: { theme: "dark" } } });
     if (url.endsWith("/models")) return respond({ required_models: [], optional_models: [], installed_models: ["gguf:demo.Q4_K_M.gguf"], models: [{ name: "gguf:demo.Q4_K_M.gguf" }], connection: { success: true, status: "connected", message: "Ready" } });
     return respond({ detail: "Unexpected test route." }, 404);
   });
@@ -125,5 +129,112 @@ describe("App polling", () => {
     state.tasks = [{ ...runningTask, status: "succeeded", sequence: 2, updated_at: "2026-07-21T18:00:09Z" }];
     await pollOnce(fetcher);
     expect(shell.renders).toBeGreaterThan(afterStatus);
+  });
+
+  describe("cadence", () => {
+    /** Record every period the app asks the browser to poll at, while still running the real timers. */
+    function recordIntervalPeriods() {
+      const periods: number[] = [];
+      const realSetInterval = window.setInterval.bind(window);
+      const spy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout !== undefined) periods.push(timeout);
+        return realSetInterval(handler, timeout, ...args);
+      }) as typeof window.setInterval);
+      return { periods, restore: () => spy.mockRestore() };
+    }
+
+    it("polls llama.cpp status slowly once the runtime is ready", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "ready", binary_present: true, loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state);
+      const { periods, restore } = recordIntervalPeriods();
+      try {
+        render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+        expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+        await pollOnce(fetcher);
+
+        // Ready: every fifteen seconds. Two seconds is for a runtime that is changing.
+        expect(periods).toContain(15_000);
+        expect(periods).not.toContain(2000);
+      } finally {
+        restore();
+      }
+    });
+
+    it("watches the runtime closely while it starts, without an extra request for the switch", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "ready", binary_present: true, loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state);
+      const { periods, restore } = recordIntervalPeriods();
+      try {
+        render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+        expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+        await pollOnce(fetcher);
+        expect(periods).not.toContain(2000);
+
+        // The next poll brings news: the runtime is starting. The interval now
+        // changes on the very result that arrived; that must not cost a request.
+        state.llamacpp = { state: "starting", binary_present: true, models_directory: "C:\\models" };
+        const systemBefore = callsTo(fetcher, "/system");
+        await pollOnce(fetcher);
+
+        expect(useModelStore.getState().llamacppStatus?.state).toBe("starting");
+        expect(periods).toContain(2000);
+        expect(callsTo(fetcher, "/system")).toBe(systemBefore + 1);
+      } finally {
+        restore();
+      }
+    });
+
+    it("checks the runtime once when a generation ends, instead of waiting for the slow poll", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "idle", binary_present: true, models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state);
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+      expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+      await pollOnce(fetcher);
+      expect(useModelStore.getState().llamacppStatus?.state).toBe("idle");
+
+      // The runtime loaded the model while the reply was being written.
+      state.llamacpp = { state: "ready", binary_present: true, loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models" };
+      const systemBefore = callsTo(fetcher, "/system");
+      act(() => useChatStore.getState().beginGeneration("job-1", "thread-a"));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+      // Starting one changes the poll's interval, which costs no request of its own.
+      expect(callsTo(fetcher, "/system")).toBe(systemBefore);
+
+      act(() => useChatStore.getState().endGeneration("job-1"));
+
+      await waitFor(() => expect(useModelStore.getState().llamacppStatus?.state).toBe("ready"));
+      expect(callsTo(fetcher, "/system")).toBe(systemBefore + 1);
+    });
+
+    it("does not check the runtime for a generation that ends when no GGUF model is selected", async () => {
+      window.sessionStorage.setItem("cortex.session.token", "local-session");
+      const state: Backend = {
+        tasks: [],
+        llamacpp: { state: "idle", binary_present: true, models_directory: "C:\\models" },
+      };
+      const fetcher = backend(state, "local-chat:7b");
+      render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+      expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+      const systemBefore = callsTo(fetcher, "/system");
+
+      act(() => useChatStore.getState().beginGeneration("job-1", "thread-a"));
+      act(() => useChatStore.getState().endGeneration("job-1"));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+
+      expect(callsTo(fetcher, "/system")).toBe(systemBefore);
+    });
   });
 });

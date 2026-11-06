@@ -38,9 +38,11 @@ from cortex_backend.repositories.sqlite_backup import (
     open_at_rest,
     put_sidecars_back,
     quick_check_at_rest,
+    replace_with_retry,
     snapshot_database,
     utc_now_iso,
 )
+from cortex_backend.repositories.sqlite_reclaim import reclaim_free_space
 from cortex_backend.repositories.sqlite_schema import (
     Migration,
     SchemaTooNewError,
@@ -243,12 +245,33 @@ def _migrate_to_v5(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "messages", "original_content", "TEXT")
 
 
+def _migrate_to_v6(connection: sqlite3.Connection) -> None:
+    """A revision that moves whenever a chat's messages do.
+
+    The revision used to be the number of messages, which a regeneration leaves
+    unchanged: it replaces the last reply, so two regenerations started from the
+    same state both passed the compare-and-swap. It is now its own counter,
+    raised by every write to a chat's messages. Existing chats start from their
+    message count, which is what the clients last saw, and the column is only
+    ever added: nothing is rewritten or dropped, and an older release refuses
+    the file (see DatabaseManager._unsupported_schema_error) instead of
+    misreading it.
+    """
+    add_column_if_missing(connection, "threads", "revision", "INTEGER NOT NULL DEFAULT 0")
+    # MAX() keeps a re-run from ever lowering a revision that has moved on.
+    connection.execute(
+        "UPDATE threads SET revision = MAX(revision, "
+        "(SELECT COUNT(*) FROM messages WHERE messages.thread_id = threads.id))"
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
@@ -295,7 +318,7 @@ def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(
         self,
@@ -340,6 +363,7 @@ class DatabaseManager:
             self._snapshot_before_upgrade()
             self._create_tables()
             self._refresh_startup_backup(primary_verified=primary_verified)
+            self._reclaim_free_space()
 
     def _ensure_parent_directory(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -474,17 +498,17 @@ class DatabaseManager:
             if displace_existing_to is not None and os.path.exists(destination):
                 older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
                 try:
-                    os.replace(destination, displace_existing_to)
+                    replace_with_retry(destination, displace_existing_to)
                 except OSError:
                     cls._drop_spare_name(older_file_kept_as)
                     raise
                 displaced_to = displace_existing_to
             try:
-                os.replace(temporary_path, destination)
+                replace_with_retry(temporary_path, destination)
             except OSError:
                 if displaced_to is not None:
                     try:
-                        os.replace(displaced_to, destination)
+                        replace_with_retry(displaced_to, destination)
                     except OSError:
                         logging.warning("Could not return a displaced database file to its name.")
                     else:
@@ -553,7 +577,7 @@ class DatabaseManager:
         if spare is None:
             return
         try:
-            os.replace(spare, path)
+            replace_with_retry(spare, path)
         except OSError:
             logging.warning("Could not return an older database backup to its name.")
 
@@ -950,6 +974,13 @@ class DatabaseManager:
         connection: sqlite3.Connection | None = None
         try:
             connection = open_for_upgrade(self.db_path)
+            if self._is_new_database(connection):
+                # Only a database with no tables yet can be given this, and it
+                # has to come before write-ahead logging is switched on: it lets
+                # a history that has been cleared give its disk space back (see
+                # sqlite_reclaim). Existing files are converted later, when
+                # there is enough to give back to make that worth doing.
+                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
             prepare_database(connection, _MIGRATIONS, target=self.SCHEMA_VERSION)
         except SchemaTooNewError as exc:
             raise self._unsupported_schema_error(exc.version) from exc
@@ -988,6 +1019,44 @@ class DatabaseManager:
                 "AND group_id NOT IN (SELECT id FROM chat_groups)"
             )
             logging.info("Database schema is at version %d.", stored_version(conn))
+
+    @staticmethod
+    def _is_new_database(connection: sqlite3.Connection) -> bool:
+        """Whether the file has never held a table: brand new, or created empty."""
+        return (
+            stored_version(connection) == 0
+            and connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None
+        )
+
+    def _reclaim_free_space(self) -> None:
+        """Give the disk space of deleted chats back, at startup and only when safe.
+
+        Deleting history frees pages inside the file but never makes the file
+        smaller. When more than a quarter of it is free (see sqlite_reclaim) they
+        are handed back, and only under these conditions:
+
+        * a backup of this very content was just written and verified this
+          launch, so the one operation that rewrites the whole file has a
+          restore point (a failed backup skips it, and the next launch tries);
+        * it runs here, in the constructor, before the application serves a
+          request, so it never competes with a write, and another connection
+          holding the write lock only makes it give up;
+        * it is bounded in time and in size, and it is all-or-nothing, so
+          whatever the outcome the file holds exactly the rows it held;
+        * a full rewrite that fails or runs out of time is not tried again for a
+          week (a marker beside the database, see sqlite_reclaim), so a file it
+          cannot finish on does not cost every launch the whole time limit.
+
+        A failure is logged and ignored, like a failed backup: it is not a
+        reason to refuse to start.
+        """
+        if self.backup_status.state != "ok" or not os.path.exists(self.backup_path):
+            return
+        outcome = reclaim_free_space(self.db_path)
+        if outcome in ("trimmed", "rewritten"):
+            logging.info("Returned unused space in the chat database to the disk (%s).", outcome)
+        elif outcome != "nothing_to_do":
+            logging.info("Left unused space in the chat database in place (%s).", outcome)
 
     @staticmethod
     def _parse_legacy_attachment(value: object) -> dict | None:
@@ -1101,21 +1170,91 @@ class DatabaseManager:
         os.makedirs(archive_dir, exist_ok=True)
         return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
 
+    @staticmethod
+    def _retired_directory_name(directory: str) -> str | None:
+        """An unused ``<dir>.retired`` name (``.retired-2``, ``.retired-3``, ...), or None."""
+        base = os.path.normpath(directory)
+        for number in range(1, 1000):
+            candidate = f"{base}.retired" if number == 1 else f"{base}.retired-{number}"
+            if not os.path.lexists(candidate):
+                return candidate
+        return None
+
+    def _retire_legacy_directory(self) -> None:
+        """Take the legacy history directory out of the way once it holds nothing.
+
+        Migrated files move to ``<dir>_migrated_<time>`` and unreadable ones to
+        ``<dir>/quarantine``, so the directory itself outlives every pass, and
+        with it the "legacy history found" warning on every launch. Once it is
+        verified to hold nothing (an empty ``quarantine`` folder counts as
+        nothing) it is renamed to ``<dir>.retired`` -- ``.retired-2`` and so on
+        if that name is taken -- and never deleted: no folder, empty or not, is
+        removed by this. Renaming rather than ``rmdir`` was chosen so that
+        nothing is destroyed even if the emptiness check is wrong or a file
+        lands in the folder between the check and the rename: whatever is in it
+        is still there, under the new name, and the ``.retired`` folder is one
+        the user can delete when they like. The name is not the one the
+        migration looks at, so the folder is not scanned again. No chat file,
+        quarantined or not, and no stray file of the user's is ever moved or
+        deleted here: a directory that still holds any of them is left exactly
+        as it is.
+        """
+        directory = self.legacy_history_dir
+        quarantine = os.path.join(directory, "quarantine")
+        try:
+            others = [name for name in os.listdir(directory) if name != "quarantine"]
+            # A link is somebody's arrangement, not ours to look through or remove.
+            has_quarantine = os.path.lexists(quarantine)
+            quarantined = (
+                os.listdir(quarantine)
+                if has_quarantine and os.path.isdir(quarantine) and not os.path.islink(quarantine)
+                else None
+            )
+            if others or (has_quarantine and quarantined is None):
+                return
+            if quarantined:
+                logging.info(
+                    "Legacy chat files that could not be migrated are kept in the quarantine "
+                    "folder of the old chat history directory."
+                )
+                return
+            retired_as = self._retired_directory_name(directory)
+            if retired_as is None:
+                return
+            os.rename(directory, retired_as)
+        except OSError as exc:
+            logging.info(
+                "The old chat history directory was left where it is (%s).", type(exc).__name__
+            )
+            return
+        logging.info(
+            "The old chat history directory held nothing more and was renamed to %s.",
+            os.path.basename(retired_as),
+        )
+
     def migrate_from_json_if_needed(self) -> MigrationResult:
         """Migrate valid legacy files transactionally and isolate invalid files."""
         if not os.path.isdir(self.legacy_history_dir):
+            return MigrationResult()
+
+        pending = [
+            filename
+            for filename in sorted(os.listdir(self.legacy_history_dir))
+            if filename.lower().endswith('.json')
+            and os.path.isfile(os.path.join(self.legacy_history_dir, filename))
+        ]
+        if not pending:
+            # Nothing to import: an earlier pass already did, or the directory
+            # was never used. Stay quiet rather than warn at every launch.
+            self._retire_legacy_directory()
             return MigrationResult()
 
         logging.warning("Legacy JSON chat history found. Starting migration to SQLite...")
         migrated = skipped = quarantined = 0
         archive_dir = f"{self.legacy_history_dir}_migrated_{int(datetime.now().timestamp())}"
 
-        for filename in sorted(os.listdir(self.legacy_history_dir)):
-            if not filename.lower().endswith('.json'):
-                continue
+        for filename in pending:
             file_path = os.path.join(self.legacy_history_dir, filename)
-            if not os.path.isfile(file_path):
-                continue
 
             try:
                 chat_data = self._parse_legacy_chat(self._load_legacy_chat_file(file_path))
@@ -1144,8 +1283,13 @@ class DatabaseManager:
                         skipped += 1
                     else:
                         conn.execute(
-                            "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                            (chat_data['id'], chat_data['title'], chat_data['timestamp']),
+                            "INSERT INTO threads (id, title, timestamp, revision) VALUES (?, ?, ?, ?)",
+                            (
+                                chat_data['id'],
+                                chat_data['title'],
+                                chat_data['timestamp'],
+                                len(chat_data['messages']),
+                            ),
                         )
                         try:
                             base_timestamp = datetime.fromisoformat(
@@ -1194,6 +1338,7 @@ class DatabaseManager:
             result.skipped,
             result.quarantined,
         )
+        self._retire_legacy_directory()
         return result
 
     def create_chat(self, thread_id: str, title: str):
@@ -1215,10 +1360,12 @@ class DatabaseManager:
         """Creates a new chat thread and bulk-inserts a list of messages."""
         try:
             with self.connect() as conn:
-                # 1. Create the new thread entry
+                # 1. Create the new thread entry. Its revision starts at the number
+                # of messages it is about to hold, like any chat that has had
+                # that many appended.
                 conn.execute(
-                    "INSERT INTO threads (id, title, timestamp) VALUES (?, ?, ?)",
-                    (thread_id, title, _utc_now_iso())
+                    "INSERT INTO threads (id, title, timestamp, revision) VALUES (?, ?, ?, ?)",
+                    (thread_id, title, _utc_now_iso(), len(messages))
                 )
                 
                 # 2. Prepare and insert all messages for the new thread
@@ -1288,6 +1435,12 @@ class DatabaseManager:
                         (thread_id, thread_title, _utc_now_iso()),
                     )
                 self._check_chat_revision(conn, thread_id, expected_revision)
+                if thread_title is None and conn.execute(
+                    "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone() is None:
+                    # Without a title there is nothing to create the chat from.
+                    # Say so, rather than let the foreign key report it.
+                    raise PersistenceError("Chat does not exist.", operation="chat_not_found")
                 conn.execute("""
                     INSERT INTO messages (thread_id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1302,14 +1455,15 @@ class DatabaseManager:
                     original_content,
                     _utc_now_iso()
                 ))
-                # Update the thread's main timestamp to reflect recent activity
+                # Update the thread's main timestamp to reflect recent activity,
+                # and move its revision so anyone holding the old one is stale.
                 conn.execute(
-                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    "UPDATE threads SET timestamp = ?, revision = revision + 1 WHERE id = ?",
                     (_utc_now_iso(), thread_id)
                 )
                 return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         except PersistenceError as exc:
-            if exc.operation == "chat_revision_conflict":
+            if exc.operation in ("chat_revision_conflict", "chat_not_found"):
                 raise
             raise PersistenceError(
                 f"Failed to add message to thread {thread_id}.",
@@ -1327,12 +1481,12 @@ class DatabaseManager:
             return
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("expected_revision must be a non-negative integer")
-        actual_revision = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()[0]
-        )
+        row = conn.execute(
+            "SELECT revision FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        # A chat that does not exist yet is at revision 0.
+        actual_revision = int(row[0]) if row is not None else 0
         if actual_revision != expected_revision:
             raise PersistenceError(
                 f"Chat revision changed (expected {expected_revision}, found {actual_revision}).",
@@ -1340,30 +1494,23 @@ class DatabaseManager:
             )
 
     def load_chat_overview(self, thread_id: str) -> dict | None:
-        """Thread metadata and message count, without loading the messages.
+        """Thread metadata and revision, without loading the messages.
 
-        chat_revision() is the message count, and a caller that needs only the
-        revision or the title should not pay for every row of a long thread
-        being read and JSON-decoded. Returns the same keys load_chat does,
-        minus "messages", plus "revision".
+        A caller that needs only the revision or the title should not pay for
+        every row of a long thread being read and JSON-decoded. Returns the same
+        keys load_chat does, minus "messages".
         """
         try:
             with self.connect() as conn:
                 row = conn.execute(
-                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    "SELECT id, title, timestamp, group_id, revision FROM threads WHERE id = ?",
                     (thread_id,),
                 ).fetchone()
                 if not row:
                     return None
                 overview = dict(row)
-                if "timestamp" in overview:
-                    overview["timestamp"] = _as_utc_iso(overview["timestamp"])
-                overview["revision"] = int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
-                        (thread_id,),
-                    ).fetchone()[0]
-                )
+                overview["timestamp"] = _as_utc_iso(overview["timestamp"])
+                overview["revision"] = int(overview["revision"])
                 return overview
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1376,9 +1523,13 @@ class DatabaseManager:
         """Loads a full chat thread (metadata and messages) from the database."""
         try:
             with self.connect() as conn:
+                # One read transaction, so the revision and the messages come
+                # from the same moment: a write landing between two separate
+                # reads would otherwise pair an older revision with newer rows.
+                conn.execute("BEGIN")
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, title, timestamp, group_id FROM threads WHERE id = ?",
+                    "SELECT id, title, timestamp, group_id, revision FROM threads WHERE id = ?",
                     (thread_id,),
                 )
                 thread_row = cursor.fetchone()
@@ -1386,8 +1537,8 @@ class DatabaseManager:
                     return None
                 
                 chat_data = dict(thread_row)
-                if 'timestamp' in chat_data:
-                    chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
+                chat_data['timestamp'] = _as_utc_iso(chat_data['timestamp'])
+                chat_data['revision'] = int(chat_data['revision'])
                 
                 cursor.execute(
                     "SELECT id, role, content, sources, thoughts, attachments, generation_stats_json, original_content, timestamp FROM messages "
@@ -1438,7 +1589,7 @@ class DatabaseManager:
         """Deletes the most recent 'assistant' role message from a given thread."""
         try:
             with self.connect() as conn:
-                conn.execute("""
+                cursor = conn.execute("""
                     DELETE FROM messages 
                     WHERE id = (
                         SELECT id FROM messages 
@@ -1447,6 +1598,11 @@ class DatabaseManager:
                         LIMIT 1
                     )
                 """, (thread_id,))
+                if cursor.rowcount > 0:
+                    # The messages changed, so the revision moves with them.
+                    conn.execute(
+                        "UPDATE threads SET revision = revision + 1 WHERE id = ?", (thread_id,)
+                    )
                 logging.info("Deleted the last assistant message for a chat thread.")
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1515,14 +1671,17 @@ class DatabaseManager:
                 if cursor.rowcount != 1:
                     raise PersistenceError(
                         f"Assistant message {message_id} was not found.",
-                        operation="replace_message",
+                        operation="message_not_found",
                     )
+                # A regeneration leaves the message count as it was, so the
+                # revision has to move on its own for a second regeneration
+                # started from the same state to be recognised as stale.
                 conn.execute(
-                    "UPDATE threads SET timestamp = ? WHERE id = ?",
+                    "UPDATE threads SET timestamp = ?, revision = revision + 1 WHERE id = ?",
                     (_utc_now_iso(), thread_id),
                 )
         except PersistenceError as exc:
-            if exc.operation == "chat_revision_conflict":
+            if exc.operation in ("chat_revision_conflict", "message_not_found"):
                 raise
             raise PersistenceError(
                 f"Failed to replace message {message_id}.",
@@ -1534,9 +1693,17 @@ class DatabaseManager:
         """Updates the title of a specific chat thread."""
         try:
             with self.connect() as conn:
-                conn.execute("UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id))
+                # Only the title changes: a rename is not activity, so the chat
+                # keeps its place in the recency-ordered sidebar.
+                cursor = conn.execute(
+                    "UPDATE threads SET title = ? WHERE id = ?", (new_title, thread_id)
+                )
+                if cursor.rowcount == 0:
+                    raise PersistenceError("Chat does not exist.", operation="chat_not_found")
                 logging.info("Renamed chat thread (private title omitted).")
         except PersistenceError as exc:
+            if exc.operation == "chat_not_found":
+                raise
             raise PersistenceError(
                 f"Failed to rename chat {thread_id}.",
                 operation="update_chat_title",
@@ -1589,13 +1756,14 @@ class DatabaseManager:
         """Append a group after every existing one."""
         try:
             with self.connect() as conn:
-                next_position = conn.execute(
-                    "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_groups"
-                ).fetchone()[0]
+                # One statement, so choosing the next position and inserting it
+                # cannot be split by another writer. Reading the maximum first
+                # and inserting afterwards let two groups made at the same
+                # moment (routes run on a thread pool) take the same position.
                 conn.execute(
                     "INSERT INTO chat_groups (id, name, position, collapsed, timestamp) "
-                    "VALUES (?, ?, ?, 0, ?)",
-                    (group_id, name, next_position, _utc_now_iso()),
+                    "SELECT ?, ?, COALESCE(MAX(position), -1) + 1, 0, ? FROM chat_groups",
+                    (group_id, name, _utc_now_iso()),
                 )
         except PersistenceError as exc:
             raise PersistenceError(
@@ -1665,6 +1833,11 @@ class DatabaseManager:
         """Move a chat into a group, or out of every group when ``group_id`` is None."""
         try:
             with self.connect() as conn:
+                # The write lock is taken before the group is looked at. Without
+                # it, a delete_group landing between this check and the UPDATE
+                # left the chat filed under a group that no longer exists, and
+                # the sidebar hid it until the next startup sweep.
+                conn.execute("BEGIN IMMEDIATE")
                 if group_id is not None and conn.execute(
                     "SELECT 1 FROM chat_groups WHERE id = ?", (group_id,)
                 ).fetchone() is None:
@@ -1745,8 +1918,13 @@ class PermanentMemoryManager:
             )
             os.close(fd)
             shutil.copy2(source, temporary_path)
+            # The copy is the recovery file for the next launch, so it gets the
+            # same flush to disk the primary gets in _save_memos before it is
+            # moved into place; copy2 only hands the bytes to the OS.
+            with open(temporary_path, "r+b") as copy:
+                os.fsync(copy.fileno())
             cls._read_memos(temporary_path)
-            os.replace(temporary_path, destination)
+            replace_with_retry(temporary_path, destination)
             temporary_path = None
         except (OSError, shutil.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise PersistenceError(
@@ -1856,7 +2034,7 @@ class PermanentMemoryManager:
         """
         damaged_path = f"{self.memory_file_path}.corrupt"
         try:
-            os.replace(self.memory_file_path, damaged_path)
+            replace_with_retry(self.memory_file_path, damaged_path)
         except OSError as exc:
             # Usually a lock. The save that follows would fail on the same
             # file anyway, so report the condition rather than pressing on.
@@ -1893,7 +2071,7 @@ class PermanentMemoryManager:
             self._prepare_primary_for_save()
             if os.path.exists(self.memory_file_path):
                 self._atomic_copy_memos(self.memory_file_path, self.backup_file_path)
-            os.replace(temporary_path, self.memory_file_path)
+            replace_with_retry(temporary_path, self.memory_file_path)
             temporary_path = None
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise PersistenceError(

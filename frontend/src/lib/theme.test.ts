@@ -5,10 +5,12 @@ import {
   applyStoredTheme,
   applyThemePreference,
   DEFAULT_THEME_PREFERENCE,
+  nextThemePreference,
   readStoredThemePreference,
   resolveTheme,
   syncNativeTitleBar,
   THEME_BACKGROUNDS,
+  THEME_LABELS,
   THEME_STORAGE_KEY,
   watchSystemTheme,
   type ThemePreference,
@@ -65,6 +67,30 @@ describe("resolveTheme", () => {
     ["system", false, "light"],
   ])("%s with the system dark=%s resolves to %s", (preference, systemDark, expected) => {
     expect(resolveTheme(preference, systemDark)).toBe(expected);
+  });
+});
+
+describe("nextThemePreference", () => {
+  it.each<[ThemePreference, ThemePreference]>([
+    ["system", "light"],
+    ["light", "dark"],
+    ["dark", "system"],
+  ])("moves %s to %s", (current, next) => {
+    expect(nextThemePreference(current)).toBe(next);
+  });
+
+  it("visits all three preferences before repeating, so system is never skipped", () => {
+    const seen: ThemePreference[] = [];
+    let preference: ThemePreference = "dark";
+    for (let step = 0; step < 6; step += 1) {
+      preference = nextThemePreference(preference);
+      seen.push(preference);
+    }
+    expect(seen).toEqual(["system", "light", "dark", "system", "light", "dark"]);
+  });
+
+  it("has a label for every preference", () => {
+    expect(THEME_LABELS).toEqual({ system: "System", light: "Light", dark: "Dark" });
   });
 });
 

@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import { E2E_BACKEND, E2E_BACKEND_LIVENESS, E2E_BACKEND_ORIGIN } from "./e2eBackend";
+
 /**
  * The one browser test that does not mock the API.
  *
@@ -29,6 +31,23 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 test.describe.configure({ mode: "default" });
 
 const HANDOFF_SECRET = "e2e-handoff-secret";
+
+/**
+ * Locally, Playwright reuses whatever already answers on the backend port and
+ * the dev server's port, and its readiness probe only looks at the status
+ * code. Refuse to run against anything that is not `scripts/e2e_backend.py`:
+ * checked directly, and through the dev server's proxy the page actually uses.
+ */
+test.beforeEach(async ({ request }) => {
+  const header = E2E_BACKEND.markerHeader.toLowerCase();
+  for (const url of [`${E2E_BACKEND_ORIGIN}${E2E_BACKEND_LIVENESS}`, E2E_BACKEND_LIVENESS]) {
+    const live = await request.get(url);
+    expect(
+      live.headers()[header],
+      `${url} is not served by scripts/e2e_backend.py; stop whatever is listening there`,
+    ).toBe(E2E_BACKEND.marker);
+  }
+});
 
 /** A fresh bootstrap token, the way the launcher obtains one. */
 async function bootstrapToken(request: APIRequestContext): Promise<string> {
@@ -127,23 +146,36 @@ test("completes a real generation end to end", async ({ page, request }) => {
 
   await openWorkspace(page, request);
 
-  await page.getByLabel("Message Cortex").fill("hello from the browser");
+  // A reused local backend keeps every chat from earlier runs, so this test
+  // names its own: a prompt no other run sent, and the thread id the server
+  // assigned to this send.
+  const prompt = `hello from the browser ${Date.now().toString(36)}`;
+  const accepted = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/generations",
+  );
+  await page.getByLabel("Message Cortex").fill(prompt);
   await page.getByRole("button", { name: "Send message" }).click();
+  const acceptance = await accepted;
+  expect(acceptance.ok(), await acceptance.text()).toBeTruthy();
+  const { thread_id: threadId } = await acceptance.json();
+  expect(threadId).toBeTruthy();
 
   // The reply text comes from the deterministic engine, but everything between
   // the click and this assertion is real: admission, the job registry, the SSE
   // stream, persistence, and the chat reload.
-  await expect(page.getByText("Echo: hello from the browser")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(`Echo: ${prompt}`)).toBeVisible({ timeout: 20_000 });
 
-  // Persisted, not merely rendered from the stream.
+  // Persisted and listed, not merely rendered from the stream.
   const chats = await request.get("/api/v1/chats", { headers });
   expect(chats.ok()).toBeTruthy();
-  const summaries = await chats.json();
-  expect(summaries.length).toBeGreaterThan(0);
+  const summaries: { id: string }[] = await chats.json();
+  expect(summaries.map((summary) => summary.id)).toContain(threadId);
 
-  const thread = await request.get(`/api/v1/chats/${summaries[0].id}`, { headers });
+  const thread = await request.get(`/api/v1/chats/${encodeURIComponent(threadId)}`, { headers });
   expect(thread.ok()).toBeTruthy();
-  const messages = (await thread.json()).messages;
-  expect(messages.map((message: { role: string }) => message.role)).toEqual(["user", "assistant"]);
-  expect(messages[1].content).toBe("Echo: hello from the browser");
+  const messages: { role: string; content: string }[] = (await thread.json()).messages;
+  expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+  expect(messages[0].content).toBe(prompt);
+  expect(messages[1].content).toBe(`Echo: ${prompt}`);
 });
