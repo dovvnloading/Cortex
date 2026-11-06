@@ -202,7 +202,7 @@ describe("App", () => {
 
   it("renews once when every request of the first load has expired", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
-    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    window.history.replaceState({}, "", "/#handoff=desktop-handoff");
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/session/handoff")) return respond({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
@@ -227,48 +227,28 @@ describe("App", () => {
     }
   });
 
-  it("recovers the session after a reload that dropped the launch fragment", async () => {
-    // The launcher delivers the handoff secret once, in the URL fragment, and
-    // the app scrubs it. It used to live only in React state, so any reload --
-    // including the error boundary's own "Reload workspace" button -- lost it,
-    // and the next session expiry left onboarding with no retry that could
-    // ever succeed. The user had to quit and relaunch Cortex.
+  it("does not recover with a handoff secret stored by an older version", async () => {
+    // The long-lived handoff must not survive a reload through browser storage.
+    // The user can restart the native app to obtain fresh credentials instead.
     window.sessionStorage.setItem("cortex.session.token", "local-session");
-    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    window.sessionStorage.setItem("cortex.session.handoff", "legacy-desktop-handoff");
     window.history.replaceState({}, "", "/");
-    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
-    let expireSystem = true;
-    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
-      if (url.endsWith("/system") && expireSystem) {
-        expireSystem = false;
-        return json({ detail: "Local session expired." }, 401);
-      }
-      if (url.endsWith("/system")) return json({ status: "ok", preview: true, session_required: true, started_at: "2026-07-21T18:00:00Z" });
-      if (url.endsWith("/chat-groups")) return json([]);
-      if (url.endsWith("/chats")) return json([]);
-      if (url.endsWith("/settings")) return json({ settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } } });
-      if (url.endsWith("/memories")) return json({ memos: [] });
-      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: [], connection: { success: true, status: "connected", message: "Ready" } });
-      if (url.endsWith("/session/handoff")) {
-        expect(new Headers(init?.headers).get("X-Cortex-Handoff")).toBe("desktop-handoff");
-        return json({ bootstrap_token: "fresh-bootstrap", expires_at: "2026-07-21T18:05:00Z" });
-      }
-      if (url.endsWith("/session/exchange")) return json({ session_token: "recovered-session", expires_at: "2026-07-21T19:00:00Z", token_type: "bearer" });
-      return json({ detail: "Unexpected test route." }, 404);
+      if (url.endsWith("/system")) return respond({ detail: "Local session expired." }, 401);
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
     });
 
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
-    await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input).endsWith("/session/handoff"))).toBe(true));
-    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
-    expect(window.sessionStorage.getItem("cortex.session.token")).toBe("recovered-session");
+    expect(await screen.findByRole("heading", { name: "Start local workspace" }, { timeout: 10_000 })).toBeVisible();
+    expect(await screen.findByText(/Restart Cortex to reconnect securely/)).toBeVisible();
+    expect(callsTo(fetcher, "/session/handoff")).toHaveLength(0);
+    expect(window.sessionStorage.getItem("cortex.session.handoff")).toBeNull();
+    expect(window.sessionStorage.getItem("cortex.session.token")).toBeNull();
   });
 
-  it("keeps the handoff secret from the launch fragment for later reloads", async () => {
+  it("uses the handoff from the launch fragment without persisting it", async () => {
     window.history.replaceState({}, "", "/#bootstrap=launch-token&handoff=desktop-handoff");
     const json = (body: unknown) => new Response(JSON.stringify(body), {
       status: 200,
@@ -289,7 +269,7 @@ describe("App", () => {
     render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
 
     expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
-    expect(window.sessionStorage.getItem("cortex.session.handoff")).toBe("desktop-handoff");
+    expect(window.sessionStorage.getItem("cortex.session.handoff")).toBeNull();
     // The visible URL is still scrubbed.
     expect(window.location.href).not.toContain("handoff=");
   });
@@ -412,13 +392,12 @@ describe("App", () => {
 
   it("resumes the running generation once the session is back after a failed renewal", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
-    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
     window.sessionStorage.setItem("cortex.active.generation", JSON.stringify({
       jobId: "job-expired",
       threadId: "thread-expired",
       lastEventId: 3,
     }));
-    window.history.replaceState({}, "", "/chat/thread-expired");
+    window.history.replaceState({}, "", "/chat/thread-expired#handoff=desktop-handoff");
     const streamEvents = [
       { event_id: 1, event: "generation.content_delta", job_id: "job-expired", thread_id: "thread-expired", data: { delta: "Recovered answer" } },
       { event_id: 2, event: "generation.completed", job_id: "job-expired", thread_id: "thread-expired", data: {} },
@@ -506,7 +485,7 @@ describe("App", () => {
     // already renewed the session. Answering that 401 with a second handoff,
     // exchange and remount is what the hand-written branches used to do.
     window.sessionStorage.setItem("cortex.session.token", "local-session");
-    window.sessionStorage.setItem("cortex.session.handoff", "desktop-handoff");
+    window.history.replaceState({}, "", "/#handoff=desktop-handoff");
     let releaseSlowGroups!: (response: Response) => void;
     const slowGroups = new Promise<Response>((resolve) => { releaseSlowGroups = resolve; });
     const group = { id: "group-filed", name: "Filed", collapsed: false, created_at: "2026-07-21T18:00:00Z", updated_at: "2026-07-21T18:00:00Z" };
