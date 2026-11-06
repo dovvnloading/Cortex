@@ -46,7 +46,8 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   await expect(page.getByText("LOCAL, PRIVATE, YOURS")).toHaveCount(0);
   await page.getByLabel("Message Cortex").fill("hello");
   await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.getByText("Echo: hello")).toBeVisible();
+  await expect(page.getByRole("article", { name: "Cortex message" }).getByText("Echo: hello")).toBeVisible();
+  await expect(page.getByRole("article", { name: "Cortex response in progress" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Ask a follow-up question" })).toHaveCount(0);
 });
 
@@ -258,7 +259,7 @@ test("renders a structured workbench transcript with markdown and code blocks", 
   await expect(page.getByRole("article", { name: "Cortex message" })).toBeVisible();
   await expect(page.getByRole("article", { name: "Your message" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Result", level: 1 })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "Aspect" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Aspect" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "Shape" })).toBeVisible();
   const tableLayout = await page.locator(".markdown-table-wrap table").evaluate((node) => {
     const firstRow = node.querySelector("tr");

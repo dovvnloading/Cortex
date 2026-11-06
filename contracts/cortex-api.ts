@@ -390,10 +390,16 @@ export interface LlamaCppRuntimeStatus {
   last_restart_reason?: string | null;
   loaded_context?: number | null;
   last_failure_code?: "unsupported_architecture" | "model_unreadable" | "memory" | "missing_shards" | "projector_not_a_model" | "no_gpu" | "port_unavailable" | "runtime_unusable" | "startup_timeout" | "health_check_failed" | "runtime_exited" | null;
+  gpu_layers_offloaded?: number | null;
+  gpu_layers_total?: number | null;
+  backend_note?: string | null;
+  context_note?: string | null;
 }
 
 export interface LlamaCppSettings {
   gpu_backend?: "auto" | "vulkan" | "cpu";
+  idle_unload_minutes?: number;
+  extra_args?: Array<string>;
 }
 
 export interface MemoryResponse {

@@ -83,7 +83,10 @@ transcript.](.github/images/workspace-light.png)
   a folder of `.gguf` files and it serves them through its own managed llama.cpp
   runtime -- no separate install. The `llama-server` binary is fetched once,
   verified against a pinned SHA-256, and cached. GPU backend selection is
-  `auto` (try Vulkan, fall back to CPU), `vulkan`, or `cpu`.
+  `auto` (try Vulkan, fall back to CPU; Vulkan is skipped when the machine has
+  no Vulkan loader), `vulkan`, or `cpu`. A loaded model is released after 30
+  idle minutes (Settings > System; 0 keeps it loaded) or with "Unload model",
+  and its context window is held to what the model was trained for.
 - **Bring your own GGUF.** Download a model into the local folder by direct URL
   or Hugging Face repo, then select it from the same picker as everything else.
   For a repository, Settings can list its `.gguf` files (with sizes, folders
