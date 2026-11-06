@@ -230,6 +230,39 @@ over data the model writes into the program -- not editing files or running
 your tests. A consent-gated workspace mode for that kind of work is the
 project's stated direction, and it is not built yet.
 
+### Experimental read-only repository research (CLI)
+
+The first **read-only** slice of that workspace direction is available to
+developers through a separate terminal command, not through ordinary chat or
+the desktop UI. Pass an absolute local repository path and the explicit
+`--allow-read-only` consent flag. Cortex copies eligible small UTF-8 source
+files into a bounded, short-lived **in-memory snapshot**, then searches and
+reads from the snapshot instead of returning to the working tree.
+
+```powershell
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --list
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --search "class Client"
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --model qwen3:8b --question "Where is request authentication checked?"
+```
+
+The research turn uses **loopback Ollama only** and can make up to four
+read/search tool calls before returning an answer. It cannot edit files,
+run tests, start a shell, install packages, or read outside its snapshot.
+Each grant expires after 15 minutes, is scoped to its owner, and can be revoked;
+the CLI revokes it on exit. No grant or file contents are persisted by this
+feature. Hidden credentials, dependency/build directories, symlinks and
+Windows reparse points are excluded; indexing is bounded by file count,
+file size and total bytes, and reports when it is incomplete. Original files
+are not changed.
+
+**Limitations:** This is a developer-facing backend/CLI capability, not yet a
+complete UI-integrated coding agent. It is not an OS sandbox: concurrent
+hostile filesystem mutation during snapshot capture can still create path
+races, and code files themselves may contain sensitive text. Grant access
+only to a repository you trust to share with the chosen local model. Model
+answers and file citations remain unverified until checked against source.
+Workspace edit/test/rollback support is **not** part of this release slice.
+
 ## Architecture
 
 ```text
