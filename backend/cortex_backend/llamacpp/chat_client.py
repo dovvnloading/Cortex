@@ -11,6 +11,7 @@ so the user sees the answer as the model writes it.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import ssl
@@ -19,7 +20,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from threading import Event, Lock
-from typing import Any
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import httpx
 
@@ -35,6 +36,31 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
 # Counting tokens is a single short request; a server that does not answer it
 # quickly is not worth waiting for before the real one.
 _TOKENIZE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=10.0, pool=2.0)
+
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+def _uses_the_server(
+    method: Callable[Concatenate[LlamaCppChatClient, _Params], _Result],
+) -> Callable[Concatenate[LlamaCppChatClient, _Params], _Result]:
+    """Tell the provider the server is in use for the whole call.
+
+    A generation can outlast the manager's idle period, and only this client
+    knows when its request begins and ends. Held from before the server is
+    made ready until the reply (or its failure) is over, so the server is
+    neither unloaded for being idle nor by a manual unload halfway through, and
+    the idle clock restarts when the call ends. A provider that does not track
+    use (a test double) is left alone.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: LlamaCppChatClient, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        scope = getattr(self._provider, "request_scope", None)
+        with scope() if callable(scope) else nullcontext():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class LlamaCppChatClient:
@@ -126,6 +152,7 @@ class LlamaCppChatClient:
         """
         self._status_callback = callback
 
+    @_uses_the_server
     def chat(
         self,
         *,
@@ -192,6 +219,7 @@ class LlamaCppChatClient:
             think=think,
         )
 
+    @_uses_the_server
     def tokenize(
         self,
         *,

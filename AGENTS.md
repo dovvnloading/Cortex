@@ -116,6 +116,7 @@ python -m ruff check backend tests tools main.py app_factory.py scripts
 python -m mypy
 python tools/generate_contracts.py --check
 python tools/artifact_boundary_review.py --json --strict
+python tools/harness_eval.py --check --json
 Push-Location frontend
 npm run typecheck
 npm run lint

@@ -83,7 +83,10 @@ transcript.](.github/images/workspace-light.png)
   a folder of `.gguf` files and it serves them through its own managed llama.cpp
   runtime -- no separate install. The `llama-server` binary is fetched once,
   verified against a pinned SHA-256, and cached. GPU backend selection is
-  `auto` (try Vulkan, fall back to CPU), `vulkan`, or `cpu`.
+  `auto` (try Vulkan, fall back to CPU; Vulkan is skipped when the machine has
+  no Vulkan loader), `vulkan`, or `cpu`. A loaded model is released after 30
+  idle minutes (Settings > System; 0 keeps it loaded) or with "Unload model",
+  and its context window is held to what the model was trained for.
 - **Bring your own GGUF.** Download a model into the local folder by direct URL
   or Hugging Face repo, then select it from the same picker as everything else.
   For a repository, Settings can list its `.gguf` files (with sizes, folders
@@ -132,7 +135,11 @@ transcript.](.github/images/workspace-light.png)
   shortcuts reference. The sidebar also supports searching chats by title.
 - **Durable context.** Threads live in SQLite; permanent memories use atomic
   local JSON storage. Existing JSON chat history and Windows settings are read
-  additively during migration without rewriting the legacy source.
+  additively during migration without rewriting the legacy source. For a managed
+  llama.cpp model, Cortex remeasures shortened prompts with the runtime's tokenizer
+  before generation instead of trusting a character-ratio estimate. If even the
+  history-free prompt is too large, it refuses the turn rather than knowingly
+  sending text the runtime would silently truncate.
 - **Exact arithmetic.** An explicit calculation ("what is 17.5% of 2,340?") is
   checked by a deterministic local calculator before the model answers, so the
   figure in the reply is computed rather than guessed.
@@ -225,6 +232,48 @@ The language itself is a restricted Python subset, so this suits calculations
 over data the model writes into the program -- not editing files or running
 your tests. A consent-gated workspace mode for that kind of work is the
 project's stated direction, and it is not built yet.
+
+### Experimental read-only repository research (CLI)
+
+The first **read-only** slice of that workspace direction is available to
+developers through a separate terminal command, not through ordinary chat or
+the desktop UI. Pass an absolute local repository path and the explicit
+`--allow-read-only` consent flag. Cortex copies eligible small UTF-8 source
+files into a bounded, short-lived **in-memory snapshot**, then searches and
+reads from the snapshot instead of returning to the working tree.
+
+```powershell
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --list
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --search "class Client"
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --model qwen3:8b --question "Where is request authentication checked?"
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --model qwen3:8b --question "Propose fixing this parser bug" --preview-patch
+```
+
+The research turn uses **loopback Ollama only** and can make up to four
+read/search tool calls before returning an answer. It cannot edit files,
+run tests, start a shell, install packages, or read outside its snapshot.
+Each grant expires after 15 minutes, is scoped to its owner, and can be revoked;
+the CLI revokes it on exit. No grant or file contents are persisted by this
+feature. Hidden credentials, dependency/build directories, symlinks and
+Windows reparse points are excluded; indexing is bounded by file count,
+file size and total bytes, and reports when it is incomplete. Original files
+are not changed.
+
+With `--preview-patch`, the model can additionally propose **exact,
+one-occurrence text replacements** within already-indexed files. Each proposal
+must carry the SHA-256 of the baseline file reported by the read tool. Cortex
+stages the replacement **in memory only**, checks for ambiguity, stale hashes
+and size limits, and returns a unified diff for inspection. The original
+checkout is never edited. A preview is not an applied patch and no tests run.
+
+**Limitations:** This is a developer-facing backend/CLI capability, not yet a
+complete UI-integrated coding agent. It is not an OS sandbox: concurrent
+hostile filesystem mutation during snapshot capture can still create path
+races, and code files themselves may contain sensitive text. Grant access
+only to a repository you trust to share with the chosen local model. Model
+answers and file citations remain unverified until checked against source.
+Applying changes, executing tests, rollback/checkpoint persistence and any
+automatic repair loop are **not** part of this release slice.
 
 ## Architecture
 
@@ -322,6 +371,22 @@ contract](AGENTS.md) first. Cortex's current product boundary is bounded local
 execution: approval-gated code in a restricted Python subset, safe computation,
 and fixed-function image recipes. Nothing here enables arbitrary workspace or
 shell authority.
+
+The backend also ships a deterministic trajectory evaluator that exercises
+code-proposal admission, validation, bounded repair, cancellation, contextual
+history, untrusted tool output, and feedback handoff against **scripted**
+model replies. It performs no model download or code execution, and is part of
+the local quick gate and Windows CI:
+
+```powershell
+python tools/harness_eval.py --check --json
+python tools/harness_eval.py --case approved-result-feedback --json
+```
+
+Its pass rate measures harness contracts, **not** real-model task success or
+state-of-the-art coding performance. A future live-model benchmark must report
+model identifiers, hardware, corpus, tokens, time, and approval outcomes
+separately; never report the deterministic score as an agent benchmark.
 
 To run them automatically before every push:
 

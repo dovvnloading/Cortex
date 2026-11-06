@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import shutil
+import sys
 import tempfile
 import time
 import zipfile
@@ -57,9 +59,9 @@ def _expected_directory_hash() -> str:
         return hash_directory(extract_dir)
 
 
-def _release_for(archive_bytes: bytes, *, filename: str = "llama-cpu.zip") -> PinnedRelease:
+def _release_for(archive_bytes: bytes, *, filename: str = "llama-cpu.zip", tag: str = "b0001") -> PinnedRelease:
     return PinnedRelease(
-        tag="b0001",
+        tag=tag,
         assets={
             "cpu": AssetSpec(
                 filename=filename,
@@ -391,3 +393,204 @@ def test_a_stall_after_cancellation_is_reported_as_cancellation(tmp_path: Path) 
             "cpu",
             cancellation_event=SimpleNamespace(is_set=lambda: stopped["value"]),
         )
+
+
+# ---------------------------------------------------------------------------
+# Superseded runtime builds are removed (RT-20)
+# ---------------------------------------------------------------------------
+
+
+def _older_build(root: Path, name: str) -> Path:
+    """A build directory laid out like an extracted release, under ``root``."""
+    directory = root / name
+    (directory / "nested").mkdir(parents=True)
+    (directory / "llama-server.exe").write_bytes(b"older stub")
+    (directory / "llama-server-impl.dll").write_bytes(b"older impl")
+    (directory / "nested" / "ggml-extra.dll").write_bytes(b"older backend")
+    return directory
+
+
+def _fetch_current(root: Path, *, tag: str = "b0100") -> tuple[BinaryFetcher, PinnedRelease]:
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes, tag=tag)
+    fetcher = BinaryFetcher(root, http_client=_client_returning(archive_bytes))
+    fetcher.ensure_binary(release, "cpu")
+    return fetcher, release
+
+
+def test_old_release_directories_are_pruned(tmp_path: Path) -> None:
+    older_cpu = _older_build(tmp_path, "b0050-cpu")
+    older_vulkan = _older_build(tmp_path, "b0050-vulkan")
+    oldest = _older_build(tmp_path, "b0007-cpu")
+    same_tag_other_backend = _older_build(tmp_path, "b0100-vulkan")
+    newer = _older_build(tmp_path, "b0200-cpu")
+    # Things that are not superseded builds and must never be touched.
+    in_progress_download = tmp_path / ".download-0123456789abcdef"
+    in_progress_download.write_bytes(b"partial archive")
+    in_progress_extract = tmp_path / ".extract-0123456789abcdef"
+    (in_progress_extract / "half").mkdir(parents=True)
+    marker = tmp_path / "preferred_gpu_backend.json"
+    marker.write_text("{}", encoding="utf-8")
+    unrelated = tmp_path / "notes"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_text("keep", encoding="utf-8")
+    a_file_named_like_a_build = tmp_path / "b0040-cpu"
+    a_file_named_like_a_build.write_bytes(b"not a directory")
+
+    fetcher, release = _fetch_current(tmp_path)
+
+    assert not older_cpu.exists()
+    assert not older_vulkan.exists()
+    assert not oldest.exists()
+    # The pinned release, on both backends, and anything newer than it.
+    assert (tmp_path / "b0100-cpu" / "llama-server.exe").is_file()
+    assert same_tag_other_backend.is_dir()
+    assert newer.is_dir()
+    assert in_progress_download.is_file()
+    assert in_progress_extract.is_dir()
+    assert marker.is_file()
+    assert (unrelated / "keep.txt").is_file()
+    assert a_file_named_like_a_build.is_file()
+    # No half-deleted remains are left under a launchable name, and the runtime
+    # that was just fetched still verifies.
+    assert not any(entry.name.startswith(".prune-") for entry in tmp_path.iterdir())
+    assert fetcher.is_cached(release, "cpu")
+
+
+def test_pruning_also_runs_when_the_current_build_was_already_cached(tmp_path: Path) -> None:
+    fetcher, release = _fetch_current(tmp_path)
+    older = _older_build(tmp_path, "b0050-cpu")
+    later = BinaryFetcher(tmp_path, http_client=_client_returning(b"no download expected"))
+
+    later.ensure_binary(release, "cpu")
+
+    assert not older.exists()
+    assert fetcher.is_cached(release, "cpu")
+
+
+def test_pruning_happens_once_per_release_and_process(tmp_path: Path) -> None:
+    fetcher, release = _fetch_current(tmp_path)
+    appeared_later = _older_build(tmp_path, "b0050-cpu")
+
+    fetcher.ensure_binary(release, "cpu")
+
+    assert appeared_later.is_dir()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="relies on Windows refusing to rename a directory that holds an open file")
+def test_a_build_that_is_locked_is_kept_and_the_launch_still_succeeds(tmp_path: Path) -> None:
+    locked = _older_build(tmp_path, "b0050-cpu")
+    free = _older_build(tmp_path, "b0060-cpu")
+    # A file held open the way a running program holds its own files.
+    with (locked / "llama-server-impl.dll").open("rb"):
+        fetcher, release = _fetch_current(tmp_path)
+
+        assert (locked / "llama-server.exe").is_file()
+        assert (locked / "nested" / "ggml-extra.dll").is_file()
+    assert not free.exists()
+    assert fetcher.is_cached(release, "cpu")
+
+
+def test_a_build_a_program_is_running_from_is_left_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A running image refuses a write-open; that alone is enough to keep the build."""
+    in_use = _older_build(tmp_path, "b0050-cpu")
+    real_open = Path.open
+
+    def open_refusing_the_running_image(self: Path, mode: str = "r", *args, **kwargs):
+        if self.name == "llama-server.exe" and "+" in mode:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_refusing_the_running_image)
+
+    _fetch_current(tmp_path)
+
+    assert (in_use / "llama-server.exe").is_file()
+    assert (in_use / "llama-server-impl.dll").is_file()
+    assert (in_use / "nested" / "ggml-extra.dll").is_file()
+
+
+def test_a_failure_while_deleting_never_fails_the_launch_and_is_finished_next_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    older = _older_build(tmp_path, "b0050-cpu")
+    archive_bytes = _build_archive()
+    release = _release_for(archive_bytes, tag="b0100")  # built first: it uses rmtree itself
+    real_rmtree = shutil.rmtree
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "access denied")
+
+    monkeypatch.setattr(binary_fetcher_module.shutil, "rmtree", refuse)
+    BinaryFetcher(tmp_path, http_client=_client_returning(archive_bytes)).ensure_binary(release, "cpu")  # must not raise
+
+    # The old build was moved out of the launchable name before the delete
+    # failed, so nothing can start from a half-deleted directory.
+    assert not older.exists()
+    leftovers = [entry for entry in tmp_path.iterdir() if entry.name.startswith(".prune-")]
+    assert len(leftovers) == 1
+
+    monkeypatch.setattr(binary_fetcher_module.shutil, "rmtree", real_rmtree)
+    BinaryFetcher(tmp_path, http_client=_client_returning(b"no download expected")).ensure_binary(release, "cpu")
+
+    assert not any(entry.name.startswith(".prune-") for entry in tmp_path.iterdir())
+
+
+def test_at_most_a_handful_of_builds_are_removed_per_pass(tmp_path: Path) -> None:
+    for build in range(1, 13):
+        _older_build(tmp_path, f"b{build:04d}-cpu")
+
+    _fetch_current(tmp_path)
+
+    remaining = [entry.name for entry in tmp_path.iterdir() if entry.name.startswith("b00") and entry.name != "b0100-cpu"]
+    assert len(remaining) == 12 - binary_fetcher_module._MAX_PRUNED_PER_PASS
+
+
+def test_a_link_that_looks_like_an_old_build_is_never_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    (outside / "precious").mkdir(parents=True)
+    (outside / "precious" / "data.txt").write_text("keep", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    try:
+        (runtime / "b0050-cpu").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this account cannot create directory symlinks")
+
+    _fetch_current(runtime)
+
+    assert (outside / "precious" / "data.txt").read_text(encoding="utf-8") == "keep"
+    # And the link itself was not moved or renamed out of sight.
+    assert (runtime / "b0050-cpu").is_symlink()
+    assert not any(entry.name.startswith(".prune-") for entry in runtime.iterdir())
+
+
+def test_nothing_is_pruned_when_the_pinned_tag_is_not_a_build_number(tmp_path: Path) -> None:
+    older = _older_build(tmp_path, "b0050-cpu")
+
+    _fetch_current(tmp_path, tag="custom-tag")
+
+    assert older.is_dir()
+
+
+def test_a_cancelled_pass_removes_nothing(tmp_path: Path) -> None:
+    fetcher, release = _fetch_current(tmp_path)
+    older = _older_build(tmp_path, "b0050-cpu")
+    fetcher._pruned_for = None
+
+    fetcher._prune_superseded_builds(release, SimpleNamespace(is_set=lambda: True))
+
+    assert older.is_dir()
+
+
+def test_pruning_logs_build_names_and_nothing_from_inside_them(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG")
+    _older_build(tmp_path, "b0050-cpu")
+
+    _fetch_current(tmp_path)
+
+    assert "b0050-cpu" in caplog.text
+    for inside in ("llama-server-impl.dll", "ggml-extra.dll", "older stub"):
+        assert inside not in caplog.text

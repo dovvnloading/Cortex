@@ -73,3 +73,76 @@ def test_status_route_reports_no_failure_cause_by_default() -> None:
 
     assert _llamacpp_status(_request_with_manager(SimpleNamespace(status=live))).last_failure_code is None
     assert _llamacpp_status(_request_with_manager(None)).last_failure_code is None
+
+
+def test_status_route_reports_why_the_gpu_build_was_not_used() -> None:
+    note = "No Vulkan graphics loader was found on this computer, so the CPU build is used."
+    live = LlamaCppRuntimeStatus(
+        state="ready",
+        binary_present=True,
+        loaded_model="gguf:model.gguf",
+        last_error=None,
+        models_directory="C:/synthetic/models",
+        active_backend="cpu",
+        backend_note=note,
+    )
+
+    status = _llamacpp_status(_request_with_manager(SimpleNamespace(status=live)))
+
+    assert status.backend_note == note
+    assert status.model_dump()["backend_note"] == note
+    assert _llamacpp_status(_request_with_manager(None)).backend_note is None
+
+
+def test_status_route_reports_how_many_layers_are_on_the_gpu() -> None:
+    live = LlamaCppRuntimeStatus(
+        state="ready",
+        binary_present=True,
+        loaded_model="gguf:model.gguf",
+        last_error=None,
+        models_directory="C:/synthetic/models",
+        active_backend="vulkan",
+        gpu_layers_offloaded=24,
+        gpu_layers_total=33,
+    )
+
+    status = _llamacpp_status(_request_with_manager(SimpleNamespace(status=live)))
+
+    assert (status.gpu_layers_offloaded, status.gpu_layers_total) == (24, 33)
+
+
+def test_status_route_reports_unknown_offload_as_null_not_zero() -> None:
+    live = LlamaCppRuntimeStatus(
+        state="ready",
+        binary_present=True,
+        loaded_model="gguf:model.gguf",
+        last_error=None,
+        models_directory="C:/synthetic/models",
+        active_backend="vulkan",
+    )
+
+    for status in (
+        _llamacpp_status(_request_with_manager(SimpleNamespace(status=live))),
+        _llamacpp_status(_request_with_manager(None)),
+    ):
+        assert status.gpu_layers_offloaded is None
+        assert status.gpu_layers_total is None
+
+
+def test_status_route_reports_that_the_context_window_was_limited() -> None:
+    note = "The context window was limited to 4096 tokens, the most this model was trained for (32768 were requested)."
+    live = LlamaCppRuntimeStatus(
+        state="ready",
+        binary_present=True,
+        loaded_model="gguf:model.gguf",
+        last_error=None,
+        models_directory="C:/synthetic/models",
+        active_backend="cpu",
+        loaded_context=4096,
+        context_note=note,
+    )
+
+    status = _llamacpp_status(_request_with_manager(SimpleNamespace(status=live)))
+
+    assert status.context_note == note
+    assert _llamacpp_status(_request_with_manager(None)).context_note is None
