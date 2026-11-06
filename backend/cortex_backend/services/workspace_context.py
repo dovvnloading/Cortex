@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import secrets
 import stat
 from threading import RLock
+import unicodedata
 import time
 from types import MappingProxyType
 
@@ -74,6 +75,10 @@ class WorkspaceAccessError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class WorkspaceFile:
     path: str
+    # Exact UTF-8 content including CRLF, final newline and optional BOM.
+    # Patch preview must not silently rewrite line endings or otherwise
+    # change bytes outside the replacement the model proposed.
+    text: str
     lines: tuple[str, ...]
     sha256: str
 
@@ -145,8 +150,19 @@ def _safe_root(value: str) -> Path:
 
 
 def _permitted_name(name: str, *, directory: bool) -> bool:
+    # A filename is later emitted as an exact identifier, a model citation or
+    # a unified-diff header. Reject invisible/bidi controls and separators
+    # rather than letting one file forge an additional path or diff hunk.
+    if (
+        not name or len(name) > 120 or name != name.strip()
+        or any(
+            char in ":\\\\/" or unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in name
+        )
+    ):
+        return False
     lowered = name.casefold()
-    if not name or name.startswith(".") and name not in {".github", ".githooks", ".gitignore"}:
+    if name.startswith(".") and name not in {".github", ".githooks", ".gitignore"}:
         return False
     if directory:
         return lowered not in _EXCLUDED_DIRECTORIES
@@ -268,13 +284,14 @@ def _capture_files(root: Path) -> tuple[Mapping[str, WorkspaceFile], int, int, i
                 truncated = True
                 break
             try:
-                content = data.decode("utf-8-sig")
+                content = data.decode("utf-8")
             except UnicodeError:
                 skipped += 1
                 continue
             relative = Path(entry.path).relative_to(root).as_posix()
             files[relative] = WorkspaceFile(
                 path=relative,
+                text=content,
                 lines=tuple(content.splitlines()),
                 sha256=hashlib.sha256(data).hexdigest(),
             )

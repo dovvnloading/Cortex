@@ -243,6 +243,7 @@ reads from the snapshot instead of returning to the working tree.
 python tools/workspace_research.py --root "C:\src\project" --allow-read-only --list
 python tools/workspace_research.py --root "C:\src\project" --allow-read-only --search "class Client"
 python tools/workspace_research.py --root "C:\src\project" --allow-read-only --model qwen3:8b --question "Where is request authentication checked?"
+python tools/workspace_research.py --root "C:\src\project" --allow-read-only --model qwen3:8b --question "Propose fixing this parser bug" --preview-patch
 ```
 
 The research turn uses **loopback Ollama only** and can make up to four
@@ -255,13 +256,21 @@ Windows reparse points are excluded; indexing is bounded by file count,
 file size and total bytes, and reports when it is incomplete. Original files
 are not changed.
 
+With `--preview-patch`, the model can additionally propose **exact,
+one-occurrence text replacements** within already-indexed files. Each proposal
+must carry the SHA-256 of the baseline file reported by the read tool. Cortex
+stages the replacement **in memory only**, checks for ambiguity, stale hashes
+and size limits, and returns a unified diff for inspection. The original
+checkout is never edited. A preview is not an applied patch and no tests run.
+
 **Limitations:** This is a developer-facing backend/CLI capability, not yet a
 complete UI-integrated coding agent. It is not an OS sandbox: concurrent
 hostile filesystem mutation during snapshot capture can still create path
 races, and code files themselves may contain sensitive text. Grant access
 only to a repository you trust to share with the chosen local model. Model
 answers and file citations remain unverified until checked against source.
-Workspace edit/test/rollback support is **not** part of this release slice.
+Applying changes, executing tests, rollback/checkpoint persistence and any
+automatic repair loop are **not** part of this release slice.
 
 ## Architecture
 
