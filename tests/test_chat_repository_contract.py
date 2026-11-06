@@ -256,6 +256,18 @@ def test_both_stores_accept_the_same_message_fields() -> None:
     assert tuple(storage._MESSAGE_FIELD_COLUMNS) == MESSAGE_FIELDS
 
 
+def test_sqlite_partial_read_statements_are_prebuilt_from_schema_columns() -> None:
+    """No request data participates in SQL construction, even a column name."""
+    queries = storage._MESSAGE_SELECT_QUERIES
+    assert len(queries) == (1 << len(MESSAGE_FIELDS)) - 1
+    assert queries[frozenset(("id", "stats"))] == (
+        "SELECT id, generation_stats_json AS stats FROM messages "
+        "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC"
+    )
+    assert all(query.count("?") == 1 for query in queries.values())
+    assert frozenset(("id", "content FROM messages; --")) not in queries
+
+
 def test_the_sqlite_partial_read_never_decodes_a_field_it_was_not_asked_for(tmp_path: Path) -> None:
     """What a partial read is for: the columns left out are not even decoded.
 

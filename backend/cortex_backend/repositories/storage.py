@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import combinations
 import hashlib
 import os
 import json
@@ -108,6 +109,18 @@ def _message_select_list(fields: Sequence[str]) -> str:
         for name, column in ((name, _MESSAGE_FIELD_COLUMNS[name]) for name in fields)
     )
 
+
+# Every possible projection is compiled from literal schema columns at import.
+# A request only selects an existing statement by its validated field set;
+# no caller-supplied text can become part of a SQL statement.
+_MESSAGE_SELECT_QUERIES: dict[frozenset[str], str] = {
+    frozenset(names): (
+        "SELECT " + _message_select_list(names)
+        + " FROM messages WHERE thread_id = ? ORDER BY timestamp ASC, id ASC"
+    )
+    for count in range(1, len(_MESSAGE_FIELD_COLUMNS) + 1)
+    for names in combinations(_MESSAGE_FIELD_COLUMNS, count)
+}
 
 def _decode_message_row(message: dict) -> dict:
     """Decode the stored JSON and timestamp fields a message row carries, as load_chat does."""
@@ -1577,8 +1590,7 @@ class DatabaseManager:
                 chat_data['revision'] = int(chat_data['revision'])
                 
                 cursor.execute(
-                    f"SELECT {_message_select_list(tuple(_MESSAGE_FIELD_COLUMNS))} FROM messages "
-                    "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
+                    _MESSAGE_SELECT_QUERIES[frozenset(_MESSAGE_FIELD_COLUMNS)],
                     (thread_id,)
                 )
                 chat_data['messages'] = [
@@ -1632,8 +1644,7 @@ class DatabaseManager:
                 ).fetchone() is None:
                     return None
                 rows = conn.execute(
-                    f"SELECT {_message_select_list(fields)} FROM messages "
-                    "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC",
+                    _MESSAGE_SELECT_QUERIES[frozenset(fields)],
                     (thread_id,),
                 ).fetchall()
             return [_decode_message_row(dict(row)) for row in rows]
