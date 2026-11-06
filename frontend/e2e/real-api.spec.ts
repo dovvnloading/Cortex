@@ -78,7 +78,7 @@ async function sessionHeaders(request: APIRequestContext) {
 
 async function openWorkspace(page: Page, request: APIRequestContext): Promise<string> {
   const token = await bootstrapToken(request);
-  await page.goto(`/?bootstrap=${encodeURIComponent(token)}`);
+  await page.goto(`/#bootstrap=${encodeURIComponent(token)}`);
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   return token;
 }

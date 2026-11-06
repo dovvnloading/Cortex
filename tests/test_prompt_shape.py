@@ -876,6 +876,63 @@ def test_history_names_earlier_attachments() -> None:
     assert "[Attached: report.md (text/markdown)]" in messages[1]["content"]
 
 
+def _earlier_document(text: str, filename: str = "report.md") -> GenerationAttachment:
+    return GenerationAttachment(
+        attachment_id="doc-earlier",
+        filename=filename,
+        mime_type="text/markdown",
+        kind="document",
+        text_content=text,
+        from_earlier_message=True,
+    )
+
+
+def test_documents_from_the_previous_message_are_set_apart_from_new_attachments() -> None:
+    """The model must not take a resent document for one the user just attached."""
+
+    messages = _prompt(
+        query="Now list its section headings.",
+        history_messages=[
+            {"role": "user", "content": "Summarise this.\n[Attached: report.md (text/markdown)]"},
+            {"role": "assistant", "content": "It covers two findings."},
+        ],
+        attachments=(_earlier_document("## Findings\n## Next steps"),),
+    )
+
+    user = messages[-1]["content"]
+    assert "## DOCUMENTS FROM THE USER'S PREVIOUS MESSAGE" in user
+    assert "## ATTACHED DOCUMENTS" not in user
+    # Framed as untrusted reference data, exactly like a new document.
+    assert 'Attachment filename: "report.md"' in user
+    assert "BEGIN UNTRUSTED REFERENCE DATA" in user and "## Next steps" in user
+    assert user.endswith("## USER QUESTION\nNow list its section headings.")
+    # And nothing of it in the system role.
+    assert "## Findings" not in messages[0]["content"]
+
+
+@pytest.mark.parametrize(("num_ctx", "kept_whole"), [(4096, False), (65536, True)])
+def test_an_earlier_document_shares_the_attachment_budget_that_scales_with_the_window(
+    num_ctx: int, kept_whole: bool
+) -> None:
+    text = "".join(f"line {index} of the earlier report\n" for index in range(2000))
+
+    (fitted,) = SynthesisAgent.fit_attachments_to_context(
+        (_earlier_document(text),),
+        query="Now list its section headings.",
+        chat_history="No history available.",
+        permanent_memories=[],
+        memories_enabled=False,
+        user_system_instructions=None,
+        num_ctx=num_ctx,
+    )
+
+    assert fitted.from_earlier_message is True
+    assert (fitted.text_content == text) is kept_whole
+    if not kept_whole:
+        assert fitted.text_content is not None
+        assert fitted.text_content.endswith("[Attachment text truncated to fit the model context.]")
+
+
 def test_a_message_with_only_an_attachment_stays_in_history() -> None:
     """A file sent with no words is still a turn the model must see."""
 

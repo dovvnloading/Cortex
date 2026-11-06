@@ -150,7 +150,7 @@ console.log(`Capturing to ${outDir}`);
 // ---------------------------------------------------------------------------
 // Chat: transcript, code, reasoning, sources, tables
 // ---------------------------------------------------------------------------
-await page.goto(`${base}/?bootstrap=${encodeURIComponent(browserToken)}`);
+await page.goto(`${base}/#bootstrap=${encodeURIComponent(browserToken)}`);
 await page.getByLabel("Message Cortex").waitFor({ state: "visible" });
 await page.waitForTimeout(500);
 

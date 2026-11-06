@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,28 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl
     fcntl = None
+
+
+# What a non-blocking lock attempt reports when another handle holds the lock:
+# msvcrt's LK_NBLCK and a read or write of the locked byte give EACCES (and
+# LK_LOCK EDEADLOCK once it gives up); flock gives EWOULDBLOCK/EAGAIN.
+_CONTENDED_ERRNOS = frozenset(
+    {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}
+)
+
+
+class InstanceLockError(RuntimeError):
+    """The instance lock could not be set up at all.
+
+    Distinct from contention -- another Cortex holding the lock, which is what
+    ``InstanceLock.acquire`` returning ``None`` means. The message is fixed
+    text naming the step that failed (and the class of the OS error), never a
+    path or a secret, so it can go into the startup log as it stands.
+    """
+
+
+def _contended(error: OSError) -> bool:
+    return error.errno in _CONTENDED_ERRNOS
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,14 +88,26 @@ class InstanceLock:
         self._record: InstanceRecord | None = None
 
     def acquire(self, *, port: int) -> InstanceRecord | None:
+        """Take the lock and publish this instance's record and handoff secret.
+
+        Returns ``None`` only when another process holds the lock. Anything
+        else that stops the lock being taken -- a profile folder that cannot be
+        created or secured, a lock file that cannot be opened, a secret or
+        record that cannot be written -- raises ``InstanceLockError``: treating
+        those as contention sent the launch looking for a running instance
+        that did not exist, and the person saw a dialog about a log nobody had
+        tried to write.
+        """
         try:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             secure_private_path(self.profile_dir, directory=True)
             secret_path = AppPaths.from_data_dir(self.secret_path).data_dir
-            if secret_path != self.secret_path:
-                return None
-        except (OSError, AppPathError):
-            return None
+        except (OSError, AppPathError) as exc:
+            raise InstanceLockError(
+                f"Cortex could not prepare its instance folder ({type(exc).__name__})."
+            ) from exc
+        if secret_path != self.secret_path:
+            raise InstanceLockError("Cortex's instance secret path does not resolve to itself.")
         try:
             # Do not use append mode here: every marker write would advance to
             # EOF and make this persistent lock grow once per launch.  Opening
@@ -82,35 +117,46 @@ class InstanceLock:
                 os.O_RDWR | os.O_CREAT,
                 0o600,
             )
-            handle = os.fdopen(descriptor, "r+b")
-        except OSError:
-            return None
+        except OSError as exc:
+            raise InstanceLockError(
+                f"Cortex could not open its instance lock file ({type(exc).__name__})."
+            ) from exc
         try:
             # msvcrt requires a byte to exist before locking the range.  Keep
             # normalization before locking: truncating a Windows file while a
-            # byte-range lock is held can invalidate that lock.
-            handle.seek(0)
-            if handle.read(1) == b"":
-                handle.seek(0)
-                handle.write(b"0")
-                handle.flush()
-            else:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() != 1:
-                    handle.truncate(1)
-                    handle.flush()
-            handle.seek(0)
-        except OSError:
-            handle.close()
-            return None
+            # byte-range lock is held can invalidate that lock.  The size comes
+            # from fstat rather than a read, because reading a byte another
+            # process has locked fails, and the writes go straight to the
+            # descriptor so a failed one leaves nothing buffered to retry on
+            # close.  A write that fails because the byte is locked is a
+            # contender that got there first.
+            size = os.fstat(descriptor).st_size
+            if size == 0:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"0")
+            elif size != 1:
+                os.ftruncate(descriptor, 1)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        except OSError as exc:
+            os.close(descriptor)
+            if _contended(exc):
+                return None
+            raise InstanceLockError(
+                f"Cortex could not prepare its instance lock file ({type(exc).__name__})."
+            ) from exc
+        handle = os.fdopen(descriptor, "r+b")
         try:
             if msvcrt is not None:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             elif fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError as exc:
             handle.close()
-            return None
+            if _contended(exc):
+                return None
+            raise InstanceLockError(
+                f"Cortex could not lock its instance lock file ({type(exc).__name__})."
+            ) from exc
 
         try:
             secret = secrets.token_urlsafe(32)
@@ -128,13 +174,15 @@ class InstanceLock:
                 json.dumps(record.as_dict(), indent=2), encoding="utf-8"
             )
             os.replace(temporary, self.record_path)
-        except (OSError, AppPathError):
+        except (OSError, AppPathError) as exc:
             handle.close()
             try:
                 self.secret_path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
-            return None
+            raise InstanceLockError(
+                f"Cortex could not publish its instance record ({type(exc).__name__})."
+            ) from exc
         self._handle = handle
         self._record = record
         return record

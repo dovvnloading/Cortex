@@ -133,12 +133,10 @@ type ErrorBody = {
 };
 
 const SESSION_TOKEN_KEY = "cortex.session.token";
-// The launcher hands the handoff secret over once, in the URL fragment. It
-// stays valid for the life of the backend process and is the only way to
-// re-exchange an expired session, so it has to survive a reload the same way
-// the session token does -- otherwise the app's own "Reload workspace"
-// button leaves the next session expiry unrecoverable.
-const HANDOFF_SECRET_KEY = "cortex.session.handoff";
+// Older versions persisted the long-lived launcher handoff secret in web
+// storage. Erase that legacy copy on startup. A handoff is now kept in memory
+// only, so a script with storage access cannot retrieve it after the launch.
+const LEGACY_HANDOFF_SECRET_KEY = "cortex.session.handoff";
 const VALIDATION_ISSUE_LIMIT = 8;
 const VALIDATION_TEXT_LIMIT = 240;
 const REQUEST_LOCATION_MARKERS = new Set(["body", "query", "path", "header", "cookie"]);
@@ -225,20 +223,11 @@ function removePersistedSessionToken(): void {
   }
 }
 
-export function readPersistedHandoffSecret(): string {
+export function discardLegacyHandoffSecret(): void {
   try {
-    return window.sessionStorage.getItem(HANDOFF_SECRET_KEY) ?? "";
+    window.sessionStorage.removeItem(LEGACY_HANDOFF_SECRET_KEY);
   } catch {
-    return "";
-  }
-}
-
-export function persistHandoffSecret(secret: string): void {
-  if (!secret) return;
-  try {
-    window.sessionStorage.setItem(HANDOFF_SECRET_KEY, secret);
-  } catch {
-    // Best effort, exactly like the session token above.
+    // Storage can be blocked; the secret is never read or written by this version.
   }
 }
 

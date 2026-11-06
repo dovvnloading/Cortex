@@ -39,7 +39,7 @@ test("a returning light-theme user never sees the dark ground while settings loa
   await page.addInitScript(() => window.localStorage.setItem("cortex.theme", "light"));
   const release = await routeWorkspace(page, "light");
 
-  await page.goto("/chat/new?bootstrap=launcher-token");
+  await page.goto("/chat/new#bootstrap=launcher-token");
 
   await expect(page.getByText("Loading local workspace")).toBeVisible();
   expect(await documentTheme(page)).toBe("light");
@@ -69,7 +69,7 @@ test("system follows the operating system's colour scheme, and a first launch st
   const release = await routeWorkspace(page, "system");
 
   // No cache yet: the fallback is dark, matching the backend's default.
-  await page.goto("/chat/new?bootstrap=launcher-token");
+  await page.goto("/chat/new#bootstrap=launcher-token");
   await expect(page.getByText("Loading local workspace")).toBeVisible();
   expect(await documentTheme(page)).toBe("dark");
   expect(await bodyBackground(page)).toBe(DARK_BG);

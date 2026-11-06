@@ -28,15 +28,16 @@ from cortex_backend.services.attachments import (
     MAX_CHAT_IMAGE_DIMENSION,
     MAX_CHAT_IMAGE_PIXELS,
 )
+from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.llm import PromptTemplate
-from cortex_backend.testing.fake_ollama import FakeOllamaState
+from cortex_backend.testing.fake_ollama import FakeGenerationEngine, FakeOllamaState
 from cortex_backend.execution.attachment_staging import (
     ABANDONED_STAGE_SECONDS,
     ATTACHMENT_INTERRUPTED,
     STAGING_LEASE_SECONDS,
 )
 from cortex_backend.execution.repository import ExecutionRepository, ExecutionRepositoryError
-from support import session_headers as _session
+from support import parse_sse_events, session_headers as _session
 
 
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
@@ -804,3 +805,222 @@ def test_a_local_gguf_model_refuses_an_image_instead_of_dropping_it(tmp_path):
             f"a GGUF model accepted an image it cannot see: {blocked.status_code}"
         )
         assert "does not support image input" in blocked.json()["detail"]
+
+
+# -- A follow-up keeps the documents of the message before it ------------------
+
+
+class _AttachmentSpy(FakeGenerationEngine):
+    """Records the attachments each turn hands the model."""
+
+    def __init__(self, state: FakeOllamaState, seen: list[tuple[GenerationAttachment, ...]]):
+        super().__init__(state)
+        self._seen = seen
+
+    def generate(self, **kwargs):
+        self._seen.append(tuple(kwargs.get("attachments", ())))
+        return super().generate(**kwargs)
+
+
+def _follow_up_app(
+    state: FakeOllamaState | None = None, attachments: ChatAttachmentService | None = None
+):
+    seen: list[tuple[GenerationAttachment, ...]] = []
+    state = state or FakeOllamaState()
+    dependencies = build_demo_dependencies(ollama_state=state)
+    if attachments is not None:
+        dependencies.attachments = attachments
+    dependencies.generation = GenerationService(
+        history_loader=lambda _thread_id: [],
+        memory_loader=dependencies.memories.get_memos,
+        engine_factory=lambda _snapshot: _AttachmentSpy(state, seen),
+    )
+    return create_app(dependencies, allowed_hosts=ALLOWED_HOSTS), seen
+
+
+def _stage_file(client: TestClient, headers: dict[str, str], name: str, content: bytes) -> dict:
+    staged = client.post(
+        "/api/v1/attachments",
+        headers=headers,
+        json={
+            "request_id": "stage-" + name.replace(".", "-"),
+            "filename": name,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        },
+    )
+    assert staged.status_code == 201, staged.text
+    return staged.json()
+
+
+def _finish(client: TestClient, headers: dict[str, str], job_id: str) -> None:
+    with client.stream("GET", f"/api/v1/generations/{job_id}/events", headers=headers) as response:
+        events = parse_sse_events("".join(response.iter_text()))
+    assert events[-1]["event"] == "generation.completed", events[-1]
+
+
+def _turn(
+    client: TestClient,
+    headers: dict[str, str],
+    request_id: str,
+    user_input: str,
+    *,
+    thread_id: str = "follow-up-thread",
+    attachments: list[dict] | None = None,
+) -> dict:
+    accepted = client.post(
+        "/api/v1/generations",
+        headers=headers,
+        json={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "user_input": user_input,
+            "attachments": attachments or [],
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    _finish(client, headers, accepted.json()["job_id"])
+    return accepted.json()
+
+
+def _documents(turn: tuple[GenerationAttachment, ...]) -> list[tuple[str, str | None, bool]]:
+    return [
+        (item.filename, item.text_content, item.from_earlier_message)
+        for item in turn
+        if item.kind == "document"
+    ]
+
+
+_REPORT = b"# Report\n\n## Findings\n\n## Next steps\n"
+
+
+def test_a_follow_up_turn_reuses_the_previous_documents_reference_text():
+    """"Summarise this", then "now list its section headings".
+
+    The second message attaches nothing, and only metadata is stored with the
+    first, so the model used to get the follow-up with no document at all and
+    invent the headings. The previous message's document is resolved again,
+    through the same owner and integrity checks, and marked as earlier.
+    """
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        _turn(client, headers, "follow-up-1", "Summarise this.", attachments=[report])
+        _turn(client, headers, "follow-up-2", "Now list its section headings.")
+        chat = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
+
+    first, follow_up = seen
+    assert _documents(first) == [("report.md", _REPORT.decode(), False)]
+    assert _documents(follow_up) == [("report.md", _REPORT.decode(), True)]
+    # Resent for the model only: the follow-up is stored as the user sent it.
+    assert chat["messages"][0]["attachments"][0]["filename"] == "report.md"
+    assert chat["messages"][2]["content"] == "Now list its section headings."
+    assert chat["messages"][2]["attachments"] is None
+
+
+def test_regenerating_a_follow_up_reply_brings_the_same_documents_back():
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        _turn(client, headers, "regen-1", "Summarise this.", attachments=[report])
+        _turn(client, headers, "regen-2", "Now list its section headings.")
+        reply_id = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()["messages"][-1]["id"]
+        regenerated = client.post(
+            "/api/v1/chats/follow-up-thread/regenerations",
+            headers=headers,
+            json={"request_id": "regen-3", "message_id": reply_id},
+        )
+        assert regenerated.status_code == 202, regenerated.text
+        _finish(client, headers, regenerated.json()["job_id"])
+
+    assert _documents(seen[-1]) == [("report.md", _REPORT.decode(), True)]
+
+
+def test_only_the_message_right_before_a_follow_up_lends_it_documents():
+    """A document comes back for the next turn, not for every turn after it."""
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        _turn(client, headers, "bound-1", "Summarise this.", attachments=[report])
+        _turn(client, headers, "bound-2", "Now list its section headings.")
+        _turn(client, headers, "bound-3", "Thanks, that is all.")
+
+    assert [len(_documents(turn)) for turn in seen] == [1, 1, 0]
+
+
+def test_a_follow_up_with_its_own_attachment_does_not_bring_back_the_earlier_ones():
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        notes = _stage_file(client, headers, "notes.txt", b"other notes")
+        _turn(client, headers, "own-1", "Summarise this.", attachments=[report])
+        _turn(client, headers, "own-2", "And this one?", attachments=[notes])
+
+    assert _documents(seen[-1]) == [("notes.txt", "other notes", False)]
+
+
+def test_an_earlier_image_is_not_sent_again_with_a_follow_up():
+    state = FakeOllamaState(
+        installed_models={"vision-model"},
+        model_capabilities={"vision-model": ("completion", "vision")},
+    )
+    app, seen = _follow_up_app(state)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        photo = _stage_file(client, headers, "photo.png", _png_bytes())
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        _turn(client, headers, "image-1", "Compare these.", attachments=[photo, report])
+        _turn(client, headers, "image-2", "Which one is longer?")
+
+    assert {item.kind for item in seen[0]} == {"image", "document"}
+    assert [(item.kind, item.filename) for item in seen[1]] == [("document", "report.md")]
+
+
+class _LaterClock(datetime):
+    """A month on: past the longest time a staged attachment is kept."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.now(tz) + timedelta(days=31)
+
+
+def test_a_follow_up_whose_earlier_document_expired_still_gets_an_answer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "secret-report.md", b"confidential text")
+        _turn(client, headers, "expired-1", "Summarise this.", attachments=[report])
+        monkeypatch.setattr(attachments_module, "datetime", _LaterClock)
+        with caplog.at_level("INFO"):
+            _turn(client, headers, "expired-2", "Now list its section headings.")
+        chat = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
+
+    assert seen[-1] == ()
+    assert chat["messages"][-1]["content"] == "Echo: Now list its section headings."
+    # Counted, never named: neither the file name nor its text reaches the log.
+    assert "1 document(s) from the previous message" in caplog.text
+    assert "secret-report" not in caplog.text and "confidential" not in caplog.text
+
+
+def test_a_follow_up_whose_earlier_document_was_deleted_still_gets_an_answer(tmp_path: Path):
+    repository, service = _durable(tmp_path)
+    app, seen = _follow_up_app(attachments=service)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        kept = _stage_file(client, headers, "kept.md", b"still here")
+        _turn(client, headers, "deleted-1", "Summarise these.", attachments=[report, kept])
+        repository.delete_artifact(report["attachment_id"])
+        _turn(client, headers, "deleted-2", "Now list their section headings.")
+
+    assert _documents(seen[0]) == [
+        ("report.md", _REPORT.decode(), False),
+        ("kept.md", "still here", False),
+    ]
+    # The one that is gone is left out; the other still comes back.
+    assert _documents(seen[-1]) == [("kept.md", "still here", True)]

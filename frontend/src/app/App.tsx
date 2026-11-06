@@ -4,8 +4,7 @@ import {
   CortexApi,
   ApiError,
   describeApiError,
-  persistHandoffSecret,
-  readPersistedHandoffSecret,
+  discardLegacyHandoffSecret,
 } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
@@ -86,24 +85,22 @@ type LauncherCredentials = { bootstrapToken: string; handoffSecret: string };
 /** Read the launcher's one-time credentials. Pure: nothing is written here.
  *
  * The bootstrap token is single-use, so it is only ever read from the URL. The
- * handoff secret is not: it stays valid for the life of the backend process
- * and is the only way to re-exchange an expired session. Falling back to the
- * persisted copy is what makes a reload survivable -- without it, pressing the
- * error boundary's own "Reload workspace" button (or F5) scrubbed the secret,
- * and the next session expiry an hour later left onboarding with no retry at
- * all, so the user had to quit and relaunch Cortex.
+ * handoff secret remains valid for the backend's lifetime, but persists only
+ * in this page's memory. It is never saved to web storage. Reloading the page
+ * discards it deliberately; if a session then expires, restarting Cortex gives
+ * the window fresh launch credentials.
  *
- * Storing the secret is a side effect, so it happens in the same effect that
- * scrubs the URL -- see below for why an initialiser must stay pure.
+ * Both are read from the fragment only, which is the one place the launcher
+ * puts them: a fragment is never sent to a server, so it cannot reach a
+ * request line, a proxy or a log. A credential in the query string is not
+ * used (it is still scrubbed from the address bar, below).
  */
 function readLauncherCredentials(): LauncherCredentials {
   const url = new URL(window.location.href);
-  const search = url.searchParams;
   const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
   return {
-    bootstrapToken: search.get("bootstrap") || hash.get("bootstrap") || "",
-    handoffSecret:
-      search.get("handoff") || hash.get("handoff") || readPersistedHandoffSecret(),
+    bootstrapToken: hash.get("bootstrap") || "",
+    handoffSecret: hash.get("handoff") || "",
   };
 }
 
@@ -159,9 +156,9 @@ export function App({ api: providedApi }: Props) {
   useEffect(() => {
     // All of these are side effects and all are idempotent, so StrictMode's
     // second invocation is a no-op.
-    persistHandoffSecret(launcherCredentials.handoffSecret);
-    // The client renews an expired session itself, in place, so it needs the
-    // secret too. Without this a 401 reached the workspace and remounted it.
+    discardLegacyHandoffSecret();
+    // Keep the handoff only in memory for in-page session renewal. Do not
+    // write this long-lived credential to sessionStorage or localStorage.
     api.setHandoffSecret(launcherCredentials.handoffSecret);
     scrubLauncherCredentials();
   }, [api, launcherCredentials.handoffSecret]);
@@ -204,8 +201,11 @@ export function App({ api: providedApi }: Props) {
   const handleSessionExpired = useCallback(() => {
     if (api.hasSession) return;
     setSessionReady(false);
+    if (!handoffSecret) {
+      setOnboardingError("The local session expired after a reload. Restart Cortex to reconnect securely.");
+    }
     void reconnect();
-  }, [api, reconnect]);
+  }, [api, reconnect, handoffSecret]);
 
   useEffect(() => api.subscribeSessionExpired(handleSessionExpired), [api, handleSessionExpired]);
 

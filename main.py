@@ -39,6 +39,7 @@ from cortex_backend.launcher import (  # noqa: E402
     DesktopWindowError,
     FrontendBuildError,
     InstanceLock,
+    InstanceLockError,
     InstanceRecord,
     WebViewInstallDeclined,
     WebViewRuntimeError,
@@ -111,6 +112,9 @@ DATA_PATH_REMEDY = (
     "or make %APPDATA% point at a local folder."
 )
 _last_startup_log_path: Path | None = None
+# Whether this launch tried to write a startup diagnostic at all, so the dialog
+# says the log could not be written only when a write was attempted and failed.
+_startup_log_attempted = False
 _startup_dialog_hint: str | None = None
 # The window already showed the startup failure on its error page, so the
 # message box that follows a failed startup would only say it twice.
@@ -381,7 +385,8 @@ def _write_startup_diagnostic(
 ) -> Path | None:
     """Append one bounded, privacy-safe startup record and return its path."""
 
-    global _last_startup_log_path
+    global _last_startup_log_path, _startup_log_attempted
+    _startup_log_attempted = True
     path = _startup_log_path(data_dir)
     try:
         entry = (
@@ -396,6 +401,37 @@ def _write_startup_diagnostic(
     except (OSError, UnicodeError):
         _last_startup_log_path = None
         return None
+
+
+class LauncherFailure(RuntimeError):
+    """A failure the launcher found itself rather than caught from something else.
+
+    Its message is fixed text, so it goes into the startup log as it stands.
+    """
+
+
+def _fail(
+    stage: str,
+    message: str,
+    code: int,
+    *,
+    data_dir: Path | None,
+    error: BaseException | None = None,
+) -> int:
+    """End a launch with ``code``, having recorded why in the startup log.
+
+    Every failing exit goes through here, so the dialog that follows always has
+    a log to point at -- several exits used to print and return, and the dialog
+    then said the log "could not be written" when nothing had tried. ``error``
+    is what was caught, when there is one; otherwise ``message`` is recorded.
+    """
+    _write_startup_diagnostic(
+        stage=stage,
+        error=error if error is not None else LauncherFailure(message),
+        data_dir=data_dir,
+    )
+    print(message if error is None else f"{message}: {error}", file=sys.stderr)
+    return code
 
 
 def _record_startup_note(*, stage: str, detail: str, data_dir: Path | None) -> None:
@@ -657,13 +693,21 @@ def _attach_runtime_log_to_uvicorn() -> None:
         logger.addHandler(_runtime_file_handler)
 
 
-def _startup_dialog_message(log_path: Path | None, hint: str | None = None) -> str:
-    """The startup-error dialog text: the cause the person can act on, then the log."""
+def _startup_dialog_message(
+    log_path: Path | None, hint: str | None = None, *, attempted: bool = True
+) -> str:
+    """The startup-error dialog text: the cause the person can act on, then the log.
+
+    With no log, the dialog says one could not be written only when a write was
+    ``attempted``; otherwise it says nothing about a log rather than something
+    untrue.
+    """
     paragraphs = ["Cortex could not start."]
     if hint:
         paragraphs.append(hint)
     if log_path is None:
-        paragraphs.append("Cortex could not write its diagnostic log.")
+        if attempted:
+            paragraphs.append("Cortex could not write its diagnostic log.")
     else:
         paragraphs.append(f"A privacy-safe diagnostic log was written to:\n{log_path}")
         paragraphs.append("Press Ctrl+C in this dialog to copy this message.")
@@ -825,11 +869,14 @@ def _run_headless(*, backend, frontend, server) -> int:
                 f"Vite stopped unexpectedly with exit code {frontend.returncode}."
             )
         time.sleep(0.1)
-    return 0 if server.should_exit else 1
+    if server.should_exit:
+        return 0
+    # The server ended without being asked to and without an error of its own.
+    raise RuntimeError("Cortex backend stopped unexpectedly.")
 
 
 def _acquire_or_hand_off(
-    instance: InstanceLock, *, port: int, headless: bool
+    instance: InstanceLock, *, port: int, headless: bool, data_dir: Path | None = None
 ) -> tuple[InstanceRecord | None, int]:
     """Take the instance lock, or hand this launch over to the instance that holds it.
 
@@ -844,6 +891,10 @@ def _acquire_or_hand_off(
     If the first instance dies meanwhile its lock is free, and this launch
     starts normally. Nothing on this path is an error: the app is running or
     starting, which is what the user asked for.
+
+    ``acquire`` returns ``None`` only when another process really holds the
+    lock; a lock that cannot be set up raises ``InstanceLockError`` instead,
+    which is a failure of this launch and not a running instance to look for.
     """
     deadline = time.monotonic() + SECOND_LAUNCH_WAIT_SECONDS
     while True:
@@ -852,11 +903,12 @@ def _acquire_or_hand_off(
             return record, 0
         existing = instance.read_record()
         if existing is None:
-            print(
+            return None, _fail(
+                "instance lock",
                 "Cortex could not acquire its instance lock and no valid running-instance record exists.",
-                file=sys.stderr,
+                2,
+                data_dir=data_dir,
             )
-            return None, 2
         if headless:
             print(f"Cortex is already running on loopback port {existing.port}.")
             return None, 0
@@ -880,11 +932,12 @@ def _acquire_or_hand_off(
         # free: go round and take it. If it never is, the record is stale in a
         # way this cannot resolve, and that is a failure.
         if time.monotonic() >= deadline:
-            print(
+            return None, _fail(
+                "instance lock",
                 "Cortex is not running, but its instance lock could not be taken.",
-                file=sys.stderr,
+                2,
+                data_dir=data_dir,
             )
-            return None, 2
         time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
 
 
@@ -892,12 +945,26 @@ def _run_web(args: argparse.Namespace) -> int:
     """Run Cortex; a backend that had to be abandoned at exit is never exit 0."""
     global _backend_abandoned_at_exit, _backend_stop_failed
     global _startup_dialog_hint, _startup_failure_displayed
+    global _last_startup_log_path, _startup_log_attempted
     _backend_abandoned_at_exit = False
     _backend_stop_failed = False
     _startup_dialog_hint = None
     _startup_failure_displayed = False
+    _last_startup_log_path = None
+    _startup_log_attempted = False
     try:
         result = _launch(args)
+    except InstanceLockError as exc:
+        # The lock file lives in the data folder, so a lock that cannot be set
+        # up is a data folder Cortex cannot use.
+        _startup_dialog_hint = DATA_PATH_REMEDY
+        result = _fail(
+            "instance lock",
+            "Cortex could not set up its instance lock",
+            2,
+            data_dir=args.data_dir,
+            error=exc,
+        )
     finally:
         _close_runtime_logging()
     if result == 0 and _backend_stop_failed:
@@ -1301,9 +1368,13 @@ def _run_instance(
         print("The WebView2 Runtime was not installed; Cortex is closing.")
         return 0
     except FrontendBuildError as exc:
-        _write_startup_diagnostic(stage="frontend preparation", error=exc, data_dir=args.data_dir)
-        print(f"Frontend preparation failed: {exc}", file=sys.stderr)
-        return 2
+        return _fail(
+            "frontend preparation",
+            "Frontend preparation failed",
+            2,
+            data_dir=args.data_dir,
+            error=exc,
+        )
     except (
         DesktopWindowError,
         OSError,
@@ -1311,18 +1382,18 @@ def _run_instance(
         TimeoutError,
         WebViewRuntimeError,
     ) as exc:
-        _write_startup_diagnostic(
-            stage="desktop startup/runtime",
-            error=exc,
-            data_dir=args.data_dir,
-        )
         if isinstance(exc, WebViewRuntimeError):
             # Fixed text that says what to do next, so show it.
             _startup_dialog_hint = str(exc)
         elif isinstance(exc, AppPathError):
             _startup_dialog_hint = DATA_PATH_REMEDY
-        print(f"Cortex startup/runtime error: {exc}", file=sys.stderr)
-        return 1
+        return _fail(
+            "desktop startup/runtime",
+            "Cortex startup/runtime error",
+            1,
+            data_dir=args.data_dir,
+            error=exc,
+        )
     finally:
         # Whatever the window's worker is still doing should stop, and it is
         # waited for (bounded) so this never stops a backend it is midway
@@ -1350,13 +1421,9 @@ def _launch(args: argparse.Namespace) -> int:
                 cortex_version=CORTEX_VERSION,
             )
         except FrontendBuildError as exc:
-            _write_startup_diagnostic(
-                stage="frontend build",
-                error=exc,
-                data_dir=args.data_dir,
+            return _fail(
+                "frontend build", "Frontend build failed", 2, data_dir=args.data_dir, error=exc
             )
-            print(f"Frontend build failed: {exc}", file=sys.stderr)
-            return 2
         print(f"Frontend bundle ready at {dist}")
         return 0
 
@@ -1364,13 +1431,13 @@ def _launch(args: argparse.Namespace) -> int:
     try:
         backend_listener = _reserve_port(0) if args.port == 0 else None
     except OSError as exc:
-        _write_startup_diagnostic(
-            stage="backend port reservation",
-            error=exc,
+        return _fail(
+            "backend port reservation",
+            "Cortex could not reserve its backend port",
+            1,
             data_dir=args.data_dir,
+            error=exc,
         )
-        print(f"Cortex could not reserve its backend port: {exc}", file=sys.stderr)
-        return 1
     backend_port = (
         int(backend_listener.getsockname()[1])
         if backend_listener is not None
@@ -1380,7 +1447,7 @@ def _launch(args: argparse.Namespace) -> int:
     try:
         with InstanceLock(paths.data_dir) as instance:
             record, handoff_exit = _acquire_or_hand_off(
-                instance, port=backend_port, headless=args.headless
+                instance, port=backend_port, headless=args.headless, data_dir=args.data_dir
             )
             if record is None:
                 return handoff_exit
@@ -1389,16 +1456,13 @@ def _launch(args: argparse.Namespace) -> int:
                 try:
                     backend_listener = _reserve_port(backend_port)
                 except OSError as exc:
-                    _write_startup_diagnostic(
-                        stage="backend port reservation",
-                        error=exc,
+                    return _fail(
+                        "backend port reservation",
+                        "Cortex could not reserve its backend port",
+                        1,
                         data_dir=args.data_dir,
+                        error=exc,
                     )
-                    print(
-                        f"Cortex could not reserve its backend port: {exc}",
-                        file=sys.stderr,
-                    )
-                    return 1
 
             # Only the instance that owns the lock writes the runtime log, so a
             # second launch that hands off and exits never has the file open
@@ -1408,11 +1472,12 @@ def _launch(args: argparse.Namespace) -> int:
 
             handoff_secret = instance.read_secret(record)
             if not handoff_secret:
-                print(
+                return _fail(
+                    "handoff secret",
                     "Cortex could not initialize its authenticated handoff secret.",
-                    file=sys.stderr,
+                    2,
+                    data_dir=args.data_dir,
                 )
-                return 2
 
             return _run_instance(
                 args,
@@ -1436,22 +1501,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = _run_web(args)
     except AppPathError as exc:
-        _write_startup_diagnostic(
-            stage="data path resolution",
-            error=exc,
-            data_dir=args.data_dir,
-        )
-        print(f"Cortex data-path error: {exc}", file=sys.stderr)
         _startup_dialog_hint = DATA_PATH_REMEDY
-        result = 2
-    except Exception as exc:
-        _write_startup_diagnostic(
-            stage="uncaught startup",
-            error=exc,
+        result = _fail(
+            "data path resolution",
+            "Cortex data-path error",
+            2,
             data_dir=args.data_dir,
+            error=exc,
         )
-        print(f"Cortex startup error: {exc}", file=sys.stderr)
-        result = 1
+    except Exception as exc:
+        result = _fail(
+            "uncaught startup", "Cortex startup error", 1, data_dir=args.data_dir, error=exc
+        )
     # A backend abandoned at exit is not a startup failure, and a modal box
     # would keep the process alive after the user has already quit.
     if (
@@ -1466,7 +1527,11 @@ def main(argv: list[str] | None = None) -> int:
 
             ctypes.windll.user32.MessageBoxW(
                 None,
-                _startup_dialog_message(_last_startup_log_path, _startup_dialog_hint),
+                _startup_dialog_message(
+                    _last_startup_log_path,
+                    _startup_dialog_hint,
+                    attempted=_startup_log_attempted,
+                ),
                 "Cortex startup error",
                 0x10,
             )

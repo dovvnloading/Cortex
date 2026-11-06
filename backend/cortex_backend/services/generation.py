@@ -279,6 +279,14 @@ class GenerationServiceResult:
     streamed: bool = False
 
 
+# Everything of a stored message that its turn in the model's history is built
+# from: the words (and the untranslated original, see _history_turn), who said
+# them, and the attachments the history names. A caller reading a transcript
+# only to hand it over as history needs no more than this -- not the reasoning
+# kept on each reply, its sources or its stats.
+HISTORY_MESSAGE_FIELDS = ("id", "role", "content", "original_content", "attachments")
+
+
 def _history_turn(message: Mapping[str, Any]) -> dict[str, Any]:
     """One stored message as the model should see it in its own history.
 

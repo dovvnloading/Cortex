@@ -130,6 +130,10 @@ class GenerationAttachment:
     kind: Literal["image", "document"]
     text_content: str | None = None
     image_base64: str | None = None
+    # A document the user attached to their previous message, resent so a
+    # follow-up ("now list its headings") still has the text it is about. The
+    # prompt sets these apart from what the user attached this time.
+    from_earlier_message: bool = False
 
 
 @dataclass(frozen=True, slots=True)

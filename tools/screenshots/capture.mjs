@@ -72,7 +72,7 @@ await page.addInitScript(() => {
 console.log("Capturing...");
 
 // --- 1. Workspace: sidebar library + a real transcript -----------------------
-await page.goto(`${base}/?bootstrap=${encodeURIComponent(token)}`);
+await page.goto(`${base}/#bootstrap=${encodeURIComponent(token)}`);
 await page.getByLabel("Message Cortex").waitFor({ state: "visible" });
 
 // The sidebar is already expanded at this width, so open the hero

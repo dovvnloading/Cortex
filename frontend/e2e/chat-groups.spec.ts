@@ -57,7 +57,7 @@ test("loads chat groups successfully and files their chats", async ({ page }) =>
     updated_at: "2026-01-01T00:00:00Z",
   }]);
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByRole("button", { name: "Collapse Research" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
   await expect(page.getByText("Research")).toBeVisible();
@@ -85,7 +85,7 @@ test("does not let a late initial group response erase a group created while loa
     } });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByRole("button", { name: "New group" }).click();
   await page.getByRole("textbox", { name: "Group name" }).fill("Created while loading");

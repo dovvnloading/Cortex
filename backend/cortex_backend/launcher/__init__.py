@@ -12,7 +12,7 @@ from .desktop import (
     show_startup_failure,
 )
 from .frontend import FrontendBuildError, ensure_frontend
-from .instance import InstanceLock, InstanceRecord
+from .instance import InstanceLock, InstanceLockError, InstanceRecord
 from .webview_runtime import (
     WEBVIEW2_DOWNLOAD_URL,
     WebViewInstallDeclined,
@@ -28,6 +28,7 @@ __all__ = [
     "DesktopWindowError",
     "FrontendBuildError",
     "InstanceLock",
+    "InstanceLockError",
     "InstanceRecord",
     "WebViewInstallDeclined",
     "WebViewRuntimeError",

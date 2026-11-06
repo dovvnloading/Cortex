@@ -26,7 +26,7 @@ test("opens the command palette with Ctrl+K, filters, and navigates to settings"
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
 
-  await page.goto("/chat/thread-a?bootstrap=launcher-token");
+  await page.goto("/chat/thread-a#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
   await page.keyboard.press("Control+k");
@@ -64,7 +64,7 @@ test("the shortcuts help dialog opens on '?' and closes on Escape", async ({ pag
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
 
-  await page.goto("/?bootstrap=launcher-token");
+  await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
   // "?" must not fire while focus is inside the composer, so blur it first.
