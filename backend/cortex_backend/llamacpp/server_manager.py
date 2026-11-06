@@ -715,7 +715,7 @@ class LlamaServerManager:
         self._gpu_layers: tuple[int, int] | None = None
         self._backend_note: str | None = None
         self._context_note: str | None = None
-        self._trained_context_cache: dict[Path, tuple[tuple[int, int], int | None]] = {}
+        self._trained_context_cache: dict[Path, tuple[tuple[int, int, int, int], int | None]] = {}
 
     def close(self) -> None:
         """Stop the managed process and close an HTTP client owned here."""
@@ -1095,7 +1095,9 @@ class LlamaServerManager:
             stat = model_path.stat()
         except OSError:
             return None
-        stamp = (stat.st_size, stat.st_mtime_ns)
+        # Size and mtime alone can match after an atomic replacement. Include
+        # the file identity so a new GGUF is never mistaken for the old one.
+        stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
         with self._state_lock:
             cached = self._trained_context_cache.get(model_path)
         if cached is not None and cached[0] == stamp:

@@ -3305,6 +3305,27 @@ def test_a_changed_model_file_is_read_again(tmp_path: Path) -> None:
     assert _context_argument(launcher.launch_args[1]) == "16384"
 
 
+
+def test_replaced_gguf_with_same_size_and_mtime_uses_its_new_context(tmp_path: Path) -> None:
+    """An atomic replacement must invalidate metadata even when its size and timestamp match."""
+    model_path = tmp_path / "grows.gguf"
+    replacement = tmp_path / "fresh.gguf"  # same-length model name and architecture
+    _write_gguf(model_path, context_length=4096)
+    original = model_path.stat()
+    manager, launcher = _manager_for_a_real_file(tmp_path, model_path, [_FakePopen(), _FakePopen()])
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    _write_gguf(replacement, context_length=16384)
+    assert replacement.stat().st_size == original.st_size
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    replacement.replace(model_path)
+    assert model_path.stat().st_mtime_ns == original.st_mtime_ns
+
+    manager.ensure_ready(model_path, num_ctx=32768)
+
+    assert [_context_argument(argv) for argv in launcher.launch_args] == ["4096", "16384"]
+
+
 def test_a_request_with_no_preference_is_still_held_to_the_trained_context(tmp_path: Path) -> None:
     model_path = tmp_path / "tiny.gguf"
     _write_gguf(model_path, context_length=2048)
