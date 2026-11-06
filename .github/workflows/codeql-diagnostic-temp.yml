@@ -1,0 +1,24 @@
+# Temporary read-only diagnostic for PR #331; remove after triage.
+name: PR 331 CodeQL annotation diagnostic
+
+on:
+  push:
+    branches:
+      - fix/combined-bug-fixes
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Print the failing check annotation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/check-runs/127983899895/annotations" \
+            --jq '.[] | {path, start_line, end_line, annotation_level, title, message}'
