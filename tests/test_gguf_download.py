@@ -2923,12 +2923,15 @@ def test_a_single_model_is_published_even_if_its_staging_file_cannot_be_removed(
 
 
 def test_rollback_keeps_going_when_one_removal_fails(tmp_path: Path, monkeypatch) -> None:
-    """One part that cannot be removed must not stop the others being removed,
-    or hide why the download failed."""
+    """An antivirus-locked quarantine file must not block rollback of other
+    shards or hide the real download error."""
     server = _ShardServer(tmp_path / "src")
     models = _models_dir(tmp_path)
     first = models / server.names[0]
-    refused = _deny_unlink(monkeypatch, lambda path: path == first)
+    # Rollback now renames a published file to an identity-checked quarantine
+    # before unlinking, so locking the original pathname no longer exercises
+    # the removal-failure path.
+    refused = _deny_unlink(monkeypatch, lambda path: path.name.startswith(".rollback-") and not refused)
     last = models / server.names[2]
 
     def someone_else_saves_the_last_part() -> None:
@@ -2939,8 +2942,10 @@ def test_rollback_keeps_going_when_one_removal_fails(tmp_path: Path, monkeypatch
     with pytest.raises(GGUFDownloadError, match="already exists"):
         download_gguf_set(server.parts(), models, http_client=server.client())
 
-    assert refused == [first]
-    assert not (models / server.names[1]).exists()  # removed although the first one could not be
+    assert len(refused) == 1 and refused[0].name.startswith(".rollback-")
+    assert refused[0].exists()  # one hidden, non-model leftover while antivirus holds it
+    assert not first.exists()
+    assert not (models / server.names[1]).exists()  # rolled back despite the first cleanup failure
     assert last.read_bytes() == b"theirs"
 
 
