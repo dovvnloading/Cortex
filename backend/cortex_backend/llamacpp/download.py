@@ -622,6 +622,7 @@ def download_gguf(
     *,
     progress_callback: Callable[[GGUFDownloadProgress], None] | None = None,
     cancellation_event: Event | None = None,
+    before_publish: Callable[[], bool] | None = None,
     http_client: httpx.Client | None = None,
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
@@ -653,11 +654,37 @@ def download_gguf(
             reporter=reporter,
         ).run()
         _validate_gguf_file(temp_path)
+        _require_not_cancelled(cancellation_event)
+        # A job's begin_commit arbitrates with Cancel under one registry lock.
+        # After it succeeds, a late Stop is refused instead of falsely
+        # reporting a cancelled job whose finished model is already on disk.
+        if before_publish is not None and not before_publish():
+            raise GGUFDownloadError("Download cancelled.")
+        # Standalone callers without the registry commit barrier can still
+        # cancel a non-overwriting publish. Remember our staged file identity
+        # *before* publication so rollback never deletes another writer's file.
+        original_identity = (
+            _file_identity(temp_path)
+            if cancellation_event is not None and before_publish is None and not allow_overwrite
+            else None
+        )
+        if cancellation_event is not None and before_publish is None and not allow_overwrite and original_identity is None:
+            raise GGUFDownloadError("Cannot safely publish a cancellable model on this filesystem.")
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
+        if before_publish is None and not allow_overwrite and cancellation_event is not None:
+            if cancellation_event.is_set():
+                _rollback_published(destination, original_identity)
+                raise GGUFDownloadError("Download cancelled.")
     finally:
         _remove_quietly(temp_path)
     reporter.success(destination.stat().st_size)
     return destination
+
+
+def _require_not_cancelled(cancellation_event: Event | None) -> None:
+    """Reject cancellation before publishing a finished GGUF to the model catalog."""
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise GGUFDownloadError("Download cancelled.")
 
 
 def _checked_limits(max_download_bytes: int | None, min_free_space_bytes: int | None) -> tuple[int, int]:
@@ -677,6 +704,7 @@ def download_gguf_set(
     *,
     progress_callback: Callable[[GGUFDownloadProgress], None] | None = None,
     cancellation_event: Event | None = None,
+    before_publish: Callable[[], bool] | None = None,
     http_client: httpx.Client | None = None,
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
@@ -735,14 +763,24 @@ def download_gguf_set(
                 reporter=_PartProgress(reporter, fetched_bytes, len(parts) - position),
             ).run()
             _validate_gguf_file(staging_path)
+            _require_not_cancelled(cancellation_event)
             fetched_bytes += staging_path.stat().st_size
+
+        _require_not_cancelled(cancellation_event)
+        # Crossing the commit barrier once, after *all* parts have validated,
+        # prevents a late Stop from being acknowledged in the middle of
+        # publishing a set. Non-job callers still check and roll back below.
+        if before_publish is not None and not before_publish():
+            raise GGUFDownloadError("Download cancelled.")
         for staging_path, destination in zip(staged, destinations, strict=True):
+            _require_not_cancelled(cancellation_event)
             # Capture the identity while this is still our private staged file.
             # Reading the destination *after* publication could accidentally
             # capture another writer's replacement instead.
             original_identity = _file_identity(staging_path)
             _publish(staging_path, destination, allow_overwrite=False)
             published.append((destination, original_identity))
+            _require_not_cancelled(cancellation_event)
         complete = True
     finally:
         # Best effort, and every file gets its turn: a file that cannot be
