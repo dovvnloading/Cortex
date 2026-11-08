@@ -79,7 +79,10 @@ export function useModelJobs(dependencies: Dependencies): {
   const tracked = useRef<Tracking | null>(null);
   const untracked = useRef(new Set<AbortController>());
 
-  const follow = useCallback(async (job: ActiveModelJob, options: Required<ModelJobOptions>): Promise<ModelJobResult> => {
+  const follow = useCallback(async (
+    job: ActiveModelJob,
+    options: Required<Pick<ModelJobOptions, "checkOllamaConnection" | "notifyOnSuccess">>,
+  ): Promise<ModelJobResult> => {
     // Nothing to report to once the screen is gone; the job carries on and
     // the next screen picks it up from what the store remembers.
     const store = useModelStore.getState();
