@@ -79,7 +79,8 @@ def test_a_newer_store_preserves_committed_wal_frames_beside_its_inspection_copy
     """Uncheckpointed changes are recoverable from the quarantine as a unit."""
     db_path = tmp_path / "execution.sqlite"
     _write_newer_store(db_path)
-    with sqlite3.connect(db_path) as raw:
+    raw = sqlite3.connect(db_path)
+    try:
         raw.execute("PRAGMA journal_mode=WAL")
         raw.execute("PRAGMA wal_autocheckpoint=0")
         raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -90,6 +91,8 @@ def test_a_newer_store_preserves_committed_wal_frames_beside_its_inspection_copy
         # without depending on operating-system file sharing or subprocesses.
         primary_bytes = db_path.read_bytes()
         wal_bytes = Path(f"{db_path}-wal").read_bytes()
+    finally:
+        raw.close()
 
     db_path.write_bytes(primary_bytes)
     wal_path = Path(f"{db_path}-wal")
