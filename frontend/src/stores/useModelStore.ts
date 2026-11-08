@@ -24,6 +24,8 @@ export type ActiveModelJob = {
   lastEventId: number;
   /** The chat model selected when this GGUF download began; missing on legacy jobs. */
   selectedChatModelAtStart?: string | null;
+  /** GGUF folder at admission; missing for older stored jobs. */
+  ggufDirectoryAtStart?: string | null;
 };
 
 const ACTIVE_MODEL_JOB_KEY = "cortex.active.model-job";
@@ -42,6 +44,11 @@ function isActiveModelJob(value: unknown): value is ActiveModelJob {
       !("selectedChatModelAtStart" in candidate)
       || candidate.selectedChatModelAtStart === null
       || typeof candidate.selectedChatModelAtStart === "string"
+    )
+    && (
+      !("ggufDirectoryAtStart" in candidate)
+      || candidate.ggufDirectoryAtStart === null
+      || typeof candidate.ggufDirectoryAtStart === "string"
     );
 }
 

@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { CortexApi } from "../api/client";
 import { useModelStore } from "../stores/useModelStore";
+import { useSettingsStore } from "../stores/useSettingsStore";
 import { ToastProvider } from "./ToastProvider";
 
 /**
@@ -66,7 +67,12 @@ const LISTING = {
   ],
 };
 
-function backend(options: { installed?: string[]; chat?: string | null; listing?: () => Response } = {}) {
+function backend(options: {
+  installed?: string[];
+  chat?: string | null;
+  ggufDirectory?: string | null;
+  listing?: () => Response;
+} = {}) {
   const installed = options.installed ?? [];
   const streams: ReturnType<typeof handFedStream>[] = [];
   const eventRequests: { lastEventId: string | null }[] = [];
@@ -105,7 +111,10 @@ function backend(options: { installed?: string[]; chat?: string | null; listing?
       settingsWrites.push(body.settings);
       return respond({ settings: body.settings });
     }
-    if (url.endsWith("/settings")) return respond({ settings: { models: { chat: options.chat ?? null, title: null }, appearance: { theme: "dark" } } });
+    if (url.endsWith("/settings")) return respond({ settings: {
+      models: { chat: options.chat ?? null, title: null, gguf_directory: options.ggufDirectory ?? null },
+      appearance: { theme: "dark" },
+    } });
     if (url.endsWith("/memories")) return respond({ memos: [] });
     if (url.endsWith("/models")) return respond({ required_models: [], optional_models: [], installed_models: installed, connection: { success: true, status: "connected", message: "Ready" } });
     return respond({ detail: "Unexpected test route." }, 404);
@@ -259,6 +268,33 @@ describe("a model download", () => {
     expect(server.settingsWrites).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Selected local model: preferred.gguf" })).toBeInTheDocument();
     expect(await screen.findByText(`${FILE} downloaded. Select it from the model menu to start chatting.`, {}, WAIT)).toBeVisible();
+  });
+
+  it("does not select a GGUF downloaded into a previously configured folder", async () => {
+    const oldDirectory = "C:/Models/Original";
+    const newDirectory = "C:/Models/New";
+    const server = backend({ installed: ["gguf:other.gguf"], chat: "gguf:other.gguf", ggufDirectory: oldDirectory });
+    const { user } = await openApp(server);
+    await openSystem(user);
+    await startDownload(user);
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+
+    // Another Settings view saves a different GGUF directory while the
+    // backend continues downloading to the directory captured at admission.
+    act(() => {
+      const saved = useSettingsStore.getState().settings;
+      expect(saved).not.toBeNull();
+      if (saved) useSettingsStore.getState().setSettings({
+        ...saved, models: { ...saved.models, gguf_directory: newDirectory },
+      });
+    });
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(remembered()).toBeNull(), WAIT);
+
+    expect(server.settingsWrites).toHaveLength(0);
+    expect(await screen.findByText(new RegExp(`downloaded to ${oldDirectory}`), {}, WAIT)).toBeVisible();
+    expect(screen.getByText(/Switch the folder back in Settings or move the file/)).toBeVisible();
   });
 
   it("still auto-selects the downloaded model when no later choice was made", async () => {
