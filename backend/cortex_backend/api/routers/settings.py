@@ -114,7 +114,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> MemoryResponse:
         try:
-            return MemoryResponse(memos=deps.memories.replace_memos(payload.memos))
+            return MemoryResponse(
+                memos=deps.memories.replace_memos(
+                    payload.memos, expected_memos=payload.expected_memos
+                )
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
