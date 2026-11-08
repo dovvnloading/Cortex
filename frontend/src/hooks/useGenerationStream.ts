@@ -233,7 +233,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   const consume = useCallback(
-    async (job: PersistedJob, onCompleted: OnCompleted, onFailed: OnFailed): Promise<void> => {
+    async (job: PersistedJob, onCompleted: OnCompleted, onFailed: OnFailed): Promise<"auth" | void> => {
       if (consumingRef.current === job.jobId) return;
       consumingRef.current = job.jobId;
       const controller = new AbortController();
@@ -478,6 +478,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
         if (consumingRef.current === job.jobId) consumingRef.current = null;
         if (sessionExpired) onSessionExpired();
       }
+      // Only an authentication refusal needs the host to reattach. The
+      // existing tracked job/cursor survives, and the previous consumer has
+      // fully released its claim before the host sees this result.
+      if (sessionExpired) return "auth";
     },
     [api, onSessionExpired],
   );
