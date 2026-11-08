@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+import sqlite3
 from pathlib import Path
 import shutil
 from threading import Barrier
@@ -24,6 +26,7 @@ from cortex_backend.repositories.storage import (
     PermanentMemoryManager,
 )
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository
+from cortex_backend.repositories.settings import SettingsRepositoryError
 from cortex_backend.services.models import ModelService
 from cortex_backend.testing.fake_ollama import FakeOllamaState
 
@@ -457,6 +460,77 @@ def test_settings_colocated_in_the_chat_database_are_adopted_once(tmp_path: Path
     )
     reopened = SQLiteSettingsRepository(settings_db, adopt_from=chat_db)
     assert reopened.load().settings.models.chat == "gguf:newer.gguf"
+
+
+def test_transient_source_read_failure_cannot_persist_default_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A briefly locked old settings source must remain eligible for retry."""
+    old_db = tmp_path / "colocated.sqlite"
+    new_db = tmp_path / "separate.sqlite"
+    old = SQLiteSettingsRepository(old_db)
+    original = old.load().settings
+    old.save(original.model_copy(
+        update={"models": original.models.model_copy(update={"chat": "gguf:old-choice.gguf"})}
+    ))
+    legacy = LegacySettingsReader(_copy_qsettings_fixture(tmp_path))
+    real_connect = sqlite3.connect
+    refused = 0
+
+    def locked_once(database, *args, **kwargs):
+        nonlocal refused
+        if str(database) == str(old_db) and refused == 0:
+            refused += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr("cortex_backend.repositories.sqlite_settings.sqlite3.connect", locked_once)
+    with pytest.raises(SettingsRepositoryError, match="read old settings during migration"):
+        SQLiteSettingsRepository(new_db, legacy=legacy, adopt_from=old_db)
+    monkeypatch.undo()
+
+    with sqlite3.connect(new_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM cortex_settings").fetchone()[0] == 0
+
+    retried = SQLiteSettingsRepository(new_db, legacy=legacy, adopt_from=old_db)
+    assert retried.load().settings.models.chat == "gguf:old-choice.gguf"
+
+
+def test_transient_destination_write_failure_preserves_adoption_for_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding the source row is not success until its copy was committed."""
+    old_db = tmp_path / "colocated.sqlite"
+    new_db = tmp_path / "separate.sqlite"
+    old = SQLiteSettingsRepository(old_db)
+    original = old.load().settings
+    old.save(original.model_copy(
+        update={"models": original.models.model_copy(update={"chat": "gguf:saved-choice.gguf"})}
+    ))
+    legacy = LegacySettingsReader(_copy_qsettings_fixture(tmp_path))
+    connect_original = SQLiteSettingsRepository.connect
+    destination_calls = 0
+
+    @contextmanager
+    def one_failed_writer(self):
+        nonlocal destination_calls
+        if self.db_path == new_db:
+            destination_calls += 1
+            if destination_calls == 2:
+                raise SettingsRepositoryError("synthetic destination write failure")
+        with connect_original(self) as connection:
+            yield connection
+
+    monkeypatch.setattr(SQLiteSettingsRepository, "connect", one_failed_writer)
+    with pytest.raises(SettingsRepositoryError, match="adopt old settings"):
+        SQLiteSettingsRepository(new_db, legacy=legacy, adopt_from=old_db)
+    monkeypatch.undo()
+
+    with sqlite3.connect(new_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM cortex_settings").fetchone()[0] == 0
+
+    retried = SQLiteSettingsRepository(new_db, legacy=legacy, adopt_from=old_db)
+    assert retried.load().settings.models.chat == "gguf:saved-choice.gguf"
 
 
 def test_adoption_is_skipped_cleanly_when_there_is_nothing_to_adopt(tmp_path: Path):
