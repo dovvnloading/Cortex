@@ -778,8 +778,13 @@ async def _start_generation_job(
                     generated_title = title_from_first_message(payload.user_input)
                 if generated_title != title:
                     try:
-                        deps.chats.rename_chat(thread_id, generated_title)
-                        title = generated_title
+                        # This must be a single atomic compare-and-rename:
+                        # another client may have changed the title during the
+                        # slow model call. The manual title always wins.
+                        if deps.chats.rename_chat_if_title(
+                            thread_id, generated_title, expected_title=title
+                        ):
+                            title = generated_title
                     except Exception as exc:
                         logger.warning(
                             "Cortex title update failed (%s).", type(exc).__name__
