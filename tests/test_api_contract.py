@@ -428,7 +428,9 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         ).json() == {"memos": ["Alice"]}
         assert (
             client.put(
-                "/api/v1/memories", json={"memos": ["one", "two"]}, headers=headers
+                "/api/v1/memories",
+                json={"memos": ["one", "two"], "expected_memos": ["Alice"]},
+                headers=headers,
             ).status_code
             == 200
         )
@@ -503,6 +505,64 @@ def test_generation_with_preexisting_nonconforming_chat_id_still_works():
         assert response.json()["thread_id"] == legacy_thread_id
         chat = dependencies.chats.get_chat(legacy_thread_id)
         assert chat["messages"][0]["content"] == "hello"
+
+
+@pytest.mark.parametrize("repository_kind", ["in_memory", "json"])
+def test_stale_memory_editor_cannot_delete_memories_added_by_another_client(
+    tmp_path: Path, repository_kind: str,
+) -> None:
+    """A stale full-list PUT must fail atomically, not erase a concurrent addition."""
+    dependencies = build_demo_dependencies()
+    if repository_kind == "json":
+        from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository
+        from cortex_backend.repositories.storage import PermanentMemoryManager
+
+        dependencies.memories = LegacyPermanentMemoryRepository(
+            PermanentMemoryManager(memory_file_path=str(tmp_path / "permanent_memory.json"))
+        )
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        first = client.post("/api/v1/memories", json={"memo": "A"}, headers=headers)
+        assert first.status_code == 200
+        earlier = client.get("/api/v1/memories", headers=headers).json()["memos"]
+        assert earlier == ["A"]
+
+        # A second view (or an accepted model suggestion) saves B while the
+        # original editor continues displaying the first snapshot.
+        saved = client.post("/api/v1/memories", json={"memo": "B"}, headers=headers)
+        assert saved.status_code == 200
+        stale = client.put(
+            "/api/v1/memories",
+            json={"memos": ["A revised"], "expected_memos": earlier},
+            headers=headers,
+        )
+        assert stale.status_code == 409
+        assert "changed" in stale.json()["detail"].lower()
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["A", "B"]
+
+        # After refreshing, the person may apply their explicit edit while
+        # retaining the concurrent addition that the first draft never saw.
+        refreshed = client.get("/api/v1/memories", headers=headers).json()["memos"]
+        applied = client.put(
+            "/api/v1/memories",
+            json={"memos": ["A revised", "B"], "expected_memos": refreshed},
+            headers=headers,
+        )
+        assert applied.status_code == 200
+        assert applied.json()["memos"] == ["A revised", "B"]
+
+
+def test_memory_replace_requires_a_starting_snapshot() -> None:
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        client.post("/api/v1/memories", json={"memo": "Keep me"}, headers=headers)
+        refused = client.put(
+            "/api/v1/memories", json={"memos": []}, headers=headers
+        )
+        assert refused.status_code == 422
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["Keep me"]
 
 
 def test_memory_clear_without_confirmation_is_a_client_validation_error():
