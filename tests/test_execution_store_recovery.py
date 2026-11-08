@@ -73,6 +73,90 @@ def test_the_damaged_file_is_kept_for_inspection(tmp_path: Path) -> None:
     assert len(preserved) == 1
 
 
+def test_a_newer_store_preserves_committed_wal_frames_beside_its_inspection_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uncheckpointed changes are recoverable from the quarantine as a unit."""
+    db_path = tmp_path / "execution.sqlite"
+    _write_newer_store(db_path)
+    with sqlite3.connect(db_path) as raw:
+        raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("PRAGMA wal_autocheckpoint=0")
+        raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        raw.execute("INSERT INTO future_only_table (id, note) VALUES (2, 'written-in-wal')")
+        raw.commit()
+        # Restore these on-disk bytes after the clean close, which otherwise
+        # checkpoints and unlinks the WAL. This simulates a crashed process
+        # without depending on operating-system file sharing or subprocesses.
+        primary_bytes = db_path.read_bytes()
+        wal_bytes = Path(f"{db_path}-wal").read_bytes()
+
+    db_path.write_bytes(primary_bytes)
+    wal_path = Path(f"{db_path}-wal")
+    wal_path.write_bytes(wal_bytes)
+    # Classification is independently covered by the newer-schema tests;
+    # avoid opening/closing the only reader, which would checkpoint the WAL.
+    monkeypatch.setattr(ExecutionRepository, "_inspect_store", lambda self: "newer")
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    copies = list(tmp_path.glob("execution.sqlite.newer-" + "[0-9a-f]" * 32))
+    assert len(copies) == 1
+    aside = copies[0]
+    assert Path(f"{aside}-wal").read_bytes() == wal_bytes
+    assert not wal_path.exists()
+    with sqlite3.connect(aside) as raw:
+        assert raw.execute(
+            "SELECT note FROM future_only_table WHERE id = 2"
+        ).fetchone()[0] == "written-in-wal"
+
+
+def test_sidecar_quarantine_failure_leaves_execution_database_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = _seed_store(tmp_path)
+    wal = Path(f"{db_path}-wal")
+    wal.write_bytes(b"synthetic uncheckpointed WAL")
+    before = db_path.read_bytes()
+    real_replace = os.replace
+
+    def reject_wal(source, target):
+        if str(source) == str(wal):
+            raise PermissionError("synthetic WAL sharing violation")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(ExecutionRepository, "_inspect_store", lambda self: "damaged")
+    monkeypatch.setattr(os, "replace", reject_wal)
+    with pytest.raises(ExecutionRepositoryError, match="could not be replaced"):
+        ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    assert db_path.read_bytes() == before
+    assert wal.read_bytes() == b"synthetic uncheckpointed WAL"
+    assert not list(tmp_path.glob("execution.sqlite.damaged-" + "[0-9a-f]" * 32))
+
+
+def test_failed_primary_quarantine_puts_execution_wal_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = _seed_store(tmp_path)
+    wal = Path(f"{db_path}-wal")
+    wal.write_bytes(b"synthetic uncheckpointed WAL")
+    before = db_path.read_bytes()
+    real_replace = os.replace
+
+    def reject_primary(source, target):
+        if str(source) == str(db_path):
+            raise PermissionError("synthetic primary sharing violation")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(ExecutionRepository, "_inspect_store", lambda self: "newer")
+    monkeypatch.setattr(os, "replace", reject_primary)
+    with pytest.raises(ExecutionRepositoryError, match="newer version of Cortex"):
+        ExecutionRepository(db_path, tmp_path / "artifacts")
+
+    assert db_path.read_bytes() == before
+    assert wal.read_bytes() == b"synthetic uncheckpointed WAL"
+
+
 def test_a_healthy_store_is_left_completely_alone(tmp_path: Path) -> None:
     """The check must never discard a database that was fine."""
     db_path = tmp_path / "execution.sqlite"
@@ -343,6 +427,27 @@ def test_startup_sweep_reclaims_only_old_set_aside_copies(tmp_path: Path) -> Non
     assert wrong_shape.exists()
     assert other_store.exists()
     assert db_path.exists()
+
+
+def test_execution_quarantine_wal_expires_with_its_primary_and_not_before(tmp_path: Path) -> None:
+    db_path = _seed_store(tmp_path)
+    copy = tmp_path / f"execution.sqlite.damaged-{'a' * 32}"
+    copy.write_bytes(b"set-aside primary")
+    wal = Path(f"{copy}-wal")
+    wal.write_bytes(b"recoverable frames")
+    shm = Path(f"{copy}-shm")
+    shm.write_bytes(b"shared memory index")
+    marker = _mark_seen(copy, ASIDE_COPY_RETENTION_SECONDS / 86_400 - 1)
+
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+    assert copy.exists() and wal.exists() and shm.exists()
+
+    _age(marker, ASIDE_COPY_RETENTION_SECONDS / 86_400 + 1)
+    ExecutionRepository(db_path, tmp_path / "artifacts")
+    assert not copy.exists()
+    assert not wal.exists()
+    assert not shm.exists()
+    assert not marker.exists()
 
 
 def test_a_copy_from_an_earlier_build_gets_its_own_retention_window(tmp_path: Path) -> None:
