@@ -2166,22 +2166,30 @@ class PermanentMemoryManager:
                             shutil.copyfileobj(source, saved, length=1024 * 1024)
                             saved.flush()
                             os.fsync(saved.fileno())
-                        # Do not delete a different or modified primary if a
-                        # concurrent writer replaced it during the copy.
-                        current = os.stat(self.memory_file_path)
-                        if (
-                            initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns
-                        ) != (
-                            current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
-                        ):
-                            raise OSError("Permanent memory file changed during quarantine.")
-                        os.unlink(self.memory_file_path)
                     except BaseException:
                         try:
                             os.unlink(damaged_path)
                         except OSError:
                             logging.warning("Could not remove an incomplete permanent-memory quarantine.")
                         raise
+                # Windows will not unlink a file that our own reader still has
+                # open. Close the reader before checking identity and removing
+                # the original; a failed removal leaves its original intact.
+                try:
+                    current = os.stat(self.memory_file_path)
+                    if (
+                        initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns
+                    ) != (
+                        current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+                    ):
+                        raise OSError("Permanent memory file changed during quarantine.")
+                    os.unlink(self.memory_file_path)
+                except BaseException:
+                    try:
+                        os.unlink(damaged_path)
+                    except OSError:
+                        logging.warning("Could not remove an incomplete permanent-memory quarantine.")
+                    raise
             except FileExistsError:
                 # The old .corrupt is a recoverable user-data copy. Retry only
                 # under a fresh name; never os.replace over an existing one.
