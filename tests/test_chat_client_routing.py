@@ -678,6 +678,55 @@ def test_llamacpp_chat_client_authenticates_blocking_and_streaming_requests(tmp_
     assert observed_authorization == ["Bearer runtime-secret", "Bearer runtime-secret"]
 
 
+def test_llamacpp_chat_client_rejects_stream_eof_without_completion(tmp_path: Path) -> None:
+    """A 200 SSE stream with only deltas must not commit a partial answer."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    chunks: list[tuple[str, str]] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'data: {"choices":[{"delta":{"content":"incomplete"}}]}\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"), models_directory=lambda: tmp_path, http_client=http_client
+    )
+    with pytest.raises(LlamaCppError, match="before completion"):
+        client.chat(
+            model=f"gguf:{model_path.name}",
+            messages=[],
+            options={},
+            cancellation_event=Event(),
+            on_delta=lambda kind, chunk: chunks.append((kind, chunk)),
+        )
+    assert chunks == [("content", "incomplete")]
+
+
+def test_llamacpp_chat_client_accepts_terminal_finish_reason_without_done(tmp_path: Path) -> None:
+    """The runtime may finish with a genuine finish_reason before SSE closes."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"),
+        models_directory=lambda: tmp_path,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = client.chat(model=f"gguf:{model_path.name}", messages=[], options={}, cancellation_event=Event())
+    assert result["message"]["content"] == "complete"
+
+
 def test_llamacpp_chat_client_threads_status_callback_into_ensure_ready(tmp_path: Path) -> None:
     model_path = tmp_path / "tiny.gguf"
     model_path.write_bytes(b"fake")
