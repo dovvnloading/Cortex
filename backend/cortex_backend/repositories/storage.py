@@ -2302,6 +2302,19 @@ class PermanentMemoryManager:
                 self.memos = previous_memos
                 raise
 
+    def update_memos_if_current(self, memos: list[str], *, expected_memos: list[str]) -> bool:
+        """Compare with the caller's original snapshot and persist atomically.
+
+        A stale full-list replacement must never remove a different client's
+        newly saved memories. This lock also guards add_memo and clear_memos,
+        so concurrent API writers cannot slip between comparison and save.
+        """
+        with self._lock:
+            if self.memos != expected_memos:
+                return False
+            self.update_memos(memos)
+            return True
+
     def update_memos(self, memos: list[str]):
         """
         Replaces the entire list of memos with a new list and saves to disk.
