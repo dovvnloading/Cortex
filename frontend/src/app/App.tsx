@@ -781,7 +781,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       modelGenerationRef.current += 1;
       setModels(refreshed);
     },
-    onDownloaded: (filename) => finishGGUFDownload(filename),
+    onDownloaded: (filename, selectedChatModelAtStart) => finishGGUFDownload(filename, selectedChatModelAtStart),
   });
 
   const listHuggingFaceFiles = (repoId: string, signal: AbortSignal) => api.listHuggingFaceGGUFFiles(repoId, { signal });
@@ -796,8 +796,15 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
   };
 
-  const finishGGUFDownload = async (filename: string) => {
-    const selected = await chooseLocalModel(`gguf:${filename}`);
+  const finishGGUFDownload = async (filename: string, selectedChatModelAtStart?: string | null) => {
+    const currentChatModel = useSettingsStore.getState().settings?.models?.chat ?? null;
+    // The download may finish after the user chose another model, or after a
+    // reload. A legacy resumed job has no snapshot and must not guess.
+    if (selectedChatModelAtStart === undefined || currentChatModel !== selectedChatModelAtStart) {
+      notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
+      return;
+    }
+    const selected = await chooseLocalModel(`gguf:${filename}`, selectedChatModelAtStart);
     if (!selected) {
       notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
     }
@@ -805,6 +812,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   const downloadGGUFModel = async (request: ModelDownloadRequest) => {
     const label = request.source === "huggingface" ? request.filename ?? "GGUF model" : "GGUF model";
+    const selectedChatModelAtStart = useSettingsStore.getState().settings?.models?.chat ?? null;
     let accepted: JobAccepted;
     try {
       accepted = await api.downloadGGUFModel(request);
@@ -813,7 +821,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       notify(message, "error");
       throw new Error(message, { cause: error });
     }
-    const result = await modelJobs.run(accepted, label, { checkOllamaConnection: false, notifyOnSuccess: false });
+    const result = await modelJobs.run(accepted, label, {
+      checkOllamaConnection: false,
+      notifyOnSuccess: false,
+      selectedChatModelAtStart,
+    });
     // The workspace closed first; the download carries on and is picked up
     // again (and selected) by the next one.
     if (result.detached) return;
@@ -824,7 +836,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // shows the same sentence beside its button.
       throw new Error(result.failure ?? "Model download failed.");
     }
-    await finishGGUFDownload(filename);
+    await finishGGUFDownload(filename, selectedChatModelAtStart);
   };
 
   const unloadLocalModel = async () => {
@@ -838,13 +850,16 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const chooseLocalModel = async (model: string): Promise<boolean> => {
+  const chooseLocalModel = async (model: string, expectedCurrentModel?: string | null): Promise<boolean> => {
     // Read the store rather than this render's `settings`: a GGUF download
     // runs for minutes before selecting what it fetched, and Settings stays
     // editable throughout. Sending the snapshot captured when the download
     // started would silently revert everything the user saved meanwhile.
     const current = useSettingsStore.getState().settings;
     if (!current) return false;
+    // Recheck at the write point, not only at download completion. The
+    // existing expected_revision also protects a simultaneous remote save.
+    if (expectedCurrentModel !== undefined && (current.models?.chat ?? null) !== expectedCurrentModel) return false;
     setSaving(true);
     try {
       const response = await api.updateSettings({
