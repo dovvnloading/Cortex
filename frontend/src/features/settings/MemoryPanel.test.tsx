@@ -55,7 +55,7 @@ describe("MemoryPanel", () => {
 
     expect(screen.getByRole("textbox", { name: "Memory 2" })).toHaveValue("Edited");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(onReplace).toHaveBeenCalledWith(["First", "Edited", "Third"]);
+    expect(onReplace).toHaveBeenCalledWith(["First", "Edited", "Third"], ["First", "Second", "Third"]);
   });
 
   it("preserves edited rows when removing a neighboring row", async () => {
@@ -76,7 +76,43 @@ describe("MemoryPanel", () => {
     await user.click(screen.getByRole("button", { name: "Remove memory 1" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
-    expect(onReplace).toHaveBeenCalledWith(["Edited"]);
+    expect(onReplace).toHaveBeenCalledWith(["Edited"], ["First", "Second"]);
+  });
+
+  it("keeps local edits while accepting a newer memory list after a stale-save conflict", async () => {
+    const user = userEvent.setup();
+    const onReplace = vi.fn<(memos: string[], expectedMemos: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("stale snapshot"))
+      .mockResolvedValue(undefined);
+
+    function Host() {
+      const [memos, setMemos] = useState(["Original"]);
+      return (
+        <>
+          <button onClick={() => setMemos(["Original", "Added elsewhere"])}>Refresh from server</button>
+          <MemoryPanel
+            memos={memos}
+            busy={false}
+            onAdd={vi.fn().mockResolvedValue(undefined)}
+            onReplace={onReplace}
+            onClear={vi.fn().mockResolvedValue(undefined)}
+          />
+        </>
+      );
+    }
+    render(<Host />);
+    await user.clear(screen.getByRole("textbox", { name: "Memory 1" }));
+    await user.type(screen.getByRole("textbox", { name: "Memory 1" }), "Edited");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onReplace).toHaveBeenNthCalledWith(1, ["Edited"], ["Original"]);
+
+    await user.click(screen.getByRole("button", { name: "Refresh from server" }));
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Edited");
+    expect(screen.getByRole("textbox", { name: "Memory 2" })).toHaveValue("Added elsewhere");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onReplace).toHaveBeenNthCalledWith(
+      2, ["Edited", "Added elsewhere"], ["Original", "Added elsewhere"],
+    );
   });
 
   it("only appends a memory after the add succeeds", async () => {
@@ -189,7 +225,7 @@ describe("MemoryPanel", () => {
     await user.type(input, "Edited");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
-    expect(onReplace).toHaveBeenCalledWith(["Edited"]);
+    expect(onReplace).toHaveBeenCalledWith(["Edited"], ["Original"]);
     expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("Edited");
   });
 });
