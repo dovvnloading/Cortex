@@ -637,8 +637,8 @@ def test_gguf_download_job_failure_reports_the_specific_reason(monkeypatch, tmp_
     already-safe-to-show reason (refusing to overwrite, out of disk space,
     not a GGUF file) with "Job failed. Please try again."."""
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
-        del url, filename, directory, progress_callback, cancellation_event
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, before_publish=None):
+        del url, filename, directory, progress_callback, cancellation_event, before_publish
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
 
     monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
@@ -674,11 +674,13 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
     was added instead of reusing "models" (which only allows one active job)."""
     release_download = threading.Event()
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, before_publish=None):
         del url, cancellation_event
         if progress_callback:
             progress_callback(GGUFDownloadProgress(filename=filename, status="starting"))
-        release_download.wait(timeout=5)
+        assert release_download.wait(timeout=5), "test never released the transfer"
+        if before_publish is not None:
+            assert before_publish()
         path = Path(directory) / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fake")
@@ -2993,9 +2995,11 @@ def _download_job(client: TestClient, headers: dict[str, str], payload: dict[str
 def test_the_download_route_fetches_a_split_model_as_one_job(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_download_gguf_set(parts, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf_set(parts, directory, *, progress_callback=None, cancellation_event=None, before_publish=None):
         del cancellation_event
         captured["parts"], captured["directory"] = parts, Path(directory)
+        if before_publish is not None:
+            assert before_publish()
         assert progress_callback is not None
         progress_callback(GGUFDownloadProgress(filename=parts[0][1], status="success", completed=6, total=6))
         return tuple(Path(directory) / name for _url, name in parts)
@@ -3028,9 +3032,11 @@ def test_the_download_route_fetches_a_split_model_as_one_job(monkeypatch, tmp_pa
 def test_the_download_route_saves_a_subfolder_file_under_its_basename(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, before_publish=None):
         del progress_callback, cancellation_event
         captured.update(url=url, filename=filename, directory=Path(directory))
+        if before_publish is not None:
+            assert before_publish()
         return Path(directory) / filename
 
     monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
@@ -3048,6 +3054,104 @@ def test_the_download_route_saves_a_subfolder_file_under_its_basename(monkeypatc
         "filename": "model.gguf",
         "directory": tmp_path,
     }
+
+
+def test_gguf_job_cancel_during_validation_does_not_publish(tmp_path: Path, monkeypatch) -> None:
+    """Cancellation before begin_commit must win and leave no installed model."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeTransfer:
+        def __init__(self, *, staging_path: Path, **kwargs) -> None:
+            del kwargs
+            self.path = staging_path
+
+        def run(self) -> None:
+            self.path.write_bytes(b"GGUF" + b"\x00" * 28)
+
+    def slow_validation(_path: Path) -> None:
+        started.set()
+        assert release.wait(timeout=10), "test never released the model validator"
+
+    monkeypatch.setattr(download_module, "_GGUFTransfer", FakeTransfer)
+    monkeypatch.setattr(download_module, "_validate_gguf_file", slow_validation)
+    app = create_app(
+        build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path
+    )
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            accepted = client.post(
+                "/api/v1/models/gguf/downloads",
+                json={"source": "url", "url": "https://example.com/model.gguf"},
+                headers=headers,
+            )
+            assert accepted.status_code == 202
+            job_id = accepted.json()["job_id"]
+            assert started.wait(timeout=10), "validator was not reached"
+
+            cancelled = client.post(f"/api/v1/jobs/{job_id}/cancel", headers=headers)
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "cancelling"
+            release.set()
+
+            def job_cancelled() -> bool:
+                return client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["status"] == "cancelled"
+
+            wait_until(job_cancelled, describe="the cancelled GGUF job to unwind")
+    finally:
+        release.set()
+    assert not (tmp_path / "model.gguf").exists()
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
+def test_gguf_job_commit_barrier_refuses_late_stop_without_falsifying_success(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Once publication begins, the job's status must match committed disk state."""
+    publishing = threading.Event()
+    release = threading.Event()
+
+    def fake_download_gguf(
+        url, filename, directory, *, progress_callback=None, cancellation_event=None, before_publish=None
+    ):
+        del url, progress_callback, cancellation_event
+        assert before_publish is not None and before_publish()
+        publishing.set()
+        assert release.wait(timeout=10), "test never released publishing"
+        destination = Path(directory) / filename
+        destination.write_bytes(b"published model")
+        return destination
+
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", fake_download_gguf)
+    app = create_app(
+        build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path
+    )
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            accepted = client.post(
+                "/api/v1/models/gguf/downloads",
+                json={"source": "url", "url": "https://example.com/model.gguf"},
+                headers=headers,
+            )
+            assert accepted.status_code == 202
+            job_id = accepted.json()["job_id"]
+            assert publishing.wait(timeout=10), "publication never crossed its commit barrier"
+
+            stop = client.post(f"/api/v1/jobs/{job_id}/cancel", headers=headers)
+            assert stop.status_code == 200
+            assert stop.json()["status"] == "running"
+            assert stop.json()["can_cancel"] is False
+            release.set()
+
+            def job_succeeded() -> bool:
+                return client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["status"] == "succeeded"
+
+            wait_until(job_succeeded, describe="the committed GGUF job to finish")
+    finally:
+        release.set()
+    assert (tmp_path / "model.gguf").read_bytes() == b"published model"
 
 
 def test_the_download_route_rejects_a_path_that_escapes_the_repository(tmp_path: Path) -> None:
