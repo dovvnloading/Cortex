@@ -16,7 +16,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from threading import Event, Lock
@@ -31,6 +31,30 @@ from .model_directory import resolve_gguf_path
 from .server_manager import LlamaServerProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _sse_payloads(lines: Iterable[str]) -> Iterator[str]:
+    """Yield complete SSE data fields (multiple data: lines make one event).
+
+    The HTTP response iterator supplies lines, not events. Parsing each line
+    independently can discard a valid multiline JSON delta and still report a
+    completed answer. Keepalives and metadata fields are not message content.
+    """
+    data_lines: list[str] = []
+    for line in lines:
+        if not line:
+            if data_lines:
+                yield "\n".join(data_lines)
+                data_lines = []
+            continue
+        if line.startswith("data:"):
+            value = line[len("data:"):]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
+    # Be permissive of EOF directly after the last data line. The caller still
+    # enforces an explicit terminal completion marker (or cancellation).
+    if data_lines:
+        yield "\n".join(data_lines)
+
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
 # Counting tokens is a single short request; a server that does not answer it
@@ -379,19 +403,25 @@ class LlamaCppChatClient:
                     cancellation_event, response.close, name="llama-chat-cancel-watch"
                 ):
                     try:
-                        for line in response.iter_lines():
+                        for payload in _sse_payloads(response.iter_lines()):
                             if cancellation_event.is_set():
                                 break
-                            if not line or not line.startswith("data:"):
-                                continue
-                            payload = line[len("data:"):].strip()
-                            if payload == "[DONE]":
+                            if payload.strip() == "[DONE]":
                                 done_received = True
                                 break
                             try:
                                 chunk = json.loads(payload)
-                            except ValueError:
-                                continue
+                            except ValueError as exc:
+                                # A malformed frame may carry critical missing
+                                # content. Do not ignore it and claim success
+                                # just because later frames say [DONE].
+                                raise LlamaCppError(
+                                    "The local model runtime sent malformed streaming data."
+                                ) from exc
+                            if not isinstance(chunk, dict):
+                                raise LlamaCppError(
+                                    "The local model runtime sent malformed streaming data."
+                                )
                             stream_error = chunk.get("error")
                             if stream_error:
                                 raise LlamaCppError(_stream_error_detail(stream_error))

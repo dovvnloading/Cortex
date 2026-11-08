@@ -748,6 +748,48 @@ def test_llamacpp_chat_client_accepts_terminal_finish_reason_without_done(tmp_pa
     assert result["message"]["content"] == "complete"
 
 
+def test_llamacpp_multiline_sse_event_preserves_all_answer_text(tmp_path: Path) -> None:
+    """One SSE event may legally have multiple data: lines forming one JSON payload."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    content = (
+        b'data: {"choices":[{"delta":{"content":"Intro "}}]}\n\n'
+        b'data: {"choices":\n'
+        b'data: [{"delta":{"content":"CRITICAL FACT"}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        b'data: [DONE]\n\n'
+    )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
+    ))
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"), models_directory=lambda: tmp_path, http_client=http_client
+    )
+    result = client.chat(model=f"gguf:{model_path.name}", messages=[], options={}, cancellation_event=Event())
+    assert result["message"]["content"] == "Intro CRITICAL FACT"
+
+
+def test_llamacpp_malformed_sse_frame_is_not_silently_discarded(tmp_path: Path) -> None:
+    """Even a later valid terminal frame cannot conceal an invalid data event."""
+    model_path = tmp_path / "tiny.gguf"
+    model_path.write_bytes(b"fake")
+    content = (
+        b'data: {"choices":[{"delta":{"content":"Intro "}}]}\n\n'
+        b'data: {"choices": not-valid-json}\n\n'
+        b'data: [DONE]\n\n'
+    )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
+    ))
+    client = LlamaCppChatClient(
+        _StaticProvider("http://fakellama"), models_directory=lambda: tmp_path, http_client=http_client
+    )
+    with pytest.raises(LlamaCppError, match="malformed streaming data"):
+        client.chat(model=f"gguf:{model_path.name}", messages=[], options={}, cancellation_event=Event())
+
+
 def test_llamacpp_chat_client_threads_status_callback_into_ensure_ready(tmp_path: Path) -> None:
     model_path = tmp_path / "tiny.gguf"
     model_path.write_bytes(b"fake")
@@ -1001,7 +1043,9 @@ def test_llamacpp_chat_client_keeps_the_tokens_it_had_when_cancelled_mid_stream(
 
         def iter_lines(self):
             yield _chunk("Hel")
+            yield ""
             yield _chunk("lo")
+            yield ""
             # The caller presses Stop here; the watcher closes the response
             # and the transport reports the interrupted read as an error.
             cancellation.set()
