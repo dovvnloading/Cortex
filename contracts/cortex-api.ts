@@ -476,6 +476,7 @@ export interface RenameChatRequest {
 
 export interface ReplaceMemoryRequest {
   memos: Array<string>;
+  expected_memos: Array<string>;
 }
 
 export interface ResizeStep {

@@ -150,7 +150,9 @@ def test_an_out_of_range_last_event_id_is_refused_before_the_stream_opens(app_fa
 def test_an_oversized_memory_is_refused_the_same_way_by_put_and_post(app_factory_client) -> None:
     """POST bounded each item; its PUT sibling did not, so PUT answered 500."""
     assert app_factory_client.post("/api/v1/memories", json={"memo": "x" * 501}).status_code == 422
-    assert app_factory_client.put("/api/v1/memories", json={"memos": ["x" * 501]}).status_code == 422
+    assert app_factory_client.put(
+        "/api/v1/memories", json={"memos": ["x" * 501], "expected_memos": []}
+    ).status_code == 422
 
 
 def test_a_full_memory_store_is_a_conflict_not_a_server_fault(app_factory_client) -> None:

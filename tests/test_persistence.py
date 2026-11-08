@@ -23,9 +23,37 @@ from cortex_backend.repositories.storage import (
     PermanentMemoryManager,
     PersistenceError,
 )
+from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository, MemoryRevisionConflict
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_stale_memory_replacement_preserves_newer_disk_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "permanent_memory.json"
+            repository = LegacyPermanentMemoryRepository(
+                PermanentMemoryManager(memory_file_path=str(path))
+            )
+            repository.add_memo("Original")
+            snapshot = repository.get_memos()
+            repository.add_memo("Newer client fact")
+
+            with self.assertRaises(MemoryRevisionConflict):
+                repository.replace_memos_if_current(
+                    ["Original edited"], expected_memos=snapshot
+                )
+            self.assertEqual(repository.get_memos(), ["Original", "Newer client fact"])
+            self.assertEqual(
+                PermanentMemoryManager(memory_file_path=str(path)).get_memos(),
+                ["Original", "Newer client fact"],
+            )
+            self.assertEqual(
+                repository.replace_memos_if_current(
+                    ["Original edited", "Newer client fact"],
+                    expected_memos=["Original", "Newer client fact"],
+                ),
+                ["Original edited", "Newer client fact"],
+            )
+
     def test_persistence_logs_omit_private_paths_and_chat_titles(self):
         with tempfile.TemporaryDirectory() as directory:
             private_db_path = Path(directory) / "Alice private records.sqlite"

@@ -621,10 +621,10 @@ export class CortexApi {
     });
   }
 
-  replaceMemories(memos: string[]): Promise<MemoryResponse> {
+  replaceMemories(memos: string[], expectedMemos: string[]): Promise<MemoryResponse> {
     return this.request<MemoryResponse>("/memories", {
       method: "PUT",
-      body: JSON.stringify({ memos }),
+      body: JSON.stringify({ memos, expected_memos: expectedMemos }),
     });
   }
 

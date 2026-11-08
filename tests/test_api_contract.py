@@ -428,7 +428,9 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
         ).json() == {"memos": ["Alice"]}
         assert (
             client.put(
-                "/api/v1/memories", json={"memos": ["one", "two"]}, headers=headers
+                "/api/v1/memories",
+                json={"memos": ["one", "two"], "expected_memos": ["Alice"]},
+                headers=headers
             ).status_code
             == 200
         )
@@ -503,6 +505,45 @@ def test_generation_with_preexisting_nonconforming_chat_id_still_works():
         assert response.json()["thread_id"] == legacy_thread_id
         chat = dependencies.chats.get_chat(legacy_thread_id)
         assert chat["messages"][0]["content"] == "hello"
+
+
+def test_stale_memory_editor_cannot_erase_another_clients_new_memory() -> None:
+    """A stale full replacement returns 409 while preserving the newer saved fact."""
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        client.post("/api/v1/memories", json={"memo": "First"}, headers=headers)
+        original = client.get("/api/v1/memories", headers=headers).json()["memos"]
+        assert original == ["First"]
+
+        # Another authenticated browser view adds a fact while this editor is open.
+        added = client.post("/api/v1/memories", json={"memo": "Second"}, headers=headers)
+        assert added.json()["memos"] == ["First", "Second"]
+        stale = client.put(
+            "/api/v1/memories",
+            json={"memos": ["First revised"], "expected_memos": original},
+            headers=headers,
+        )
+        assert stale.status_code == 409
+        assert "changed" in stale.json()["detail"]
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["First", "Second"]
+
+        # A compatible client must send the snapshot it actually read.
+        fresh = client.put(
+            "/api/v1/memories",
+            json={"memos": ["First revised", "Second"], "expected_memos": ["First", "Second"]},
+            headers=headers,
+        )
+        assert fresh.status_code == 200
+        assert fresh.json()["memos"] == ["First revised", "Second"]
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["First revised", "Second"]
+
+        # A legacy client that cannot show what it edited fails closed.
+        missing_precondition = client.put(
+            "/api/v1/memories", json={"memos": ["First revised"]}, headers=headers
+        )
+        assert missing_precondition.status_code == 422
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["First revised", "Second"]
 
 
 def test_memory_clear_without_confirmation_is_a_client_validation_error():

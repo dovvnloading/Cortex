@@ -758,7 +758,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const replaceMemory = async (next: string[]) => {
     setMemoryBusy(true);
     try {
-      const response = await api.replaceMemories(next);
+      // The editor's last server snapshot is a mandatory precondition. A
+      // different window may have added a fact since we opened Settings;
+      // silently replacing the entire list would permanently delete it.
+      const response = await api.replaceMemories(next, memos);
       applyMemories(response.memos);
       notify("Memory changes saved.", "success");
     } catch (error) {
