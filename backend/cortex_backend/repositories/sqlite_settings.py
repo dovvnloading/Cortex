@@ -375,7 +375,13 @@ class SQLiteSettingsRepository:
             # Validating the copy opened it, so SQLite made "<temp>-wal" and
             # "<temp>-shm". os.replace moves only the file itself.
             for suffix in ("-wal", "-shm"):
-                Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
+                try:
+                    Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
+                except OSError:
+                    # The primary was already published successfully. A
+                    # leftover temp-file sidecar must not turn that committed
+                    # restore into a reported failure or trigger rollback.
+                    logging.warning("Could not remove a published settings snapshot's temporary sidecar.")
             temporary_path = None
         except (OSError, shutil.Error, sqlite3.Error) as exc:
             raise SettingsRepositoryError("Could not copy the settings database safely.") from exc
@@ -568,22 +574,6 @@ class SQLiteSettingsRepository:
         """The WAL sidecars SQLite keeps beside the primary database file."""
         return (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
 
-    def _discard_sidecars(self) -> None:
-        """Drop WAL sidecars left behind after an explicit restore replaced the primary.
-
-        restore_backup overwrites the primary in place, and the previous
-        database's -wal and -shm would otherwise be replayed onto the copy.
-        Startup recovery does not use this: it preserves them (see
-        _recover_from).
-        """
-        for sidecar in self._sidecar_paths():
-            try:
-                sidecar.unlink(missing_ok=True)
-            except OSError as exc:
-                raise SettingsRepositoryError(
-                    "Could not remove a stale settings write-ahead log."
-                ) from exc
-
     def _create_backup(self) -> str | None:
         """Refresh the verified backup from the current primary.
 
@@ -639,7 +629,14 @@ class SQLiteSettingsRepository:
         self.backup_status = BackupStatus("failed", failure_detail(str(error), cause))
 
     def restore_backup(self) -> None:
-        """Restore the last verified database backup without changing QSettings."""
+        """Restore a verified backup while keeping the replaced primary and WAL recoverable.
+
+        Move the primary first, then its sidecars, and only then publish the
+        replacement. A crash after moving the primary leaves a recognizable
+        interrupted-recovery quarantine and no file for stale WAL frames to
+        replay onto. If a sidecar cannot be preserved, roll back the primary
+        instead of publishing a mismatched database.
+        """
         with self._write_lock:
             candidate = next(
                 (
@@ -651,10 +648,64 @@ class SQLiteSettingsRepository:
             )
             if candidate is None:
                 raise SettingsRepositoryError("No valid settings database backup is available.")
-            self._atomic_copy_database(candidate, self.db_path)
-            # Before _ensure_schema opens the restored file: any -wal still
-            # sitting there belongs to the database this copy just replaced.
-            self._discard_sidecars()
+            if not self.db_path.exists():
+                if any(path.exists() for path in self._sidecar_paths()):
+                    raise SettingsRepositoryError(
+                        "Cannot restore settings while orphaned write-ahead logs remain."
+                    )
+                self._atomic_copy_database(candidate, self.db_path)
+                self._ensure_schema()
+                return
+
+            # The standard interrupted-recovery marker makes a power loss
+            # between quarantine and publish safe on the next launch. Even a
+            # healthy old primary is preserved so manual rollback remains
+            # possible after an explicit backup restore.
+            old_primary = Path(f"{self.db_path}.corrupt-{uuid4().hex}")
+            try:
+                os.replace(self.db_path, old_primary)
+            except OSError as exc:
+                raise SettingsRepositoryError(
+                    "Could not preserve the settings database before restoring a backup."
+                ) from exc
+            sidecars_before = tuple(path for path in self._sidecar_paths() if path.exists())
+            try:
+                moved = move_sidecars(self.db_path, old_primary)
+            except OSError as exc:
+                if all(path.exists() for path in sidecars_before):
+                    # A failed partial move was undone, so the old primary may
+                    # safely return to its original name.
+                    try:
+                        os.replace(old_primary, self.db_path)
+                    except OSError as rollback_exc:
+                        raise SettingsRepositoryError(
+                            "Could not return the settings database after a failed restore."
+                        ) from rollback_exc
+                # If any log could not be returned, leave the primary aside:
+                # startup recovery can pick up the quarantine, rather than
+                # silently using a valid-looking primary missing its WAL.
+                raise SettingsRepositoryError(
+                    "Could not preserve the old settings write-ahead log before restore."
+                ) from exc
+            try:
+                self._atomic_copy_database(candidate, self.db_path)
+            except SettingsRepositoryError:
+                # Copy publication failed before exposing a new primary.
+                # Return the sidecars first, while no primary exists at the
+                # original name; if that fails, leave the old primary aside.
+                try:
+                    put_sidecars_back(moved)
+                except OSError as rollback_exc:
+                    raise SettingsRepositoryError(
+                        "Settings restore failed; old database and log were preserved separately."
+                    ) from rollback_exc
+                try:
+                    os.replace(old_primary, self.db_path)
+                except OSError as rollback_exc:
+                    raise SettingsRepositoryError(
+                        "Settings restore failed; the previous database remains quarantined."
+                    ) from rollback_exc
+                raise
             self._ensure_schema()
 
     def _read_row(self) -> tuple[CortexSettings, str] | None:
