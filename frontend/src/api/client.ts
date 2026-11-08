@@ -23,6 +23,7 @@ import type {
   LlamaCppRuntimeStatus,
   HandoffResponse,
   MemoryResponse,
+  ReplaceMemoryRequest,
   ModelDownloadRequest,
   ModelPullRequest,
   ModelResponse,
@@ -621,10 +622,13 @@ export class CortexApi {
     });
   }
 
-  replaceMemories(memos: string[]): Promise<MemoryResponse> {
+  replaceMemories(memos: string[], expectedMemos: string[]): Promise<MemoryResponse> {
+    // A full-list overwrite needs the exact list this editor originally
+    // loaded, or a newer addition from another view could be erased.
+    const payload: ReplaceMemoryRequest = { memos, expected_memos: expectedMemos };
     return this.request<MemoryResponse>("/memories", {
       method: "PUT",
-      body: JSON.stringify({ memos }),
+      body: JSON.stringify(payload),
     });
   }
 
