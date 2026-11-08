@@ -1813,6 +1813,30 @@ class DatabaseManager:
                 cause=exc,
             ) from exc
 
+    def update_chat_title_if_title(
+        self, thread_id: str, new_title: str, *, expected_title: str
+    ) -> bool:
+        """Compare and rename in one SQLite statement, never overwriting a manual edit.
+
+        Title generation runs after the assistant reply has been committed and
+        may take seconds. Reading the title before that work is not a lock:
+        another client can rename it while the model is running. This UPDATE
+        only touches the placeholder the generator actually saw.
+        """
+        try:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE threads SET title = ? WHERE id = ? AND title = ?",
+                    (new_title, thread_id, expected_title),
+                )
+                return cursor.rowcount == 1
+        except PersistenceError as exc:
+            raise PersistenceError(
+                "Failed to conditionally rename a chat.",
+                operation="update_chat_title_if_title",
+                cause=exc,
+            ) from exc
+
     def get_all_chats_summary(self) -> list[dict]:
         """Retrieves a summary (id, title, timestamp, group_id) of all chats, sorted by recency."""
         try:
