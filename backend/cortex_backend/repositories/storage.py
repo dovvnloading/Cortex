@@ -1299,6 +1299,39 @@ class DatabaseManager:
             os.path.basename(retired_as),
         )
 
+    @staticmethod
+    def _matches_legacy_chat_already_imported(
+        conn: sqlite3.Connection, chat_data: dict, existing: sqlite3.Row
+    ) -> bool:
+        """Only skip an ID collision when title, time and every message match.
+
+        Two distinct history files may share an old ID, but that does not make
+        either disposable. The comparison streams rows from SQLite and uses the
+        same JSON serialization as import, rather than materializing a second
+        potentially large transcript in memory.
+        """
+        if existing["title"] != chat_data["title"] or existing["timestamp"] != chat_data["timestamp"]:
+            return False
+        stored = conn.execute(
+            "SELECT role, content, sources, thoughts, attachments "
+            "FROM messages WHERE thread_id = ? ORDER BY timestamp, id",
+            (chat_data["id"],),
+        )
+        for message in chat_data["messages"]:
+            row = stored.fetchone()
+            if row is None:
+                return False
+            expected = (
+                message["role"],
+                message["content"],
+                json.dumps(message.get("sources")) if message.get("sources") else None,
+                message.get("thoughts"),
+                json.dumps(message.get("attachments")) if message.get("attachments") else None,
+            )
+            if tuple(row) != expected:
+                return False
+        return stored.fetchone() is None
+
     def migrate_from_json_if_needed(self) -> MigrationResult:
         """Migrate valid legacy files transactionally and isolate invalid files."""
         if not os.path.isdir(self.legacy_history_dir):
@@ -1340,14 +1373,21 @@ class DatabaseManager:
                     )
                 continue
 
+            collision = False
             try:
                 with self.connect() as conn:
                     existing = conn.execute(
-                        "SELECT 1 FROM threads WHERE id = ?",
+                        "SELECT title, timestamp FROM threads WHERE id = ?",
                         (chat_data['id'],),
                     ).fetchone()
                     if existing:
-                        skipped += 1
+                        if self._matches_legacy_chat_already_imported(conn, chat_data, existing):
+                            skipped += 1
+                        else:
+                            # The two histories have the same ID but different
+                            # content/metadata. Never hide the incoming one in
+                            # the "successfully migrated" archive.
+                            collision = True
                     else:
                         conn.execute(
                             "INSERT INTO threads (id, title, timestamp, revision) VALUES (?, ?, ?, ?)",
@@ -1389,6 +1429,23 @@ class DatabaseManager:
                         migrated += 1
             except PersistenceError:
                 raise
+
+            if collision:
+                try:
+                    self._quarantine_legacy_file(file_path)
+                    quarantined += 1
+                    logging.warning(
+                        "A legacy chat ID belonged to a different conversation; "
+                        "the conflicting file was preserved in the quarantine folder."
+                    )
+                except OSError as exc:
+                    # The original file remains in legacy history. Never
+                    # archive an unimported conversation on quarantine error.
+                    logging.error(
+                        "Could not preserve a conflicting legacy chat (%s).",
+                        type(exc).__name__,
+                    )
+                continue
 
             try:
                 self._archive_legacy_file(file_path, archive_dir)
