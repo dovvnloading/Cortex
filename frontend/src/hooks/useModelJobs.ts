@@ -28,6 +28,8 @@ export type ModelJobOptions = {
   notifyOnSuccess?: boolean;
   /** Original model selection for a GGUF job, retained across workspace reloads. */
   selectedChatModelAtStart?: string | null;
+  /** GGUF folder configured at download admission, retained through reloads. */
+  ggufDirectoryAtStart?: string | null;
 };
 
 type Dependencies = {
@@ -36,7 +38,11 @@ type Dependencies = {
   /** The inventory a finished job refreshed. */
   onModels: (models: ModelResponse) => void;
   /** A download that finished while nothing was waiting on it, which is one picked up again after a reload. */
-  onDownloaded: (filename: string, selectedChatModelAtStart: string | null | undefined) => Promise<void>;
+  onDownloaded: (
+    filename: string,
+    selectedChatModelAtStart: string | null | undefined,
+    ggufDirectoryAtStart: string | null | undefined,
+  ) => Promise<void>;
 };
 
 type Tracking = { jobId: string; controller: AbortController; cancelRequested: boolean };
@@ -219,6 +225,9 @@ export function useModelJobs(dependencies: Dependencies): {
       ...(options.selectedChatModelAtStart !== undefined
         ? { selectedChatModelAtStart: options.selectedChatModelAtStart }
         : {}),
+      ...(options.ggufDirectoryAtStart !== undefined
+        ? { ggufDirectoryAtStart: options.ggufDirectoryAtStart }
+        : {}),
     },
     { checkOllamaConnection: options.checkOllamaConnection ?? true, notifyOnSuccess: options.notifyOnSuccess ?? true },
   ), [follow]);
@@ -229,7 +238,9 @@ export function useModelJobs(dependencies: Dependencies): {
     const result = await follow(job, { checkOllamaConnection: !download, notifyOnSuccess: !download });
     if (!download || !result.succeeded) return;
     const filename = typeof result.data?.filename === "string" ? result.data.filename : null;
-    if (filename) await latest.current.onDownloaded(filename, job.selectedChatModelAtStart);
+    if (filename) await latest.current.onDownloaded(
+      filename, job.selectedChatModelAtStart, job.ggufDirectoryAtStart,
+    );
   }, [follow]);
 
   const cancel = useCallback(async () => {
