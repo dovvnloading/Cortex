@@ -688,6 +688,9 @@ class LlamaServerManager:
         self._last_error: str | None = None
         self._last_restart_reason: str | None = None
         self._active_backend: GpuBackend | None = None
+        # The setting used for the most recent launch attempt (including a
+        # failed one). This differs from _active_backend when "auto" falls back.
+        self._launch_backend_preference: GpuBackendSetting | None = None
         self._last_health_check: float = 0.0
         self._stderr_tail: list[str] = []
         self._failure_times: list[float] = []
@@ -790,17 +793,24 @@ class LlamaServerManager:
                 if self._closed:
                     raise LlamaCppError("The local model runtime manager is closed.")
             extra_args = self._current_extra_args()
+            requested_backend = self._gpu_backend_setting()
             trained_context = self._trained_context(model_path)
             num_ctx, context_note = self._limit_to_trained_context(num_ctx, trained_context)
             with self._state_lock:
                 if num_ctx is not None:
                     self._context_note = context_note
-                if extra_args != self._launch_extra_args:
-                    # A changed option may be exactly what fixes a launch that
-                    # kept failing; the new configuration starts with a clean slate.
+                if (
+                    extra_args != self._launch_extra_args
+                    or requested_backend != self._launch_backend_preference
+                ):
+                    # A new launch configuration can recover from repeated
+                    # failures; do not let the previous backend's crash history
+                    # prevent switching to CPU (or Vulkan).
                     self._failure_times.clear()
                     self._failure_key = None
-            verdict = self._reuse_verdict(model_path, num_ctx, token, extra_args=extra_args)
+            verdict = self._reuse_verdict(
+                model_path, num_ctx, token, extra_args=extra_args, requested_backend=requested_backend
+            )
             if verdict.reusable:
                 self._raise_if_stopping(token)
                 with self._state_lock:
@@ -839,7 +849,9 @@ class LlamaServerManager:
             if context_note is not None and on_status is not None:
                 on_status(context_note)
             try:
-                handle = self._start(model_path, effective_num_ctx, extra_args, on_status, token)
+                handle = self._start(
+                    model_path, effective_num_ctx, extra_args, on_status, token, requested_backend
+                )
                 self._touch()
                 self._ensure_idle_watcher()
                 return handle
@@ -1234,6 +1246,7 @@ class LlamaServerManager:
         cancellation_event: _CancellationToken,
         *,
         extra_args: tuple[str, ...] | None = None,
+        requested_backend: GpuBackendSetting | None = None,
     ) -> _ReuseVerdict:
         with self._state_lock:
             if self._state != "ready" or self._process is None:
@@ -1257,6 +1270,8 @@ class LlamaServerManager:
                 )
             if extra_args is not None and extra_args != self._launch_extra_args:
                 return _ReuseVerdict(reusable=False, reason=_ADVANCED_OPTIONS_CHANGED)
+            if requested_backend is not None and requested_backend != self._launch_backend_preference:
+                return _ReuseVerdict(reusable=False, reason="the configured GPU backend changed")
             exit_code = self._process.poll()
             if exit_code is not None:
                 return _ReuseVerdict(
@@ -1532,6 +1547,7 @@ class LlamaServerManager:
         extra_args: tuple[str, ...],
         on_status: StatusCallback | None,
         cancellation_event: _CancellationToken,
+        requested_backend: GpuBackendSetting,
     ) -> ServerHandle:
         if self._release is None:
             with self._state_lock:
@@ -1543,8 +1559,8 @@ class LlamaServerManager:
             # What this launch is given, and what was decided about the GPU
             # build for it: both describe the launch that is starting now.
             self._launch_extra_args = extra_args
+            self._launch_backend_preference = requested_backend
             self._backend_note = None
-        requested_backend = self._gpu_backend_setting()
         last_exc: Exception | None = None
         vulkan_launch_failed = False
         # ServerLaunchError may originate from the child process and include

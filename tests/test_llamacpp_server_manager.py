@@ -289,6 +289,35 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.active_backend == "cpu"
 
 
+def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
+    """An explicit CPU/Vulkan preference change must not reuse the old process."""
+    first, second, third = _FakePopen(), _FakePopen(), _FakePopen()
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([first, second, third])
+    preference = ["cpu"]
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    manager._gpu_backend_setting = lambda: preference[0]
+    model_path = tmp_path / "model.gguf"
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert manager.status.active_backend == "cpu"
+    preference[0] = "vulkan"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert first.terminated
+    assert manager.status.active_backend == "vulkan"
+    assert fetcher.ensure_binary_calls == ["cpu", "vulkan"]
+
+    # Unchanged preference keeps the warm process and avoids another download.
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 2
+
+    preference[0] = "cpu"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert second.terminated
+    assert manager.status.active_backend == "cpu"
+    assert fetcher.ensure_binary_calls == ["cpu", "vulkan", "cpu"]
+
+
 def test_close_stops_once_and_closes_only_an_owned_http_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     manager = _manager(
         tmp_path,
@@ -2266,6 +2295,29 @@ def test_repeated_launch_failures_are_tracked_and_trip_the_crash_loop_guard(tmp_
     assert "could not tell why" in str(raised.value)
     assert "3 times" in str(raised.value)
     assert manager.status.state == "failed"
+
+
+def test_switching_gpu_backend_escapes_old_launch_crash_loop(tmp_path: Path) -> None:
+    """A failed Vulkan setting may be replaced with CPU without waiting for cooldown."""
+    preference = ["vulkan"]
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([*[_FakePopen(exit_immediately=True) for _ in range(3)], _FakePopen()])
+    manager = _manager(tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient())
+    manager._gpu_backend_setting = lambda: preference[0]
+    model_path = tmp_path / "model.gguf"
+
+    for _ in range(3):
+        with pytest.raises(ServerLaunchError):
+            manager.ensure_ready(model_path, num_ctx=4096)
+    with pytest.raises(CrashLoopError):
+        manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 3
+
+    preference[0] = "cpu"
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert manager.status.active_backend == "cpu"
+    assert len(launcher.launch_args) == 4
+    assert fetcher.ensure_binary_calls == ["vulkan", "vulkan", "vulkan", "cpu"]
 
 
 def test_vulkan_launch_failure_is_not_blamed_when_cpu_fails_the_same_way(tmp_path: Path) -> None:
