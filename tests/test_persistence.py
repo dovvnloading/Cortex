@@ -134,10 +134,85 @@ class PersistenceTests(unittest.TestCase):
             manager.create_chat("duplicate", "Already present")
             result = manager.migrate_from_json_if_needed()
 
-            self.assertEqual((result.migrated, result.skipped, result.quarantined), (1, 1, 1))
+            # The pre-existing thread has a different title and timeline, so
+            # the colliding file is not a duplicate of that conversation.
+            self.assertEqual((result.migrated, result.skipped, result.quarantined), (1, 0, 2))
             self.assertIsNotNone(manager.load_chat("valid"))
             self.assertTrue((legacy / "quarantine" / "malformed.json").exists())
+            self.assertTrue((legacy / "quarantine" / "duplicate.json").exists())
             self.assertTrue(list(root.glob("legacy_migrated_*/*.json")))
+
+    def test_identical_legacy_chat_ids_are_skipped_only_when_contents_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            chat = {
+                "id": "shared-id",
+                "title": "Identical conversation",
+                "timestamp": "2026-01-02T10:00:00+00:00",
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Welcome"},
+                ],
+            }
+            for filename in ("first.json", "second.json"):
+                (legacy / filename).write_text(json.dumps(chat), encoding="utf-8")
+            manager = DatabaseManager(
+                db_path=str(root / "chats.sqlite"), legacy_history_dir=str(legacy)
+            )
+
+            result = manager.migrate_from_json_if_needed()
+
+            self.assertEqual(result, storage.MigrationResult(migrated=1, skipped=1))
+            loaded = manager.load_chat("shared-id")
+            self.assertEqual(
+                [message["content"] for message in loaded["messages"]],
+                ["Hello", "Welcome"],
+            )
+            self.assertEqual(
+                {item.name for item in root.glob("legacy_migrated_*/*.json")},
+                {"first.json", "second.json"},
+            )
+            self.assertFalse((legacy / "quarantine" / "second.json").exists())
+
+    def test_legacy_chat_id_collision_preserves_the_different_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            base = {
+                "id": "shared-id",
+                "title": "Two conversations with one ID",
+                "timestamp": "2026-01-02T10:00:00+00:00",
+            }
+            first = {
+                **base,
+                "messages": [{"role": "user", "content": "Original history"}],
+            }
+            second = {
+                **base,
+                "messages": [{"role": "user", "content": "Different valuable history"}],
+            }
+            (legacy / "a.json").write_text(json.dumps(first), encoding="utf-8")
+            source = legacy / "b.json"
+            source_bytes = json.dumps(second).encode("utf-8")
+            source.write_bytes(source_bytes)
+            manager = DatabaseManager(
+                db_path=str(root / "chats.sqlite"), legacy_history_dir=str(legacy)
+            )
+
+            result = manager.migrate_from_json_if_needed()
+
+            self.assertEqual(result, storage.MigrationResult(migrated=1, quarantined=1))
+            loaded = manager.load_chat("shared-id")
+            self.assertEqual(loaded["messages"][0]["content"], "Original history")
+            self.assertEqual((legacy / "quarantine" / "b.json").read_bytes(), source_bytes)
+            self.assertFalse(source.exists())
+            self.assertEqual(
+                {item.name for item in root.glob("legacy_migrated_*/*.json")},
+                {"a.json"},
+            )
 
     def test_migration_quarantines_out_of_contract_chat_records(self):
         with tempfile.TemporaryDirectory() as directory:
