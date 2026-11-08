@@ -7,6 +7,7 @@ afterward, so there is no separate download-tracking state to maintain.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import logging
 import os
@@ -14,6 +15,8 @@ import queue
 import re
 import shutil
 import socket
+import stat
+import sys
 import ssl
 import struct
 import time
@@ -714,7 +717,7 @@ def download_gguf_set(
     reporter = _ProgressReporter(progress_callback or (lambda progress: None), names[0])
     reporter.starting()
     staged: list[Path] = []
-    published: list[Path] = []
+    published: list[tuple[Path, tuple[int, int, int, int] | None]] = []
     fetched_bytes = 0
     complete = False
     try:
@@ -734,30 +737,112 @@ def download_gguf_set(
             _validate_gguf_file(staging_path)
             fetched_bytes += staging_path.stat().st_size
         for staging_path, destination in zip(staged, destinations, strict=True):
+            # Capture the identity while this is still our private staged file.
+            # Reading the destination *after* publication could accidentally
+            # capture another writer's replacement instead.
+            original_identity = _file_identity(staging_path)
             _publish(staging_path, destination, allow_overwrite=False)
-            published.append(destination)
+            published.append((destination, original_identity))
         complete = True
     finally:
         # Best effort, and every file gets its turn: a file that cannot be
         # removed (antivirus holding it open, say) must neither stop the rest
         # being removed nor replace the reason the download failed.
         if not complete:
-            for path in published:
-                _remove_quietly(path)
+            for path, original_identity in published:
+                _rollback_published(path, original_identity)
         for path in staged:
             _remove_quietly(path)
     reporter.success(fetched_bytes)
     return tuple(destinations)
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Identify a regular file without following a replaced path or a link.
+
+    A filesystem with no usable file IDs cannot support safe conditional
+    rollback. In that case leave a published part in place rather than risk
+    deleting another process's file.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or not info.st_ino:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _move_no_replace(source: Path, destination: Path) -> None:
+    """Atomically rename only if the destination is still unoccupied.
+
+    Windows os.rename refuses an existing destination, unlike POSIX rename.
+    Linux has renameat2(RENAME_NOREPLACE). On another POSIX platform without
+    an equivalent, fail closed: check-then-os.replace is not a safe fallback.
+    """
+    if os.name == "nt":
+        os.rename(source, destination)
+        return
+    if sys.platform == "linux":
+        import ctypes
+
+        renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if renameat2 is not None:
+            renameat2.argtypes = (
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            renameat2.restype = ctypes.c_int
+            # AT_FDCWD = -100; RENAME_NOREPLACE = 1 (Linux renameat2).
+            if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+                return
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number))
+    raise OSError(errno.ENOTSUP, "Atomic no-overwrite file move is unavailable.")
+
+
+def _rollback_published(
+    destination: Path, original_identity: tuple[int, int, int, int] | None
+) -> None:
+    """Remove only our published shard, even if a writer races the rollback.
+
+    A stat followed by unlink is another TOCTOU race. Instead, first move the
+    pathname to an unpredictable, non-model quarantine name *atomically*, and
+    inspect the moved file. If a concurrent writer swapped the pathname before
+    the move, put its file back without overwriting yet another writer. If the
+    restore loses that race, preserve the file under its quarantine name.
+    """
+    if original_identity is None:
+        logger.warning("Could not identify a published GGUF shard for safe rollback; leaving it in place.")
+        return
+    if _file_identity(destination) != original_identity:
+        return  # The destination was already replaced: it is not ours to delete.
+    quarantined = destination.with_name(f".rollback-{uuid4().hex}.part")
+    try:
+        _move_no_replace(destination, quarantined)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Could not isolate a GGUF shard for rollback; leaving it in place.")
+        return
+    if _file_identity(quarantined) == original_identity:
+        _remove_quietly(quarantined)
+        return
+    try:
+        _move_no_replace(quarantined, destination)
+    except OSError:
+        logger.warning(
+            "A concurrent model file was preserved under a hidden rollback filename "
+            "because its original destination could not be restored."
+        )
+
+
 def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
-    """Move a validated staging file into place without clobbering a model."""
+    """Publish a validated GGUF without overwriting a competing model."""
     if allow_overwrite:
         os.replace(staged, destination)
         return
-    # ``os.replace`` would silently destroy a model created after the
-    # initial existence check. Linking is an atomic create-if-absent
-    # operation on the same filesystem.
+    # The ordinary filesystem path uses atomic hard-link creation.
     try:
         os.link(staged, destination)
     except FileExistsError as exc:
@@ -765,29 +850,25 @@ def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
             "A model with this filename already exists; refusing to overwrite it."
         ) from exc
     except OSError as exc:
-        # Hard links aren't supported on every destination filesystem
-        # (exFAT, FAT32, and many SMB/network shares raise a plain
-        # ``OSError`` here, not ``FileExistsError``). Fall back to a
-        # plain move, which works for same-volume moves everywhere.
-        # Re-check for a racing writer first -- this narrows, but
-        # cannot fully close, the race window ``os.link`` closed on
-        # filesystems that support it.
-        if destination.exists():
+        # FAT/exFAT and some network folders cannot create hard links. Their
+        # fallback must also be an atomic no-replace operation. In particular,
+        # checking destination.exists() followed by os.replace() loses a race
+        # and can destroy an unrelated, multi-gigabyte model.
+        try:
+            _move_no_replace(staged, destination)
+        except FileExistsError as move_exc:
             raise GGUFDownloadError(
                 "A model with this filename already exists; refusing to overwrite it."
-            ) from exc
-        try:
-            os.replace(staged, destination)
-        except OSError as replace_exc:
+            ) from move_exc
+        except OSError as move_exc:
             raise GGUFDownloadError(
-                "Could not save the downloaded model to its destination folder."
-            ) from replace_exc
-    # The model is in place from here on. Removing the staging name is only
-    # tidying, and the caller removes it again: if it fails (antivirus can hold
-    # a freshly linked file open on Windows), raising would report a failure for
-    # a file that is published, and a split set would not know to roll it back.
+                "Could not publish the downloaded model without risking an overwrite "
+                "on this filesystem."
+            ) from move_exc
+        return
+    # Removing the original staging name is only tidying; antivirus may hold
+    # it open on Windows. A successful link is already a published model.
     _remove_quietly(staged)
-
 
 def _remove_quietly(path: Path) -> None:
     """Delete ``path`` if it exists; a failure is logged, never raised."""
