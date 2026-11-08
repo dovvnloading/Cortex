@@ -254,12 +254,20 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     },
                 )
 
+            def begin_publish() -> bool:
+                return sink.begin_commit(
+                    "gguf_download",
+                    "Publishing validated model files.",
+                    data={"filename": filename},
+                )
+
             if parts is not None:
                 download_gguf_set(
                     parts,
                     directory,
                     progress_callback=publish,
                     cancellation_event=cancel_event,
+                    before_publish=begin_publish,
                 )
                 # The first part names the whole set in the model list.
                 return {"filename": parts[0][1], "parts": len(parts)}
@@ -269,6 +277,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 directory,
                 progress_callback=publish,
                 cancellation_event=cancel_event,
+                before_publish=begin_publish,
             )
             return {"filename": filename}
 
