@@ -406,7 +406,7 @@ describe("MemoryPanel unsaved changes", () => {
     expect(onReplace).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["Second"]);
+    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["Second"], ["First", "Second"]);
   });
 
   it("puts a removed row back with Undo and is clean again", async () => {
@@ -433,7 +433,7 @@ describe("MemoryPanel unsaved changes", () => {
     await user.click(screen.getByRole("button", { name: "Undo removing memory 1" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
-    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["First edited"]);
+    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["First edited"], ["First"]);
   });
 
   it("leaves the marked rows in place when the save fails, and settles them once the server answers", async () => {
@@ -497,6 +497,6 @@ describe("MemoryPanel unsaved changes", () => {
 
     expect(screen.getByRole("textbox", { name: "Memory 1 (removed)" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["Second", "Third"]);
+    expect(onReplace).toHaveBeenCalledExactlyOnceWith(["Second", "Third"], ["First", "Second", "Third"]);
   });
 });
