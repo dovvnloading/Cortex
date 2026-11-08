@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from threading import RLock
 from typing import Any, Protocol
 
 
 class MemoryRepositoryError(RuntimeError):
     """Safe failure raised by a memory repository."""
+
+
+class MemoryRevisionConflict(MemoryRepositoryError):
+    """The caller's memory snapshot is stale; an unsaved edit must not erase new data."""
 
 
 class MemoryRepository(Protocol):
@@ -18,6 +23,10 @@ class MemoryRepository(Protocol):
     def add_memo(self, memo: str) -> list[str]: ...
 
     def replace_memos(self, memos: list[str]) -> list[str]: ...
+
+    def replace_memos_if_current(self, memos: list[str], *, expected_memos: list[str]) -> list[str]:
+        """Replace only when the original list still matches under the write lock."""
+        ...
 
     def clear_memos(self) -> None: ...
 
@@ -39,6 +48,13 @@ class LegacyPermanentMemoryRepository:
         self._memory.update_memos(memos)
         return self._memory.get_memos()
 
+    def replace_memos_if_current(self, memos: list[str], *, expected_memos: list[str]) -> list[str]:
+        if not self._memory.update_memos_if_current(memos, expected_memos=expected_memos):
+            raise MemoryRevisionConflict(
+                "Permanent memories changed in another view. Reopen Settings before saving your edits."
+            )
+        return self._memory.get_memos()
+
     def clear_memos(self) -> None:
         self._memory.clear_memos()
 
@@ -50,6 +66,7 @@ class InMemoryMemoryRepository:
     MAX_MEMO_LENGTH = 500
 
     def __init__(self, memos: list[str] | None = None):
+        self._lock = RLock()
         self._memos: list[str] = []
         self.replace_memos(memos or [])
 
@@ -77,15 +94,28 @@ class InMemoryMemoryRepository:
         return normalized
 
     def get_memos(self) -> list[str]:
-        return list(self._memos)
+        with self._lock:
+            return list(self._memos)
 
     def add_memo(self, memo: str) -> list[str]:
-        self._memos = self._normalize(self._memos + [memo])
-        return self.get_memos()
+        with self._lock:
+            self._memos = self._normalize(self._memos + [memo])
+            return list(self._memos)
 
     def replace_memos(self, memos: list[str]) -> list[str]:
-        self._memos = self._normalize(deepcopy(memos))
-        return self.get_memos()
+        with self._lock:
+            self._memos = self._normalize(deepcopy(memos))
+            return list(self._memos)
+
+    def replace_memos_if_current(self, memos: list[str], *, expected_memos: list[str]) -> list[str]:
+        with self._lock:
+            if self._memos != expected_memos:
+                raise MemoryRevisionConflict(
+                    "Permanent memories changed in another view. Reopen Settings before saving your edits."
+                )
+            self._memos = self._normalize(deepcopy(memos))
+            return list(self._memos)
 
     def clear_memos(self) -> None:
-        self._memos.clear()
+        with self._lock:
+            self._memos.clear()
