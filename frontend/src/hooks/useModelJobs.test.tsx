@@ -70,7 +70,7 @@ function fakes() {
   };
   const notify = vi.fn();
   const onModels = vi.fn();
-  const onDownloaded = vi.fn<(filename: string) => Promise<void>>().mockResolvedValue(undefined);
+  const onDownloaded = vi.fn<(filename: string, selectedChatModelAtStart?: string | null) => Promise<void>>().mockResolvedValue(undefined);
   return { api, streams, notify, onModels, onDownloaded };
 }
 
@@ -284,7 +284,7 @@ describe("cancelling", () => {
 
 describe("picking a job up again", () => {
   it("continues from the last event a previous screen showed, then finishes what the download's caller would have", async () => {
-    state().setActiveJob(job({ lastEventId: 7 }));
+    state().setActiveJob(job({ lastEventId: 7, selectedChatModelAtStart: "gguf:previous.gguf" }));
     const { streams, notify, onModels, onDownloaded } = setup();
 
     await waitFor(() => expect(streams).toHaveLength(1));
@@ -298,7 +298,7 @@ describe("picking a job up again", () => {
 
     await act(async () => streams[0].finish(succeeded(9)));
 
-    await waitFor(() => expect(onDownloaded).toHaveBeenCalledWith("demo.Q4_K_M.gguf"));
+    await waitFor(() => expect(onDownloaded).toHaveBeenCalledWith("demo.Q4_K_M.gguf", "gguf:previous.gguf"));
     expect(onModels).toHaveBeenCalledWith(inventory);
     expect(notify).not.toHaveBeenCalled();
     expect(state().modelBusy).toBe(false);
