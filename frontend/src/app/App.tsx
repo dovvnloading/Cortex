@@ -755,14 +755,24 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
-  const replaceMemory = async (next: string[]) => {
+  const replaceMemory = async (next: string[], expectedMemos: string[]) => {
     setMemoryBusy(true);
     try {
-      const response = await api.replaceMemories(next);
+      const response = await api.replaceMemories(next, expectedMemos);
       applyMemories(response.memos);
       notify("Memory changes saved.", "success");
     } catch (error) {
-      notify(apiMessage(error, "Could not save memory changes."), "error");
+      if (error instanceof ApiError && error.status === 409) {
+        // Refresh after a stale full-list replacement, but do not discard
+        // the editor's local edits. It reconciles them with the fresh list.
+        await loadMemories();
+        notify(
+          "Saved memories changed in another view. The latest list was refreshed; review your edits and save again.",
+          "error",
+        );
+      } else {
+        notify(apiMessage(error, "Could not save memory changes."), "error");
+      }
       throw error;
     }
     finally { setMemoryBusy(false); }
