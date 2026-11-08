@@ -239,6 +239,41 @@ describe("a model download", () => {
     expect(picker).toBeEnabled();
   });
 
+  it("preserves a newer model selection when a background GGUF download finishes", async () => {
+    const server = backend({ installed: ["gguf:other.gguf", "gguf:preferred.gguf"], chat: "gguf:other.gguf" });
+    const { user } = await openApp(server);
+    await openSystem(user);
+    await startDownload(user);
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+
+    await user.click(await screen.findByRole("button", { name: "Selected local model: other.gguf" }, WAIT));
+    await user.click(await screen.findByRole("option", { name: "preferred.gguf" }, WAIT));
+    await waitFor(() => expect(server.settingsWrites).toHaveLength(1), WAIT);
+    expect(server.settingsWrites[0].models.chat).toBe("gguf:preferred.gguf");
+
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(remembered()).toBeNull(), WAIT);
+
+    expect(server.settingsWrites).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Selected local model: preferred.gguf" })).toBeInTheDocument();
+    expect(await screen.findByText(`${FILE} downloaded. Select it from the model menu to start chatting.`, {}, WAIT)).toBeVisible();
+  });
+
+  it("still auto-selects the downloaded model when no later choice was made", async () => {
+    const server = backend({ installed: ["gguf:other.gguf"], chat: "gguf:other.gguf" });
+    const { user } = await openApp(server);
+    await openSystem(user);
+    await startDownload(user);
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(server.settingsWrites).toHaveLength(1), WAIT);
+    expect(server.settingsWrites[0].models.chat).toBe(`gguf:${FILE}`);
+  });
+
   it("says why it failed beside the button, in the backend's words", async () => {
     const reason = "This Hugging Face repository is gated or private. Set the HF_TOKEN environment variable.";
     const server = backend();
