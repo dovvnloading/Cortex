@@ -194,8 +194,13 @@ class SQLiteSettingsRepository:
                     ).fetchone()
                 if already is not None:
                     return
-            except SettingsRepositoryError:
-                return
+            except SettingsRepositoryError as exc:
+                # A failed destination read is not evidence that there is no
+                # old settings row. Refuse fallback writes until it can be
+                # checked successfully on a later launch.
+                raise SettingsRepositoryError(
+                    "Could not check stored settings during migration. Restart Cortex to retry."
+                ) from exc
 
             source: sqlite3.Connection | None = None
             try:
@@ -211,10 +216,16 @@ class SQLiteSettingsRepository:
                     "SELECT schema_version, revision, payload, updated_at "
                     "FROM cortex_settings WHERE id = 1"
                 ).fetchone()
+            except sqlite3.OperationalError as exc:
+                # A transient lock or interrupted read is different from an
+                # invalid old file. Falling back now would commit defaults to
+                # the new DB and permanently prevent a later adoption retry.
+                raise SettingsRepositoryError(
+                    "Could not read old settings during migration. Restart Cortex to retry."
+                ) from exc
             except sqlite3.Error:
-                # The old database being unreadable must not stop Cortex from
-                # starting -- it just means there is nothing to adopt, and the
-                # normal legacy/default path takes over.
+                # A genuinely unreadable/corrupt old SQLite file can still
+                # follow the established legacy/default migration path.
                 return
             finally:
                 if source is not None:
@@ -251,8 +262,12 @@ class SQLiteSettingsRepository:
                             _utc_now(),
                         ),
                     )
-            except SettingsRepositoryError:
-                return
+            except SettingsRepositoryError as exc:
+                # Never silently persist the QSettings/default fallback when
+                # the old row was found but its copy into the new DB failed.
+                raise SettingsRepositoryError(
+                    "Could not adopt old settings during migration. Restart Cortex to retry."
+                ) from exc
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
