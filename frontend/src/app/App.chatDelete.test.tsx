@@ -110,6 +110,25 @@ describe("App chat deletion with Undo", () => {
     expect(useChatStore.getState().chats.map((chat) => chat.id)).toEqual(["chat-a", "chat-b"]);
   });
 
+  it("does not delete early or lose Undo when unrelated toasts overflow the stack", async () => {
+    const { fetcher, deletes } = workspace();
+    await openWorkspace(fetcher);
+    await deleteChatAndControlTime("Alpha plan");
+
+    act(() => {
+      for (let i = 0; i < 8; i++) useUiStore.getState().notify(`Unrelated notice ${i}`, "info");
+    });
+    expect(deletes).toEqual([]);
+    expect(toastRegion().getByRole("button", { name: "Undo" })).toBeVisible();
+
+    await passTime(UNDO_WINDOW_MS - 1);
+    expect(deletes).toEqual([]);
+    fireEvent.click(toastRegion().getByRole("button", { name: "Undo" }));
+    await passTime(UNDO_WINDOW_MS + 100);
+    expect(deletes).toEqual([]);
+    expect(screen.getByRole("button", { name: "Delete Alpha plan" })).toBeInTheDocument();
+  });
+
   it("sends exactly one delete when the Undo window closes, and the chat stays gone", async () => {
     const { fetcher, deletes } = workspace();
     await openWorkspace(fetcher);

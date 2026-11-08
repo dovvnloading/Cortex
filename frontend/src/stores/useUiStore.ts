@@ -94,10 +94,13 @@ export const useUiStore = create<UiStoreState>((set, get) => {
         if (duplicate) return duplicate.id;
       }
       const id = nextToastId++;
-      // Past the cap the oldest toast makes room. It counts as closed, so a
-      // pending undo commits rather than being left with no way to be used.
+      // Make room using only passive notifications. Evicting an actionable
+      // toast would remove Undo and fire onClose before its advertised grace
+      // period ends, irreversibly deleting a chat. If every toast has an
+      // action, allow temporary overflow until those actions expire or close.
       const overflow = get().toasts.length + 1 - MAX_TOASTS;
-      for (const evicted of get().toasts.slice(0, Math.max(0, overflow))) closeToast(evicted.id, true);
+      const evictable = get().toasts.filter((toast) => !toast.action);
+      for (const evicted of evictable.slice(0, Math.max(0, overflow))) closeToast(evicted.id, true);
       if (onClose) toastCloseHandlers.set(id, onClose);
       set((state) => ({ toasts: [...state.toasts, action ? { id, kind, message, action } : { id, kind, message }] }));
       const lifetime = options.durationMs ?? (kind === "error" ? null : TOAST_LIFETIME_MS);
