@@ -242,6 +242,78 @@ def test_restore_discards_the_replaced_databases_write_ahead_log(tmp_path: Path)
     assert repository.load().settings.revision == 1
 
 
+def test_restore_refuses_locked_wal_without_replacing_the_original_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    before = repository.db_path.read_bytes()
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"original committed settings")
+    backup_before = repository.backup_path.read_bytes()
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("synthetic sharing violation")
+
+    monkeypatch.setattr("cortex_backend.repositories.sqlite_settings.move_sidecars", refuse)
+    with pytest.raises(SettingsRepositoryError, match="preserve the old settings write-ahead log"):
+        repository.restore_backup()
+
+    assert repository.db_path.read_bytes() == before
+    assert wal.read_bytes() == b"original committed settings"
+    assert repository.backup_path.read_bytes() == backup_before
+
+
+def test_failed_restore_publication_returns_original_primary_and_wal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    before = repository.db_path.read_bytes()
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"original committed settings")
+
+    def full_disk(cls, source, destination):
+        raise SettingsRepositoryError("injected restore publish failure")
+
+    monkeypatch.setattr(SQLiteSettingsRepository, "_atomic_copy_database", classmethod(full_disk))
+    with pytest.raises(SettingsRepositoryError, match="injected restore publish failure"):
+        repository.restore_backup()
+
+    assert repository.db_path.read_bytes() == before
+    assert wal.read_bytes() == b"original committed settings"
+    assert not list(tmp_path.glob("settings.sqlite.corrupt-*"))
+
+
+class _RestorePowerLoss(BaseException):
+    """Simulate a crash immediately after the primary was quarantined."""
+
+
+def test_restore_interrupted_before_moving_wal_recovers_safely_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, original = _repository_with_valid_backup(tmp_path)
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"old settings log frames")
+
+    def die_before_moving_sidecars(*_args, **_kwargs):
+        raise _RestorePowerLoss
+
+    monkeypatch.setattr(
+        "cortex_backend.repositories.sqlite_settings.move_sidecars", die_before_moving_sidecars
+    )
+    with pytest.raises(_RestorePowerLoss):
+        repository.restore_backup()
+    monkeypatch.undo()
+
+    assert not repository.db_path.exists()
+    (quarantined,) = tmp_path.glob("settings.sqlite.corrupt-*")
+    assert wal.read_bytes() == b"old settings log frames"
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+    assert recovered.load().settings == original
+    assert Path(f"{quarantined}-wal").read_bytes() == b"old settings log frames"
+    assert not wal.exists()
+
+
 def test_a_workspace_written_before_suggestions_was_removed_still_loads(tmp_path: Path):
     """CortexSettings is extra="forbid", so a retired key is a hard failure.
 
