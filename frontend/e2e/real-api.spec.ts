@@ -164,7 +164,12 @@ test("completes a real generation end to end", async ({ page, request }) => {
   // The reply text comes from the deterministic engine, but everything between
   // the click and this assertion is real: admission, the job registry, the SSE
   // stream, persistence, and the chat reload.
-  await expect(page.getByText(`Echo: ${prompt}`)).toBeVisible({ timeout: 20_000 });
+  // The optimistic "response ready, saving" row may briefly coexist with
+  // the persisted reply. Scope to the saved message, not both copies of the
+  // same text, so Playwright strict mode verifies the committed answer.
+  await expect(
+    page.getByRole("article", { name: "Cortex message" }).getByText(`Echo: ${prompt}`),
+  ).toBeVisible({ timeout: 20_000 });
 
   // Persisted and listed, not merely rendered from the stream.
   const chats = await request.get("/api/v1/chats", { headers });
