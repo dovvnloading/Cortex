@@ -17,7 +17,14 @@ export type ModelJobKind = "models" | "gguf_download";
  * backend and outlives the page, so this is only what is needed to find it
  * again: which job, what to call it, and the last event already shown.
  */
-export type ActiveModelJob = { jobId: string; kind: ModelJobKind; model: string; lastEventId: number };
+export type ActiveModelJob = {
+  jobId: string;
+  kind: ModelJobKind;
+  model: string;
+  lastEventId: number;
+  /** The chat model selected when this GGUF download began; missing on legacy jobs. */
+  selectedChatModelAtStart?: string | null;
+};
 
 const ACTIVE_MODEL_JOB_KEY = "cortex.active.model-job";
 
@@ -30,7 +37,12 @@ function isActiveModelJob(value: unknown): value is ActiveModelJob {
     && typeof candidate.model === "string"
     && typeof candidate.lastEventId === "number"
     && Number.isSafeInteger(candidate.lastEventId)
-    && candidate.lastEventId >= 0;
+    && candidate.lastEventId >= 0
+    && (
+      !("selectedChatModelAtStart" in candidate)
+      || candidate.selectedChatModelAtStart === null
+      || typeof candidate.selectedChatModelAtStart === "string"
+    );
 }
 
 /**
