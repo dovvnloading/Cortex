@@ -849,7 +849,7 @@ def _publish(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
         raise GGUFDownloadError(
             "A model with this filename already exists; refusing to overwrite it."
         ) from exc
-    except OSError as exc:
+    except OSError:
         # FAT/exFAT and some network folders cannot create hard links. Their
         # fallback must also be an atomic no-replace operation. In particular,
         # checking destination.exists() followed by os.replace() loses a race
