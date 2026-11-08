@@ -385,6 +385,11 @@ class OllamaChatClient:
                 close = getattr(chunks, "close", None)
                 if callable(close):
                     close()
+        if not final and (cancellation_event is None or not cancellation_event.is_set()):
+            # An HTTP iterator reaching EOF does not establish a completed
+            # Ollama generation. Otherwise a broken connection turns the
+            # visible prefix of the answer into a falsely successful reply.
+            raise RuntimeError("Ollama stream ended without a completion frame.")
         final["message"] = {
             "content": "".join(content_parts),
             "thinking": "".join(thinking_parts) or None,

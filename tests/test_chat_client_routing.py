@@ -303,6 +303,27 @@ def test_ollama_chat_client_streams_the_full_response_when_not_cancelled() -> No
     assert result["eval_count"] == 3
 
 
+def test_ollama_chat_client_refuses_an_unfinished_stream() -> None:
+    """EOF after a content delta is not a successful Ollama generation."""
+    delivered: list[tuple[str, str]] = []
+
+    class _TruncatedOllama:
+        def chat(self, *, model, messages, options, stream=False):
+            assert stream is True
+            return iter([{"message": {"content": "partial answer"}, "done": False}])
+
+    client = OllamaChatClient(_TruncatedOllama())
+    with pytest.raises(RuntimeError, match="without a completion frame"):
+        client.chat(
+            model="fixture:1b",
+            messages=[],
+            options={},
+            cancellation_event=Event(),
+            on_delta=lambda kind, text: delivered.append((kind, text)),
+        )
+    assert delivered == [("content", "partial answer")]
+
+
 class _ResidencyOllama:
     """An Ollama client stub that says which models are loaded and keeps the order of its calls."""
 
