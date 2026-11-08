@@ -2302,15 +2302,20 @@ class PermanentMemoryManager:
                 self.memos = previous_memos
                 raise
 
-    def update_memos(self, memos: list[str]):
+    def update_memos(
+        self, memos: list[str], *, expected_memos: list[str] | None = None
+    ):
         """
-        Replaces the entire list of memos with a new list and saves to disk.
+        Replaces the complete memory list, checking the editor's starting list.
 
-        Args:
-            memos (list[str]): The new, complete list of memos.
+        The comparison and save share the manager lock with add_memo and
+        clear_memos, so a stale editor cannot erase a newer committed addition.
         """
-        # Filter out any empty strings that might have come from the UI.
         with self._lock:
+            if expected_memos is not None and self.memos != expected_memos:
+                raise ValueError(
+                    "Memories changed while you were editing. Refresh and review your changes."
+                )
             previous_memos = list(self.memos)
             self.memos = self.normalize_memos(memos)
             try:
