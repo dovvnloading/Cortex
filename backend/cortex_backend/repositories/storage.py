@@ -2146,29 +2146,63 @@ class PermanentMemoryManager:
         self._atomic_copy_memos(self.backup_file_path, self.memory_file_path)
 
     def _set_aside_corrupt_memory_file(self, cause: BaseException) -> None:
-        """Move an unrecoverable memory file out of the way of a fresh save.
+        """Preserve an unreadable memory file without overwriting older quarantines.
 
-        Moving rather than deleting: the damaged bytes may still be readable
-        by a person even when this parser gives up on them. A single fixed
-        name is used on purpose -- an unbounded ``.corrupt.1``, ``.corrupt.2``
-        series would be its own slow leak in the data directory.
+        The first damaged copy keeps the legacy ``.corrupt`` name. Subsequent
+        incidents use a unique suffix: an earlier copy may be the only source
+        from which a person can salvage old memories. The destination is
+        created exclusively before copying, so a collision or symlink cannot
+        overwrite it. The original is unlinked only after the copy is synced.
         """
-        damaged_path = f"{self.memory_file_path}.corrupt"
-        try:
-            replace_with_retry(self.memory_file_path, damaged_path)
-        except OSError as exc:
-            # Usually a lock. The save that follows would fail on the same
-            # file anyway, so report the condition rather than pressing on.
-            raise PersistenceError(
-                "Cannot save permanent memory because the existing file is corrupt "
-                "and could not be set aside.",
-                operation="save_permanent_memory",
-                cause=cause,
-            ) from exc
-        logging.warning(
-            "The permanent memory file was unreadable (%s) and no valid backup "
-            "existed; it was moved aside and a new file was written.",
-            type(cause).__name__,
+        first_path = f"{self.memory_file_path}.corrupt"
+        candidates = (first_path, *(f"{first_path}-{uuid4().hex}" for _ in range(4)))
+        for damaged_path in candidates:
+            try:
+                with open(self.memory_file_path, "rb") as source:
+                    initial = os.fstat(source.fileno())
+                    fd = os.open(damaged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    try:
+                        with os.fdopen(fd, "wb") as saved:
+                            shutil.copyfileobj(source, saved, length=1024 * 1024)
+                            saved.flush()
+                            os.fsync(saved.fileno())
+                        # Do not delete a different or modified primary if a
+                        # concurrent writer replaced it during the copy.
+                        current = os.stat(self.memory_file_path)
+                        if (
+                            initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns
+                        ) != (
+                            current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+                        ):
+                            raise OSError("Permanent memory file changed during quarantine.")
+                        os.unlink(self.memory_file_path)
+                    except BaseException:
+                        try:
+                            os.unlink(damaged_path)
+                        except OSError:
+                            logging.warning("Could not remove an incomplete permanent-memory quarantine.")
+                        raise
+            except FileExistsError:
+                # The old .corrupt is a recoverable user-data copy. Retry only
+                # under a fresh name; never os.replace over an existing one.
+                continue
+            except OSError as exc:
+                raise PersistenceError(
+                    "Cannot save permanent memory because the existing file is corrupt "
+                    "and could not be set aside.",
+                    operation="save_permanent_memory",
+                    cause=cause,
+                ) from exc
+            logging.warning(
+                "The permanent memory file was unreadable (%s) and no valid backup "
+                "existed; its bytes were preserved before saving a new file.",
+                type(cause).__name__,
+            )
+            return
+        raise PersistenceError(
+            "Cannot save permanent memory because a safe quarantine name was unavailable.",
+            operation="save_permanent_memory",
+            cause=cause,
         )
 
     def _save_memos(self):
