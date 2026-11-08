@@ -2936,6 +2936,16 @@
       "ReplaceMemoryRequest": {
         "additionalProperties": false,
         "properties": {
+          "expected_memos": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Expected Memos",
+            "type": "array"
+          },
           "memos": {
             "items": {
               "maxLength": 500,
@@ -2948,7 +2958,8 @@
           }
         },
         "required": [
-          "memos"
+          "memos",
+          "expected_memos"
         ],
         "title": "ReplaceMemoryRequest",
         "type": "object"
