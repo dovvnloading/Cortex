@@ -21,6 +21,8 @@ from threading import Condition, RLock
 from typing import Any, Literal
 from uuid import uuid4
 
+from cortex_backend.repositories.sqlite_backup import move_sidecars, put_sidecars_back
+
 from .models import (
     PROFILE_NAME_PATTERN,
     ExecutionApproval,
@@ -368,24 +370,31 @@ class ExecutionRepository:
             return
 
         aside = self.db_path.with_name(f"{self.db_path.name}.{verdict}-{uuid4().hex}")
+        error_message = (
+            "The execution store is damaged and could not be replaced."
+            if verdict == "damaged"
+            else "The execution store was written by a newer version of Cortex "
+            "and could not be set aside."
+        )
+        # WAL frames belong to the old primary and may hold committed jobs and
+        # approvals. Move them beside its inspection copy, never unlink them.
+        # If any move fails the helper rolls its earlier moves back.
+        try:
+            moved_sidecars = move_sidecars(self.db_path, aside)
+        except OSError as exc:
+            raise ExecutionRepositoryError(error_message) from exc
         try:
             os.replace(self.db_path, aside)
         except OSError as exc:
-            raise ExecutionRepositoryError(
-                "The execution store is damaged and could not be replaced."
-                if verdict == "damaged"
-                else "The execution store was written by a newer version of Cortex "
-                "and could not be set aside."
-            ) from exc
+            try:
+                put_sidecars_back(moved_sidecars)
+            except OSError:
+                # All copies stay on disk for manual recovery, even if Windows
+                # prevents us returning an original sidecar to its old name.
+                _LOGGER.error("Could not return execution WAL after a failed quarantine.")
+            raise ExecutionRepositoryError(error_message) from exc
         # The startup sweep that follows dates the copy from now, not from the
         # last write, by marking it the first time it sees it.
-        for suffix in ("-wal", "-shm"):
-            # They describe the file just moved aside, so SQLite must not
-            # replay them onto the empty replacement.
-            try:
-                self.db_path.with_name(f"{self.db_path.name}{suffix}").unlink(missing_ok=True)
-            except OSError:
-                pass
         if verdict == "damaged":
             _LOGGER.error(
                 "The execution store was unreadable and has been rebuilt. "
@@ -508,6 +517,11 @@ class ExecutionRepository:
                     continue
                 marker_info = marker.lstat()
                 if stat.S_ISREG(marker_info.st_mode) and marker_info.st_mtime < cutoff:
+                    # Quarantine WAL/SHM are part of this copy's recoverable
+                    # contents and share its retention window. Remove them
+                    # only when the matching primary expires.
+                    for suffix in ("-wal", "-shm"):
+                        Path(f"{copy}{suffix}").unlink(missing_ok=True)
                     copy.unlink()
                     marker.unlink(missing_ok=True)
             except OSError:
