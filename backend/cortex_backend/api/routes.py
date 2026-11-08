@@ -739,7 +739,17 @@ async def _start_generation_job(
                     },
                 )
 
-            overview = deps.chats.get_chat_overview(thread_id) or {}
+            # The assistant message above is already committed. An ancillary
+            # overview read used only for title work must never report the
+            # saved answer as a failed generation (and offer a duplicate Retry).
+            try:
+                overview = deps.chats.get_chat_overview(thread_id) or {}
+            except Exception as exc:
+                logger.warning(
+                    "Cortex could not read the chat overview after saving an answer (%s).",
+                    type(exc).__name__,
+                )
+                overview = {}
             title = str(overview.get("title") or "New Chat")
             if target_message_id is None and title == "New Chat":
                 raw_title = None
@@ -791,12 +801,22 @@ async def _start_generation_job(
                         )
             # rename_chat above may have moved the title, and the assistant
             # message moved the revision. Neither needs the transcript.
-            overview = deps.chats.get_chat_overview(thread_id) or overview
+            try:
+                overview = deps.chats.get_chat_overview(thread_id) or overview
+            except Exception as exc:
+                logger.warning(
+                    "Cortex could not refresh the chat overview after saving an answer (%s).",
+                    type(exc).__name__,
+                )
+            # The successful assistant insert/replace advanced the revision
+            # by one. If both optional overview reads failed, report the
+            # known committed revision instead of a fabricated zero.
+            committed_revision = (prepared_revision + 1) if prepared_revision is not None else 0
             return {
                 "thread_id": thread_id,
                 "user_message_id": user_message_id,
                 "assistant_message_id": assistant_message_id,
-                "chat_revision": int(overview.get("revision", 0)),
+                "chat_revision": int(overview.get("revision", committed_revision)),
                 "title": str(overview.get("title") or title),
                 "response": result.response,
                 "thoughts": result.thoughts,

@@ -841,6 +841,50 @@ def test_manual_chat_rename_wins_over_delayed_title_generation() -> None:
         release_title.set()
 
 
+@pytest.mark.parametrize("failing_overview", [1, 2, 0])
+def test_saved_answer_survives_failure_to_read_postcommit_overview(failing_overview: int) -> None:
+    """A committed answer stays successful even if optional overview reads fail."""
+    dependencies = build_demo_dependencies()
+    real_overview = dependencies.chats.get_chat_overview
+    reads_after_commit = 0
+
+    def flaky_overview(thread_id: str):
+        nonlocal reads_after_commit
+        chat = dependencies.chats.get_chat(thread_id)
+        # The first overview read during prepare is essential and stays
+        # healthy. After the assistant exists, both reads are optional.
+        if chat and any(message.get("role") == "assistant" for message in chat["messages"]):
+            reads_after_commit += 1
+            if failing_overview == 0 or reads_after_commit == failing_overview:
+                raise RuntimeError("synthetic post-commit overview failure")
+        return real_overview(thread_id)
+
+    dependencies.chats.get_chat_overview = flaky_overview
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post(
+            "/api/v1/generations",
+            json={"request_id": f"postcommit-overview-{failing_overview}", "user_input": "Hello"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        payload = accepted.json()
+        job_id = payload["job_id"]
+        events = client.get(f"/api/v1/jobs/{job_id}/events", headers=headers)
+        assert events.status_code == 200
+        assert '"status":"succeeded"' in events.text
+        assert '"status":"failed"' not in events.text
+
+        snapshot = client.get(f"/api/v1/jobs/{job_id}", headers=headers)
+        assert snapshot.json()["status"] == "succeeded"
+        assert snapshot.json()["result"]["chat_revision"] >= 2
+        chat = client.get(f"/api/v1/chats/{payload['thread_id']}", headers=headers).json()
+        assert [message["role"] for message in chat["messages"]] == ["user", "assistant"]
+        assert chat["messages"][-1]["content"]
+        assert reads_after_commit == 2
+
+
 def test_cancel_after_commit_reports_it_cannot_cancel():
     """A Stop that arrives after the commit point says it was not honoured.
 
