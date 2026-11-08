@@ -291,10 +291,11 @@ class AddMemoryRequest(APIModel):
 
 
 class ReplaceMemoryRequest(APIModel):
-    # Same per-item bound as AddMemoryRequest.memo above. Without it an
-    # oversized entry reached the store, which raises, and the route reported
-    # a 500 for input its POST sibling rejects cleanly with a 422.
+    # Both lists have the same bound: a stale full-list replacement must carry
+    # the exact snapshot it was edited from, not just the desired new values.
+    # The repository compares before writing under the same lock as additions.
     memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
+    expected_memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
 
 
 class ClearMemoryRequest(APIModel):
