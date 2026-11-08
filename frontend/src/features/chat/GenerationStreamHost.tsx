@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { ChatResponse } from "../../../../contracts/cortex-api";
 import type { CortexApi } from "../../api/client";
-import { readActiveJob, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
+import { readActiveJob, reconnectDelay, useGenerationStream, type PersistedJob } from "../../hooks/useGenerationStream";
 import { useChatStore } from "../../stores/useChatStore";
 
 type Props = {
@@ -31,16 +31,10 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
   // whenever the store goes idle would resurrect a finished job if clearing
   // the stored copy had failed.
   const coldStartCheckedRef = useRef(false);
-  // The job this host has already attached to. Without it a consumer that
-  // stopped on a refused session would be attached a second time, behind the
-  // very refusal the app is about to act on.
-  //
-  // Known limit: when the app finds that a newer session already exists it
-  // ignores the refusal and keeps this host mounted, so the job stays tracked
-  // with nothing reading it until the workspace remounts. Apart from a refused
-  // session the consumer ends only when it is stopped or the job is over; an
-  // abort it did not ask for is retried inside the consumer, not left to this
-  // guard.
+  // The job this host has already attached to. It is only released after the
+  // consumer exits (including authentication refusal), so no two readers
+  // follow the same generation concurrently. An expired session that another
+  // request already renewed should not leave the composer stuck until reload.
   const attachedJobIdRef = useRef<string | null>(null);
 
   const onCompleted = useCallback(
@@ -74,32 +68,65 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
   // The mount-time look is deferred so React StrictMode's simulated unmount
   // cancels the first attempt instead of racing a second consumer against it.
   useEffect(() => {
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    let authAttempt = 0;
+    let retryJobId: string | null = null;
     const follow = (job: PersistedJob): void => {
-      if (attachedJobIdRef.current === job.jobId) return;
+      if (disposed || attachedJobIdRef.current === job.jobId) return;
+      if (retryJobId !== job.jobId) {
+        retryJobId = job.jobId;
+        authAttempt = 0;
+      }
       attachedJobIdRef.current = job.jobId;
-      void consume(job, onCompleted, onFailed);
+      void consume(job, onCompleted, onFailed).then((outcome) => {
+        if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
+        // The consumer is now *fully* stopped, including its status fallback,
+        // so dropping this guard cannot create concurrent SSE readers.
+        attachedJobIdRef.current = null;
+        if (useChatStore.getState().generation.jobId !== job.jobId) return;
+        // A working replacement session may already exist, so the parent's
+        // onSessionExpired deliberately does nothing. Keep the job and cursor,
+        // and retry with bounded backoff instead of stranding the composer.
+        const delayMs = reconnectDelay(authAttempt);
+        authAttempt = Math.min(authAttempt + 1, 20);
+        if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          followTrackedJob();
+        }, delayMs);
+      });
     };
     const followTrackedJob = (): void => {
+      if (disposed) return;
       const { generation, generationCursor } = useChatStore.getState();
       if (!generation.jobId || !generation.threadId) return;
       follow({ jobId: generation.jobId, threadId: generation.threadId, lastEventId: generationCursor });
     };
 
     const timer = window.setTimeout(() => {
+      if (disposed) return;
       const { generation, beginGeneration } = useChatStore.getState();
       if (generation.jobId) {
         followTrackedJob();
       } else if (!coldStartCheckedRef.current) {
         const stored = readActiveJob();
         if (stored) {
-          // A cold start replays the job from its first event: the store holds
-          // no text yet, and a stored cursor would leave the start of the
-          // answer missing. Claim it before the store moves, so the
-          // subscription below does not attach a second time.
+          // A cold start replays from event zero; the store has no text yet.
+          // Claim before beginGeneration triggers the store subscriber.
           const job: PersistedJob = { ...stored, lastEventId: 0 };
           attachedJobIdRef.current = job.jobId;
           beginGeneration(job.jobId, job.threadId);
-          void consume(job, onCompleted, onFailed);
+          void consume(job, onCompleted, onFailed).then((outcome) => {
+            if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
+            attachedJobIdRef.current = null;
+            const delayMs = reconnectDelay(authAttempt);
+            authAttempt = Math.min(authAttempt + 1, 20);
+            reconnectTimer = window.setTimeout(() => {
+              reconnectTimer = null;
+              followTrackedJob();
+            }, delayMs);
+          });
         }
       }
       coldStartCheckedRef.current = true;
@@ -108,7 +135,9 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
       if (state.generation.jobId && state.generation.jobId !== previous.generation.jobId) followTrackedJob();
     });
     return () => {
+      disposed = true;
       window.clearTimeout(timer);
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       unsubscribe();
     };
   }, [consume, onCompleted, onFailed]);
