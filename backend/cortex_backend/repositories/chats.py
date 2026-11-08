@@ -144,6 +144,10 @@ class ChatRepository(Protocol):
 
     def rename_chat(self, thread_id: str, title: str) -> None: ...
 
+    def rename_chat_if_title(self, thread_id: str, title: str, *, expected_title: str) -> bool:
+        """Change the title only if it still matches the captured placeholder."""
+        ...
+
     def delete_chat(self, thread_id: str) -> None: ...
 
     def fork_chat(self, thread_id: str, message_id: str, new_thread_id: str) -> None: ...
@@ -265,6 +269,13 @@ class LegacyDatabaseChatRepository:
             if typed is exc:
                 raise
             raise typed from exc
+
+    def rename_chat_if_title(self, thread_id: str, title: str, *, expected_title: str) -> bool:
+        return bool(
+            self._database.update_chat_title_if_title(
+                thread_id, title, expected_title=expected_title
+            )
+        )
 
     def delete_chat(self, thread_id: str) -> None:
         self._database.delete_chat(thread_id)
@@ -543,6 +554,14 @@ class InMemoryChatRepository:
             # Only the title: a rename is not activity, so the chat keeps its
             # place in the recency-ordered list, as it does in the database.
             chat["title"] = title
+
+    def rename_chat_if_title(self, thread_id: str, title: str, *, expected_title: str) -> bool:
+        with self._lock:
+            chat = self._chats.get(thread_id)
+            if chat is None or chat.get("title") != expected_title:
+                return False
+            chat["title"] = title
+            return True
 
     def delete_chat(self, thread_id: str) -> None:
         with self._lock:
