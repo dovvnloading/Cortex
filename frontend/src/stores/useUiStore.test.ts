@@ -127,6 +127,28 @@ describe("useUiStore", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("keeps actionable Undo available and does not commit it when notifications overflow", () => {
+    const onUndo = vi.fn();
+    const onClose = vi.fn();
+    const undoId = useUiStore.getState().notify("Chat deleted.", "success", {
+      action: { label: "Undo", onAction: onUndo },
+      durationMs: 6000,
+      onClose,
+    });
+
+    for (let i = 0; i < 10; i++) useUiStore.getState().notify(`Background notice ${i}`, "info");
+    expect(useUiStore.getState().toasts).toHaveLength(5);
+    expect(useUiStore.getState().toasts.some((toast) => toast.id === undoId)).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(5999);
+    expect(onClose).not.toHaveBeenCalled();
+    useUiStore.getState().runToastAction(undoId);
+    expect(onUndo).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(10_000);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("command palette and shortcuts dialog visibility toggle independently", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     expect(useUiStore.getState().commandPaletteOpen).toBe(true);
