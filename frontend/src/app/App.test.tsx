@@ -1283,6 +1283,19 @@ describe("App", () => {
     await openModelSettings(user);
     await user.click(screen.getByRole("button", { name: "Rescan local models" }));
 
+    if (status === "running") {
+      // An SSE close with a still-running backend job must keep the progress
+      // and Cancel owner alive and attempt to reconnect. No false "failed"
+      // toast or inventory refresh should be reported.
+      await waitFor(() => expect(fetcher.mock.calls.filter(
+        ([input]) => String(input).endsWith("/jobs/model-job-eof"),
+      ).length).toBeGreaterThan(0));
+      expect(useModelStore.getState().modelBusy).toBe(true);
+      expect(useModelStore.getState().activeJob?.jobId).toBe("model-job-eof");
+      expect(modelRefreshes).toBe(1);
+      expect(screen.queryByText("Local model inventory refreshed.")).not.toBeInTheDocument();
+      return;
+    }
     expect(await screen.findByText((content) => content.includes(expected))).toBeVisible();
     expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/jobs/model-job-eof"))).toHaveLength(1);
     expect(modelRefreshes).toBe(status === "succeeded" ? 2 : 1);
