@@ -781,7 +781,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       modelGenerationRef.current += 1;
       setModels(refreshed);
     },
-    onDownloaded: (filename, selectedChatModelAtStart) => finishGGUFDownload(filename, selectedChatModelAtStart),
+    onDownloaded: (filename, selectedChatModelAtStart, ggufDirectoryAtStart) => (
+      finishGGUFDownload(filename, selectedChatModelAtStart, ggufDirectoryAtStart)
+    ),
   });
 
   const listHuggingFaceFiles = (repoId: string, signal: AbortSignal) => api.listHuggingFaceGGUFFiles(repoId, { signal });
@@ -796,12 +798,29 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
   };
 
-  const finishGGUFDownload = async (filename: string, selectedChatModelAtStart?: string | null) => {
-    const currentChatModel = useSettingsStore.getState().settings?.models?.chat ?? null;
+  const finishGGUFDownload = async (
+    filename: string,
+    selectedChatModelAtStart?: string | null,
+    ggufDirectoryAtStart?: string | null,
+  ) => {
+    const current = useSettingsStore.getState().settings;
+    const currentChatModel = current?.models?.chat ?? null;
     // The download may finish after the user chose another model, or after a
-    // reload. A legacy resumed job has no snapshot and must not guess.
+    // reload. A legacy resumed job has no admission snapshot and must not guess.
     if (selectedChatModelAtStart === undefined || currentChatModel !== selectedChatModelAtStart) {
       notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
+      return;
+    }
+    // The backend writes to the folder configured when the download was
+    // admitted, but discovery uses the CURRENT folder. Never silently choose
+    // a model that's stranded in a different directory.
+    if (ggufDirectoryAtStart === undefined || (current?.models?.gguf_directory ?? null) !== ggufDirectoryAtStart) {
+      const original = ggufDirectoryAtStart?.trim() || "the default GGUF models folder";
+      notify(
+        `${filename} was downloaded to ${original}, but the GGUF models folder changed. `
+          + "Switch the folder back in Settings or move the file into the current folder before selecting it.",
+        "info",
+      );
       return;
     }
     const selected = await chooseLocalModel(`gguf:${filename}`, selectedChatModelAtStart);
@@ -812,7 +831,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   const downloadGGUFModel = async (request: ModelDownloadRequest) => {
     const label = request.source === "huggingface" ? request.filename ?? "GGUF model" : "GGUF model";
-    const selectedChatModelAtStart = useSettingsStore.getState().settings?.models?.chat ?? null;
+    const modelsAtStart = useSettingsStore.getState().settings?.models;
+    const selectedChatModelAtStart = modelsAtStart?.chat ?? null;
+    const ggufDirectoryAtStart = modelsAtStart?.gguf_directory ?? null;
     let accepted: JobAccepted;
     try {
       accepted = await api.downloadGGUFModel(request);
@@ -825,6 +846,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       checkOllamaConnection: false,
       notifyOnSuccess: false,
       selectedChatModelAtStart,
+      ggufDirectoryAtStart,
     });
     // The workspace closed first; the download carries on and is picked up
     // again (and selected) by the next one.
@@ -836,7 +858,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // shows the same sentence beside its button.
       throw new Error(result.failure ?? "Model download failed.");
     }
-    await finishGGUFDownload(filename, selectedChatModelAtStart);
+    await finishGGUFDownload(filename, selectedChatModelAtStart, ggufDirectoryAtStart);
   };
 
   const unloadLocalModel = async () => {
