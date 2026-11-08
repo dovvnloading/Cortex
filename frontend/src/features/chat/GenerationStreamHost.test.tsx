@@ -131,36 +131,47 @@ describe("GenerationStreamHost", () => {
     expect(attachments).toHaveLength(1);
   });
 
-  it("does not attach again to a job whose consumer stopped on a refused session", async () => {
-    // The app leaves the workspace mounted when it finds that a newer session
-    // exists, so the host outlives the refusal with the job still tracked, and
-    // its effect re-runs for any change of dependency. Attaching again there
-    // would run a second consumer behind the very refusal the app is acting on.
-    const streamGeneration = vi.fn((_jobId: string, _onEvent: unknown, options: { signal?: AbortSignal } = {}) => {
-      if (streamGeneration.mock.calls.length === 1) return Promise.reject(new ApiError(401, "Local session expired."));
-      return new Promise<void>((_resolve, reject) => {
+  it("reattaches after a 401 when another request already renewed the session", async () => {
+    // The app ignores a stale 401 when its API has a working newer session.
+    // Recover without remounting and without concurrent consumers.
+    let emitAfterRenewal: ((event: { event_id: number; event: string }) => void) | null = null;
+    const streamGeneration = vi.fn((_jobId: string, onEvent: unknown, options: { signal?: AbortSignal; afterEventId?: number } = {}) => {
+      if (streamGeneration.mock.calls.length === 1) {
+        (onEvent as (event: unknown) => void)({
+          event_id: 1, event: "generation.content_delta", job_id: "job-1",
+          thread_id: "thread-a", data: { delta: "saved prefix" },
+        });
+        return Promise.reject(new ApiError(401, "Previous local session expired."));
+      }
+      return new Promise<void>((resolve, reject) => {
+        emitAfterRenewal = (event) => {
+          (onEvent as (event: unknown) => void)({
+            job_id: "job-1", thread_id: "thread-a", data: {}, ...event,
+          });
+          if (event.event === "generation.completed") resolve();
+        };
         options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
       });
     });
     const { api } = fakeStreamApi({ streamGeneration: streamGeneration as unknown as CortexApi["streamGeneration"] });
-    const onSessionExpired = vi.fn();
-    const { rerender, unmount } = render(<GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />);
-    act(() => trackGeneration("job-1", "thread-a"));
-    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
-    expect(streamGeneration).toHaveBeenCalledTimes(1);
-    expect(useChatStore.getState().generation.jobId).toBe("job-1");
-
-    rerender(<GenerationStreamHost api={api} onSessionExpired={() => undefined} />);
-    await settleTimers();
-
-    expect(streamGeneration).toHaveBeenCalledTimes(1);
-
-    // The claim belongs to this host: the workspace that replaces it once the
-    // session is renewed picks the job up again, from where the store left it.
-    unmount();
+    const onSessionExpired = vi.fn(); // a new session exists; no workspace remount
     render(<GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />);
-    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2));
-    expect(streamGeneration.mock.calls[1][2]).toMatchObject({ afterEventId: 0 });
+    act(() => trackGeneration("job-1", "thread-a"));
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(useChatStore.getState().generation.jobId).toBe("job-1");
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(streamGeneration.mock.calls[1][2]).toMatchObject({ afterEventId: 1 });
+    expect(emitAfterRenewal).not.toBeNull();
+
+    await act(async () => {
+      emitAfterRenewal!({ event_id: 2, event: "generation.completed" });
+    });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    expect(api.chat).toHaveBeenCalledWith("thread-a");
+    expect(useChatStore.getState().lastCompletion).toMatchObject({ threadId: "thread-a" });
+    await settleTimers();
+    expect(streamGeneration).toHaveBeenCalledTimes(2);
   });
 
   it("keeps following a job when the stream is cut by an abort that was not the host's own", async () => {
