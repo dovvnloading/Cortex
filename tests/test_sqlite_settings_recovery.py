@@ -123,6 +123,69 @@ def test_failed_backup_copy_preserves_current_recovery_generation(
     assert repository.backup_path.read_bytes() == backup_before
 
 
+def test_failed_settings_snapshot_preserves_both_independent_backup_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed snapshot must not destroy the older of two distinct backups (#354)."""
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    original = repository.load().settings
+    repository.save(original)
+    updated = original.model_copy(
+        update={"appearance": original.appearance.model_copy(update={"theme": "light"})}
+    )
+    repository.save(updated)
+    newest = updated.model_copy(
+        update={"appearance": updated.appearance.model_copy(update={"theme": "system"})}
+    )
+    repository.save(newest)
+    # Two distinct, valid, independently useful snapshots.
+    before = (repository.backup_path.read_bytes(), repository.previous_backup_path.read_bytes())
+    assert before[0] != before[1]
+
+    def fail_snapshot(cls, source, destination):
+        raise SettingsRepositoryError("injected snapshot failure")
+
+    monkeypatch.setattr(SQLiteSettingsRepository, "_atomic_snapshot_database", classmethod(fail_snapshot))
+    with pytest.raises(SettingsRepositoryError, match="injected snapshot failure"):
+        repository._create_backup()
+
+    assert (repository.backup_path.read_bytes(), repository.previous_backup_path.read_bytes()) == before
+    assert not list(tmp_path.glob(".*.pending"))
+
+
+def test_failed_settings_backup_publication_preserves_both_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    before = (repository.backup_path.read_bytes(), repository.previous_backup_path.read_bytes())
+    from cortex_backend.repositories import sqlite_settings
+
+    real_publish = sqlite_settings.replace_with_retry
+
+    def refuse_newest(source, destination, **kwargs):
+        if Path(destination) == repository.backup_path:
+            raise PermissionError("synthetic backup sharing violation")
+        return real_publish(source, destination, **kwargs)
+
+    monkeypatch.setattr(sqlite_settings, "replace_with_retry", refuse_newest)
+    with pytest.raises(SettingsRepositoryError, match="Could not create a settings database backup"):
+        repository._create_backup()
+
+    assert (repository.backup_path.read_bytes(), repository.previous_backup_path.read_bytes()) == before
+    assert not list(tmp_path.glob(".*.pending"))
+
+
+def test_successful_settings_backup_rotates_only_after_new_snapshot_is_verified(tmp_path: Path) -> None:
+    repository, _ = _repository_with_valid_backup(tmp_path)
+    formerly_newest = repository.backup_path.read_bytes()
+
+    repository._create_backup()
+
+    assert repository.previous_backup_path.read_bytes() == formerly_newest
+    assert SQLiteSettingsRepository._database_is_valid(repository.backup_path)
+    assert not list(tmp_path.glob(".*.pending"))
+
+
 def test_recovery_falls_back_to_older_verified_backup_generation(tmp_path: Path):
     repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
     original = repository.load().settings
