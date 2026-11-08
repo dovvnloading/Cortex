@@ -85,6 +85,101 @@ def _split_paths(tmp_path: Path) -> tuple[tuple[tuple[str, str], ...], Path, Pat
     return parts, tmp_path / first_name, tmp_path / second_name
 
 
+def test_single_gguf_cancelled_during_validation_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_network(monkeypatch)
+    from threading import Event
+
+    cancelled = Event()
+    model = tmp_path / "single.gguf"
+    monkeypatch.setattr(gguf_download, "_validate_gguf_file", lambda _path: cancelled.set())
+
+    with pytest.raises(gguf_download.GGUFDownloadError, match="cancelled"):
+        gguf_download.download_gguf(
+            "https://example.com/single.gguf", model.name, tmp_path, cancellation_event=cancelled
+        )
+
+    assert not model.exists()
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
+def test_single_gguf_cancel_during_publication_rolls_back_only_its_own_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_network(monkeypatch)
+    from threading import Event
+
+    cancelled = Event()
+    target = tmp_path / "single.gguf"
+    original_publish = gguf_download._publish
+
+    def publish_and_cancel(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
+        original_publish(staged, destination, allow_overwrite=allow_overwrite)
+        cancelled.set()
+
+    monkeypatch.setattr(gguf_download, "_publish", publish_and_cancel)
+    with pytest.raises(gguf_download.GGUFDownloadError, match="cancelled"):
+        gguf_download.download_gguf(
+            "https://example.com/single.gguf", target.name, tmp_path, cancellation_event=cancelled
+        )
+
+    assert not target.exists()
+
+
+def test_split_gguf_cancelled_during_final_validation_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_network(monkeypatch)
+    from threading import Event
+
+    cancelled = Event()
+    parts, first, second = _split_paths(tmp_path)
+    validations = 0
+
+    def validate(_staged: Path) -> None:
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            cancelled.set()
+
+    monkeypatch.setattr(gguf_download, "_validate_gguf_file", validate)
+    with pytest.raises(gguf_download.GGUFDownloadError, match="cancelled"):
+        gguf_download.download_gguf_set(parts, tmp_path, cancellation_event=cancelled)
+
+    assert validations == 2
+    assert not first.exists() and not second.exists()
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
+def test_split_cancel_during_publication_keeps_a_replaced_foreign_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_network(monkeypatch)
+    from threading import Event
+
+    cancelled = Event()
+    parts, first, second = _split_paths(tmp_path)
+    original_publish = gguf_download._publish
+    foreign_content = b"replacement from a different writer"
+
+    def publish_swap_and_cancel(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
+        original_publish(staged, destination, allow_overwrite=allow_overwrite)
+        if destination == first:
+            foreign = tmp_path / ".foreign-shard"
+            foreign.write_bytes(foreign_content)
+            os.replace(foreign, first)
+            cancelled.set()
+
+    monkeypatch.setattr(gguf_download, "_publish", publish_swap_and_cancel)
+    with pytest.raises(gguf_download.GGUFDownloadError, match="cancelled"):
+        gguf_download.download_gguf_set(parts, tmp_path, cancellation_event=cancelled)
+
+    assert first.read_bytes() == foreign_content
+    assert not second.exists()
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
 def test_split_rollback_does_not_delete_a_replaced_earlier_shard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
