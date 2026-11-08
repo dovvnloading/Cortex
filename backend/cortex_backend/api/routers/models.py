@@ -112,7 +112,10 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             )
             if not pulled:
                 return {"cancelled": True, "model": model}
-            return {"model": model, "installed_models": deps.models.list_installed()}
+            # Installation is complete; inventory refresh is a separate, fallible operation.
+            # Do not turn an already-successful pull into a failed job if Ollama
+            # briefly refuses the follow-up listing. The client rescans on completion.
+            return {"model": model}
 
         try:
             snapshot = await request.app.state.jobs.start(
