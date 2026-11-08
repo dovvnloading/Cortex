@@ -26,6 +26,8 @@ export type ModelJobOptions = {
   checkOllamaConnection?: boolean;
   /** Announce success with the generic toast. Default true. */
   notifyOnSuccess?: boolean;
+  /** Original model selection for a GGUF job, retained across workspace reloads. */
+  selectedChatModelAtStart?: string | null;
 };
 
 type Dependencies = {
@@ -34,7 +36,7 @@ type Dependencies = {
   /** The inventory a finished job refreshed. */
   onModels: (models: ModelResponse) => void;
   /** A download that finished while nothing was waiting on it, which is one picked up again after a reload. */
-  onDownloaded: (filename: string) => Promise<void>;
+  onDownloaded: (filename: string, selectedChatModelAtStart: string | null | undefined) => Promise<void>;
 };
 
 type Tracking = { jobId: string; controller: AbortController; cancelRequested: boolean };
@@ -211,6 +213,9 @@ export function useModelJobs(dependencies: Dependencies): {
       kind: accepted.kind === "gguf_download" ? "gguf_download" : "models",
       model: label,
       lastEventId: 0,
+      ...(options.selectedChatModelAtStart !== undefined
+        ? { selectedChatModelAtStart: options.selectedChatModelAtStart }
+        : {}),
     },
     { checkOllamaConnection: options.checkOllamaConnection ?? true, notifyOnSuccess: options.notifyOnSuccess ?? true },
   ), [follow]);
@@ -221,7 +226,7 @@ export function useModelJobs(dependencies: Dependencies): {
     const result = await follow(job, { checkOllamaConnection: !download, notifyOnSuccess: !download });
     if (!download || !result.succeeded) return;
     const filename = typeof result.data?.filename === "string" ? result.data.filename : null;
-    if (filename) await latest.current.onDownloaded(filename);
+    if (filename) await latest.current.onDownloaded(filename, job.selectedChatModelAtStart);
   }, [follow]);
 
   const cancel = useCallback(async () => {
