@@ -221,6 +221,58 @@ class PersistenceTests(unittest.TestCase):
                 '{"memos": ["remember te',
             )
 
+    def test_repeated_corrupt_memory_saves_preserve_earlier_quarantine(self):
+        """A second corrupt file must never replace a salvageable old .corrupt."""
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "permanent_memory.json"
+            first_quarantine = Path(f"{memory_path}.corrupt")
+            old_data = '{"memos": ["salvageable original memory"]}'
+            first_quarantine.write_text(old_data, encoding="utf-8")
+            damaged = '{"memos": ["newer but incomplete'
+            memory_path.write_text(damaged, encoding="utf-8")
+
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            manager.add_memo("a fresh memory")
+
+            self.assertEqual(manager.get_memos(), ["a fresh memory"])
+            self.assertEqual(first_quarantine.read_text(encoding="utf-8"), old_data)
+            new_quarantines = list(Path(directory).glob("permanent_memory.json.corrupt-*"))
+            self.assertEqual(len(new_quarantines), 1)
+            self.assertEqual(new_quarantines[0].read_text(encoding="utf-8"), damaged)
+
+            # A third incident must preserve both earlier copies.
+            memory_path.write_text('{"memos": ["third broken', encoding="utf-8")
+            reopened = PermanentMemoryManager(memory_file_path=str(memory_path))
+            reopened.clear_memos()
+            self.assertEqual(first_quarantine.read_text(encoding="utf-8"), old_data)
+            self.assertEqual(new_quarantines[0].read_text(encoding="utf-8"), damaged)
+            self.assertEqual(len(list(Path(directory).glob("permanent_memory.json.corrupt-*"))), 2)
+
+    def test_failed_quarantine_preserves_damaged_primary_and_existing_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory_path = Path(directory) / "permanent_memory.json"
+            damaged = '{"memos": ["incomplete'
+            memory_path.write_text(damaged, encoding="utf-8")
+            previous = Path(f"{memory_path}.corrupt")
+            previous.write_text('{"memos": ["old salvage"]}', encoding="utf-8")
+            manager = PermanentMemoryManager(memory_file_path=str(memory_path))
+            real_open = os.open
+
+            def refuse_quarantine(path, flags, mode=0o777):
+                if str(path).startswith(str(previous)):
+                    raise PermissionError("quarantine destination unavailable")
+                return real_open(path, flags, mode)
+
+            from unittest.mock import patch
+
+            with patch("cortex_backend.repositories.storage.os.open", side_effect=refuse_quarantine):
+                with self.assertRaises(storage.PersistenceError):
+                    manager.add_memo("new content")
+
+            self.assertEqual(memory_path.read_text(encoding="utf-8"), damaged)
+            self.assertEqual(previous.read_text(encoding="utf-8"), '{"memos": ["old salvage"]}')
+
+
     def test_a_corrupt_memory_file_still_recovers_from_a_good_backup(self):
         """The protection this guard exists for must survive the repair path."""
         with tempfile.TemporaryDirectory() as directory:
