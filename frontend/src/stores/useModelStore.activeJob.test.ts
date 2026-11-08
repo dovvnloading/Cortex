@@ -22,7 +22,9 @@ describe("the model job a tab is following", () => {
   });
 
   it("remembers the selected model through event cursor updates and remounts", () => {
-    const admitted = { ...job, selectedChatModelAtStart: "gguf:old.gguf" };
+    const admitted = {
+      ...job, selectedChatModelAtStart: "gguf:old.gguf", ggufDirectoryAtStart: "C:/Models/Original",
+    };
     useModelStore.getState().setActiveJob(admitted);
     useModelStore.getState().advanceActiveJob("job-1", 7);
     expect(readStoredModelJob()).toEqual({ ...admitted, lastEventId: 7 });
