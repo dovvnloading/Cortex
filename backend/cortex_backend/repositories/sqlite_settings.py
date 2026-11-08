@@ -602,12 +602,11 @@ class SQLiteSettingsRepository:
                 ) from exc
 
     def _create_backup(self) -> str | None:
-        """Refresh the verified backup from the current primary.
+        """Publish a verified new backup before rotating the older generation.
 
-        The primary is read through SQLite's online backup API, not copied as
-        a file after a checkpoint: in WAL mode recent commits can live only in
-        the -wal sidecar, and wal_checkpoint(TRUNCATE) does not raise when a
-        reader keeps it from finishing.
+        The primary is read through SQLite's online backup API, including
+        uncheckpointed WAL commits. A failed snapshot, verification or
+        publication must not overwrite either existing backup generation.
         """
         with self._write_lock:
             if not self.db_path.exists():
@@ -616,16 +615,45 @@ class SQLiteSettingsRepository:
                 raise SettingsRepositoryError(
                     "Could not create a settings database backup from an invalid database."
                 )
+            # Both snapshots are prepared and verified under private names
+            # before changing either published generation. In particular,
+            # never copy .bak onto .bak.1 before the new .bak can be published.
+            fresh_stage = self.backup_path.with_name(
+                f".{self.backup_path.name}.{uuid4().hex}.pending"
+            )
+            older_stage = self.previous_backup_path.with_name(
+                f".{self.previous_backup_path.name}.{uuid4().hex}.pending"
+            )
+            newest_published = False
+            older_published = False
             try:
-                # Preserve the prior verified backup before replacing the current
-                # generation. If the new copy fails, the old .bak remains intact.
+                self._atomic_snapshot_database(self.db_path, fresh_stage)
                 if self.backup_path.exists() and self._database_is_valid(self.backup_path):
-                    self._atomic_copy_database(self.backup_path, self.previous_backup_path)
-                self._atomic_snapshot_database(self.db_path, self.backup_path)
+                    self._atomic_copy_database(self.backup_path, older_stage)
+
+                # If this fails, both earlier generations remain untouched.
+                replace_with_retry(fresh_stage, self.backup_path)
+                newest_published = True
+                if older_stage.exists():
+                    # The new, validated recovery point is already in place.
+                    # A failed older-slot rotation leaves the old .bak.1
+                    # intact and the staged .bak copy available for recovery.
+                    replace_with_retry(older_stage, self.previous_backup_path)
+                older_published = True
             except SettingsRepositoryError:
                 raise
             except OSError as exc:
                 raise SettingsRepositoryError("Could not create a settings database backup.") from exc
+            finally:
+                for stage in (fresh_stage, older_stage):
+                    if stage == older_stage and newest_published and not older_published and stage.exists():
+                        logging.warning("Could not rotate the older settings backup; staged copy preserved.")
+                        continue
+                    for suffix in ("", *SIDECAR_SUFFIXES):
+                        try:
+                            Path(f"{stage}{suffix}").unlink(missing_ok=True)
+                        except OSError:
+                            logging.warning("Could not remove a temporary settings backup snapshot.")
             return str(self.backup_path)
 
     def _refresh_startup_backup(self) -> str | None:
