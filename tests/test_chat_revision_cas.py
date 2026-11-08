@@ -207,6 +207,21 @@ def test_renaming_or_filing_a_chat_does_not_move_its_revision(repository):
     repository.add_message("thread", "user", "still accepted", expected_revision=2)
 
 
+def test_generated_title_only_replaces_the_initial_placeholder(repository) -> None:
+    """Both repositories atomically refuse a stale automated rename."""
+    repository.create_chat("new", "New Chat")
+    assert repository.rename_chat_if_title(
+        "new", "First generated title", expected_title="New Chat"
+    ) is True
+    repository.rename_chat("new", "Manually chosen title")
+
+    assert repository.rename_chat_if_title(
+        "new", "Late generated title", expected_title="New Chat"
+    ) is False
+    assert repository.get_chat_overview("new")["title"] == "Manually chosen title"
+    assert _revision(repository, "new") == 0
+
+
 def test_a_fork_starts_at_its_message_count_and_moves_from_there(repository):
     answer = _chat_with_an_answer(repository)
     repository.replace_message("thread", answer, "second answer")  # revision 3 over two messages

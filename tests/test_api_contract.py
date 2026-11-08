@@ -754,6 +754,52 @@ def test_generation_routes_refuse_non_generation_jobs():
     assert "kind generation" in tags["generations"]
 
 
+def test_manual_chat_rename_wins_over_delayed_title_generation() -> None:
+    """A title proposed after a slow generation must not overwrite a saved edit."""
+    dependencies = build_demo_dependencies()
+    title_started = Event()
+    release_title = Event()
+
+    def delayed_title(snapshot, response, cancellation_event=None):
+        del snapshot, response, cancellation_event
+        title_started.set()
+        assert release_title.wait(timeout=10.0), "title generation was not released"
+        return "Late generated title"
+
+    dependencies.generation.generate_chat_title = delayed_title
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            accepted = client.post(
+                "/api/v1/generations",
+                json={"request_id": "manual-title-race-1", "user_input": "Plan a milestone"},
+                headers=headers,
+            )
+            assert accepted.status_code == 202
+            data = accepted.json()
+            assert title_started.wait(timeout=10.0), "title generator never started"
+            thread_id = data["thread_id"]
+            manual = client.patch(
+                f"/api/v1/chats/{thread_id}",
+                json={"title": "My deliberate title"},
+                headers=headers,
+            )
+            assert manual.status_code == 200
+            assert manual.json()["title"] == "My deliberate title"
+            release_title.set()
+
+            completed = client.get(
+                f"/api/v1/jobs/{data['job_id']}/events", headers=headers
+            )
+            assert completed.status_code == 200
+            assert '"status":"succeeded"' in completed.text
+            chat = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+            assert chat["title"] == "My deliberate title"
+    finally:
+        release_title.set()
+
+
 def test_cancel_after_commit_reports_it_cannot_cancel():
     """A Stop that arrives after the commit point says it was not honoured.
 
