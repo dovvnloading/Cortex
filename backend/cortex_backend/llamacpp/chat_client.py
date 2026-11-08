@@ -355,6 +355,7 @@ class LlamaCppChatClient:
         usage: dict | None = None
         timings: dict | None = None
         finish_reason: str | None = None
+        done_received = False
         self._begin_http_request()
         try:
             with self._http.stream(
@@ -385,6 +386,7 @@ class LlamaCppChatClient:
                                 continue
                             payload = line[len("data:"):].strip()
                             if payload == "[DONE]":
+                                done_received = True
                                 break
                             try:
                                 chunk = json.loads(payload)
@@ -434,6 +436,10 @@ class LlamaCppChatClient:
             ) from exc
         finally:
             self._end_http_request()
+        if not cancellation_event.is_set() and not (done_received or finish_reason):
+            # A clean HTTP EOF is not a successful inference: a broken local
+            # stream can end after delivering only a prefix of the answer.
+            raise LlamaCppError("The local model runtime ended its response before completion.")
         # Reuse the existing non-streamed adapter by handing it a payload
         # shaped the same way -- accumulated deltas standing in for the
         # single message a non-streamed response would have carried.
