@@ -469,9 +469,26 @@ class SQLiteSettingsRepository:
         database is created as it always was.
         """
         quarantined = find_interrupted_recovery(self.db_path)
-        if quarantined is None:
-            return None
         candidate = self._first_valid_backup()
+        if quarantined is None:
+            # Treat a missing primary as recoverable data loss, not an
+            # intentional reset. Restore before a later save can rotate valid
+            # backups into empty/default snapshots.
+            # Orphaned sidecars describe a different primary, so fail closed
+            # rather than replaying them onto the restored settings.
+            if any(path.exists() for path in self._sidecar_paths()):
+                raise SettingsRepositoryError(
+                    "Settings database is missing but orphaned write-ahead logs remain; "
+                    "manual recovery is required."
+                )
+            if candidate is None:
+                return None
+            self._atomic_copy_database(candidate, self.db_path)
+            self.recovery_report = RecoveryReport(
+                recovered_from=str(candidate), quarantined_path="", at=utc_now_iso()
+            )
+            logging.warning("Settings database was missing; restored from a verified backup.")
+            return str(candidate)
         if candidate is None:
             logging.warning(
                 "The settings database is missing beside a quarantined corrupt copy and no valid "

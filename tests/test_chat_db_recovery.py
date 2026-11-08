@@ -1045,13 +1045,50 @@ def test_an_interrupted_recovery_does_not_replay_a_stray_log_onto_the_restored_c
     assert not stray.exists()
 
 
-def test_a_missing_primary_with_nothing_quarantined_starts_a_new_database(tmp_path: Path) -> None:
-    manager, _ = _manager_with_data(tmp_path)
+def test_a_missing_primary_without_quarantine_restores_valid_chat_backups(tmp_path: Path) -> None:
+    manager, original = _manager_with_data(tmp_path)
+    manager = _reopen(manager)  # both generations now contain the conversation
+    assert _chat_ids(manager.backup_path) == {"thread-1"}
+    assert _chat_ids(manager.previous_backup_path) == {"thread-1"}
+
     for suffix in ("", "-wal", "-shm"):
         Path(f"{manager.db_path}{suffix}").unlink(missing_ok=True)
 
-    fresh = _reopen(manager)
+    recovered = _reopen(manager)
 
+    assert recovered.load_chat("thread-1") == original
+    assert recovered.recovery_report is not None
+    assert recovered.recovery_report.recovered_from == manager.backup_path
+    assert recovered.recovery_report.quarantined_path == ""  # no primary existed to quarantine
+    assert recovered.last_corrupt_path is None
+
+    # Repeated startups must not rotate the only history into an empty DB.
+    for _ in range(3):
+        recovered = _reopen(recovered)
+        assert recovered.load_chat("thread-1") == original
+        assert _chat_ids(manager.backup_path) == {"thread-1"}
+        assert _chat_ids(manager.previous_backup_path) == {"thread-1"}
+
+
+def test_missing_primary_with_orphaned_wal_fails_closed_and_preserves_backups(tmp_path: Path) -> None:
+    manager, _ = _manager_with_data(tmp_path)
+    Path(manager.db_path).unlink()
+    wal = Path(f"{manager.db_path}-wal")
+    wal.write_bytes(b"frames from the missing database")
+    backup_before = Path(manager.backup_path).read_bytes()
+
+    with pytest.raises(PersistenceError, match="orphaned write-ahead logs"):
+        _reopen(manager)
+
+    assert not Path(manager.db_path).exists()
+    assert wal.read_bytes() == b"frames from the missing database"
+    assert Path(manager.backup_path).read_bytes() == backup_before
+
+
+def test_missing_chat_primary_with_no_backup_starts_fresh(tmp_path: Path) -> None:
+    fresh = DatabaseManager(
+        db_path=str(tmp_path / "chat.sqlite"), legacy_history_dir=str(tmp_path / "legacy")
+    )
     assert fresh.recovery_report is None
     assert fresh.get_all_chats_summary() == []
 

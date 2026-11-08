@@ -75,7 +75,9 @@ class RecoveryReport:
     ``recovered_from`` is the backup that was restored and
     ``quarantined_path`` the file the corrupt primary was moved to; its
     write-ahead log, if there was one, sits beside it as
-    ``<quarantined_path>-wal``. ``at`` is a UTC ISO timestamp.
+    ``<quarantined_path>-wal``. When a missing primary was restored
+    directly from backup, no primary was quarantined and this field is empty.
+    ``at`` is a UTC ISO timestamp.
 
     The restored state is the one the backup captured, which is the state at
     the previous launch: anything written since then is only in the

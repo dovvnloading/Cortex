@@ -697,9 +697,27 @@ class DatabaseManager:
         created as it always was.
         """
         quarantined = find_interrupted_recovery(self.db_path)
-        if quarantined is None:
-            return False
         candidate = self._first_valid_backup()
+        if quarantined is None:
+            # A missing primary is not proof the user wanted to reset. If a
+            # verified backup exists, restoring it prevents future startups
+            # from rotating empty snapshots over the only conversation history.
+            # Stray WAL/SHM files may belong to the lost primary: never let
+            # SQLite replay those frames onto a replacement database.
+            if any(os.path.exists(f"{self.db_path}{suffix}") for suffix in ("-wal", "-shm")):
+                raise PersistenceError(
+                    "Chat database is missing but orphaned write-ahead logs remain; "
+                    "manual recovery is required.",
+                    operation="recovery",
+                )
+            if candidate is None:
+                return False
+            self._atomic_copy_database(candidate, self.db_path)
+            self.recovery_report = RecoveryReport(
+                recovered_from=candidate, quarantined_path="", at=utc_now_iso()
+            )
+            logging.warning("Chat database was missing; restored from a verified backup.")
+            return True
         if candidate is None:
             logging.warning(
                 "The chat database is missing beside a quarantined corrupt copy and no valid "

@@ -443,16 +443,46 @@ def test_finishing_an_interrupted_settings_recovery_that_cannot_publish_leaves_n
     assert SQLiteSettingsRepository(repository.db_path).load().settings == original
 
 
-def test_a_missing_settings_primary_with_nothing_quarantined_starts_a_new_database(
-    tmp_path: Path,
-) -> None:
-    repository, _ = _settings_with_backups(tmp_path)
+def test_missing_settings_primary_restores_valid_backups_without_quarantine(tmp_path: Path) -> None:
+    repository, original = _settings_with_backups(tmp_path)
+    customized = original.model_copy(
+        update={"appearance": original.appearance.model_copy(update={"theme": "light"})}
+    )
+    # The settings backup is taken before a write. Save more than once to put
+    # the nondefault theme into both validated generations.
+    for _ in range(3):
+        repository.save(customized)
+    backup_before = repository.backup_path.read_bytes()
     for suffix in ("", "-wal", "-shm"):
         Path(f"{repository.db_path}{suffix}").unlink(missing_ok=True)
 
-    fresh = SQLiteSettingsRepository(repository.db_path)
+    recovered = SQLiteSettingsRepository(repository.db_path)
+    assert recovered.load().settings.appearance.theme == "light"
+    assert recovered.recovery_report is not None
+    assert recovered.recovery_report.recovered_from == str(repository.backup_path)
+    assert recovered.recovery_report.quarantined_path == ""
+    assert recovered.last_corrupt_path is None
+    assert repository.backup_path.read_bytes() == backup_before
 
-    assert fresh.recovery_report is None
+    for _ in range(3):
+        recovered.save(recovered.load().settings)
+        recovered = SQLiteSettingsRepository(repository.db_path)
+        assert recovered.load().settings.appearance.theme == "light"
+
+
+def test_missing_settings_primary_with_orphaned_wal_fails_without_mutation(tmp_path: Path) -> None:
+    repository, _ = _settings_with_backups(tmp_path)
+    repository.db_path.unlink()
+    wal = Path(f"{repository.db_path}-wal")
+    wal.write_bytes(b"uncheckpointed settings from missing primary")
+    backup_before = repository.backup_path.read_bytes()
+
+    with pytest.raises(SettingsRepositoryError, match="orphaned write-ahead logs"):
+        SQLiteSettingsRepository(repository.db_path)
+
+    assert not repository.db_path.exists()
+    assert wal.read_bytes() == b"uncheckpointed settings from missing primary"
+    assert repository.backup_path.read_bytes() == backup_before
 
 
 def test_settings_recovery_adopts_a_log_an_interrupted_attempt_left_under_another_name(
