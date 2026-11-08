@@ -310,6 +310,46 @@ def test_model_inventory_pull_progress_and_failure_are_safe():
         ).json()["installed_models"]
 
 
+
+def test_successful_model_pull_survives_failed_inventory_refresh():
+    """A transient inventory read must not turn installed model bytes into a failed job."""
+    dependencies = build_demo_dependencies()
+
+    def successful_pull(model, *, progress_callback=None, cancellation_event=None, verify=True):
+        del model, progress_callback, cancellation_event, verify
+        return True
+
+    def failed_listing():
+        raise RuntimeError("Transient inventory read failure")
+
+    dependencies.models.pull_model = successful_pull
+    dependencies.models.list_installed = failed_listing
+    app = create_app(
+        dependencies,
+        allowed_hosts=("testserver", "127.0.0.1", "localhost", "::1"),
+    )
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/session/exchange",
+            json={"bootstrap_token": app.state.session_manager.bootstrap_token},
+        ).json()["session_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        accepted = client.post(
+            "/api/v1/models/pulls",
+            json={"model": "fixture:1b"},
+            headers=headers,
+        )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+        events = client.get(f"/api/v1/jobs/{job_id}/events", headers=headers)
+        assert events.status_code == 200
+        assert '"status":"succeeded"' in events.text
+        snapshot = client.get(f"/api/v1/jobs/{job_id}", headers=headers)
+        assert snapshot.status_code == 200
+        assert snapshot.json()["status"] == "succeeded"
+        assert snapshot.json()["result"] == {"model": "fixture:1b"}
+
+
 def test_duplicate_model_tags_are_normalized_to_one_installed_entry():
     details = ModelService.extract_model_details(
         {"models": [{"name": "qwen3:8b", "size": 1}, {"name": "qwen3:8b", "size": 2}]}
