@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from threading import RLock
 from typing import Any, Protocol
 
 
@@ -17,7 +18,9 @@ class MemoryRepository(Protocol):
 
     def add_memo(self, memo: str) -> list[str]: ...
 
-    def replace_memos(self, memos: list[str]) -> list[str]: ...
+    def replace_memos(
+        self, memos: list[str], *, expected_memos: list[str] | None = None
+    ) -> list[str]: ...
 
     def clear_memos(self) -> None: ...
 
@@ -35,8 +38,10 @@ class LegacyPermanentMemoryRepository:
         self._memory.add_memo(memo)
         return self._memory.get_memos()
 
-    def replace_memos(self, memos: list[str]) -> list[str]:
-        self._memory.update_memos(memos)
+    def replace_memos(
+        self, memos: list[str], *, expected_memos: list[str] | None = None
+    ) -> list[str]:
+        self._memory.update_memos(memos, expected_memos=expected_memos)
         return self._memory.get_memos()
 
     def clear_memos(self) -> None:
@@ -50,6 +55,7 @@ class InMemoryMemoryRepository:
     MAX_MEMO_LENGTH = 500
 
     def __init__(self, memos: list[str] | None = None):
+        self._lock = RLock()
         self._memos: list[str] = []
         self.replace_memos(memos or [])
 
@@ -77,15 +83,27 @@ class InMemoryMemoryRepository:
         return normalized
 
     def get_memos(self) -> list[str]:
-        return list(self._memos)
+        with self._lock:
+            return list(self._memos)
 
     def add_memo(self, memo: str) -> list[str]:
-        self._memos = self._normalize(self._memos + [memo])
-        return self.get_memos()
+        with self._lock:
+            self._memos = self._normalize(self._memos + [memo])
+            return list(self._memos)
 
-    def replace_memos(self, memos: list[str]) -> list[str]:
-        self._memos = self._normalize(deepcopy(memos))
-        return self.get_memos()
+    def replace_memos(
+        self, memos: list[str], *, expected_memos: list[str] | None = None
+    ) -> list[str]:
+        with self._lock:
+            # The editor replaces a complete list. Only the exact snapshot it
+            # last loaded may be replaced; another client's new memories win.
+            if expected_memos is not None and self._memos != expected_memos:
+                raise ValueError(
+                    "Memories changed while you were editing. Refresh and review your changes."
+                )
+            self._memos = self._normalize(deepcopy(memos))
+            return list(self._memos)
 
     def clear_memos(self) -> None:
-        self._memos.clear()
+        with self._lock:
+            self._memos.clear()
