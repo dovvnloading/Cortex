@@ -641,6 +641,8 @@ def download_gguf(
     temp_path = directory / f".download-{uuid4().hex}.part"
     reporter = _ProgressReporter(progress_callback or (lambda progress: None), target_filename)
     reporter.starting()
+    staged_identity: tuple[int, int, int, int] | None = None
+    published = False
     try:
         _GGUFTransfer(
             url=url,
@@ -653,10 +655,23 @@ def download_gguf(
             reporter=reporter,
         ).run()
         _validate_gguf_file(temp_path)
+        _raise_if_cancelled(cancellation_event)
+        staged_identity = _file_identity(temp_path) if not allow_overwrite else None
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
+        published = True
+        # Publication can race Stop. For a new file, roll back only the model
+        # this transfer created; never unlink a concurrent writer's replacement.
+        if not allow_overwrite:
+            _raise_if_cancelled(cancellation_event)
+        reporter.success(destination.stat().st_size)
+        if not allow_overwrite:
+            _raise_if_cancelled(cancellation_event)
+    except BaseException:
+        if published and not allow_overwrite:
+            _rollback_published(destination, staged_identity)
+        raise
     finally:
         _remove_quietly(temp_path)
-    reporter.success(destination.stat().st_size)
     return destination
 
 
@@ -735,14 +750,19 @@ def download_gguf_set(
                 reporter=_PartProgress(reporter, fetched_bytes, len(parts) - position),
             ).run()
             _validate_gguf_file(staging_path)
+            _raise_if_cancelled(cancellation_event)
             fetched_bytes += staging_path.stat().st_size
         for staging_path, destination in zip(staged, destinations, strict=True):
+            _raise_if_cancelled(cancellation_event)
             # Capture the identity while this is still our private staged file.
             # Reading the destination *after* publication could accidentally
             # capture another writer's replacement instead.
             original_identity = _file_identity(staging_path)
             _publish(staging_path, destination, allow_overwrite=False)
             published.append((destination, original_identity))
+            _raise_if_cancelled(cancellation_event)
+        reporter.success(fetched_bytes)
+        _raise_if_cancelled(cancellation_event)
         complete = True
     finally:
         # Best effort, and every file gets its turn: a file that cannot be
@@ -753,8 +773,13 @@ def download_gguf_set(
                 _rollback_published(path, original_identity)
         for path in staged:
             _remove_quietly(path)
-    reporter.success(fetched_bytes)
     return tuple(destinations)
+
+
+def _raise_if_cancelled(cancellation_event: Event | None) -> None:
+    """Check Stop at the filesystem publication barrier, not only during HTTP reads."""
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise GGUFDownloadError("Download cancelled.")
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
