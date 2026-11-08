@@ -295,6 +295,9 @@ class ReplaceMemoryRequest(APIModel):
     # oversized entry reached the store, which raises, and the route reported
     # a 500 for input its POST sibling rejects cleanly with a 422.
     memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
+    # Required for all full-list edits: older clients must not silently delete
+    # memories that another window saved while their editor was open.
+    expected_memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
 
 
 class ClearMemoryRequest(APIModel):
