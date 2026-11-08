@@ -16,7 +16,7 @@ type Props = {
   onRetry?: () => void;
   busy: boolean;
   onAdd: (memo: string) => Promise<void>;
-  onReplace: (memos: string[]) => Promise<void>;
+  onReplace: (memos: string[], expectedMemos: string[]) => Promise<void>;
   onClear: () => Promise<void>;
 };
 
@@ -117,7 +117,10 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
 
   const saveChanges = () => {
     // Failures are reported by the workspace callback; the draft is kept.
-    void onReplace(draft.filter((row) => !row.removed).map((row) => row.value)).catch(() => undefined);
+    void onReplace(
+      draft.filter((row) => !row.removed).map((row) => row.value),
+      memos,
+    ).catch(() => undefined);
   };
 
   const heading = (
