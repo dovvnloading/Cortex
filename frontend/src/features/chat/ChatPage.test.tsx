@@ -355,7 +355,7 @@ describe("ChatPage composer integration", () => {
 
   it("does not offer recovery on answered or earlier user turns", async () => {
     const api = chatApi({
-      chat: vi.fn(async () => ({
+      chat: vi.fn(async (): Promise<ChatResponse> => ({
         ...emptyChat("thread-a"),
         revision: 3,
         messages: [
