@@ -108,6 +108,8 @@ from .schemas import (
     ExecutionTaskSummary,
     GenerationRequest,
     RegenerationRequest,
+    ModelPullRequest,
+    ModelDownloadRequest,
     JobAccepted,
     JobStatusResponse,
     LlamaCppRuntimeStatus,
@@ -259,7 +261,7 @@ def _runtime_is_ready(request: Request) -> bool:
 
 def _request_fingerprint(
     operation: str,
-    payload: GenerationRequest | RegenerationRequest,
+    payload: GenerationRequest | RegenerationRequest | ModelPullRequest | ModelDownloadRequest,
     *,
     path_thread_id: str | None = None,
 ) -> str:
