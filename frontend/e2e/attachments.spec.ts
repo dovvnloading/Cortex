@@ -135,3 +135,41 @@ test("settings asks before edits are lost and keeps them when told to keep editi
   await page.getByRole("alertdialog").getByRole("button", { name: "Discard" }).click();
   await expect.poll(() => new URL(page.url()).pathname).toBe("/chat/new");
 });
+
+
+test("browser history Back and Forward require confirmation before losing unsaved Settings", async ({ page }) => {
+  await stubWorkspace(page);
+  await page.goto("/#bootstrap=launcher-token");
+  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
+
+  await page.getByRole("combobox", { name: "Theme" }).click();
+  await page.getByRole("option", { name: "Light" }).click();
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  // The browser moves its cursor first, but the app must keep Settings
+  // mounted and reverse the traversal while the Save/Discard dialog is open.
+  await page.evaluate(() => window.history.back());
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/settings");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Theme" })).toHaveText(/Light/);
+
+  await page.evaluate(() => window.history.back());
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/settings");
+  await dialog.getByRole("button", { name: "Discard" }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/");
+  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+
+  // This is real history replay, not a pushState substitute: Forward returns
+  // to the previous Settings entry after the user discarded their changes.
+  await page.evaluate(() => window.history.forward());
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/settings");
+  await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
+  await expect(page.getByText("Unsaved changes")).toHaveCount(0);
+});

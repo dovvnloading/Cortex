@@ -151,7 +151,7 @@ function scrubLauncherCredentials(): void {
 
   const nextHash = hash.toString();
   url.hash = nextHash ? `#${nextHash}` : "";
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(window.history.state ?? {}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 export function App({ api: providedApi }: Props) {
@@ -253,7 +253,7 @@ export function App({ api: providedApi }: Props) {
             const cleanHash = new URLSearchParams(cleanUrl.hash.replace(/^#/, ""));
             cleanHash.delete("bootstrap");
             cleanUrl.hash = cleanHash.toString() ? `#${cleanHash}` : "";
-            window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+            window.history.replaceState(window.history.state ?? {}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
             // Bootstrap credentials are one-time handoff tokens. Keep the
             // session token in the API client, but never retain a token that
             // would fail if a later 401 returns us to the onboarding screen.
