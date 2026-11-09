@@ -105,6 +105,45 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByLabelText("Message Cortex")).toHaveValue("");
   });
 
+  it("disables old assistant regeneration when the chat ends on an unanswered user turn", async () => {
+    const transcript: ChatResponse = {
+      id: "thread-a", title: "Interrupted",
+      timestamp: "2026-01-01T00:00:00Z", revision: 3,
+      messages: [
+        { id: "u1", role: "user", content: "Initial question" },
+        { id: "a1", role: "assistant", content: "Initial answer" },
+        { id: "u2", role: "user", content: "Follow-up without an answer" },
+      ],
+    };
+    const regenerate = vi.fn();
+    const api = chatApi({
+      chat: vi.fn(async () => transcript),
+      regenerate,
+    });
+    renderChat(api);
+
+    const retry = await screen.findByRole("button", { name: "Retry response" });
+    const older = screen.getByRole("button", { name: "Regenerate response" });
+    expect(retry).toBeEnabled();
+    expect(older).toBeDisabled();
+    expect(regenerate).not.toHaveBeenCalled();
+  });
+
+  it("keeps Regenerate enabled when the last message really is an assistant", async () => {
+    const transcript: ChatResponse = {
+      id: "thread-a", title: "Answered",
+      timestamp: "2026-01-01T00:00:00Z", revision: 2,
+      messages: [
+        { id: "u1", role: "user", content: "Initial question" },
+        { id: "a1", role: "assistant", content: "Initial answer" },
+      ],
+    };
+    const api = chatApi({ chat: vi.fn(async () => transcript) });
+    renderChat(api);
+    expect(await screen.findByRole("button", { name: "Regenerate response" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument();
+  });
+
   it("asks before clearing memories requested by a completed generation", async () => {
     const user = userEvent.setup();
     const clearMemory = vi.fn<() => Promise<void>>().mockResolvedValue();

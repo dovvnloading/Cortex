@@ -239,10 +239,11 @@ export function ChatPage({
   const attachments = attachmentDrafts[attachmentScope] ?? readComposerAttachments(threadId);
   const threadOptionsKey = threadId ?? NEW_THREAD_OPTIONS_KEY;
   const threadOptions = generationOptionsByThread[threadOptionsKey] ?? null;
-  const finalAssistantId = useMemo(
-    () => [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null,
-    [messages],
-  );
+  // Only the actual last message can be regenerated. An unanswered trailing
+  // user turn has its own Retry action; the preceding assistant is no longer
+  // the final message and the backend would reject its regeneration.
+  const lastMessage = messages.at(-1);
+  const finalAssistantId = lastMessage?.role === "assistant" ? lastMessage.id ?? null : null;
   const displayedThreadId = threadId ?? resolvedThreadId;
   const activeJobForCurrentThread = Boolean(generation.jobId && generation.threadId === displayedThreadId);
   const generationElsewhere = Boolean(generation.jobId && !activeJobForCurrentThread);
