@@ -59,11 +59,12 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
     cancelGeneration: vi.fn(async () => ({ job_id: "job-1", kind: "generation", status: "cancelling", sequence: 2 })),
     forkChat: vi.fn(),
     stageChatAttachment: vi.fn(),
+    memories: vi.fn(async () => ({ memos: ["Original"] })),
     ...overrides,
   } as unknown as CortexApi;
 }
 
-function chatElement(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+function chatElement(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: (expectedMemos: string[]) => Promise<void>) {
   return (
     <ChatWithHost
       api={api}
@@ -83,7 +84,7 @@ function chatElement(api: CortexApi, threadId = "thread-a", selectedModelSupport
   );
 }
 
-function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: () => Promise<void>) {
+function renderChat(api: CortexApi, threadId = "thread-a", selectedModelSupportsVision: boolean | null = null, onClearMemory?: (expectedMemos: string[]) => Promise<void>) {
   return render(chatElement(api, threadId, selectedModelSupportsVision, onClearMemory));
 }
 
@@ -147,9 +148,12 @@ describe("ChatPage composer integration", () => {
 
     expect(await screen.findByRole("heading", { name: "Clear permanent memories?" })).toBeVisible();
     expect(screen.getByText("Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Clear memories" }));
+    expect(await screen.findByText("Original")).toBeVisible();
+    const clearButton = screen.getByRole("button", { name: "Clear memories" });
+    await waitFor(() => expect(clearButton).toBeEnabled());
+    await user.click(clearButton);
 
-    await waitFor(() => expect(clearMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(clearMemory).toHaveBeenCalledWith(["Original"]));
     expect(confirm).not.toHaveBeenCalled();
   });
 

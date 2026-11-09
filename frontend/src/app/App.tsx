@@ -751,14 +751,21 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     finally { setMemoryBusy(false); }
   };
 
-  const clearMemory = async () => {
+  const clearMemory = async (expectedMemos: string[]) => {
     setMemoryBusy(true);
     try {
-      const response: MemoryResponse = await api.clearMemories();
+      const response: MemoryResponse = await api.clearMemories(expectedMemos);
       applyMemories(response.memos);
       notify("Permanent memories cleared.", "success");
     } catch (error) {
-      notify(apiMessage(error, "Could not clear memories."), "error");
+      if (error instanceof ApiError && error.status === 409) {
+        // Another view changed the memories while this confirmation was open.
+        // Refresh and require an explicit second confirmation of the new list.
+        await loadMemories();
+        notify("Permanent memories changed. Review the updated list before confirming again.", "error");
+      } else {
+        notify(apiMessage(error, "Could not clear memories."), "error");
+      }
       throw error;
     }
     finally { setMemoryBusy(false); }
@@ -1060,7 +1067,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   );
 }
 
-function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: () => Promise<void> }) {
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: (expectedMemos: string[]) => Promise<void> }) {
   const navigate = useNavigate();
   return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
 }
