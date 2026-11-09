@@ -163,6 +163,57 @@ def test_replay_after_answer_saved_returns_original_answer_without_generating_ag
         assert client.get(f"/api/v1/chats/{thread_id}", headers=headers).json() == original_chat
 
 
+def test_pruning_a_completed_job_does_not_expire_the_durable_replay_key() -> None:
+    """A bounded in-memory job log must not turn a replay into a second chat."""
+    from cortex_backend.api.jobs import JobRegistry
+
+    chats = InMemoryChatRepository()
+    app = _app_with_chats(chats)
+    app.state.jobs = JobRegistry(max_terminal_jobs=1)
+    original = None
+    payloads = [
+        {"request_id": "original-pruned", "user_input": "Answer the original only."},
+        {"request_id": "other-one", "user_input": "Second chat"},
+        {"request_id": "other-two", "user_input": "Third chat"},
+    ]
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        for payload in payloads:
+            accepted = client.post("/api/v1/generations", json=payload, headers=headers)
+            assert accepted.status_code == 202
+            if original is None:
+                original = accepted.json()
+            with client.stream(
+                "GET", f"/api/v1/generations/{accepted.json()['job_id']}/events",
+                headers=headers,
+            ) as response:
+                events = parse_sse_events("".join(response.iter_text()))
+            assert events[-1]["event"] == "generation.completed"
+
+        assert original is not None
+        assert app.state.jobs.request_snapshot(
+            kind="generation", owner=OWNER, request_id=payloads[0]["request_id"],
+        ) is None, "fixture must evict the original in-memory registry record"
+
+        saved = client.get(
+            f"/api/v1/chats/{original['thread_id']}", headers=headers,
+        ).json()
+        replay = client.post("/api/v1/generations", json=payloads[0], headers=headers)
+        assert replay.status_code == 202
+        assert replay.json()["thread_id"] == original["thread_id"]
+        assert replay.json()["user_message_id"] == original["user_message_id"]
+        with client.stream(
+            "GET", f"/api/v1/generations/{replay.json()['job_id']}/events",
+            headers=headers,
+        ) as response:
+            events = parse_sse_events("".join(response.iter_text()))
+        assert events[-1]["event"] == "generation.completed"
+        assert events[-1]["data"]["recovered"] is True
+        assert client.get(
+            f"/api/v1/chats/{original['thread_id']}", headers=headers,
+        ).json() == saved
+
+
 def test_sqlite_duplicate_admission_key_rolls_back_the_entire_message_write(
     tmp_path: Path,
 ) -> None:
