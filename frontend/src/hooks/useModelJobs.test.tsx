@@ -92,7 +92,7 @@ function Host({ context }: { context: ReturnType<typeof fakes> }) {
 const state = () => useModelStore.getState();
 const remembered = () => JSON.parse(window.sessionStorage.getItem(STORAGE_KEY) ?? "null") as ActiveModelJob | null;
 
-afterEach(() => window.sessionStorage.clear());
+afterEach(() => { window.sessionStorage.clear(); state().clearSecondaryJobs(); });
 
 describe("following a job the backend just accepted", () => {
   it("shows its progress, remembers it while it runs, and forgets it once it has succeeded", async () => {
@@ -571,6 +571,72 @@ describe("a second job while one is being followed", () => {
 
     await act(async () => { await result.current.cancel(); });
     expect(api.cancelJob).toHaveBeenCalledWith("download-1");
+  });
+
+  it("persists both jobs and their independent cursors, then resumes and cancels either after reload", async () => {
+    const first = setup();
+    act(() => {
+      void first.result.current.run(accepted("download-1"), "large.gguf");
+      void first.result.current.run(accepted("rescan-1", "models"), "local model inventory");
+    });
+    await waitFor(() => expect(first.streams).toHaveLength(2));
+    act(() => {
+      first.streams.find((stream) => stream.jobId === "download-1")!.emit(downloading(6, GIB, 4 * GIB));
+      first.streams.find((stream) => stream.jobId === "rescan-1")!.emit(event(4, { phase: "model_check", data: { message: "Scanning local models." } }));
+    });
+
+    expect(state().activeJob).toMatchObject({ jobId: "download-1", lastEventId: 6 });
+    expect(state().secondaryJobs["rescan-1"]).toMatchObject({ lastEventId: 4 });
+    expect(state().secondaryProgress["rescan-1"]?.status).toBe("Scanning local models.");
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.active.model-jobs.secondary") ?? "[]")).toEqual([
+      expect.objectContaining({ jobId: "rescan-1", lastEventId: 4 }),
+    ]);
+
+    first.unmount();
+    expect(first.streams.every((stream) => stream.options?.signal?.aborted)).toBe(true);
+    // A page reload discards the JS store, not the tab's sessionStorage.
+    useModelStore.setState({
+      activeJob: null, secondaryJobs: {}, secondaryProgress: {},
+      modelBusy: false, modelProgress: null,
+    });
+    const second = setup();
+    await waitFor(() => expect(second.streams).toHaveLength(2));
+    expect(second.streams.find((stream) => stream.jobId === "download-1")?.options?.afterEventId).toBe(6);
+    expect(second.streams.find((stream) => stream.jobId === "rescan-1")?.options?.afterEventId).toBe(4);
+
+    await act(async () => { await second.result.current.cancel("rescan-1"); });
+    expect(second.api.cancelJob).toHaveBeenCalledWith("rescan-1");
+    expect(state().secondaryProgress["rescan-1"]).toMatchObject({ cancelling: true });
+    await act(async () => second.streams.find((stream) => stream.jobId === "rescan-1")!.finish(event(5, {
+      kind: "state", status: "cancelled", data: { message: "Cancelled." },
+    })));
+    expect(state().secondaryJobs["rescan-1"]).toBeUndefined();
+    expect(state().modelBusy).toBe(true);
+    await act(async () => second.streams.find((stream) => stream.jobId === "download-1")!.finish(succeeded(7)));
+    expect(state().activeJob).toBeNull();
+    expect(state().modelBusy).toBe(false);
+    expect(window.sessionStorage.getItem("cortex.active.model-jobs.secondary")).toBeNull();
+  });
+
+  it("keeps the second job visible and cancellable when the first finishes", async () => {
+    const { result, streams, api } = setup();
+    act(() => {
+      void result.current.run(accepted("download-1"), "large.gguf");
+      void result.current.run(accepted("rescan-1", "models"), "local model inventory");
+    });
+    await waitFor(() => expect(streams).toHaveLength(2));
+    await act(async () => streams.find((stream) => stream.jobId === "download-1")!.finish(succeeded(1)));
+    expect(state().activeJob).toBeNull();
+    expect(state().secondaryJobs["rescan-1"]?.jobId).toBe("rescan-1");
+    expect(state().modelBusy).toBe(true);
+
+    await act(async () => { await result.current.cancel("rescan-1"); });
+    expect(api.cancelJob).toHaveBeenCalledWith("rescan-1");
+    await act(async () => streams.find((stream) => stream.jobId === "rescan-1")!.finish(event(2, {
+      kind: "state", status: "cancelled", data: { message: "Cancelled." },
+    })));
+    expect(state().secondaryJobs["rescan-1"]).toBeUndefined();
+    expect(state().modelBusy).toBe(false);
   });
 
   it("is cut with the first when the screen goes away", async () => {
