@@ -48,7 +48,25 @@ type Dependencies = {
 type Tracking = { jobId: string; controller: AbortController; cancelRequested: boolean };
 
 const DETACHED: ModelJobResult = { succeeded: false, data: null, failure: null, cancelled: false, detached: true };
-const STILL_RUNNING = "Model operation is still running; completion was not confirmed.";
+// A dropped SSE connection must not hide a live download's progress or Cancel.
+const RECONNECT_INITIAL_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 5000;
+
+function waitForReconnect(signal: AbortSignal, delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      window.clearTimeout(timeout);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timeout = window.setTimeout(done, delayMs);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
 
 /**
  * The backend has no job this session can follow: it finished long ago, or the
@@ -123,37 +141,75 @@ export function useModelJobs(dependencies: Dependencies): {
     let completedData: Record<string, unknown> | null = null;
     let failureMessage: string | null = null;
     try {
-      const terminalEvent = await api.streamJob(job.jobId, (event) => {
-        if (tracking && attached()) {
-          useModelStore.getState().advanceActiveJob(job.jobId, event.id);
-          const progress = describeModelProgress(event, job.model);
-          if (progress) {
-            useModelStore.getState().setModelProgress(
-              cancelled() ? { ...progress, status: "Cancelling...", cancelling: true } : progress,
-            );
+      let terminalStatus: JobStatusResponse["status"] | null = null;
+      let lastEventId = job.lastEventId;
+      let reconnectCount = 0;
+      // Keep following the same job, with the same Cancel controller, across
+      // transient network/auth loss and an SSE close while the job still runs.
+      // A retry replaces only the stream, never the remembered job identifier.
+      while (attached()) {
+        try {
+          const terminalEvent = await api.streamJob(job.jobId, (event) => {
+            lastEventId = Math.max(lastEventId, event.id);
+            if (tracking && attached()) {
+              useModelStore.getState().advanceActiveJob(job.jobId, event.id);
+              const progress = describeModelProgress(event, job.model);
+              if (progress) {
+                useModelStore.getState().setModelProgress(
+                  cancelled() ? { ...progress, status: "Cancelling...", cancelling: true } : progress,
+                );
+              }
+            }
+            if (event.kind === "completed") completedData = event.data ?? null;
+            if (event.kind === "error") {
+              const message = event.data?.message;
+              failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
+            }
+          }, { signal: controller.signal, afterEventId: lastEventId > 0 ? lastEventId : undefined });
+          if (!attached()) return DETACHED;
+
+          // A clean SSE close without a terminal event is not a completed
+          // operation. Reconcile against the durable backend snapshot, and
+          // reconnect if the worker is still active.
+          terminalStatus = terminalEvent ? terminalEvent.status : null;
+          if (!terminalEvent) {
+            const snapshot = await api.jobStatus(job.jobId);
+            if (!attached()) return DETACHED;
+            terminalStatus = snapshot.status;
+            if (snapshot.status === "succeeded") completedData = snapshot.result ?? null;
+            if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+              failureMessage = snapshot.error ?? null;
+            }
+          }
+          if (terminalStatus === "succeeded" || terminalStatus === "failed" || terminalStatus === "cancelled") {
+            break;
+          }
+        } catch (error) {
+          if (!attached()) return DETACHED;
+          // A missing/foreign job cannot be retried; ordinary failures are
+          // handled by the existing outer catch. A lost transport says
+          // nothing about whether the backend worker is still running.
+          if (isJobGone(error) || !(error instanceof ApiError && (error.kind === "network" || error.kind === "auth"))) {
+            throw error;
           }
         }
-        if (event.kind === "completed") completedData = event.data ?? null;
-        if (event.kind === "error") {
-          const message = event.data?.message;
-          failureMessage = typeof message === "string" && message ? message : "Model operation failed.";
-        }
-      }, { signal: controller.signal, afterEventId: job.lastEventId > 0 ? job.lastEventId : undefined });
-      if (!attached()) return DETACHED;
 
-      // A clean SSE close carries the terminal event back from streamJob. If
-      // the connection ends before that event, reconcile against the durable
-      // job snapshot before treating the operation as complete.
-      let terminalStatus: JobStatusResponse["status"] | null = terminalEvent ? terminalEvent.status : null;
-      if (!terminalEvent) {
-        const snapshot = await api.jobStatus(job.jobId);
-        if (!attached()) return DETACHED;
-        terminalStatus = snapshot.status;
-        if (snapshot.status === "succeeded") completedData = snapshot.result ?? null;
-        if (snapshot.status === "failed" || snapshot.status === "cancelled") {
-          failureMessage = snapshot.error ?? null;
+        if (tracking) {
+          const current = useModelStore.getState().modelProgress;
+          useModelStore.getState().setModelProgress({
+            model: job.model,
+            percent: current?.percent ?? null,
+            status: cancelled() ? "Cancelling..." : "Reconnecting...",
+            ...(cancelled() ? { cancelling: true } : {}),
+          });
         }
+        // Bound the *delay*, not the number of attempts: an offline backend
+        // must not permanently orphan a multi-GB job in the still-open UI.
+        const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** Math.min(reconnectCount, 5), RECONNECT_MAX_DELAY_MS);
+        reconnectCount += 1;
+        await waitForReconnect(controller.signal, delay);
       }
+      if (!attached()) return DETACHED;
 
       if (terminalStatus === "failed" || terminalStatus === "cancelled") {
         settled = true;
@@ -168,14 +224,6 @@ export function useModelJobs(dependencies: Dependencies): {
         notify(failure, "error");
         return { succeeded: false, data: null, failure, cancelled: false, detached: false };
       }
-      if (terminalStatus !== "succeeded") {
-        // Do not refresh inventory, announce success, or imply that a GGUF
-        // download produced a selectable file while the worker may continue.
-        if (tracking) useModelStore.getState().setModelProgress({ model: job.model, status: STILL_RUNNING, percent: null });
-        notify(STILL_RUNNING, "error");
-        return { succeeded: false, data: null, failure: STILL_RUNNING, cancelled: false, detached: false };
-      }
-
       const refreshedModels = await api.models();
       if (!attached()) return DETACHED;
       settled = true;

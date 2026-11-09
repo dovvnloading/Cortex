@@ -182,7 +182,7 @@ describe("following a job the backend just accepted", () => {
     expect(onModels).toHaveBeenCalledTimes(1);
   });
 
-  it("does not claim success, or forget the job, while it may still be running", async () => {
+  it("reconnects after clean SSE EOF if the durable job is still running", async () => {
     const { result, streams, api, notify, onModels } = setup();
     api.jobStatus.mockResolvedValue({ job_id: "job-1", kind: "gguf_download", status: "running", sequence: 3 });
 
@@ -191,11 +191,19 @@ describe("following a job the backend just accepted", () => {
     await waitFor(() => expect(streams).toHaveLength(1));
     await act(async () => streams[0].close());
 
-    expect(await outcome).toMatchObject({ succeeded: false, failure: expect.stringContaining("completion was not confirmed") });
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining("completion was not confirmed"), "error");
-    expect(onModels).not.toHaveBeenCalled();
-    expect(state().modelBusy).toBe(false);
+    expect(state().modelBusy).toBe(true);
+    expect(state().modelProgress?.status).toBe("Reconnecting...");
     expect(state().activeJob).toEqual(job());
+    expect(notify).not.toHaveBeenCalled();
+    expect(onModels).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].options?.afterEventId).toBeUndefined();
+    await act(async () => streams[1].finish(succeeded(4)));
+    expect((await outcome).succeeded).toBe(true);
+    expect(onModels).toHaveBeenCalledTimes(1);
+    expect(state().modelBusy).toBe(false);
+    expect(state().activeJob).toBeNull();
   });
 
   it("reports a cancellation nobody asked for as a failure", async () => {
@@ -409,19 +417,73 @@ describe("picking a job up again", () => {
   });
 
   it.each([
-    ["the connection to the backend is lost", new ApiError(0, "Cortex could not reach the local backend.", "network")],
-    ["the session has expired", new ApiError(401, "Local session expired.")],
-  ])("keeps the job when %s, because that says nothing about the job", async (_description, error) => {
+    ["the SSE network connection drops", new ApiError(0, "Cortex could not reach the local backend.", "network")],
+    ["an expired session is being renewed", new ApiError(401, "Local session expired.")],
+  ])("automatically resumes the same job when %s", async (_description, error) => {
     state().setActiveJob(job({ lastEventId: 4 }));
-    const { streams, notify } = setup();
+    const { streams, notify, onModels } = setup();
     await waitFor(() => expect(streams).toHaveLength(1));
 
     await act(async () => streams[0].fail(error));
 
-    await waitFor(() => expect(notify).toHaveBeenCalledWith(error.detail, "error"));
-    expect(state().modelBusy).toBe(false);
+    expect(state().modelBusy).toBe(true);
+    expect(state().modelProgress?.status).toBe("Reconnecting...");
     expect(state().activeJob).toEqual(job({ lastEventId: 4 }));
     expect(remembered()).toEqual(job({ lastEventId: 4 }));
+    expect(notify).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].options?.afterEventId).toBe(4);
+    await act(async () => streams[1].finish(succeeded(5)));
+    await waitFor(() => expect(onModels).toHaveBeenCalledTimes(1));
+    expect(state().modelBusy).toBe(false);
+    expect(state().activeJob).toBeNull();
+    expect(remembered()).toBeNull();
+  });
+
+  it("keeps Cancel and its last SSE cursor while reconnecting and does not orphan it behind another job", async () => {
+    const { result, streams, api, notify } = setup();
+    let primary!: Promise<ModelJobResult>;
+    act(() => {
+      primary = result.current.run(
+        accepted("large-download"), "Large GGUF model",
+        { checkOllamaConnection: false, notifyOnSuccess: false },
+      );
+    });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => streams[0].emit(downloading(7, GIB, 4 * GIB)));
+    expect(remembered()).toMatchObject({ jobId: "large-download", lastEventId: 7 });
+
+    await act(async () => streams[0].fail(new ApiError(0, "Connection reset", "network")));
+    expect(state().modelBusy).toBe(true);
+    expect(state().modelProgress?.status).toBe("Reconnecting...");
+    expect(state().activeJob?.jobId).toBe("large-download");
+
+    // A rescan started during recovery must not replace the sole remembered
+    // download ID, even while it also has an independent stream follower.
+    let rescan!: Promise<ModelJobResult>;
+    act(() => { rescan = result.current.run(accepted("rescan", "models"), "local model inventory"); });
+    await waitFor(() => expect(streams.some((s) => s.jobId === "rescan")).toBe(true));
+    expect(remembered()).toMatchObject({ jobId: "large-download", lastEventId: 7 });
+    const rescanStream = streams.find((s) => s.jobId === "rescan");
+    expect(rescanStream).toBeDefined();
+    await act(async () => rescanStream!.finish(succeeded(1, {})));
+    expect((await rescan).succeeded).toBe(true);
+    expect(state().activeJob?.jobId).toBe("large-download");
+
+    await waitFor(() => expect(streams.filter((s) => s.jobId === "large-download")).toHaveLength(2));
+    const reconnected = streams.filter((s) => s.jobId === "large-download")[1];
+    expect(reconnected.options?.afterEventId).toBe(7);
+
+    await act(async () => result.current.cancel());
+    expect(api.cancelJob).toHaveBeenCalledWith("large-download");
+    expect(state().modelProgress?.cancelling).toBe(true);
+    await act(async () => reconnected.finish(event(8, {
+      kind: "state", status: "cancelled", data: { message: "Job cancelled." },
+    })));
+    expect((await primary).cancelled).toBe(true);
+    expect(notify).toHaveBeenCalledWith("Download cancelled.", "info");
+    expect(state().activeJob).toBeNull();
   });
 
   it("forgets the job after any other refusal, so it is not asked about forever", async () => {
