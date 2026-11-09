@@ -152,7 +152,18 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
       if (disposed) return;
       const { generation, generationCursor } = useChatStore.getState();
       if (!generation.jobId || !generation.threadId) return;
-      follow({ jobId: generation.jobId, threadId: generation.threadId, lastEventId: generationCursor });
+      // The store tracks the live cursor but the acceptance metadata is in
+      // session storage. Preserve that identity on warm reconnects too; the
+      // SSE consumer otherwise overwrites the stored ID on its next event.
+      const saved = readActiveJob();
+      follow({
+        jobId: generation.jobId,
+        threadId: generation.threadId,
+        lastEventId: generationCursor,
+        ...(saved?.jobId === generation.jobId && saved.threadId === generation.threadId && saved.userMessageId
+          ? { userMessageId: saved.userMessageId }
+          : {}),
+      });
     };
 
     const timer = window.setTimeout(() => {
