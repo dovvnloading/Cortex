@@ -32,13 +32,18 @@ describe("ResponseAnnouncer", () => {
     const view = render(<ResponseAnnouncer threadId="thread-a" />);
     const status = screen.getByRole("status");
 
-    act(() => useChatStore.getState().beginGeneration("job-a", "thread-a"));
-    expect(status).toHaveTextContent("Response started");
+    act(() => {
+      useChatStore.getState().beginGeneration("job-a", "thread-a");
+      useChatStore.getState().recordCompletion({
+        jobId: "job-a", threadId: "thread-a", chat: null, clearRequested: false,
+      });
+    });
+    expect(status).toHaveTextContent("Response complete");
     act(() => useChatStore.getState().endGeneration("job-a"));
     view.rerender(<ResponseAnnouncer threadId="thread-b" />);
 
     act(() => useChatStore.getState().beginGeneration("job-a2", "thread-a"));
-    expect(status).toHaveTextContent("Response started"); // no new unrelated announcement
+    expect(status).toHaveTextContent("Response complete"); // unrelated start cannot overwrite
     act(() => {
       useChatStore.getState().endGeneration("job-a2");
       useChatStore.getState().beginGeneration("job-b", "thread-b");
