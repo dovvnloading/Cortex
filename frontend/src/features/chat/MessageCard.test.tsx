@@ -109,6 +109,13 @@ describe("MessageCard", () => {
     expect(screen.getByText(/512 tok/)).toBeInTheDocument();
   });
 
+  it("marks a runtime-failed answer as incomplete while retaining its text", () => {
+    renderCard({ id: "failed-answer", role: "assistant", content: "Useful partial reply", stats: { stop_reason: "error" } });
+    expect(screen.getByText("Useful partial reply")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent("The model failed before finishing");
+    expect(screen.getByRole("button", { name: "Regenerate response" })).toBeEnabled();
+  });
+
   it("still says why when the limit left only reasoning and no answer", () => {
     renderCard({ id: "assistant-1", role: "assistant", content: "", thoughts: "Let me think about this carefully.", stats: { stop_reason: "length" } });
 
