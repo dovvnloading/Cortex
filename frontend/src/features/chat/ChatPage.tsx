@@ -859,7 +859,7 @@ export function ChatPage({
   });
   const regenerateFrom = useCallback((message: ChatMessage, index: number) => {
     const { messages: current, startGeneration: start } = latestHandlers.current;
-    const userTurn = current[index - 1];
+    const userTurn = message.role === "user" ? current[index] : current[index - 1];
     void start(
       userTurn?.role === "user" ? userTurn.content : "",
       message.id ?? undefined,
