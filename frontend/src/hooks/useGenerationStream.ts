@@ -253,7 +253,12 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       job: PersistedJob,
       onCompleted: OnCompleted,
       onFailed: OnFailed,
-      onMissingJob: OnMissingJob,
+      // The stream host supplies durable reconciliation. Direct/legacy callers
+      // still get a safe terminal notification and transcript refresh.
+      onMissingJob: OnMissingJob = async (threadId) => {
+        onFailed(threadId, "Generation status is unknown. Review the saved chat before retrying.");
+        await onCompleted(threadId);
+      },
     ): Promise<"auth" | void> => {
       if (consumingRef.current === job.jobId) return;
       consumingRef.current = job.jobId;
