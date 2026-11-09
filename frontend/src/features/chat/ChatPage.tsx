@@ -270,7 +270,11 @@ export function ChatPage({
     // taken into local state exactly once, and acknowledged so it is not taken
     // again by the next mount. It happens once per generation, not per render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setGenerationError({ threadId: lastFailure.threadId, message: lastFailure.message, retryable: true });
+    setGenerationError({
+      threadId: lastFailure.threadId,
+      message: lastFailure.message,
+      retryable: lastFailure.retryable ?? true,
+    });
   }, [lastFailure]);
 
   // A generation ended and the stream host has already reloaded its chat.
@@ -486,7 +490,7 @@ export function ChatPage({
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
       setResolvedThreadId(jobThreadId);
-      trackGeneration(accepted.job_id, jobThreadId);
+      trackGeneration(accepted.job_id, jobThreadId, accepted.user_message_id);
       if (pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
         setPendingRecovery(null);

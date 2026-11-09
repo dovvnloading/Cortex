@@ -9,7 +9,13 @@ export const RECONNECT_MAX_DELAY_MS = 30_000;
 const RECONNECT_JITTER_RATIO = 0.2;
 const ACTIVE_JOB_KEY = "cortex.active.generation";
 
-export type PersistedJob = { jobId: string; threadId: string; lastEventId: number };
+export type PersistedJob = {
+  jobId: string;
+  threadId: string;
+  lastEventId: number;
+  /** The user turn answered by this job, when acceptance supplied it. */
+  userMessageId?: string;
+};
 
 function isPersistedJob(value: unknown): value is PersistedJob {
   if (!value || typeof value !== "object") return false;
@@ -20,7 +26,9 @@ function isPersistedJob(value: unknown): value is PersistedJob {
     && candidate.threadId.length > 0
     && typeof candidate.lastEventId === "number"
     && Number.isSafeInteger(candidate.lastEventId)
-    && candidate.lastEventId >= 0;
+    && candidate.lastEventId >= 0
+    && (candidate.userMessageId === undefined
+      || (typeof candidate.userMessageId === "string" && candidate.userMessageId.length > 0));
 }
 
 /**
@@ -124,6 +132,7 @@ function waitForReconnect(jobId: string, attempt: number, signal: AbortSignal): 
 
 type OnCompleted = (threadId: string, clearRequested?: boolean, jobId?: string) => Promise<void>;
 type OnFailed = (threadId: string, message: string) => void;
+type OnMissingJob = (threadId: string, userMessageId: string | undefined, safelyMissing: boolean) => Promise<void>;
 type OnSessionExpired = () => void;
 
 function hasClearRequest(value: unknown): boolean {
@@ -220,8 +229,8 @@ function createRafBatchedFlusher(flush: (buffered: string) => void) {
  * reload and put the store in its starting state. GenerationStreamHost sees the
  * store change and attaches the consumer, so a page never has to own one.
  */
-export function trackGeneration(jobId: string, threadId: string): void {
-  persistActiveJob({ jobId, threadId, lastEventId: 0 });
+export function trackGeneration(jobId: string, threadId: string, userMessageId?: string | null): void {
+  persistActiveJob({ jobId, threadId, lastEventId: 0, ...(userMessageId ? { userMessageId } : {}) });
   useChatStore.getState().beginGeneration(jobId, threadId);
 }
 
@@ -240,7 +249,17 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   const consume = useCallback(
-    async (job: PersistedJob, onCompleted: OnCompleted, onFailed: OnFailed): Promise<"auth" | void> => {
+    async (
+      job: PersistedJob,
+      onCompleted: OnCompleted,
+      onFailed: OnFailed,
+      // The stream host supplies durable reconciliation. Direct/legacy callers
+      // still get a safe terminal notification and transcript refresh.
+      onMissingJob: OnMissingJob = async (threadId) => {
+        onFailed(threadId, "Generation status is unknown. Review the saved chat before retrying.");
+        await onCompleted(threadId);
+      },
+    ): Promise<"auth" | void> => {
       if (consumingRef.current === job.jobId) return;
       consumingRef.current = job.jobId;
       const controller = new AbortController();
@@ -438,8 +457,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 break;
               }
               if (statusError instanceof ApiError && statusError.kind === "http" && (statusError.status === 403 || statusError.status === 404)) {
+                // A restarted registry can forget an already-persisted reply.
+                // Reconcile durable chat before offering a duplicate Retry.
                 terminal = true;
-                onFailed(job.threadId, statusError.detail || "Generation is no longer available.");
+                completion = onMissingJob(job.threadId, job.userMessageId, statusError.status === 404);
                 break;
               }
               if (!(await waitForReconnect(job.jobId, reconnectAttempt, controller.signal))) return;

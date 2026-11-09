@@ -758,18 +758,22 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().generation).toMatchObject({ jobId: "job-status-401", threadId: "thread-status-401" });
   });
 
-  it("stops retrying and clears the tracked generation when the status fallback says the job is gone", async () => {
+  it("reconciles legacy stream consumers before forgetting an unknown job", async () => {
     const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
     const generationStatus = vi.fn().mockRejectedValue(new ApiError(404, "Generation job not found."));
     const api = fakeApi({ streamGeneration, generationStatus });
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
     const onFailed = vi.fn();
     const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
 
     act(() => {
-      result.current.start("job-status-404", "thread-status-404", vi.fn().mockResolvedValue(undefined), onFailed);
+      result.current.start("job-status-404", "thread-status-404", onCompleted, onFailed);
     });
 
-    await waitFor(() => expect(onFailed).toHaveBeenCalledWith("thread-status-404", "Generation job not found."));
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith(
+      "thread-status-404", "Generation status is unknown. Review the saved chat before retrying.",
+    ));
+    expect(onCompleted).toHaveBeenCalledWith("thread-status-404");
     expect(streamGeneration).toHaveBeenCalledTimes(1);
     expect(generationStatus).toHaveBeenCalledTimes(1);
     expect(readActiveJob()).toBeNull();
