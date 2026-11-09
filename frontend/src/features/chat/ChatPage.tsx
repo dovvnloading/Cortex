@@ -13,7 +13,7 @@ import { usePageEscape } from "../../hooks/usePageEscape";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useSettingsStore } from "../../stores/useSettingsStore";
 import { useUiStore } from "../../stores/useUiStore";
-import { Dialog, DialogContent } from "../../shared/ui/Dialog";
+import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { MessageComposer, type ComposerPhase } from "./MessageComposer";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { NewChatGuide } from "./NewChatGuide";
@@ -143,6 +143,7 @@ export function ChatPage({
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [memoryClearPromptOpen, setMemoryClearPromptOpen] = useState(false);
+  const [abandonPendingOpen, setAbandonPendingOpen] = useState(false);
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
   const messageListRef = useRef<MessageListHandle>(null);
@@ -928,12 +929,55 @@ export function ChatPage({
     setShowJumpToLatest(false);
   };
 
+  // Recovery is global (the old request may still be admitted), so its escape
+  // hatch must be reachable even in another chat or when the original chat
+  // can no longer load. Abandoning here drops only the local replay key: it
+  // does not imply the backend worker has been cancelled.
+  const abandonPendingRecovery = () => {
+    pendingAdmissionRef.current = null;
+    clearPendingGenerationAdmission();
+    setGenerationError(null);
+    setAbandonPendingOpen(false);
+    useUiStore.getState().notify(
+      "Pending message recovery abandoned. The original request may still be running.",
+      "info",
+    );
+  };
+  const pendingElsewhere = pendingAdmissionRef.current !== null
+    && pendingAdmissionRef.current.threadId !== threadId;
+  const pendingRecoveryAction = (
+    <div className="stack-sm" role="status">
+      <p>An earlier message may still be running. Returning to its chat and retrying the original request is safer than sending it again.</p>
+      <button
+        type="button"
+        className="button button-secondary"
+        onClick={() => setAbandonPendingOpen(true)}
+      >
+        Abandon pending request
+      </button>
+    </div>
+  );
+  const abandonPendingDialog = abandonPendingOpen ? (
+    <PendingAdmissionAbandonDialog
+      onCancel={() => setAbandonPendingOpen(false)}
+      onConfirm={abandonPendingRecovery}
+    />
+  ) : null;
+
   // A new thread has nothing to show yet, so it shows a short guide until the
   // first message starts (a starting or streaming first turn has its own bubble).
   const showNewChatGuide = threadId === null && messages.length === 0 && !starting;
 
   if (chatLoad.threadId !== threadId || chatLoad.loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
-  if (chatLoad.error) return <div className="chat-empty-state"><h2>Conversation unavailable</h2><p>{chatLoad.error}</p><button className="button button-primary" onClick={() => void loadChat()}>Retry</button></div>;
+  if (chatLoad.error) return (
+    <div className="chat-empty-state">
+      <h2>Conversation unavailable</h2>
+      <p>{chatLoad.error}</p>
+      <button className="button button-primary" onClick={() => void loadChat()}>Retry</button>
+      {pendingAdmissionRef.current && pendingRecoveryAction}
+      {abandonPendingDialog}
+    </div>
+  );
 
   return (
     <section className="chat-page" aria-labelledby="chat-title" {...pageDrop.handlers}>
@@ -944,6 +988,7 @@ export function ChatPage({
       )}
       <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
       <ResponseAnnouncer threadId={displayedThreadId} />
+      {pendingElsewhere && pendingRecoveryAction}
       <MessageList
         ref={messageListRef}
         messages={messages}
@@ -984,8 +1029,12 @@ export function ChatPage({
           onRescanModels={onRescanModels}
           onRetry={lastPrompt && visibleError?.retryable ? retryLastPrompt : undefined}
           onDismissError={() => {
-            // Dismiss is the explicit escape hatch from an ambiguous request;
-            // merely navigating away must never lose its idempotency key.
+            // If the stored request belongs to another chat, Dismiss must
+            // confirm abandonment instead of silently dropping its replay ID.
+            if (pendingElsewhere) {
+              setAbandonPendingOpen(true);
+              return;
+            }
             if (pendingAdmissionRef.current?.threadId === threadId) {
               pendingAdmissionRef.current = null;
               clearPendingGenerationAdmission();
@@ -1000,7 +1049,37 @@ export function ChatPage({
       {memoryClearPromptOpen && (
         <MemoryClearConfirmDialog onCancel={cancelMemoryClear} onConfirm={confirmMemoryClear} />
       )}
+      {abandonPendingDialog}
     </section>
+  );
+}
+
+/**
+ * Explicit confirmation before giving up a pending generation's replay key.
+ * The old job may have been admitted; this must not pretend to cancel it.
+ */
+function PendingAdmissionAbandonDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog.Root open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <DialogContent>
+        <AlertDialog.Title>Abandon pending message recovery?</AlertDialog.Title>
+        <AlertDialog.Description>
+          The earlier message may already be running on the backend. Abandoning recovery
+          only discards this browser's ability to replay that request. It will not cancel
+          the original job, and resubmitting its prompt could create a duplicate.
+        </AlertDialog.Description>
+        <div className="dialog-actions">
+          <button type="button" className="button button-secondary" onClick={onCancel}>Keep recovery</button>
+          <button type="button" className="button button-danger" onClick={onConfirm}>Abandon recovery</button>
+        </div>
+      </DialogContent>
+    </AlertDialog.Root>
   );
 }
 
