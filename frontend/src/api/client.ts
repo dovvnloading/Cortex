@@ -552,6 +552,12 @@ export class CortexApi {
     return this.request<ExecutionTaskListResponse>(`/execution/tasks${query ? `?${query}` : ""}`);
   }
 
+  executionStatus(jobId: string): Promise<ExecutionStatusResponse> {
+    return this.request<ExecutionStatusResponse>(
+      `/execution/${encodeURIComponent(jobId)}`,
+    );
+  }
+
   executionSource(jobId: string): Promise<CodeExecutionSourceResponse> {
     return this.request<CodeExecutionSourceResponse>(
       `/execution/${encodeURIComponent(jobId)}/source`,

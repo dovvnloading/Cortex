@@ -1024,6 +1024,9 @@ describe("App", () => {
       if (url.endsWith("/execution/approval-job/approval") && init?.method === "POST") {
         return json({ detail: "Approval has expired." }, 409);
       }
+      if (url.endsWith("/execution/approval-job") && init?.method !== "POST") {
+        return json({ job_id: "approval-job", request_id: "approval-request", profile: "artifact.extended.v1", status: "cancelled", sequence: 3, approval_state: "expired" });
+      }
       return json({ detail: "Unexpected test route." }, 404);
     });
 
@@ -1035,6 +1038,103 @@ describe("App", () => {
     expect(await screen.findByText("Approval has expired.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Allow background task approval-job once" })).toBeEnabled();
     expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
+  });
+
+  it("reconciles a committed execution approval after the POST returns 500", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const pendingTask = {
+      job_id: "approval-job",
+      profile: "code.exec.v1",
+      status: "queued",
+      sequence: 2,
+      phase: "approval",
+      message: "Approval required.",
+      approval_state: "pending",
+      approval_reason: "Run a reviewed local program.",
+      approval_expires_at: "2026-11-09T20:30:00Z",
+      can_cancel: false,
+      created_at: "2026-11-09T20:00:00Z",
+      updated_at: "2026-11-09T20:00:01Z",
+    };
+    let approved = false;
+    let approvalPosts = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", session_required: true, execution_preview_available: true, started_at: "2026-11-09T19:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) return json({ tasks: [{ ...pendingTask, approval_state: approved ? "approved" : "pending", status: approved ? "running" : "queued", sequence: approved ? 3 : 2 }] });
+      if (url.endsWith("/execution/approval-job/approval") && init?.method === "POST") {
+        approvalPosts += 1;
+        approved = true; // The real server committed before its readback failed.
+        return json({ detail: "Postcommit readback failed." }, 500);
+      }
+      if (url.endsWith("/execution/approval-job") && init?.method !== "POST") {
+        return json({ job_id: "approval-job", request_id: "approval-request", profile: "code.exec.v1", status: "running", sequence: 3, approval_state: "approved" });
+      }
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Allow background task approval-job once" }));
+    expect(await screen.findByText("Background task approved once.")).toBeVisible();
+    expect(screen.queryByText("Postcommit readback failed.")).not.toBeInTheDocument();
+    expect(approvalPosts).toBe(1);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Allow background task approval-job once" })).not.toBeInTheDocument());
+  });
+
+  it("reports uncertainty instead of rejection if the approval and status acknowledgments are both lost", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+    const pendingTask = {
+      job_id: "approval-job",
+      profile: "artifact.extended.v1",
+      status: "queued",
+      sequence: 2,
+      phase: "approval",
+      message: "Approval required.",
+      approval_state: "pending",
+      approval_reason: "Review local execution.",
+      approval_expires_at: "2026-11-09T20:30:00Z",
+      can_cancel: false,
+      created_at: "2026-11-09T20:00:00Z",
+      updated_at: "2026-11-09T20:00:01Z",
+    };
+    let posts = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return json({ status: "ok", session_required: true, execution_preview_available: true, started_at: "2026-11-09T19:00:00Z" });
+      if (url.endsWith("/chat-groups")) return json([]);
+      if (url.endsWith("/chats")) return json([]);
+      if (url.endsWith("/settings")) return json({ settings: { models: { chat: "model-a", title: null }, appearance: { theme: "dark" } } });
+      if (url.endsWith("/memories")) return json({ memos: [] });
+      if (url.endsWith("/models")) return json({ required_models: [], optional_models: [], installed_models: ["model-a"], connection: { success: true, status: "connected", message: "Ready" } });
+      if (url.includes("/execution/tasks")) return json({ tasks: [pendingTask] });
+      if (url.endsWith("/execution/approval-job/approval") && init?.method === "POST") {
+        posts += 1;
+        throw new TypeError("response lost");
+      }
+      if (url.endsWith("/execution/approval-job")) return json({ detail: "Status temporarily unavailable." }, 503);
+      return json({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Allow background task approval-job once" }));
+    expect(await screen.findByText(/Approval status could not be verified.*may already be running/)).toBeVisible();
+    expect(screen.queryByText("Could not record the approval decision.")).not.toBeInTheDocument();
+    expect(posts).toBe(1);
   });
 
   it("reports an approval that went through even when the refresh after it fails", async () => {
