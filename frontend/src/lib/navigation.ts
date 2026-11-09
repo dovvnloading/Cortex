@@ -150,7 +150,7 @@ function ensureHistoryTracking(): void {
   }
   // Also resync when a new app/test host replaces its history without a
   // popstate event, but never discard the visible route during a prompt.
-  if (committedLocation === null || (!pendingHistory && guards.size === 0 && committedLocation !== locationPath())) {
+  if (committedLocation === null || (!pendingHistory && guards.size === 0 && (committedLocation !== locationPath() || historyPosition() === null))) {
     committedLocation = locationPath();
     committedIndex = historyPosition() ?? 0;
     if (historyPosition() === null) {
