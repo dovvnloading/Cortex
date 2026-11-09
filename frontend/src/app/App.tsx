@@ -23,6 +23,12 @@ import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft"
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import {
+  beginOllamaPullAdmission,
+  clearOllamaPullAdmission,
+  readPendingOllamaPullAdmission,
+  type PendingOllamaPullAdmission,
+} from "../lib/pendingOllamaAdmission";
+import {
   beginGGUFAdmission,
   clearGGUFAdmission,
   readPendingGGUFAdmission,
@@ -31,7 +37,7 @@ import {
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { applyStoredTheme, DEFAULT_THEME_PREFERENCE, nextThemePreference } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
-import { useModelJobs } from "../hooks/useModelJobs";
+import { useModelJobs, type ModelJobResult } from "../hooks/useModelJobs";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore } from "../stores/useModelStore";
@@ -847,10 +853,71 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     catch (error) { notify(apiMessage(error, "Could not check Ollama models."), "error"); }
   };
 
-  const pullModel = async (model: string) => {
-    try { await modelJobs.run(await api.pullModel(model), model); }
-    catch (error) { notify(apiMessage(error, "Could not start the model pull."), "error"); }
+  // The backend already supports idempotent Ollama pull admission; preserve
+  // that request identity before POST so a lost 202 cannot orphan a large pull.
+  const pendingOllamaFollowRef = useRef<Promise<ModelJobResult> | null>(null);
+  const followPendingOllamaPull = (pending: PendingOllamaPullAdmission): Promise<ModelJobResult> => {
+    if (pendingOllamaFollowRef.current) return pendingOllamaFollowRef.current;
+    const running = (async () => {
+      let accepted: JobAccepted;
+      try {
+        accepted = await api.pullModel(pending.model, pending.requestId);
+      } catch (error) {
+        if (isDefinitiveRejection(error)) {
+          clearOllamaPullAdmission(pending.requestId);
+          throw error;
+        }
+        try {
+          accepted = await api.pullModel(pending.model, pending.requestId);
+        } catch (retryError) {
+          if (isDefinitiveRejection(retryError)) clearOllamaPullAdmission(pending.requestId);
+          throw retryError;
+        }
+      }
+      // The follower synchronously records the accepted job ID before the
+      // unconfirmed admission key can be cleared.
+      const followed = modelJobs.run(accepted, pending.model);
+      clearOllamaPullAdmission(pending.requestId);
+      return followed;
+    })();
+    pendingOllamaFollowRef.current = running;
+    void running.then(
+      () => { if (pendingOllamaFollowRef.current === running) pendingOllamaFollowRef.current = null; },
+      () => { if (pendingOllamaFollowRef.current === running) pendingOllamaFollowRef.current = null; },
+    );
+    return running;
   };
+
+  const pullModel = async (model: string) => {
+    try {
+      const pending = beginOllamaPullAdmission(model);
+      await followPendingOllamaPull(pending);
+    } catch (error) {
+      notify(apiMessage(error, "Could not start the model pull."), "error");
+    }
+  };
+
+  const didRecoverOllamaPullRef = useRef(false);
+  const ollamaPullRecoveryCallbacksRef = useRef({ followPendingOllamaPull, notify });
+  useEffect(() => {
+    ollamaPullRecoveryCallbacksRef.current = { followPendingOllamaPull, notify };
+  });
+  useEffect(() => {
+    if (didRecoverOllamaPullRef.current) return;
+    didRecoverOllamaPullRef.current = true;
+    const pending = readPendingOllamaPullAdmission();
+    if (!pending) return;
+    let mounted = true;
+    void ollamaPullRecoveryCallbacksRef.current.followPendingOllamaPull(pending).catch(() => {
+      if (mounted) {
+        ollamaPullRecoveryCallbacksRef.current.notify(
+          "The previous Ollama pull could not be reconnected. Retry the same model to recover its job.",
+          "error",
+        );
+      }
+    });
+    return () => { mounted = false; };
+  }, [api, modelJobs.run]);
 
   const finishGGUFDownload = async (
     filename: string,

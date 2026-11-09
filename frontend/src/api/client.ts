@@ -514,8 +514,8 @@ export class CortexApi {
     return this.request<JobAccepted>("/jobs/models", { method: "POST" });
   }
 
-  pullModel(model: string): Promise<JobAccepted> {
-    const payload: ModelPullRequest = { model };
+  pullModel(model: string, requestId?: string): Promise<JobAccepted> {
+    const payload: ModelPullRequest = { model, ...(requestId ? { request_id: requestId } : {}) };
     return this.request<JobAccepted>("/models/pulls", {
       method: "POST",
       body: JSON.stringify(payload),

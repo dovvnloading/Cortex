@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import { resolveRuntimeAvailability } from "./runtimeAvailability";
 import { CortexApi } from "../api/client";
+import { beginOllamaPullAdmission, readPendingOllamaPullAdmission } from "../lib/pendingOllamaAdmission";
 import { useChatStore } from "../stores/useChatStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import { useModelStore } from "../stores/useModelStore";
@@ -1334,6 +1335,78 @@ describe("App", () => {
     expect(await screen.findByText("Current attachment staged.")).toBeVisible();
     expect(screen.queryByText("Old attachment staged.")).not.toBeInTheDocument();
     expect(screen.queryByText("Malformed legacy attachment staged.")).not.toBeInTheDocument();
+  });
+
+  it("recovers a lost Ollama pull acceptance and restores its Cancel control", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const original = beginOllamaPullAdmission("translategemma:4b");
+    const received: Array<{ model: string; request_id: string }> = [];
+    const cancelled: string[] = [];
+    const respondJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+      status, headers: { "Content-Type": "application/json" },
+    });
+    const encoder = new TextEncoder();
+    let stream: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/system")) return respondJson({
+        status: "ok", session_required: true, started_at: "2026-11-09T12:00:00Z",
+      });
+      if (url.endsWith("/chat-groups")) return respondJson([]);
+      if (url.endsWith("/chats")) return respondJson([]);
+      if (url.endsWith("/settings")) return respondJson({
+        settings: { models: { chat: null, title: null }, appearance: { theme: "dark" } },
+      });
+      if (url.endsWith("/memories")) return respondJson({ memos: [] });
+      if (url.endsWith("/models")) return respondJson({
+        required_models: [], optional_models: [], installed_models: [],
+        connection: { success: true, status: "connected", message: "Ready" },
+      });
+      if (url.endsWith("/models/pulls") && init?.method === "POST") {
+        received.push(JSON.parse(String(init.body)) as { model: string; request_id: string });
+        if (received.length === 1) throw new TypeError("The first HTTP 202 response was lost");
+        return respondJson({ job_id: "ollama-pull-job", kind: "models", status: "queued" }, 202);
+      }
+      if (url.endsWith("/jobs/ollama-pull-job/events")) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            stream = controller;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              id: 1, job_id: "ollama-pull-job", kind: "progress", status: "running",
+              phase: "model_pull", data: { model: original.model, percent: 15, message: "Downloading" },
+            })}\n\n`));
+          },
+        }), { headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.endsWith("/jobs/ollama-pull-job/cancel") && init?.method === "POST") {
+        cancelled.push(url);
+        stream?.enqueue(encoder.encode(`data: ${JSON.stringify({
+          id: 2, job_id: "ollama-pull-job", kind: "state", status: "cancelled",
+          phase: null, data: { message: "Cancelled" },
+        })}\n\n`));
+        stream?.close();
+        return respondJson({ job_id: "ollama-pull-job", kind: "models", status: "cancelling", sequence: 2 });
+      }
+      return respondJson({ detail: "Unexpected route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    await waitFor(() => expect(received).toHaveLength(2));
+    expect(received).toEqual([
+      { model: "translategemma:4b", request_id: original.requestId },
+      { model: "translategemma:4b", request_id: original.requestId },
+    ]);
+    await waitFor(() => expect(useModelStore.getState().activeJob?.jobId).toBe("ollama-pull-job"));
+    expect(readPendingOllamaPullAdmission()).toBeNull();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("button", { name: "System" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel translategemma:4b" }));
+    await waitFor(() => expect(cancelled).toHaveLength(1));
+    await waitFor(() => expect(useModelStore.getState().activeJob).toBeNull());
+    expect(received).toHaveLength(2);
+    expect(readPendingOllamaPullAdmission()).toBeNull();
   });
 
   it.each([
