@@ -1007,7 +1007,12 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const followPendingGGUFAdmission = async (pending: PendingGGUFAdmission) => {
+  const pendingGGUFFollowRef = useRef<Promise<ModelJobResult> | null>(null);
+  const followPendingGGUFAdmission = (pending: PendingGGUFAdmission): Promise<ModelJobResult> => {
+    // One pending admission can be replayed after a missing 202, recovered
+    // on mount, or triggered twice before React publishes a busy flag.
+    if (pendingGGUFFollowRef.current) return pendingGGUFFollowRef.current;
+    const running = (async () => {
     // The backend reserves jobs idempotently by request_id. If the original
     // HTTP 202 disappeared after admission, the same POST returns its job ID.
     // One immediate safe replay recovers ordinary dropped connections without
@@ -1039,6 +1044,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     // the pending acceptance record is no longer needed.
     clearGGUFAdmission(pending.payload.request_id);
     return followed;
+    })();
+    pendingGGUFFollowRef.current = running;
+    const clear = () => {
+      if (pendingGGUFFollowRef.current === running) pendingGGUFFollowRef.current = null;
+    };
+    void running.then(clear, clear);
+    return running;
   };
 
   const didRecoverGGUFAdmissionRef = useRef(false);

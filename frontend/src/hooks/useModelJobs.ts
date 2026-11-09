@@ -102,6 +102,9 @@ export function useModelJobs(dependencies: Dependencies): {
   const alive = useRef(false);
   const tracked = useRef<Tracking | null>(null);
   const untracked = useRef(new Map<string, Tracking>());
+  // A backend id may be returned by multiple idempotent admission replays.
+  // Join the existing follower instead of creating duplicate streams/Cancel rows.
+  const inFlightFollowers = useRef(new Map<string, Promise<ModelJobResult>>());
   // Successful jobs can refresh the shared inventory concurrently. Order by
   // request start, not arrival of responses, so an old snapshot cannot win.
   const inventoryRequestGeneration = useRef(0);
@@ -317,7 +320,25 @@ export function useModelJobs(dependencies: Dependencies): {
     }
   }, []);
 
-  const run = useCallback((accepted: JobAccepted, label = "local model inventory", options: ModelJobOptions = {}) => follow(
+  const followOnce = useCallback((
+    job: ActiveModelJob,
+    options: Required<Pick<ModelJobOptions, "checkOllamaConnection" | "notifyOnSuccess">>,
+  ): Promise<ModelJobResult> => {
+    const existing = inFlightFollowers.current.get(job.jobId);
+    if (existing) return existing;
+    // follow() synchronously records the job before yielding on its stream.
+    const running = follow(job, options);
+    inFlightFollowers.current.set(job.jobId, running);
+    const done = () => {
+      if (inFlightFollowers.current.get(job.jobId) === running) {
+        inFlightFollowers.current.delete(job.jobId);
+      }
+    };
+    void running.then(done, done);
+    return running;
+  }, [follow]);
+
+  const run = useCallback((accepted: JobAccepted, label = "local model inventory", options: ModelJobOptions = {}) => followOnce(
     {
       jobId: accepted.job_id,
       kind: accepted.kind === "gguf_download" ? "gguf_download" : "models",
@@ -331,18 +352,18 @@ export function useModelJobs(dependencies: Dependencies): {
         : {}),
     },
     { checkOllamaConnection: options.checkOllamaConnection ?? true, notifyOnSuccess: options.notifyOnSuccess ?? true },
-  ), [follow]);
+  ), [followOnce]);
 
   /** Pick a job back up after a reload or a remount, and finish what its caller would have. */
   const attach = useCallback(async (job: ActiveModelJob) => {
     const download = job.kind === "gguf_download";
-    const result = await follow(job, { checkOllamaConnection: !download, notifyOnSuccess: !download });
+    const result = await followOnce(job, { checkOllamaConnection: !download, notifyOnSuccess: !download });
     if (!download || !result.succeeded) return;
     const filename = typeof result.data?.filename === "string" ? result.data.filename : null;
     if (filename) await latest.current.onDownloaded(
       filename, job.selectedChatModelAtStart, job.ggufDirectoryAtStart,
     );
-  }, [follow]);
+  }, [followOnce]);
 
   const cancel = useCallback(async (jobId?: string) => {
     const primary = tracked.current;
@@ -408,6 +429,10 @@ export function useModelJobs(dependencies: Dependencies): {
       tracked.current = null;
       followers.forEach((tracking) => tracking.controller.abort());
       followers.clear();
+      // React StrictMode immediately reattaches during the next effect setup.
+      // A detached promise from the previous effect must not be reused: the
+      // next mount needs its own live SSE subscription, not DETACHED.
+      inFlightFollowers.current.clear();
       // The job itself is durable on the backend and stays remembered, but
       // this screen's ownership of it ends here. Do not strand a busy flag in
       // the process-wide store after logout or a remount.
