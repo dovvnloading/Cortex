@@ -94,3 +94,15 @@ def test_combined_catalog_keeps_ollama_tags_when_gguf_scan_fails(caplog) -> None
     assert gateway.list_calls == 1
     assert gateway.show_calls == []
     assert "secret-local-path" not in caplog.text
+
+
+def test_unreachable_ollama_keeps_tag_only_fallback_empty_and_safe(caplog) -> None:
+    class _Unavailable:
+        def list(self):
+            raise ConnectionError("sensitive-host-or-user-data")
+
+        def show(self, model):
+            raise AssertionError("show should never be called")
+
+    assert ModelService(_Unavailable()).list_installed() == ()
+    assert "sensitive-host-or-user-data" not in caplog.text
