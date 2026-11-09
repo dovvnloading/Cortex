@@ -639,6 +639,36 @@ describe("a second job while one is being followed", () => {
     expect(state().modelBusy).toBe(false);
   });
 
+  it("promotes a lone secondary after reload and forgets the old stored slot", async () => {
+    const first = setup();
+    act(() => {
+      void first.result.current.run(accepted("download-1"), "large.gguf");
+      void first.result.current.run(accepted("rescan-1", "models"), "local model inventory");
+    });
+    await waitFor(() => expect(first.streams).toHaveLength(2));
+    await act(async () => first.streams.find((stream) => stream.jobId === "download-1")!.finish(succeeded(1)));
+    expect(state().activeJob).toBeNull();
+    expect(state().secondaryJobs["rescan-1"]?.jobId).toBe("rescan-1");
+    first.unmount();
+
+    // A reload loses the in-memory state but not the stored secondary ledger.
+    useModelStore.setState({
+      activeJob: null, secondaryJobs: {}, secondaryProgress: {},
+      modelBusy: false, modelProgress: null,
+    });
+    const next = setup();
+    await waitFor(() => expect(next.streams).toHaveLength(1));
+    expect(next.streams[0].jobId).toBe("rescan-1");
+    expect(state().activeJob?.jobId).toBe("rescan-1");
+    expect(window.sessionStorage.getItem("cortex.active.model-jobs.secondary")).toBeNull();
+
+    await act(async () => next.streams[0].finish(succeeded(3, {})));
+    expect(state().activeJob).toBeNull();
+    expect(state().modelBusy).toBe(false);
+    expect(window.sessionStorage.getItem("cortex.active.model-job")).toBeNull();
+    expect(window.sessionStorage.getItem("cortex.active.model-jobs.secondary")).toBeNull();
+  });
+
   it("is cut with the first when the screen goes away", async () => {
     const { result, streams, unmount } = setup();
     act(() => { void result.current.run(accepted("download-1"), "demo.Q4_K_M.gguf"); });
