@@ -128,8 +128,13 @@ class ModelService:
         self._pull_client_factory = pull_client_factory
 
     def list_installed(self) -> tuple[str, ...]:
-        """Return the exact installed model tags in stable order."""
-        return tuple(item.name for item in self.list_installed_details())
+        """Read exact Ollama tags with one list call, without N metadata calls.
+
+        Admission and availability checks need names only. Rich per-model
+        /api/show metadata belongs to inventory() for Settings, not a request
+        that must be fast before the user's generation can be admitted.
+        """
+        return tuple(sorted(self.extract_model_tags(self._gateway.list())))
 
     def list_installed_details(self) -> tuple[InstalledModel, ...]:
         """Return normalized installed model metadata without logging content."""
