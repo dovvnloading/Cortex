@@ -132,13 +132,15 @@ test("rapid moves persist the final destination even when the earlier PATCH is s
     await page.goto("/#bootstrap=launcher-token");
     await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Move Grouped chat to a group" }).click();
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).focus();
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).press("Enter");
     await page.getByRole("menuitem", { name: "Planning" }).click();
     await expect.poll(() => writes).toEqual(["group-two"]);
 
     // The UI moves optimistically, so the second selection can be made even
     // though the first PATCH has not arrived at the backend yet.
-    await page.getByRole("button", { name: "Move Grouped chat to a group" }).click();
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).focus();
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).press("Enter");
     await page.getByRole("menuitem", { name: "Research" }).click();
     expect(writes).toEqual(["group-two"]); // no overtaking second request
 
