@@ -7,7 +7,10 @@ different writer used to be overwritten or deleted. No real network is used.
 from __future__ import annotations
 
 import errno
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -265,3 +268,128 @@ def test_split_rollback_removes_only_its_own_unmodified_shard(
     assert not first.exists()
     assert second.read_bytes() == b"other writer's shard"
     assert not list(tmp_path.glob(".rollback-*.part"))
+
+def _kill_after_split_publication(
+    folder: Path, parts: tuple[tuple[str, str], ...], stop_after: int,
+) -> None:
+    """A separate process dies without running the download's finally block."""
+    program = """
+import os
+import sys
+from pathlib import Path
+from cortex_backend.llamacpp import download as d
+
+class FakeTransfer:
+    def __init__(self, *, staging_path, **kwargs):
+        self.path = staging_path
+    def run(self):
+        self.path.write_bytes(b'GGUF' + b'\\0' * 28)
+
+d._GGUFTransfer = FakeTransfer
+d._validate_gguf_file = lambda _path: None
+publish = d._publish
+count = 0
+
+def crash_after_publish(staged, dest, *, allow_overwrite):
+    global count
+    publish(staged, dest, allow_overwrite=allow_overwrite)
+    count += 1
+    if count == int(sys.argv[2]):
+        os._exit(71)
+
+d._publish = crash_after_publish
+d.download_gguf_set(
+    [
+        ('https://example.com/first', 'model-00001-of-00002.gguf'),
+        ('https://example.com/second', 'model-00002-of-00002.gguf'),
+    ],
+    Path(sys.argv[1]),
+)
+"""
+    root = Path(__file__).resolve().parents[1]
+    environment = {**os.environ, "PYTHONPATH": str(root / "backend")}
+    ran = subprocess.run(
+        [sys.executable, "-c", program, str(folder), str(stop_after)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=35,
+        check=False,
+    )
+    assert ran.returncode == 71, ran.stderr
+    assert len(tuple(folder.glob(".split-publish-*.json"))) == 1
+
+
+def test_interrupted_split_publication_recovers_after_a_real_process_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    unrelated = tmp_path / "unrelated.gguf"
+    unrelated.write_bytes(b"Unrelated model - never delete")
+    _kill_after_split_publication(tmp_path, parts, stop_after=1)
+    assert first.exists() and not second.exists()
+    journal = next(tmp_path.glob(".split-publish-*.json"))
+    # Even signed source URLs must not be saved in clear text.
+    record = json.loads(journal.read_text(encoding="utf-8"))
+    assert record["source_fingerprint"] and "https://" not in journal.read_text(encoding="utf-8")
+
+    _stub_network(monkeypatch)
+    finished = gguf_download.download_gguf_set(parts, tmp_path)
+    assert finished == (first, second)
+    assert first.exists() and second.exists()
+    assert unrelated.read_bytes() == b"Unrelated model - never delete"
+    assert not tuple(tmp_path.glob(".split-publish-*.json"))
+    assert not tuple(tmp_path.glob(".download-*.part"))
+
+
+def test_restart_recognizes_all_shards_published_before_process_death(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    _kill_after_split_publication(tmp_path, parts, stop_after=2)
+    assert first.exists() and second.exists()
+    before = [gguf_download._file_identity(path) for path in (first, second)]
+
+    class ForbiddenNetwork:
+        def __init__(self, **kwargs):
+            raise AssertionError("a completed split set must not download again")
+
+    monkeypatch.setattr(gguf_download, "_GGUFTransfer", ForbiddenNetwork)
+    restored = gguf_download.download_gguf_set(parts, tmp_path)
+    assert restored == (first, second)
+    assert [gguf_download._file_identity(path) for path in restored] == before
+    assert not tuple(tmp_path.glob(".split-publish-*.json"))
+
+
+def test_crash_recovery_never_deletes_foreign_shard_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    _kill_after_split_publication(tmp_path, parts, stop_after=1)
+    foreign = tmp_path / ".other-writer.part"
+    foreign.write_bytes(b"somebody else's existing model")
+    os.replace(foreign, first)
+
+    _stub_network(monkeypatch)
+    with pytest.raises(gguf_download.GGUFDownloadError, match="already exists"):
+        gguf_download.download_gguf_set(parts, tmp_path)
+    assert first.read_bytes() == b"somebody else's existing model"
+    assert not second.exists()
+
+
+def test_tampered_split_manifest_fails_closed_without_deleting_a_model(
+    tmp_path: Path,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    first.write_bytes(b"user-owned model")
+    manifest = gguf_download._split_manifest_path(tmp_path, [name for _url, name in parts])
+    manifest.write_text('{"version":1,"entries":[]}', encoding="utf-8")
+
+    with pytest.raises(gguf_download.GGUFDownloadError, match="could not be verified"):
+        gguf_download.download_gguf_set(parts, tmp_path)
+    assert first.read_bytes() == b"user-owned model"
+    assert not second.exists()
+    assert manifest.exists()
+
+
