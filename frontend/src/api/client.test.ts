@@ -288,6 +288,33 @@ describe("CortexApi", () => {
     expect(terminal).toMatchObject(last);
   });
 
+  it("delivers CRLF-framed generation completion instead of merging it with progress", async () => {
+    const progress = {
+      event_id: 1,
+      event: "generation.content_delta" as const,
+      job_id: "job-1",
+      thread_id: "thread-1",
+      timestamp: "2026-11-09T18:00:00Z",
+      data: { delta: "Hello" },
+    };
+    const completed = {
+      ...progress,
+      event_id: 2,
+      event: "generation.completed" as const,
+      data: {},
+    };
+    const wire = [progress, completed].map((event) => (
+      `id: ${event.event_id}\r\nevent: ${event.event}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`
+    )).join("");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(wire, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const received: string[] = [];
+    await new CortexApi("/api/v1", fetcher).streamGeneration(
+      "job-1", (event) => received.push(event.event),
+    );
+    expect(received).toEqual(["generation.content_delta", "generation.completed"]);
+  });
+
   it("handles mixed line endings and UTF-8 characters split between byte reads", async () => {
     const first = { id: 1, job_id: "job-1", kind: "progress", status: "running", data: { message: "🧪" } };
     const last = { id: 2, job_id: "job-1", kind: "completed", status: "succeeded" };
