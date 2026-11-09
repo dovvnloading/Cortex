@@ -17,6 +17,7 @@ export type PendingGGUFAdmission = {
 };
 
 let volatileAdmission: PendingGGUFAdmission | null = null;
+let storageUnavailable = false;
 
 function isAdmission(value: unknown): value is PendingGGUFAdmission {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -50,7 +51,9 @@ function storePending(value: PendingGGUFAdmission | null): void {
   try {
     if (value) window.sessionStorage.setItem(GGUF_ADMISSION_KEY, JSON.stringify(value));
     else window.sessionStorage.removeItem(GGUF_ADMISSION_KEY);
+    storageUnavailable = false;
   } catch {
+    storageUnavailable = true;
     // The tab still remembers this request in memory if storage is disabled.
   }
 }
@@ -65,6 +68,14 @@ export function readPendingGGUFAdmission(): PendingGGUFAdmission | null {
         return decoded;
       }
       window.sessionStorage.removeItem(GGUF_ADMISSION_KEY);
+      volatileAdmission = null;
+      return null;
+    }
+    if (!storageUnavailable) {
+      // Explicitly cleared session storage invalidates the volatile mirror;
+      // don't resurrect a stale pending request on a future user action.
+      volatileAdmission = null;
+      return null;
     }
   } catch {
     // Denied storage or invalid JSON; fall through to the in-memory copy.
