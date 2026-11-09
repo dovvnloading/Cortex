@@ -18,6 +18,8 @@ type Props = {
   onAdd: (memo: string) => Promise<void>;
   onReplace: (memos: string[]) => Promise<void>;
   onClear: (expectedMemos: string[]) => Promise<void>;
+  /** Tell Settings about local edits/removals so its navigation guard protects them. */
+  onPendingChange?: (memos: string[] | null) => void;
 };
 
 type DraftRow = {
@@ -31,7 +33,7 @@ type DraftRow = {
   removed?: boolean;
 };
 
-export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onReplace, onClear }: Props) {
+export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onReplace, onClear, onPendingChange }: Props) {
   const [memo, setMemo] = useState("");
   const [draft, setDraft] = useState<DraftRow[]>(
     () => memos.map((value, id) => ({ id, value, origin: value })),
@@ -115,6 +117,11 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
   // The server trims what it stores, so a trailing space alone is no change --
   // and would otherwise stay flagged as unsaved after a save that trimmed it.
   const dirty = draft.some((row) => row.removed || row.value.trim() !== row.origin);
+  // The parent owns the page-level leave guard. Null means no pending edits;
+  // [] is deliberately different: removing every row is an unsaved change.
+  useEffect(() => {
+    onPendingChange?.(dirty ? draft.filter((row) => !row.removed).map((row) => row.value) : null);
+  }, [draft, dirty, onPendingChange]);
 
   const saveChanges = () => {
     // Failures are reported by the workspace callback; the draft is kept.
