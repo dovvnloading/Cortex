@@ -882,6 +882,48 @@ describe("App", () => {
     expect(window.localStorage.getItem("cortex.theme")).toBe("dark");
   });
 
+  it("reconciles a settings save that committed before the HTTP response failed", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    let stored = {
+      models: { chat: null, title: null },
+      appearance: { theme: "dark" },
+      revision: 1,
+    };
+    let writes = 0;
+    let reads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/settings") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { settings: typeof stored };
+        writes += 1;
+        stored = { ...body.settings, revision: stored.revision + 1 };
+        return respond({ detail: "Readback failed after settings were saved." }, 500);
+      }
+      if (url.endsWith("/settings")) {
+        reads += 1;
+        return respond({ settings: stored });
+      }
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("link", { name: "Settings" }));
+    await user.click(await screen.findByRole("combobox", { name: "Theme" }));
+    await user.click(await screen.findByRole("option", { name: "Light" }));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(await screen.findByText(/Settings save was not confirmed.*Current settings were reloaded/)).toBeVisible();
+    expect(writes).toBe(1);
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(stored.revision).toBe(2);
+    expect(stored.appearance.theme).toBe("light");
+    await waitFor(() => expect(useSettingsStore.getState().settings).toMatchObject({
+      revision: 2, appearance: { theme: "light" },
+    }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
   it("follows a saved theme change without any separate theme state", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     let stored = { models: { chat: null, title: null }, appearance: { theme: "dark" }, revision: 1 };
