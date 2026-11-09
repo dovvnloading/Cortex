@@ -122,7 +122,12 @@ function handleHistoryPop(): void {
     // only when historical cursor positions cannot be recovered.
     window.history.replaceState({ [HISTORY_POSITION]: originIndex }, "", origin);
     const approve = (yes: boolean) => {
-      if (yes && navigationSerial === serial) navigate(path);
+      if (yes && navigationSerial === serial) {
+        // We cannot replay an unindexed pre-application entry exactly.
+        // A one-time replacement is safer than prompting a second time.
+        window.history.replaceState({ [HISTORY_POSITION]: originIndex }, "", path);
+        publishRoute(path, originIndex);
+      }
     };
     if (typeof allowed === "boolean") approve(allowed);
     else void allowed.then(approve);
