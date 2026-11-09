@@ -94,6 +94,47 @@ def test_scan_cache_is_invalidated_by_mtime_and_size(tmp_path: Path) -> None:
     assert second[0].context_length == 16384
 
 
+def test_switching_gguf_directory_cannot_reuse_same_named_file_metadata(
+    tmp_path: Path,
+) -> None:
+    """Model roots A and B can preserve identical size and mtime signatures."""
+    first_root = tmp_path / "A"
+    second_root = tmp_path / "B"
+    first_root.mkdir()
+    second_root.mkdir()
+    a = first_root / "model.gguf"
+    b = second_root / "model.gguf"
+    _write_gguf(a, context_length=2048, quant=gguf.LlamaFileType.MOSTLY_Q4_K_M)
+    _write_gguf(b, context_length=16384, quant=gguf.LlamaFileType.MOSTLY_Q8_0)
+    assert a.stat().st_size == b.stat().st_size
+    timestamp_ns = 1_750_000_000_000_000_000
+    os.utime(a, ns=(timestamp_ns, timestamp_ns))
+    os.utime(b, ns=(timestamp_ns, timestamp_ns))
+    assert (a.stat().st_size, a.stat().st_mtime_ns) == (b.stat().st_size, b.stat().st_mtime_ns)
+
+    selected = [first_root]
+    directory = GGUFModelDirectory(lambda: selected[0])
+    first = directory.list_installed_details()
+    assert len(first) == 1
+    assert first[0].context_length == 2048
+    assert first[0].quantization_level == "Q4_K_M"
+    assert Path(first[0].path) == a.resolve()
+
+    selected[0] = second_root
+    second = directory.list_installed_details()
+    assert len(second) == 1
+    assert second[0].name == first[0].name
+    assert second[0].context_length == 16384
+    assert second[0].quantization_level == "Q8_0"
+    assert Path(second[0].path) == b.resolve()
+    assert directory.resolve_path(second[0].name) == b.resolve()
+
+    selected[0] = first_root
+    third = directory.list_installed_details()
+    assert third[0].context_length == 2048
+    assert Path(third[0].path) == a.resolve()
+
+
 def test_resolve_gguf_path_accepts_a_subfolder_and_rejects_escapes(tmp_path: Path) -> None:
     """Ids name a path under the folder, because that is how models are stored.
 
