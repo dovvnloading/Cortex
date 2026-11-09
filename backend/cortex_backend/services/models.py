@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from threading import Event
 from typing import Any, Literal, Protocol
 
 from cortex_backend.core.generation import ConnectionResult
+from cortex_backend.services.chat_client import close_when_cancelled
 
 
 class ModelGateway(Protocol):
@@ -115,8 +117,17 @@ class ModelPullProgress:
 class ModelService:
     """Check required model tags without depending on a UI or transport."""
 
-    def __init__(self, gateway: ModelGateway):
+    def __init__(
+        self,
+        gateway: ModelGateway,
+        *,
+        pull_client_factory: Callable[[], Any] | None = None,
+    ):
         self._gateway = gateway
+        # An Ollama pull can block inside next(stream) for up to the HTTP read
+        # timeout. A cancellable pull owns a separate client so the Stop
+        # watcher can close its socket without disrupting unrelated requests.
+        self._pull_client_factory = pull_client_factory
 
     def list_installed(self) -> tuple[str, ...]:
         """Return the exact installed model tags in stable order."""
@@ -225,20 +236,55 @@ class ModelService:
         exact_model = model.strip()
         if not exact_model:
             raise ValueError("Model tag must not be empty.")
+        if cancellation_event is not None and cancellation_event.is_set():
+            return False
+        owned_client = (
+            self._pull_client_factory()
+            if cancellation_event is not None and self._pull_client_factory is not None
+            else None
+        )
+        pull_gateway = owned_client if owned_client is not None else self._gateway
+        watch = (
+            close_when_cancelled(
+                cancellation_event,
+                owned_client.close,
+                name="ollama-model-pull-cancel-watch",
+            )
+            if cancellation_event is not None and owned_client is not None
+            else nullcontext()
+        )
         try:
-            try:
-                stream = self._gateway.pull(exact_model, stream=True)
-            except TypeError:
-                # Keep compatibility with the Stage 1/2 test and legacy gateway
-                # shape while real Ollama uses the streaming keyword.
-                stream = self._gateway.pull(exact_model)
-            updates = self._iter_updates(stream)
-            for raw_update in updates:
-                if cancellation_event is not None and cancellation_event.is_set():
-                    return False
-                update = self._normalize_progress(exact_model, raw_update)
-                if progress_callback is not None:
-                    progress_callback(update)
+            with watch:
+                try:
+                    try:
+                        stream = pull_gateway.pull(exact_model, stream=True)
+                    except TypeError:
+                        # Legacy/test gateways do not expose the stream kwarg.
+                        stream = pull_gateway.pull(exact_model)
+                    try:
+                        for raw_update in self._iter_updates(stream):
+                            if cancellation_event is not None and cancellation_event.is_set():
+                                return False
+                            update = self._normalize_progress(exact_model, raw_update)
+                            if progress_callback is not None:
+                                progress_callback(update)
+                    finally:
+                        # The official Ollama generator owns the HTTP response.
+                        # Close it on every exit so no file/socket is retained.
+                        close_stream = getattr(stream, "close", None)
+                        if callable(close_stream):
+                            try:
+                                close_stream()
+                            except Exception:
+                                if cancellation_event is None or not cancellation_event.is_set():
+                                    raise
+                except Exception:
+                    # Aborting a blocked httpx read can raise several transport
+                    # exception types; after an actual Stop that is a
+                    # cancellation, not a failed model operation.
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        return False
+                    raise
             if cancellation_event is not None and cancellation_event.is_set():
                 return False
             return (
@@ -249,6 +295,9 @@ class ModelService:
         except Exception as exc:
             logging.error("Ollama model pull failed (%s).", type(exc).__name__)
             raise
+        finally:
+            if owned_client is not None:
+                owned_client.close()
 
     @staticmethod
     def extract_model_tags(response: Any) -> set[str]:
