@@ -58,7 +58,21 @@ class CombinedModelCatalog:
         return ollama_models + gguf_models, connection
 
     def list_installed(self) -> tuple[str, ...]:
-        return tuple(model.name for model in self.inventory()[0])
+        """List Ollama tags cheaply and GGUF models through the folder scanner.
+
+        The generation hot path must not invoke Ollama show() on every installed
+        model; inventory() still exposes those richer details to Settings.
+        """
+        names = self._ollama.list_installed()
+        try:
+            gguf_models = self._gguf.list_installed_details()
+        except Exception as exc:
+            logger.warning(
+                "GGUF model scan failed (%s); local model files are not listed.",
+                type(exc).__name__,
+            )
+            gguf_models = ()
+        return (*names, *(model.name for model in gguf_models))
 
     def pull_model(
         self,
