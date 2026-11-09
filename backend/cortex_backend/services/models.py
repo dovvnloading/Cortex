@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from threading import Event
 from typing import Any, Literal, Protocol
 
 from cortex_backend.core.generation import ConnectionResult
+from cortex_backend.services.chat_client import close_when_cancelled
 
 
 class ModelGateway(Protocol):
@@ -115,8 +117,15 @@ class ModelPullProgress:
 class ModelService:
     """Check required model tags without depending on a UI or transport."""
 
-    def __init__(self, gateway: ModelGateway):
+    def __init__(
+        self, gateway: ModelGateway, *,
+        pull_client_factory: Callable[[], ModelGateway] | None = None,
+    ):
         self._gateway = gateway
+        # A blocked Ollama pull iterator cannot notice its cancellation event.
+        # Use a dedicated client that Stop can close from another thread,
+        # without disrupting inventory reads or concurrent chat generations.
+        self._pull_client_factory = pull_client_factory
 
     def list_installed(self) -> tuple[str, ...]:
         """Return the exact installed model tags in stable order."""
@@ -221,24 +230,60 @@ class ModelService:
         cancellation_event: Event | None = None,
         verify: bool = True,
     ) -> bool:
-        """Pull one exact tag and normalize streamed Ollama progress."""
+        """Pull one exact tag; Stop also interrupts a blocked HTTP stream."""
         exact_model = model.strip()
         if not exact_model:
             raise ValueError("Model tag must not be empty.")
+        if cancellation_event is not None and cancellation_event.is_set():
+            return False
+
+        dedicated = (
+            self._pull_client_factory()
+            if cancellation_event is not None and self._pull_client_factory is not None
+            else None
+        )
+        gateway = dedicated if dedicated is not None else self._gateway
+        close_client = getattr(dedicated, "close", None) if dedicated is not None else None
+        # An explicit client-close watcher is only safe when this call owns
+        # the client. Legacy/in-memory gateways keep polling between chunks.
+        watcher = (
+            close_when_cancelled(cancellation_event, close_client, name="ollama-pull-cancel-watch")
+            if cancellation_event is not None and callable(close_client)
+            else nullcontext()
+        )
+        stream: Any = None
         try:
-            try:
-                stream = self._gateway.pull(exact_model, stream=True)
-            except TypeError:
-                # Keep compatibility with the Stage 1/2 test and legacy gateway
-                # shape while real Ollama uses the streaming keyword.
-                stream = self._gateway.pull(exact_model)
-            updates = self._iter_updates(stream)
-            for raw_update in updates:
-                if cancellation_event is not None and cancellation_event.is_set():
-                    return False
-                update = self._normalize_progress(exact_model, raw_update)
-                if progress_callback is not None:
-                    progress_callback(update)
+            with watcher:
+                try:
+                    try:
+                        stream = gateway.pull(exact_model, stream=True)
+                    except TypeError:
+                        # Compatibility with gateways predating the stream keyword.
+                        stream = gateway.pull(exact_model)
+                    updates = self._iter_updates(stream)
+                    for raw_update in updates:
+                        if cancellation_event is not None and cancellation_event.is_set():
+                            return False
+                        update = self._normalize_progress(exact_model, raw_update)
+                        if progress_callback is not None:
+                            progress_callback(update)
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        return False
+                except Exception as exc:
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        # The watcher intentionally shut the HTTP client down.
+                        # The failed read is the user's Stop, not a pull error.
+                        return False
+                    logging.error("Ollama model pull failed (%s).", type(exc).__name__)
+                    raise
+                finally:
+                    close_stream = getattr(stream, "close", None)
+                    if callable(close_stream):
+                        try:
+                            close_stream()
+                        except Exception:
+                            if cancellation_event is None or not cancellation_event.is_set():
+                                raise
             if cancellation_event is not None and cancellation_event.is_set():
                 return False
             return (
@@ -246,9 +291,9 @@ class ModelService:
                 if verify
                 else True
             )
-        except Exception as exc:
-            logging.error("Ollama model pull failed (%s).", type(exc).__name__)
-            raise
+        finally:
+            if callable(close_client):
+                close_client()
 
     @staticmethod
     def extract_model_tags(response: Any) -> set[str]:
