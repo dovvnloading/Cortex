@@ -462,7 +462,43 @@ export class CortexApi {
     };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+
+    // SSE permits LF, CRLF and bare CR line terminators, including mixed
+    // framing. Process complete lines rather than splitting on "\\n\\n":
+    // a proxy using CRLF would otherwise merge every event into invalid JSON.
+    // A CR at a read boundary is a full terminator; ignore the following LF
+    // if it arrives in the next chunk (rather than treating it as a blank line).
+    let lineBuffer = "";
+    let skipLeadingLF = false;
+    let frameLines: string[] = [];
+    const onLine = (line: string) => {
+      if (line.length === 0) {
+        if (frameLines.length > 0) emit(frameLines.join("\n"));
+        frameLines = [];
+      } else {
+        frameLines.push(line);
+      }
+    };
+    const feed = (text: string) => {
+      let start = 0;
+      if (skipLeadingLF && text.length) {
+        if (text[0] === "\n") start = 1;
+        skipLeadingLF = false;
+      }
+      for (let i = start; i < text.length; i += 1) {
+        const char = text[i];
+        if (char !== "\n" && char !== "\r") continue;
+        onLine(lineBuffer + text.slice(start, i));
+        lineBuffer = "";
+        if (char === "\r") {
+          if (text[i + 1] === "\n") i += 1;
+          else if (i === text.length - 1) skipLeadingLF = true;
+        }
+        start = i + 1;
+      }
+      lineBuffer += text.slice(start);
+    };
+
     while (true) {
       // A connection that drops mid-stream rejects the read with a bare
       // TypeError; classify it like a failed connect. Only the read is
@@ -473,15 +509,12 @@ export class CortexApi {
       } catch (error) {
         throw transportError(error, options.signal);
       }
-      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) emit(frame);
+      feed(decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done }));
       if (chunk.done) break;
     }
-    // The backend may close the stream without terminating the last frame with a
-    // blank line, so anything left in the buffer is still a deliverable event.
-    if (buffer.trim()) emit(buffer);
+    // A final SSE frame is valid even without a terminating blank line.
+    if (lineBuffer) onLine(lineBuffer);
+    if (frameLines.length) emit(frameLines.join("\n"));
     return terminalEvent;
   }
 
