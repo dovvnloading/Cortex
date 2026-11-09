@@ -36,6 +36,39 @@ describe("NumberInput", () => {
     expect(onInteger).toHaveBeenLastCalledWith(12288);
   });
 
+  it.each([
+    ["en-US", "16,384"],
+    ["de-DE", "16.384"],
+    ["fr-FR", "16\u202f384"],
+    ["fr-FR with NBSP", "16\u00a0384"],
+  ])("parses localized integer grouping on edit and blur: %s", (_locale, formatted) => {
+    const onCommit = vi.fn();
+    render(<NumberInput aria-label="Context window" value={8192} min={2048} max={65536} onCommit={onCommit} />);
+    const input = screen.getByRole("textbox", { name: "Context window" });
+    fireEvent.change(input, { target: { value: formatted } });
+    fireEvent.blur(input);
+    expect(onCommit).toHaveBeenLastCalledWith(16384);
+  });
+
+  it("does not mistake decimal-looking text for an integer and clamp it to 2048", () => {
+    const onCommit = vi.fn();
+    render(<NumberInput aria-label="Context window" value={8192} min={2048} max={65536} onCommit={onCommit} />);
+    const input = screen.getByRole("textbox", { name: "Context window" });
+    fireEvent.change(input, { target: { value: "1.5" } });
+    fireEvent.blur(input);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("8192");
+  });
+
+  it("steps from a period-grouped integer rather than the decimal 8.192", () => {
+    const onCommit = vi.fn();
+    render(<NumberInput aria-label="Context window" value={8192} min={2048} max={65536} step={1024} onCommit={onCommit} />);
+    const input = screen.getByRole("textbox", { name: "Context window" });
+    fireEvent.change(input, { target: { value: "8.192" } });
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(onCommit).toHaveBeenLastCalledWith(9216);
+  });
+
   it("leaves composing Enter and arrow keys to the IME without mutating numeric settings", () => {
     const onCommit = vi.fn();
     render(<NumberInput aria-label="Amount" value={10} min={0} max={200} step={1} onCommit={onCommit} />);
