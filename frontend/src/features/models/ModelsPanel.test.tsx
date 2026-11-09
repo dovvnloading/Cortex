@@ -113,6 +113,30 @@ describe("the progress row's Cancel control", () => {
   });
 });
 
+describe("GGUF download source accessibility", () => {
+  it("exposes one group of pressed buttons, not a radiogroup without radios", async () => {
+    const { user } = renderPanel({ onListFiles: null });
+    const group = screen.getByRole("group", { name: "Download source" });
+    const huggingFace = within(group).getByRole("button", { name: "Hugging Face" });
+    const direct = within(group).getByRole("button", { name: "Direct URL" });
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    expect(huggingFace).toHaveAttribute("aria-pressed", "true");
+    expect(direct).toHaveAttribute("aria-pressed", "false");
+
+    direct.focus();
+    await user.keyboard("{Enter}");
+    expect(direct).toHaveAttribute("aria-pressed", "true");
+    expect(huggingFace).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByLabelText("Direct .gguf URL")).toBeVisible();
+
+    huggingFace.focus();
+    await user.keyboard(" ");
+    expect(huggingFace).toHaveAttribute("aria-pressed", "true");
+    expect(direct).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByLabelText(/Repo id/)).toBeVisible();
+  });
+});
+
 describe("browsing a Hugging Face repository", () => {
   it("shows the .gguf files with their sizes, by folder, with a split model as one entry", async () => {
     const { user, onListFiles } = renderPanel();
