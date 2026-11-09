@@ -163,7 +163,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
 
   return (
     <div className="gguf-download-form">
-      <div className="gguf-download-source-toggle" role="radiogroup" aria-label="Download source">
+      <div className="gguf-download-source-toggle" role="group" aria-label="Download source">
         <button
           type="button"
           className={`button button-quiet ${source === "huggingface" ? "icon-button-active" : ""}`}
