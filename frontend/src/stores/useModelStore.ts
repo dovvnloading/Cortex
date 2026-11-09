@@ -29,6 +29,7 @@ export type ActiveModelJob = {
 };
 
 const ACTIVE_MODEL_JOB_KEY = "cortex.active.model-job";
+const SECONDARY_JOBS_KEY = "cortex.active.model-jobs.secondary";
 
 function isActiveModelJob(value: unknown): value is ActiveModelJob {
   if (!value || typeof value !== "object") return false;
@@ -79,11 +80,43 @@ function storeModelJob(job: ActiveModelJob | null): void {
   }
 }
 
+/** Extra model operations are independent backend job kinds. Both must survive reload. */
+export function readStoredSecondaryModelJobs(): ActiveModelJob[] {
+  try {
+    const raw = window.sessionStorage.getItem(SECONDARY_JOBS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const jobs: ActiveModelJob[] = [];
+    for (const candidate of parsed.slice(0, 2) as unknown[]) {
+      if (isActiveModelJob(candidate) && !jobs.some((job) => job.jobId === candidate.jobId)) {
+        jobs.push(candidate);
+      }
+    }
+    return jobs;
+  } catch {
+    return [];
+  }
+}
+
+function storeSecondaryJobs(jobs: Record<string, ActiveModelJob>): void {
+  try {
+    const values = Object.values(jobs);
+    if (values.length) window.sessionStorage.setItem(SECONDARY_JOBS_KEY, JSON.stringify(values));
+    else window.sessionStorage.removeItem(SECONDARY_JOBS_KEY);
+  } catch {
+    // The in-memory followers and their Cancel controls still work.
+  }
+}
+
 interface ModelStoreState {
   models: ModelResponse | null;
   modelBusy: boolean;
   modelProgress: ModelProgress | null;
   activeJob: ActiveModelJob | null;
+  /** Every concurrent non-primary operation, indexed by durable backend job ID. */
+  secondaryJobs: Record<string, ActiveModelJob>;
+  secondaryProgress: Record<string, ModelProgress>;
   llamacppStatus: LlamaCppRuntimeStatus | null;
   setModels: (models: ModelResponse | null) => void;
   setModelBusy: (busy: boolean) => void;
@@ -92,6 +125,11 @@ interface ModelStoreState {
   setActiveJob: (job: ActiveModelJob | null) => void;
   /** Note the last event of `jobId` that was shown; ignored once another job is being followed. */
   advanceActiveJob: (jobId: string, lastEventId: number) => void;
+  rememberSecondaryJob: (job: ActiveModelJob) => void;
+  advanceSecondaryJob: (jobId: string, lastEventId: number) => void;
+  setSecondaryProgress: (jobId: string, progress: ModelProgress | null) => void;
+  forgetSecondaryJob: (jobId: string) => void;
+  clearSecondaryJobs: () => void;
   setLlamacppStatus: (status: LlamaCppRuntimeStatus | null) => void;
 }
 
@@ -100,6 +138,8 @@ export const useModelStore = create<ModelStoreState>((set, get) => ({
   modelBusy: false,
   modelProgress: null,
   activeJob: null,
+  secondaryJobs: {},
+  secondaryProgress: {},
   llamacppStatus: null,
   setModels: (models) => set({ models }),
   setModelBusy: (modelBusy) => set({ modelBusy }),
@@ -114,6 +154,37 @@ export const useModelStore = create<ModelStoreState>((set, get) => ({
     const activeJob = { ...current, lastEventId };
     storeModelJob(activeJob);
     set({ activeJob });
+  },
+  rememberSecondaryJob: (job) => {
+    const secondaryJobs = { ...get().secondaryJobs, [job.jobId]: job };
+    storeSecondaryJobs(secondaryJobs);
+    set({ secondaryJobs });
+  },
+  advanceSecondaryJob: (jobId, lastEventId) => {
+    const current = get().secondaryJobs[jobId];
+    if (!current || lastEventId <= current.lastEventId) return;
+    const secondaryJobs = { ...get().secondaryJobs, [jobId]: { ...current, lastEventId } };
+    storeSecondaryJobs(secondaryJobs);
+    set({ secondaryJobs });
+  },
+  setSecondaryProgress: (jobId, progress) => set((current) => {
+    const secondaryProgress = { ...current.secondaryProgress };
+    if (progress) secondaryProgress[jobId] = progress;
+    else delete secondaryProgress[jobId];
+    return { secondaryProgress };
+  }),
+  forgetSecondaryJob: (jobId) => {
+    const secondaryJobs = { ...get().secondaryJobs };
+    if (!(jobId in secondaryJobs)) return;
+    delete secondaryJobs[jobId];
+    const secondaryProgress = { ...get().secondaryProgress };
+    delete secondaryProgress[jobId];
+    storeSecondaryJobs(secondaryJobs);
+    set({ secondaryJobs, secondaryProgress });
+  },
+  clearSecondaryJobs: () => {
+    storeSecondaryJobs({});
+    set({ secondaryJobs: {}, secondaryProgress: {} });
   },
   setLlamacppStatus: (llamacppStatus) => set({ llamacppStatus }),
 }));
