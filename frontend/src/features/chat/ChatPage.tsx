@@ -33,7 +33,7 @@ type Props = {
   onRescanModels: () => Promise<void>;
   onThreadCreated: (threadId: string) => void;
   onForked: (chat: ChatResponse) => void;
-  onClearMemory?: () => Promise<void>;
+  onClearMemory?: (expectedMemos: string[]) => Promise<void>;
 };
 
 type ScopedError = {
@@ -143,6 +143,7 @@ export function ChatPage({
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [memoryClearPromptOpen, setMemoryClearPromptOpen] = useState(false);
+  const [memoryClearSnapshot, setMemoryClearSnapshot] = useState<string[] | null>(null);
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
   const messageListRef = useRef<MessageListHandle>(null);
@@ -349,20 +350,39 @@ export function ChatPage({
     }
   }, [api]);
 
+  // Model-proposed clears also require a snapshot read while the confirmation
+  // is open. If that read fails, the destructive action cannot be approved.
+  useEffect(() => {
+    if (!memoryClearPromptOpen) return;
+    let active = true;
+    void api.memories().then(
+      ({ memos }) => { if (active) setMemoryClearSnapshot(memos); },
+      () => {
+        if (!active) return;
+        setMemoryClearPromptOpen(false);
+        useUiStore.getState().notify("Could not load memories for review. Open Settings before clearing.", "error");
+      },
+    );
+    return () => { active = false; };
+  }, [api, memoryClearPromptOpen]);
+
   const cancelMemoryClear = useCallback(() => {
     setMemoryClearPromptOpen(false);
+    setMemoryClearSnapshot(null);
     useUiStore.getState().notify("Permanent memories were not cleared.", "info");
   }, []);
 
   const confirmMemoryClear = useCallback(async () => {
+    if (memoryClearSnapshot === null) return;
     try {
-      await onClearMemory?.();
+      await onClearMemory?.(memoryClearSnapshot);
     } catch (error) {
       useUiStore.getState().notify(describeApiError(error, "Could not clear memories."), "error");
     } finally {
       setMemoryClearPromptOpen(false);
+      setMemoryClearSnapshot(null);
     }
-  }, [onClearMemory]);
+  }, [onClearMemory, memoryClearSnapshot]);
 
   useEffect(() => {
     viewThreadIdRef.current = threadId;
@@ -998,7 +1018,7 @@ export function ChatPage({
         />
       </div>
       {memoryClearPromptOpen && (
-        <MemoryClearConfirmDialog onCancel={cancelMemoryClear} onConfirm={confirmMemoryClear} />
+        <MemoryClearConfirmDialog snapshot={memoryClearSnapshot} onCancel={cancelMemoryClear} onConfirm={confirmMemoryClear} />
       )}
     </section>
   );
@@ -1011,9 +1031,11 @@ export function ChatPage({
  * pending message bubble's teardown -- until the native dialog is dismissed.
  */
 function MemoryClearConfirmDialog({
+  snapshot,
   onCancel,
   onConfirm,
 }: {
+  snapshot: string[] | null;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
 }) {
@@ -1023,14 +1045,22 @@ function MemoryClearConfirmDialog({
       <DialogContent>
         <Dialog.Title>Clear permanent memories?</Dialog.Title>
         <p className="delete-dialog-description">Cortex requested clearing all permanent memories. Clear them now? This cannot be undone.</p>
+        {snapshot === null ? (
+          <p role="status">Loading memories for review…</p>
+        ) : (
+          <div role="region" aria-label="Memories to clear" style={{ maxHeight: 180, overflowY: "auto" }}>
+            <p>{snapshot.length} saved {snapshot.length === 1 ? "memory" : "memories"} will be removed.</p>
+            <ul>{snapshot.map((memo, index) => <li key={index}>{memo}</li>)}</ul>
+          </div>
+        )}
         <div className="dialog-actions">
           <button type="button" className="button button-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
           <button
             type="button"
             className="button button-danger"
-            disabled={busy}
+            disabled={busy || snapshot === null}
             onClick={async () => {
-              if (busy) return;
+              if (busy || snapshot === null) return;
               setBusy(true);
               try { await onConfirm(); } finally { setBusy(false); }
             }}
