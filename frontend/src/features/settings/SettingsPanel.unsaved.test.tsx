@@ -277,6 +277,49 @@ describe("SettingsPanel unsaved changes", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/chat/thread-2"));
   });
 
+  it("intercepts native Back and restores the history cursor while Keep editing is chosen", async () => {
+    // Begin with a real history entry before Settings, not a synthetic route.
+    window.history.replaceState({}, "", "/chat/new");
+    navigate("/settings");
+    const user = userEvent.setup();
+    render(<Host onSave={vi.fn<Save>()} />);
+    await editTheme(user);
+
+    act(() => window.history.back());
+    const dialog = await screen.findByRole("alertdialog");
+    await waitFor(() => expect(window.location.pathname).toBe("/settings"));
+    expect(screen.getByText("Unsaved changes")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(window.location.pathname).toBe("/settings");
+
+    // A second Back reaches the same original history entry, not another
+    // synthetic duplicate; Discard allows native traversal to finish.
+    act(() => window.history.back());
+    const second = await screen.findByRole("alertdialog");
+    await waitFor(() => expect(window.location.pathname).toBe("/settings"));
+    await user.click(within(second).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/chat/new"));
+  });
+
+  it("native history stays at Settings when Save and close fails", async () => {
+    window.history.replaceState({}, "", "/chat/new");
+    navigate("/settings");
+    const user = userEvent.setup();
+    const onSave = vi.fn<Save>().mockResolvedValue(null);
+    render(<Host onSave={onSave} />);
+    await editTheme(user);
+
+    act(() => window.history.back());
+    const dialog = await screen.findByRole("alertdialog");
+    await waitFor(() => expect(window.location.pathname).toBe("/settings"));
+    await user.click(within(dialog).getByRole("button", { name: "Save and close" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(window.location.pathname).toBe("/settings");
+    expect(screen.getByText("Unsaved changes")).toBeVisible();
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
   it("stops guarding once the panel is gone", async () => {
     const user = userEvent.setup();
     const { unmount } = render(<Host onSave={vi.fn<Save>()} />);
