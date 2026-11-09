@@ -24,7 +24,7 @@ type Listing =
   | { status: "failed"; repo: string; message: string; code: string | null };
 
 /** A download that stopped, for the form to say why beside the button. */
-type Outcome = { message: string; cancelled: boolean };
+type Outcome = { message: string; cancelled: boolean; succeeded?: boolean };
 
 /** The failures where opening the repository page is the next step: accept its terms, or check the name. */
 const OPEN_REPOSITORY_CODES = new Set(["gated", "not_found"]);
@@ -48,6 +48,9 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
   const [submitting, setSubmitting] = useState(false);
   // A ref closes the synchronous double-click window before React rerenders.
   const submittingRef = useRef(false);
+  // Downloads can take minutes while the inputs remain editable.
+  const editRevision = useRef(0);
+  const markEdited = () => { editRevision.current += 1; setOutcome(null); };
   const [listing, setListing] = useState<Listing>({ status: "idle" });
   const [manualOpen, setManualOpen] = useState(false);
   const listRequest = useRef<AbortController | null>(null);
@@ -58,6 +61,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
   const canBrowse = onListFiles !== undefined && HUGGING_FACE_REPO_ID.test(repo) && listing.status !== "loading";
 
   const changeRepo = (value: string) => {
+    markEdited();
     setRepoId(value);
     // Whatever was listed, or is being listed, belongs to the old repository.
     listRequest.current?.abort();
@@ -98,22 +102,37 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
     submittingRef.current = true;
     setSubmitting(true);
     setOutcome(null);
+    const submittedRevision = editRevision.current;
+    const submittedLabel = source === "huggingface" ? (filename.trim() || repo) : url.trim();
     const request: ModelDownloadRequest =
       source === "huggingface"
         ? { source, repo_id: repo, filename: filename.trim() }
         : { source, url: url.trim() };
     try {
       await onDownload(request);
-      setRepoId("");
-      setFilename("");
-      setPicked(false);
-      setUrl("");
-      setListing({ status: "idle" });
+      if (editRevision.current === submittedRevision) {
+        setRepoId("");
+        setFilename("");
+        setPicked(false);
+        setUrl("");
+        setListing({ status: "idle" });
+      } else {
+        setOutcome({
+          message: `Earlier download (${submittedLabel}) completed. Your newer model details were kept.`,
+          cancelled: false,
+          succeeded: true,
+        });
+      }
     } catch (caught) {
       const message = caught instanceof Error && caught.message
         ? caught.message
         : "The download did not complete. Check the details above and try again.";
-      setOutcome({ message, cancelled: caught instanceof ModelJobCancelledError });
+      setOutcome({
+        message: editRevision.current === submittedRevision
+          ? message
+          : `Earlier download (${submittedLabel}): ${message}`,
+        cancelled: caught instanceof ModelJobCancelledError,
+      });
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -134,6 +153,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
         value={filename}
         placeholder="some-model.Q4_K_M.gguf"
         onChange={(event) => {
+          markEdited();
           setFilename(event.target.value);
           setPicked(false);
         }}
@@ -148,7 +168,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
           type="button"
           className={`button button-quiet ${source === "huggingface" ? "icon-button-active" : ""}`}
           aria-pressed={source === "huggingface"}
-          onClick={() => setSource("huggingface")}
+          onClick={() => { if (source !== "huggingface") { markEdited(); setSource("huggingface"); } }}
         >
           Hugging Face
         </button>
@@ -156,7 +176,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
           type="button"
           className={`button button-quiet ${source === "url" ? "icon-button-active" : ""}`}
           aria-pressed={source === "url"}
-          onClick={() => setSource("url")}
+          onClick={() => { if (source !== "url") { markEdited(); setSource("url"); } }}
         >
           Direct URL
         </button>
@@ -219,6 +239,7 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
                           checked={filename === choice.path}
                           disabled={!choice.complete}
                           onChange={() => {
+                            markEdited();
                             setFilename(choice.path);
                             setPicked(true);
                           }}
@@ -257,12 +278,12 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
             id="gguf-url"
             value={url}
             placeholder="https://example.com/model.gguf"
-            onChange={(event) => setUrl(event.target.value)}
+            onChange={(event) => { markEdited(); setUrl(event.target.value); }}
           />
         </label>
       )}
       {outcome && (
-        outcome.cancelled
+        outcome.cancelled || outcome.succeeded
           ? <p className="muted-note" role="status">{outcome.message}</p>
           : <p className="field-error" role="alert">{outcome.message}</p>
       )}
