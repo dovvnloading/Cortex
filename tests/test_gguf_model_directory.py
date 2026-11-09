@@ -94,6 +94,46 @@ def test_scan_cache_is_invalidated_by_mtime_and_size(tmp_path: Path) -> None:
     assert second[0].context_length == 16384
 
 
+def test_scan_cache_never_reuses_metadata_after_switching_model_directories(tmp_path: Path) -> None:
+    """Two different files with the same relative name, size and mtime are not one model."""
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_file = first_root / "model.gguf"
+    second_file = second_root / "model.gguf"
+    _write_gguf(first_file, context_length=2048)
+    _write_gguf(second_file, context_length=8192)
+
+    # Equal fingerprints deliberately defeat the previous relative-name cache.
+    assert first_file.stat().st_size == second_file.stat().st_size
+    timestamp_ns = 1_700_000_000_000_000_000
+    for file in (first_file, second_file):
+        os.utime(file, ns=(timestamp_ns, timestamp_ns))
+    assert first_file.stat().st_mtime_ns == second_file.stat().st_mtime_ns
+
+    selected_root = [first_root]
+    directory = GGUFModelDirectory(lambda: selected_root[0])
+    first = directory.list_installed_details()
+    assert len(first) == 1
+    assert first[0].path == str(first_file.resolve())
+    assert first[0].context_length == 2048
+
+    selected_root[0] = second_root
+    second = directory.list_installed_details()
+    assert len(second) == 1
+    assert second[0].name == first[0].name == "gguf:model.gguf"
+    assert second[0].path == str(second_file.resolve())
+    assert second[0].context_length == 8192
+    assert directory.resolve_path(second[0].name) == second_file.resolve()
+
+    # A repeated switch is also safe; neither scan imports the other root's cache.
+    selected_root[0] = first_root
+    again = directory.list_installed_details()
+    assert again[0].path == str(first_file.resolve())
+    assert again[0].context_length == 2048
+
+
 def test_resolve_gguf_path_accepts_a_subfolder_and_rejects_escapes(tmp_path: Path) -> None:
     """Ids name a path under the folder, because that is how models are stored.
 
