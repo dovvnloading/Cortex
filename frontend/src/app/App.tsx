@@ -519,10 +519,17 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // is being generated, and every fifteen seconds otherwise: a ready runtime
   // was being asked every two seconds for as long as a GGUF model was selected.
   const generationActive = useChatStore((state) => state.generation.jobId !== null);
+  // Visibility and interval polls may overlap, as may the follow-up check
+  // when a generation ends. Only the newest *initiated* /system request may
+  // determine readiness; an older "failed" result arriving last must not
+  // disable a GGUF runtime that a newer response already marked "ready".
+  const llamacppRequestGenerationRef = useRef(0);
   const refreshLlamacppStatus = useCallback(async () => {
+    const generation = ++llamacppRequestGenerationRef.current;
     // A failed request rejects, so the poll counts it and backs off; the last
     // known status stays on screen meanwhile.
     const response = await api.system();
+    if (generation !== llamacppRequestGenerationRef.current) return;
     const next = response.llamacpp ?? null;
     // Every response parses to a new object, and the store notifies on any
     // new reference, so an unchanged status would re-render the shell on every
