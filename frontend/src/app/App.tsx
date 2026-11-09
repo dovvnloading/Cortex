@@ -874,6 +874,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   const didRecoverGGUFAdmissionRef = useRef(false);
+  const ggufRecoveryCallbacksRef = useRef({
+    followPendingGGUFAdmission,
+    finishGGUFDownload,
+    notify,
+  });
+  useEffect(() => {
+    ggufRecoveryCallbacksRef.current = { followPendingGGUFAdmission, finishGGUFDownload, notify };
+  });
   useEffect(() => {
     if (didRecoverGGUFAdmissionRef.current) return;
     didRecoverGGUFAdmissionRef.current = true;
@@ -882,17 +890,17 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     let mounted = true;
     void (async () => {
       try {
-        const result = await followPendingGGUFAdmission(pending);
+        const result = await ggufRecoveryCallbacksRef.current.followPendingGGUFAdmission(pending);
         if (!mounted || result.detached || !result.succeeded) return;
         const filename = typeof result.data?.filename === "string" ? result.data.filename : null;
         if (filename) {
-          await finishGGUFDownload(
+          await ggufRecoveryCallbacksRef.current.finishGGUFDownload(
             filename, pending.selectedChatModelAtStart, pending.ggufDirectoryAtStart,
           );
         }
-      } catch (error) {
+      } catch {
         if (mounted) {
-          notify(
+          ggufRecoveryCallbacksRef.current.notify(
             "The previous download could not be reconnected. Retry the same download to recover its job.",
             "error",
           );
