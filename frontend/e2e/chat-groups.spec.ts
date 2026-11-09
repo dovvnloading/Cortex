@@ -96,3 +96,95 @@ test("does not let a late initial group response erase a group created while loa
   await expect(page.getByRole("button", { name: "Collapse Created while loading" })).toBeVisible();
   await expect(page.getByText("Created while loading")).toHaveCount(1);
 });
+
+test("rapid moves persist the final destination even when the earlier PATCH is slow", async ({ page }) => {
+  const groupA = {
+    id: "group-one", name: "Research", collapsed: false,
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
+  const groupB = { ...groupA, id: "group-two", name: "Planning" };
+  await stubWorkspace(page, [groupA, groupB]);
+
+  let storedGroup = "group-one";
+  await page.unroute("**/api/v1/chats");
+  await page.route("**/api/v1/chats", async (route) => {
+    await route.fulfill({ json: [{
+      id: "grouped-chat", title: "Grouped chat", timestamp: "2026-01-01T00:00:00Z",
+      group_id: storedGroup,
+    }] });
+  });
+
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const writes: string[] = [];
+  await page.route("**/api/v1/chats/grouped-chat/group", async (route) => {
+    const body = route.request().postDataJSON() as { group_id: string };
+    writes.push(body.group_id);
+    if (writes.length === 1) await firstHeld;
+    storedGroup = body.group_id;
+    await route.fulfill({ json: {
+      id: "grouped-chat", title: "Grouped chat", timestamp: "2026-01-01T00:00:00Z",
+      group_id: storedGroup,
+    } });
+  });
+
+  try {
+    await page.goto("/#bootstrap=launcher-token");
+    await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).click();
+    await page.getByRole("menuitem", { name: "Planning" }).click();
+    await expect.poll(() => writes).toEqual(["group-two"]);
+
+    // The UI moves optimistically, so the second selection can be made even
+    // though the first PATCH has not arrived at the backend yet.
+    await page.getByRole("button", { name: "Move Grouped chat to a group" }).click();
+    await page.getByRole("menuitem", { name: "Research" }).click();
+    expect(writes).toEqual(["group-two"]); // no overtaking second request
+
+    releaseFirst();
+    await expect.poll(() => writes).toEqual(["group-two", "group-one"]);
+    await expect.poll(() => storedGroup).toBe("group-one");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
+    await expect(page.locator(".chat-group").filter({ hasText: "Research" }).getByRole(
+      "button", { name: "Grouped chat", exact: true },
+    )).toBeVisible();
+  } finally {
+    releaseFirst();
+  }
+});
+
+test("rapid collapse and expand persist the final preference after reload", async ({ page }) => {
+  const group = {
+    id: "group-one", name: "Research", collapsed: false,
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
+  await stubWorkspace(page, [group]);
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const writes: boolean[] = [];
+  await page.route("**/api/v1/chat-groups/group-one", async (route) => {
+    const body = route.request().postDataJSON() as { collapsed: boolean };
+    writes.push(body.collapsed);
+    if (writes.length === 1) await firstHeld;
+    group.collapsed = body.collapsed;
+    await route.fulfill({ json: group });
+  });
+
+  try {
+    await page.goto("/#bootstrap=launcher-token");
+    await page.getByRole("button", { name: "Collapse Research" }).click();
+    await expect.poll(() => writes).toEqual([true]);
+    await page.getByRole("button", { name: "Expand Research" }).click();
+    expect(writes).toEqual([true]);
+
+    releaseFirst();
+    await expect.poll(() => writes).toEqual([true, false]);
+    await expect.poll(() => group.collapsed).toBe(false);
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Collapse Research" })).toBeVisible();
+  } finally {
+    releaseFirst();
+  }
+});
