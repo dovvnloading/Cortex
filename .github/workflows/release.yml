@@ -24,6 +24,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  checks: read
 
 jobs:
   verify-version:
@@ -31,12 +33,14 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.declared.outputs.version }}
+      sha: ${{ steps.proven.outputs.sha }}
     steps:
       - name: Check out the tag being released
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -66,6 +70,170 @@ jobs:
             throw "Tag '$tag' does not match the declared version ('$expected'). Bump cortex_backend.__version__ and let frontend/package.json follow, or retag."
           }
           Write-Host "Tag $tag matches the declared version."
+
+      # Pin a release to the immutable tag SHA and require previous main runs.
+      # A matching version string is not sufficient proof that this was tested.
+      - name: Verify exact tag commit passed main quality and security gates
+        id: proven
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}
+
+  package:
+    needs: verify-version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the verified immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-version.outputs.sha }}
+          persist-credentials: false
+
+      # No dependency caches in a job that produces a release artifact: a
+      # poisoned cache entry would end up inside the package.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.lock.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the frontend bundle
+        shell: pwsh
+        run: python main.py --build-frontend --data-dir "$env:RUNNER_TEMP\cortex-release-data"
+
+      - name: Install package builder
+        run: python -m pip install "pyinstaller==6.14.2"
+
+      - name: Prepare signed WebView2 bootstrapper
+        shell: pwsh
+        run: ./packaging/prepare_webview2.ps1
+
+      - name: Build one-folder Windows package
+        run: python -m PyInstaller --noconfirm --clean packaging/Cortex.spec
+
+      - name: Verify packaged WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          $bootstrapper = Get-ChildItem dist/Cortex -Recurse -Filter MicrosoftEdgeWebview2Setup.exe | Select-Object -First 1
+          if ($null -eq $bootstrapper) { throw "Packaged WebView2 bootstrapper is missing." }
+          $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper.FullName
+          if ($signature.Status -ne "Valid") { throw "Packaged WebView2 signature is invalid." }
+
+      # The same smoke test the heavy job runs. A release that cannot reach its
+      # own health endpoint is not a release.
+      - name: Smoke-test the packaged launcher
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "cortex-release-smoke"
+          $executable = Join-Path (Get-Location) "dist\Cortex\Cortex.exe"
+          $process = $null
+          $ready = $false
+          try {
+            $process = Start-Process -FilePath $executable -ArgumentList @("--headless", "--data-dir", $data) -PassThru
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Packaged Cortex exited before its health endpoint became ready (code $($process.ExitCode))."
+              }
+              $recordPath = Join-Path $data "cortex.instance.json"
+              if (Test-Path -LiteralPath $recordPath -PathType Leaf) {
+                try {
+                  $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+                  $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$($record.port)/api/v1/health/ready"
+                  if ($response.StatusCode -eq 200) { $ready = $true; break }
+                } catch {
+                  # The backend can be between record creation and bind.
+                }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) { throw "Packaged Cortex did not expose its health endpoint within 30 seconds." }
+          } finally {
+            if ($null -ne $process) {
+              $process.Refresh()
+              if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            }
+          }
+
+      - name: Archive the package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          $name = "Cortex-$($env:VERSION)-windows-x64.zip"
+          Compress-Archive -Path dist/Cortex/* -DestinationPath $name
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $name).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii -NoNewline SHA256SUMS.txt
+          "ARCHIVE=$name" >> $env:GITHUB_ENV
+
+      - name: Create a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          gh release create $tag $env:ARCHIVE SHA256SUMS.txt `
+            --draft `
+            --title "Cortex $tag" `
+            --notes "Unsigned build produced by the release workflow. Sign it with packaging/sign_release.ps1, which replaces the archive and SHA256SUMS.txt, then review and publish."
+) {
+            throw "Cannot resolve the exact release commit."
+          }
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch protected main branch." }
+          git merge-base --is-ancestor $sha origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tags must point at a commit reachable from main."
+          }
+
+          foreach ($workflow in @("quality.yml", "python-compatibility.yml")) {
+            $url = "/repos/$repo/actions/workflows/$workflow/runs?branch=main&event=push&head_sha=$sha&per_page=100"
+            $response = gh api $url | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "Cannot verify $workflow status for $sha." }
+            $passed = @($response.workflow_runs | Where-Object {
+              $_.head_sha -eq $sha -and $_.event -eq "push" -and
+              $_.status -eq "completed" -and $_.conclusion -eq "success"
+            })
+            if ($passed.Count -eq 0) {
+              throw "Release commit $sha has no successful completed main push of $workflow."
+            }
+          }
+
+          $checks = gh api "/repos/$repo/commits/$sha/check-runs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Cannot inspect code scanning for $sha." }
+          $scanned = @($checks.check_runs | Where-Object {
+            $_.name -eq "CodeQL" -and $_.status -eq "completed" -and
+            $_.conclusion -eq "success" -and $_.head_sha -eq $sha
+          })
+          if ($scanned.Count -eq 0) {
+            throw "Release commit $sha must pass CodeQL before it may be packaged."
+          }
+
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "Verified release SHA $sha: main, Quality, Python compatibility and CodeQL passed."
 
   package:
     needs: verify-version
