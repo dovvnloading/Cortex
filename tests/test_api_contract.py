@@ -592,14 +592,18 @@ def test_memory_clear_without_confirmation_is_a_client_validation_error():
         headers = _session(client, app)
         client.post("/api/v1/memories", json={"memo": "Alice"}, headers=headers)
 
-        missing = client.post("/api/v1/memories/clear", json={}, headers=headers)
+        missing = client.post(
+            "/api/v1/memories/clear", json={"expected_memos": ["Alice"]}, headers=headers
+        )
         assert missing.status_code == 422
         assert missing.json()["detail"] == (
             "Clearing permanent memories requires explicit confirmation."
         )
 
         unconfirmed = client.post(
-            "/api/v1/memories/clear", json={"confirm": False}, headers=headers
+            "/api/v1/memories/clear",
+            json={"confirm": False, "expected_memos": ["Alice"]},
+            headers=headers,
         )
         assert unconfirmed.status_code == 422
         assert isinstance(unconfirmed.json()["detail"], str)
