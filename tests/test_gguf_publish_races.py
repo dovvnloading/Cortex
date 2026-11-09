@@ -269,6 +269,7 @@ def test_split_rollback_removes_only_its_own_unmodified_shard(
     assert second.read_bytes() == b"other writer's shard"
     assert not list(tmp_path.glob(".rollback-*.part"))
 
+
 def _kill_after_split_publication(
     folder: Path, parts: tuple[tuple[str, str], ...], stop_after: int,
 ) -> None:
@@ -283,7 +284,7 @@ class FakeTransfer:
     def __init__(self, *, staging_path, **kwargs):
         self.path = staging_path
     def run(self):
-        self.path.write_bytes(b'GGUF' + b'\\0' * 28)
+        self.path.write_bytes(b'GGUF' + bytes(28))
 
 d._GGUFTransfer = FakeTransfer
 d._validate_gguf_file = lambda _path: None
