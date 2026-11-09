@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { HuggingFaceFileListResponse, LlamaCppRuntimeStatus, ModelResponse } from "../../../../contracts/cortex-api";
@@ -379,6 +379,42 @@ describe("how a download ends", () => {
     await fillAndDownload(user);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The download did not complete.");
+  });
+
+  it("accepts only one submission before a delayed backend acknowledgement", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const onDownload = vi.fn(() => gate);
+    const { user } = renderPanel({ onListFiles: null, onDownload });
+    await user.type(screen.getByLabelText(/Repo id/), "owner/name");
+    await user.type(fileNameInput(), "model.gguf");
+
+    const button = screen.getByRole("button", { name: "Download model" });
+    // Both dispatches run before React would ordinarily paint disabled=true.
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Downloading…" })).toBeDisabled();
+
+    await act(async () => release());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Download model" })).toBeDisabled());
+    expect(onDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-enables download after an asynchronous admission rejection", async () => {
+    let rejectAdmission!: (error: Error) => void;
+    const pending = new Promise<void>((_, reject) => { rejectAdmission = reject; });
+    const onDownload = vi.fn(() => pending);
+    const { user } = renderPanel({ onListFiles: null, onDownload });
+    await user.type(screen.getByLabelText(/Repo id/), "owner/name");
+    await user.type(fileNameInput(), "model.gguf");
+
+    await user.click(screen.getByRole("button", { name: "Download model" }));
+    expect(screen.getByRole("button", { name: "Downloading…" })).toBeDisabled();
+    await act(async () => rejectAdmission(new Error("admission refused")));
+    expect(await screen.findByText("admission refused")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download model" })).toBeEnabled();
+    expect(onDownload).toHaveBeenCalledTimes(1);
   });
 
   it("cannot start a second download while one is running", () => {
