@@ -215,6 +215,44 @@ def test_combined_catalog_merges_ollama_and_gguf(tmp_path: Path) -> None:
     assert catalog.model_supports_vision("gguf:local.gguf") is False
 
 
+def test_combined_catalog_tag_only_path_avoids_eighty_ollama_show_calls(
+    tmp_path: Path,
+) -> None:
+    _write_gguf(tmp_path / "local.gguf")
+
+    class LargeOllamaGateway:
+        def __init__(self):
+            self.list_calls = 0
+            self.show_calls: list[str] = []
+
+        def list(self):
+            self.list_calls += 1
+            return {"models": [{"name": f"model-{n:03}:latest"} for n in range(80)]}
+
+        def show(self, model: str):
+            self.show_calls.append(model)
+            return {"capabilities": ["completion"]}
+
+    gateway = LargeOllamaGateway()
+    catalog = CombinedModelCatalog(
+        ModelService(gateway), GGUFModelDirectory(lambda: tmp_path),
+    )
+    names = catalog.list_installed()
+    assert names == (
+        *(f"model-{n:03}:latest" for n in range(80)),
+        "gguf:local.gguf",
+    )
+    assert gateway.list_calls == 1
+    assert gateway.show_calls == []
+
+    # Deliberate rich metadata access still loads each model's capabilities.
+    details, connection = catalog.inventory()
+    assert connection.success
+    assert len(details) == 81
+    assert gateway.list_calls == 2
+    assert len(gateway.show_calls) == 80
+
+
 def test_the_scan_finds_models_in_subfolders(tmp_path: Path) -> None:
     """The layout every downloader actually produces: one folder per repository.
 
