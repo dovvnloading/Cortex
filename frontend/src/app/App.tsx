@@ -20,6 +20,7 @@ import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
+import { prunePersistedGenerationOptions } from "../lib/persistedGenerationOptions";
 import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
@@ -396,6 +397,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setChats(chatResponse);
       // `chatResponse` is the whole list, so any other saved draft belongs to a chat that is gone.
       pruneComposerDrafts(chatResponse.map((chat) => chat.id));
+      prunePersistedGenerationOptions(chatResponse.map((chat) => chat.id));
       // Groups are organisation on top of the chats, so they load out of band
       // like the model inventory does: if the endpoint is unavailable the
       // library still opens with every chat present, just ungrouped. Blocking
@@ -664,6 +666,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       try {
         await api.deleteChat(id);
         discardComposerDraft(id);
+        useChatStore.getState().setThreadOptions(id, null);
         // Take the row out of the list before it is un-hidden, so it cannot flash back.
         setChats((current) => current.filter((chat) => chat.id !== id));
         setChatDeletePending(id, false);
