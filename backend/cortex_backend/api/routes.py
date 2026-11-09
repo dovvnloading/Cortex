@@ -47,7 +47,6 @@ from cortex_backend.core.settings import (
 )
 from cortex_backend.repositories.chats import (
     ChatNotFound,
-    ChatRepositoryError,
 )
 from cortex_backend.repositories.settings import (
     SettingsMigrationReport,
