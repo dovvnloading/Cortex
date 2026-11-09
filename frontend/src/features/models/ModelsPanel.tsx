@@ -43,8 +43,11 @@ type Props = {
   models: ModelResponse;
   busy: boolean;
   progress: Progress | null;
-  /** Stops the operation being shown; without it the progress row has no Cancel. */
-  onCancel?: () => void;
+  /** Stops the identified backend job; no ID means the primary row. */
+  onCancel?: (jobId?: string) => void;
+  /** Concurrent jobs from the other backend model-job kind. */
+  secondaryJobs?: Record<string, { jobId: string; model: string }>;
+  secondaryProgress?: Record<string, Progress>;
   setupUrl: string;
   onCheck: () => Promise<void>;
   llamacppStatus: LlamaCppRuntimeStatus;
@@ -69,7 +72,7 @@ function describeRuntimeBackend(status: LlamaCppRuntimeStatus): string {
   return `GPU (Vulkan) · ${onGpu}/${total} layers on the GPU`;
 }
 
-export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
+export function ModelsPanel({ models, busy, progress, onCancel, secondaryJobs, secondaryProgress, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
@@ -118,34 +121,46 @@ export function ModelsPanel({ models, busy, progress, onCancel, setupUrl, onChec
           {optionalMissing.map((item) => <span key={item}>{item}</span>)}
         </div>
       )}
-      {progress && (
-        <div className="model-progress" role="status" aria-label="Model operation progress" aria-live="polite" aria-busy={busy || undefined}>
-          <div className="model-progress-heading">
-            <span className="model-progress-model">
-              {busy && <span className="loading-spinner model-progress-spinner" aria-hidden="true" />}
-              {progress.model}
-            </span>
-            <span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span>
-          </div>
-          <div className="progress-track"><span style={{ width: `${progress.percent ?? 8}%` }} /></div>
-          <div className="model-progress-footer">
-            <small>{progress.status}</small>
-            {busy && onCancel && (
-              <button
-                className="button button-quiet model-progress-cancel"
-                type="button"
-                onClick={onCancel}
-                disabled={progress.cancelling}
-                aria-label={`Cancel ${progress.model}`}
-              >
-                <X aria-hidden="true" size={14} /> {progress.cancelling ? "Cancelling…" : "Cancel"}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
+      {progress && <ModelProgressRow progress={progress} busy={busy} onCancel={onCancel ? () => onCancel() : undefined} />}
+      {Object.values(secondaryJobs ?? {}).map((job) => (
+        <ModelProgressRow
+          key={job.jobId}
+          progress={secondaryProgress?.[job.jobId] ?? { model: job.model, status: "Reconnecting...", percent: null }}
+          busy
+          onCancel={onCancel ? () => onCancel(job.jobId) : undefined}
+        />
+      ))}
       <GGUFRuntimeSection llamacppStatus={llamacppStatus} gguf={gguf} runtime={runtime} />
     </section>
+  );
+}
+
+function ModelProgressRow({ progress, busy, onCancel }: { progress: Progress; busy: boolean; onCancel?: () => void }) {
+  return (
+    <div className="model-progress" role="status" aria-label={`Model operation progress: ${progress.model}`} aria-live="polite" aria-busy={busy || undefined}>
+      <div className="model-progress-heading">
+        <span className="model-progress-model">
+          {busy && <span className="loading-spinner model-progress-spinner" aria-hidden="true" />}
+          {progress.model}
+        </span>
+        <span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span>
+      </div>
+      <div className="progress-track"><span style={{ width: `${progress.percent ?? 8}%` }} /></div>
+      <div className="model-progress-footer">
+        <small>{progress.status}</small>
+        {busy && onCancel && (
+          <button
+            className="button button-quiet model-progress-cancel"
+            type="button"
+            onClick={onCancel}
+            disabled={progress.cancelling}
+            aria-label={`Cancel ${progress.model}`}
+          >
+            <X aria-hidden="true" size={14} /> {progress.cancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
