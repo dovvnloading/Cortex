@@ -361,14 +361,10 @@ def test_generation_does_not_append_an_assistant_after_a_concurrent_chat_mutatio
 
 
 class _RaceInjectingChatRepository:
-    """Land a genuinely concurrent chat write mid ``add_message``.
+    """Land a concurrent chat write just before either guarded user append.
 
-    Mimics an independent write to the chat that lands between
-    the coarse admission-revision check in ``prepare()`` and the actual
-    compare-and-append it performs, so the real ``add_message`` call's own
-    CAS observes a stale ``expected_revision`` and raises
-    ``ChatRevisionConflict`` -- even though the earlier check inside
-    ``prepare()`` already passed.
+    Request-ID generation uses ``append_generation_turn``; legacy clients
+    still use ``add_message``. Exercise the same stale-CAS race for both.
     """
 
     def __init__(self, inner, *, thread_id: str):
@@ -379,8 +375,8 @@ class _RaceInjectingChatRepository:
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def add_message(self, thread_id, role, content, **kwargs):
-        if not self._injected and thread_id == self._thread_id and role == "user":
+    def _inject_concurrent_user(self, thread_id):
+        if not self._injected and thread_id == self._thread_id:
             self._injected = True
             self._inner.add_message(
                 thread_id,
@@ -388,10 +384,19 @@ class _RaceInjectingChatRepository:
                 "a genuinely concurrent message",
                 thread_title="New Chat",
             )
+
+    def add_message(self, thread_id, role, content, **kwargs):
+        if role == "user":
+            self._inject_concurrent_user(thread_id)
         return self._inner.add_message(thread_id, role, content, **kwargs)
 
+    def append_generation_turn(self, thread_id, content, **kwargs):
+        self._inject_concurrent_user(thread_id)
+        return self._inner.append_generation_turn(thread_id, content, **kwargs)
 
-def test_generation_route_maps_a_concurrent_chat_write_race_to_409():
+
+@pytest.mark.parametrize("with_request_id", [True, False])
+def test_generation_route_maps_a_concurrent_chat_write_race_to_409(with_request_id):
     thread_id = "revision-race-thread"
     dependencies = build_demo_dependencies()
     dependencies.chats = _RaceInjectingChatRepository(
@@ -400,14 +405,11 @@ def test_generation_route_maps_a_concurrent_chat_write_race_to_409():
     app = create_app(dependencies, allowed_hosts=("testserver",))
     with TestClient(app) as client:
         headers = _session(client, app)
+        payload = {"thread_id": thread_id, "user_input": "hello"}
+        if with_request_id:
+            payload["request_id"] = "revision-race-generation"
         response = client.post(
-            "/api/v1/generations",
-            json={
-                "request_id": "revision-race-generation",
-                "thread_id": thread_id,
-                "user_input": "hello",
-            },
-            headers=headers,
+            "/api/v1/generations", json=payload, headers=headers,
         )
 
     assert response.status_code == 409
