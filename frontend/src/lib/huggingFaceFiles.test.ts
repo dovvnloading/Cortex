@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { groupGGUFFiles, HUGGING_FACE_REPO_ID } from "./huggingFaceFiles";
+import { directoryGroups, groupGGUFFiles, HUGGING_FACE_REPO_ID } from "./huggingFaceFiles";
 
 describe("groupGGUFFiles", () => {
   it("lists plain files with their sizes, top level first and then folder by folder", () => {
@@ -87,6 +87,37 @@ describe("groupGGUFFiles", () => {
     ]);
     expect(choices).toHaveLength(4);
     expect(choices.every((choice) => choice.parts === 1 && choice.complete)).toBe(true);
+  });
+});
+
+describe("directoryGroups", () => {
+  it("groups a large sorted page in one pass while retaining file order", () => {
+    const choices = groupGGUFFiles(Array.from({ length: 8000 }, (_, index) => ({
+      path: `folder${String(index).padStart(5, "0")}/weights.gguf`, size: 4096,
+    })));
+    const groups = directoryGroups(choices.slice(0, 100));
+    expect(groups).toHaveLength(100);
+    expect(groups[0]).toMatchObject({
+      directory: "folder00000",
+      choices: [{ path: "folder00000/weights.gguf" }],
+    });
+    expect(groups[99]).toMatchObject({ directory: "folder00099" });
+    expect(groups.every((group) => group.choices.length === 1)).toBe(true);
+    expect(directoryGroups(choices.slice(100, 200)).at(0)?.directory).toBe("folder00100");
+  });
+
+  it("preserves within-folder order for shared directories", () => {
+    const choices = groupGGUFFiles([
+      { path: "a/beta.gguf", size: 50 },
+      { path: "a/alpha.gguf", size: 20 },
+      { path: "b/gamma.gguf", size: 5 },
+    ]);
+    expect(directoryGroups(choices).map(({ directory, choices }) => [
+      directory, choices.map((choice) => choice.label),
+    ])).toEqual([
+      ["a", ["alpha.gguf", "beta.gguf"]],
+      ["b", ["gamma.gguf"]],
+    ]);
   });
 });
 

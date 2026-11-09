@@ -1,8 +1,8 @@
 import { Download, ExternalLink, Search } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { HuggingFaceFileListResponse, ModelDownloadRequest } from "../../../../contracts/cortex-api";
 import { ApiError, describeApiError, isAbortedError } from "../../api/client";
-import { groupGGUFFiles, HUGGING_FACE_REPO_ID, type GGUFFileChoice } from "../../lib/huggingFaceFiles";
+import { directoryGroups, groupGGUFFiles, HUGGING_FACE_REPO_ID, type GGUFFileChoice } from "../../lib/huggingFaceFiles";
 import { formatModelSize } from "../../lib/localModels";
 import { ModelJobCancelledError } from "../../lib/modelJobs";
 
@@ -28,6 +28,8 @@ type Outcome = { message: string; cancelled: boolean; succeeded?: boolean };
 
 /** The failures where opening the repository page is the next step: accept its terms, or check the name. */
 const OPEN_REPOSITORY_CODES = new Set(["gated", "not_found"]);
+// Never create thousands of radio inputs at once, even for a huge repository.
+const FILE_PAGE_SIZE = 100;
 
 function describeChoice(choice: GGUFFileChoice): string {
   if (!choice.complete) return `${choice.parts}-part model, missing a part in this repository`;
@@ -53,16 +55,36 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
   const markEdited = () => { editRevision.current += 1; setOutcome(null); };
   const [listing, setListing] = useState<Listing>({ status: "idle" });
   const [manualOpen, setManualOpen] = useState(false);
+  const [fileFilter, setFileFilter] = useState("");
+  const [filePage, setFilePage] = useState(0);
   const listRequest = useRef<AbortController | null>(null);
 
   useEffect(() => () => listRequest.current?.abort(), []);
 
   const repo = repoId.trim();
+  const filteredFiles = useMemo(() => {
+    if (listing.status !== "ready") return [];
+    const needle = fileFilter.trim().toLowerCase();
+    return needle
+      ? listing.choices.filter((choice) => (
+          choice.path.toLowerCase().includes(needle) || choice.label.toLowerCase().includes(needle)
+        ))
+      : listing.choices;
+  }, [listing, fileFilter]);
+  const totalPages = Math.max(1, Math.ceil(filteredFiles.length / FILE_PAGE_SIZE));
+  const currentPage = Math.min(filePage, totalPages - 1);
+  const pageStart = currentPage * FILE_PAGE_SIZE;
+  const visibleGroups = useMemo(
+    () => directoryGroups(filteredFiles.slice(pageStart, pageStart + FILE_PAGE_SIZE)),
+    [filteredFiles, pageStart],
+  );
   const canBrowse = onListFiles !== undefined && HUGGING_FACE_REPO_ID.test(repo) && listing.status !== "loading";
 
   const changeRepo = (value: string) => {
     markEdited();
     setRepoId(value);
+    setFileFilter("");
+    setFilePage(0);
     // Whatever was listed, or is being listed, belongs to the old repository.
     listRequest.current?.abort();
     setListing((current) => (current.status === "idle" ? current : { status: "idle" }));
@@ -78,6 +100,8 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
     const request = new AbortController();
     listRequest.current = request;
     setListing({ status: "loading", repo });
+    setFileFilter("");
+    setFilePage(0);
     try {
       const response = await onListFiles(repo, request.signal);
       if (request.signal.aborted) return;
@@ -116,6 +140,8 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
         setPicked(false);
         setUrl("");
         setListing({ status: "idle" });
+        setFileFilter("");
+        setFilePage(0);
       } else {
         setOutcome({
           message: `Earlier download (${submittedLabel}) completed. Your newer model details were kept.`,
@@ -227,29 +253,62 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
             ) : (
               <fieldset className="gguf-file-picker">
                 <legend>Files in {listing.repo}</legend>
-                {Array.from(new Set(listing.choices.map((choice) => choice.directory))).map((directory) => (
-                  <div role="group" aria-label={directory || "Top level of the repository"} key={directory}>
-                    {directory && <div className="gguf-file-folder">{directory}/</div>}
-                    {listing.choices.filter((choice) => choice.directory === directory).map((choice) => (
-                      <label className={`gguf-file-option${choice.complete ? "" : " gguf-file-option-disabled"}`} key={choice.path}>
-                        <input
-                          type="radio"
-                          name="gguf-file"
-                          value={choice.path}
-                          checked={filename === choice.path}
-                          disabled={!choice.complete}
-                          onChange={() => {
-                            markEdited();
-                            setFilename(choice.path);
-                            setPicked(true);
-                          }}
-                        />
-                        <span className="gguf-file-name">{choice.label}</span>
-                        <span className="gguf-file-meta">{describeChoice(choice)}</span>
-                      </label>
+                <label className="field-label" htmlFor="gguf-file-filter">
+                  Filter listed GGUF files
+                  <input
+                    id="gguf-file-filter"
+                    type="search"
+                    value={fileFilter}
+                    placeholder="Search by name or folder"
+                    onChange={(event) => {
+                      setFileFilter(event.target.value);
+                      setFilePage(0);
+                    }}
+                  />
+                </label>
+                {filteredFiles.length === 0 ? (
+                  <p role="status" className="muted-note">No GGUF files match this filter.</p>
+                ) : (
+                  <>
+                    <p role="status" className="muted-note">
+                      Showing {pageStart + 1}–{Math.min(pageStart + FILE_PAGE_SIZE, filteredFiles.length)} of {filteredFiles.length} files
+                    </p>
+                    {visibleGroups.map(({ directory, choices }) => (
+                      <div role="group" aria-label={directory || "Top level of the repository"} key={directory}>
+                        {directory && <div className="gguf-file-folder">{directory}/</div>}
+                        {choices.map((choice) => (
+                          <label className={`gguf-file-option${choice.complete ? "" : " gguf-file-option-disabled"}`} key={choice.path}>
+                            <input
+                              type="radio"
+                              name="gguf-file"
+                              value={choice.path}
+                              checked={filename === choice.path}
+                              disabled={!choice.complete}
+                              onChange={() => {
+                                markEdited();
+                                setFilename(choice.path);
+                                setPicked(true);
+                              }}
+                            />
+                            <span className="gguf-file-name">{choice.label}</span>
+                            <span className="gguf-file-meta">{describeChoice(choice)}</span>
+                          </label>
+                        ))}
+                      </div>
                     ))}
-                  </div>
-                ))}
+                    {totalPages > 1 && (
+                      <div className="dialog-actions" aria-label="GGUF file pages">
+                        <button type="button" className="button button-secondary" disabled={currentPage === 0} onClick={() => setFilePage(currentPage - 1)}>
+                          Previous files
+                        </button>
+                        <span aria-live="polite">Page {currentPage + 1} of {totalPages}</span>
+                        <button type="button" className="button button-secondary" disabled={currentPage === totalPages - 1} onClick={() => setFilePage(currentPage + 1)}>
+                          Next files
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
               </fieldset>
             )
           )}
