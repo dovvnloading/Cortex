@@ -910,7 +910,10 @@ def _read_matching_split_journal(
         ):
             return None
         used_staging.add(stage_name)
-        identity = tuple(identity_values)
+        identity: tuple[int, int, int, int] = (
+            identity_values[0], identity_values[1],
+            identity_values[2], identity_values[3],
+        )
         verified.append((directory / name, directory / stage_name, identity))
     return verified
 
