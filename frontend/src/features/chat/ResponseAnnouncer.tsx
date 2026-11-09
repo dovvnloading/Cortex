@@ -49,7 +49,7 @@ export function ResponseAnnouncer({ threadId }: { threadId: string | null }) {
 
   useEffect(() => useChatStore.subscribe((state, previous) => {
     const { jobId, phase } = state.generation;
-    if (jobId && jobId !== previous.generation.jobId) {
+    if (jobId && jobId !== previous.generation.jobId && state.generation.threadId === threadIdRef.current) {
       setAnnouncement("Response started");
     }
     // A stop the person asked for is "stopping" until the job ends, whether it
