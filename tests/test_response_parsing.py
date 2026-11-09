@@ -274,7 +274,8 @@ def test_tab_indented_markdown_tag_is_quoted_but_dedented_tag_is_live() -> None:
     assert spans
     assert text[spans[0][0]:spans[0][1]].startswith("\t<")
     _agent, answer, _thoughts, command = _parse(text)
-    assert answer.startswith(f"\t{_TEA_COMMAND}")
+    # The cleaned answer is trimmed, but the quoted command is still prose.
+    assert answer.startswith(_TEA_COMMAND)
     assert answer.endswith("Saved.")
     assert command == MemoryCommand(("User likes tea",), False)
 
