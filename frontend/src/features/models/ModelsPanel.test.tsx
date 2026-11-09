@@ -114,6 +114,41 @@ describe("the progress row's Cancel control", () => {
 });
 
 describe("browsing a Hugging Face repository", () => {
+  it("pages thousands of directories without mounting thousands of radio controls", async () => {
+    const massive: HuggingFaceFileListResponse = {
+      repo_id: "owner/name",
+      entries: Array.from({ length: 8000 }, (_, index) => ({
+        path: `dir${String(index).padStart(5, "0")}/model.gguf`,
+        size: 1024,
+      })),
+    };
+    const { user, onDownload } = renderPanel({
+      onListFiles: vi.fn<ListGGUFFiles>().mockResolvedValue(massive),
+    });
+    await browse(user);
+
+    await waitFor(() => expect(screen.getAllByRole("radio")).toHaveLength(100));
+    expect(screen.getByText("Showing 1–100 of 8000 files")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Previous files" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next files" }));
+    expect(screen.getByText("Showing 101–200 of 8000 files")).toBeVisible();
+    expect(screen.getAllByRole("radio")).toHaveLength(100);
+    expect(screen.queryByRole("group", { name: "dir00000" })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "dir00100" })).toBeVisible();
+
+    // Filtering should search the *whole* listing, not just the current
+    // page, while keeping the mounted radio set bounded.
+    await user.type(screen.getByRole("searchbox", { name: "Filter listed GGUF files" }), "dir07999");
+    expect(screen.getByText("Showing 1–1 of 1 files")).toBeVisible();
+    expect(screen.getAllByRole("radio")).toHaveLength(1);
+    await user.click(within(screen.getByRole("group", { name: "dir07999" })).getByRole("radio"));
+    expect(fileNameInput()).toHaveValue("dir07999/model.gguf");
+    await user.click(screen.getByRole("button", { name: "Download model" }));
+    expect(onDownload).toHaveBeenCalledWith({
+      source: "huggingface", repo_id: "owner/name", filename: "dir07999/model.gguf",
+    });
+  });
+
   it("shows the .gguf files with their sizes, by folder, with a split model as one entry", async () => {
     const { user, onListFiles } = renderPanel();
 
