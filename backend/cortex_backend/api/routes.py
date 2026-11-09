@@ -338,6 +338,94 @@ async def _start_generation_job(
             "a regeneration needs its transcript and its revision and a new turn has neither"
         )
     jobs = request.app.state.jobs
+    owner = _durable_owner(principal)
+
+    if not regenerating and payload.request_id is not None and reservation is None:
+        # The in-memory registry disappears on shutdown; the chat's durable
+        # request-to-user-turn mapping does not. Before generating a fresh
+        # chat ID or inserting another message, reconcile the committed turn.
+        admitted = await asyncio.to_thread(
+            deps.chats.get_generation_admission, owner, payload.request_id
+        )
+        if admitted is not None:
+            if (
+                admitted.fingerprint != request_fingerprint
+                or (payload.thread_id is not None and payload.thread_id != admitted.thread_id)
+            ):
+                raise JobConflict("This request ID was already used for a different payload.")
+            if jobs.request_snapshot(
+                kind="generation", owner=owner, request_id=payload.request_id
+            ) is None:
+                saved = await asyncio.to_thread(deps.chats.get_chat, admitted.thread_id)
+                if saved is None:
+                    raise ChatDomainError(
+                        "The original chat no longer exists. Review your chats before retrying.",
+                        code="stale_revision",
+                    )
+                saved_messages = list(saved.get("messages") or ())
+                index = next((
+                    i for i, message in enumerate(saved_messages)
+                    if message.get("role") == "user"
+                    and str(message.get("id")) == admitted.user_message_id
+                ), -1)
+                if index < 0:
+                    raise ChatDomainError(
+                        "The saved user turn could not be verified. Reload the conversation.",
+                        code="stale_revision",
+                    )
+                following = saved_messages[index + 1:]
+                next_user = next(
+                    (i for i, message in enumerate(following) if message.get("role") == "user"),
+                    len(following),
+                )
+                assistant = next(
+                    (message for message in following[:next_user] if message.get("role") == "assistant"),
+                    None,
+                )
+                if assistant is not None:
+                    # A committed answer must NEVER be generated again merely
+                    # because its volatile job record was lost. A harmless
+                    # completed replay job lets the existing frontend reload
+                    # the saved conversation through its normal completion path.
+                    result = {
+                        "thread_id": admitted.thread_id,
+                        "user_message_id": admitted.user_message_id,
+                        "assistant_message_id": str(assistant.get("id")),
+                        "recovered": True,
+                    }
+                    snapshot = await jobs.start(
+                        kind="generation", owner=owner, thread_id=admitted.thread_id,
+                        request_id=payload.request_id, request_fingerprint=request_fingerprint,
+                        runner=lambda _sink, _cancel: result,
+                    )
+                    return snapshot, admitted.user_message_id
+
+                if index != len(saved_messages) - 1:
+                    raise ChatDomainError(
+                        "The chat advanced after the original request. Review it before retrying.",
+                        code="stale_revision",
+                    )
+                # The original user turn is still unanswered. Reuse it as a
+                # regeneration target; prepare() will NOT insert a new turn.
+                current_revision = int(saved["revision"])
+                recovered_payload = payload.model_copy(update={
+                    "thread_id": admitted.thread_id,
+                    "base_revision": current_revision,
+                })
+                recovered_reservation = jobs.reserve(
+                    kind="generation", owner=owner, thread_id=admitted.thread_id,
+                    request_id=payload.request_id, request_fingerprint=request_fingerprint,
+                )
+                snapshot, _ = await _start_generation_job(
+                    request, deps, principal, recovered_payload,
+                    request_fingerprint=request_fingerprint,
+                    reservation=recovered_reservation,
+                    target_message_id=admitted.user_message_id,
+                    transcript=saved_messages,
+                    transcript_revision=current_revision,
+                )
+                return snapshot, admitted.user_message_id
+
     candidate_thread_id = payload.thread_id or uuid4().hex
     if reservation is None:
         reservation = jobs.reserve(
@@ -538,17 +626,26 @@ async def _start_generation_job(
                 # transcript read, fails this append instead of being answered
                 # around. So the history read at admission is the chat as
                 # admitted.
-                user_message_id = deps.chats.add_message(
-                    thread_id,
-                    "user",
-                    payload.user_input,
-                    attachments=[
-                        attachment.model_dump(mode="json")
-                        for attachment in attachment_refs
-                    ],
-                    thread_title="New Chat" if earlier_messages is None else None,
-                    expected_revision=admission_revision,
-                )
+                attachments_data = [
+                    attachment.model_dump(mode="json")
+                    for attachment in attachment_refs
+                ]
+                if payload.request_id is not None:
+                    user_message_id = deps.chats.append_generation_turn(
+                        thread_id, payload.user_input,
+                        owner=owner, request_id=payload.request_id,
+                        fingerprint=request_fingerprint, attachments=attachments_data,
+                        thread_title="New Chat" if earlier_messages is None else None,
+                        expected_revision=admission_revision,
+                    )
+                else:
+                    # Retain compatibility with legacy clients lacking an ID.
+                    user_message_id = deps.chats.add_message(
+                        thread_id, "user", payload.user_input,
+                        attachments=attachments_data,
+                        thread_title="New Chat" if earlier_messages is None else None,
+                        expected_revision=admission_revision,
+                    )
             except ChatNotFound as exc:
                 # An empty chat (revision 0) deleted since it was admitted.
                 raise ChatDomainError(
