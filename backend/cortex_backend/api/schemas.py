@@ -375,6 +375,8 @@ class ModelResponse(APIModel):
 
 class ModelPullRequest(NonBlankTextModel):
     model: str = Field(min_length=1, max_length=200)
+    # Present for clients that want safe request replay after losing HTTP 202.
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ModelDownloadRequest(APIModel):
@@ -386,6 +388,7 @@ class ModelDownloadRequest(APIModel):
     url: str | None = Field(default=None, max_length=2000)
     repo_id: str | None = Field(default=None, max_length=200, pattern=r"^[\w.\-]+/[\w.\-]+$")
     filename: str | None = Field(default=None, max_length=255)
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("url", "repo_id", "filename")
     @classmethod
