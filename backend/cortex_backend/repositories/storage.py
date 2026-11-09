@@ -314,6 +314,28 @@ def _migrate_to_v6(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v7(connection: sqlite3.Connection) -> None:
+    """Journal a generation admission in the transaction inserting its user turn.
+
+    The in-memory job registry may be lost during shutdown after the SQLite
+    message commit. A durable owner/request mapping survives the restart.
+    """
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS generation_admissions (
+            owner TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            user_message_id TEXT NOT NULL,
+            PRIMARY KEY (owner, request_id)
+        )
+    """)
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generation_admissions_thread "
+        "ON generation_admissions(thread_id)"
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
@@ -321,6 +343,7 @@ _MIGRATIONS: dict[int, Migration] = {
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 
@@ -367,7 +390,7 @@ def _content_digest(path: str, *, at_rest: bool = False) -> str | None:
 
 class DatabaseManager:
     """Manages the persistence of chat conversations to a local SQLite database."""
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(
         self,
@@ -1539,6 +1562,16 @@ class DatabaseManager:
                 cause=exc,
             ) from exc
 
+    def get_generation_admission(self, owner: str, request_id: str) -> dict | None:
+        """Find the committed user turn of an admission across process restarts."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT owner, request_id, fingerprint, thread_id, user_message_id "
+                "FROM generation_admissions WHERE owner = ? AND request_id = ?",
+                (owner, request_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def add_message(
         self,
         thread_id: str,
@@ -1551,12 +1584,15 @@ class DatabaseManager:
         thread_title: str | None = None,
         expected_revision: int | None = None,
         original_content: str | None = None,
+        generation_admission: tuple[str, str, str] | None = None,
     ):
         """Adds a new message to a specific chat thread.
 
         ``original_content`` is an assistant answer as the model wrote it, when
         ``content`` holds a translation of it (see ``_migrate_to_v5``).
         """
+        if generation_admission is not None and role != "user":
+            raise ValueError("Only user turns can carry a generation admission.")
         try:
             if role != "assistant":
                 thoughts = None
@@ -1590,13 +1626,22 @@ class DatabaseManager:
                     original_content,
                     _utc_now_iso()
                 ))
-                # Update the thread's main timestamp to reflect recent activity,
-                # and move its revision so anyone holding the old one is stale.
+                message_id = str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                if generation_admission is not None:
+                    owner, request_id, fingerprint = generation_admission
+                    # A duplicate owner/request ID rolls back the ENTIRE
+                    # transaction, including the newly inserted user turn.
+                    conn.execute(
+                        "INSERT INTO generation_admissions "
+                        "(owner, request_id, fingerprint, thread_id, user_message_id) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (owner, request_id, fingerprint, thread_id, message_id),
+                    )
                 conn.execute(
                     "UPDATE threads SET timestamp = ?, revision = revision + 1 WHERE id = ?",
                     (_utc_now_iso(), thread_id)
                 )
-                return str(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                return message_id
         except PersistenceError as exc:
             if exc.operation in ("chat_revision_conflict", "chat_not_found"):
                 raise

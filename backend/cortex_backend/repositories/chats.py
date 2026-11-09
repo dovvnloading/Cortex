@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Protocol
@@ -38,6 +39,16 @@ class ChatNotFound(ChatRepositoryError):
 
 class MessageNotFound(ChatRepositoryError):
     """The referenced message does not exist in its chat."""
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationAdmission:
+    """The durable owner-scoped request-to-message association."""
+    owner: str
+    request_id: str
+    fingerprint: str
+    thread_id: str
+    user_message_id: str
 
 
 def _assistant_thoughts(role: str, thoughts: str | None) -> str | None:
@@ -140,6 +151,17 @@ class ChatRepository(Protocol):
         thread_title: str | None = None,
         expected_revision: int | None = None,
         original_content: str | None = None,
+    ) -> str: ...
+
+    def get_generation_admission(
+        self, owner: str, request_id: str
+    ) -> GenerationAdmission | None: ...
+
+    def append_generation_turn(
+        self, thread_id: str, content: str, *,
+        owner: str, request_id: str, fingerprint: str,
+        attachments: list[dict[str, Any]] | None,
+        expected_revision: int, thread_title: str | None,
     ) -> str: ...
 
     def rename_chat(self, thread_id: str, title: str) -> None: ...
@@ -261,6 +283,27 @@ class LegacyDatabaseChatRepository:
             return str(messages[-1].get("id", len(messages) - 1))
         return str(result)
 
+    def get_generation_admission(
+        self, owner: str, request_id: str
+    ) -> GenerationAdmission | None:
+        stored = self._database.get_generation_admission(owner, request_id)
+        return GenerationAdmission(**stored) if stored is not None else None
+
+    def append_generation_turn(
+        self, thread_id: str, content: str, *,
+        owner: str, request_id: str, fingerprint: str,
+        attachments: list[dict[str, Any]] | None,
+        expected_revision: int, thread_title: str | None,
+    ) -> str:
+        # The adapter passes this key to the database's transactional insert:
+        # persisting the request mapping later would recreate the crash window.
+        return self.add_message(
+            thread_id, "user", content,
+            attachments=attachments, expected_revision=expected_revision,
+            thread_title=thread_title,
+            generation_admission=(owner, request_id, fingerprint),
+        )
+
     def rename_chat(self, thread_id: str, title: str) -> None:
         try:
             self._database.update_chat_title(thread_id, title)
@@ -337,6 +380,7 @@ class InMemoryChatRepository:
         self._lock = RLock()
         self._chats: dict[str, dict[str, Any]] = {}
         self._groups: dict[str, dict[str, Any]] = {}
+        self._generation_admissions: dict[tuple[str, str], GenerationAdmission] = {}
         self._next_message_id = 1
         for chat in chats or []:
             copied = deepcopy(chat)
@@ -544,6 +588,31 @@ class InMemoryChatRepository:
             )
             chat["timestamp"] = self._timestamp()
             chat["revision"] += 1
+            return message_id
+
+    def get_generation_admission(
+        self, owner: str, request_id: str
+    ) -> GenerationAdmission | None:
+        with self._lock:
+            return self._generation_admissions.get((owner, request_id))
+
+    def append_generation_turn(
+        self, thread_id: str, content: str, *,
+        owner: str, request_id: str, fingerprint: str,
+        attachments: list[dict[str, Any]] | None,
+        expected_revision: int, thread_title: str | None,
+    ) -> str:
+        with self._lock:
+            key = (owner, request_id)
+            if key in self._generation_admissions:
+                raise ChatRevisionConflict("This generation request was already committed.")
+            message_id = self.add_message(
+                thread_id, "user", content, attachments=attachments,
+                thread_title=thread_title, expected_revision=expected_revision,
+            )
+            self._generation_admissions[key] = GenerationAdmission(
+                owner, request_id, fingerprint, thread_id, message_id,
+            )
             return message_id
 
     def rename_chat(self, thread_id: str, title: str) -> None:

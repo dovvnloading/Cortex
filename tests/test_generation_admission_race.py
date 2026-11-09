@@ -203,14 +203,13 @@ def test_generation_admission_never_reads_overview_after_committing_user_turn(
     """
     dependencies = build_demo_dependencies()
     chats = dependencies.chats
-    original_add = chats.add_message
+    original_append = chats.append_generation_turn
     original_overview = chats.get_chat_overview
     committed = {"value": False}
 
-    def add_message(*args, **kwargs):
-        result = original_add(*args, **kwargs)
-        if len(args) > 1 and args[1] == "user":
-            committed["value"] = True
+    def append_generation_turn(*args, **kwargs):
+        result = original_append(*args, **kwargs)
+        committed["value"] = True
         return result
 
     def overview(thread_id):
@@ -218,7 +217,7 @@ def test_generation_admission_never_reads_overview_after_committing_user_turn(
             raise AssertionError("generation admission read after durable user insert")
         return original_overview(thread_id)
 
-    monkeypatch.setattr(chats, "add_message", add_message)
+    monkeypatch.setattr(chats, "append_generation_turn", append_generation_turn)
     monkeypatch.setattr(chats, "get_chat_overview", overview)
     if existing_thread:
         chats.create_chat(THREAD_ID, "Existing")
