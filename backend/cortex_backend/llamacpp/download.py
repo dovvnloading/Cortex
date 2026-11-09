@@ -8,7 +8,9 @@ afterward, so there is no separate download-tracking state to maintain.
 from __future__ import annotations
 
 import errno
+import hashlib
 import ipaddress
+import json
 import logging
 import os
 import queue
@@ -85,6 +87,12 @@ _SPLIT_NAME_PATTERN = re.compile(
     r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})(?P<suffix>\.gguf)$", re.IGNORECASE
 )
 _MAX_SPLIT_PARTS = 256
+# A compact on-disk intent is fsynced before *any* split shard is published.
+# It contains only names, stable file identities and a request digest, never
+# signed download URLs or bearer tokens. The cap prevents unbounded JSON reads.
+_SPLIT_JOURNAL_PATTERN = re.compile(r"^\.split-publish-[0-9a-f]{32}\.json$")
+_SPLIT_STAGING_PATTERN = re.compile(r"^\.download-[0-9a-f]{32}\.part$")
+_MAX_SPLIT_JOURNAL_BYTES = 192 * 1024
 _HF_BLOB_URL_PATTERN = re.compile(r"^(https://huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
 # The one host that ever receives a Hugging Face access token. Its file CDN
 # (``cdn-lfs.huggingface.co`` and friends) is deliberately a different host and
@@ -725,6 +733,16 @@ def download_gguf_set(
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
     destinations = [directory / name for name in names]
+    # A previous Cortex process may have died after publishing shard one.
+    # Its fsynced journal predates that publication and proves exactly which
+    # regular files belong to the interrupted attempt. Reconcile only an
+    # *identical* request; never delete an unrelated model that took a name.
+    recovered = _recover_split_publication(parts, directory)
+    if recovered is not None:
+        reporter = _ProgressReporter(progress_callback or (lambda progress: None), names[0])
+        reporter.starting()
+        reporter.success(sum(path.stat().st_size for path in recovered))
+        return recovered
     if any(destination.exists() for destination in destinations):
         raise GGUFDownloadError(
             "A file of this split model already exists in the models folder; refusing to overwrite it."
@@ -735,6 +753,8 @@ def download_gguf_set(
     published: list[tuple[Path, tuple[int, int, int, int] | None]] = []
     fetched_bytes = 0
     complete = False
+    publication_journal: Path | None = None
+    journal_identities: list[tuple[int, int, int, int]] = []
     try:
         for position, (url, _name) in enumerate(parts):
             staging_path = directory / f".download-{uuid4().hex}.part"
@@ -752,12 +772,24 @@ def download_gguf_set(
             _validate_gguf_file(staging_path)
             _raise_if_cancelled(cancellation_event)
             fetched_bytes += staging_path.stat().st_size
-        for staging_path, destination in zip(staged, destinations, strict=True):
+        # The record must be durable BEFORE the first _publish(): a process
+        # death cannot run the in-memory finally/rollback below. Fail closed
+        # on filesystems that cannot identify our own files after a restart.
+        for staging_path in staged:
+            identity = _file_identity(staging_path)
+            if identity is None:
+                raise GGUFDownloadError(
+                    "This filesystem cannot safely recover an interrupted split-model publication."
+                )
+            journal_identities.append(identity)
+        _raise_if_cancelled(cancellation_event)
+        publication_journal = _write_split_publication_journal(
+            parts, staged, journal_identities, directory
+        )
+        for staging_path, destination, original_identity in zip(
+            staged, destinations, journal_identities, strict=True
+        ):
             _raise_if_cancelled(cancellation_event)
-            # Capture the identity while this is still our private staged file.
-            # Reading the destination *after* publication could accidentally
-            # capture another writer's replacement instead.
-            original_identity = _file_identity(staging_path)
             _publish(staging_path, destination, allow_overwrite=False)
             published.append((destination, original_identity))
             _raise_if_cancelled(cancellation_event)
@@ -773,7 +805,159 @@ def download_gguf_set(
                 _rollback_published(path, original_identity)
         for path in staged:
             _remove_quietly(path)
+        # If a rollback itself could not isolate an owned file (e.g. an AV
+        # lock on Windows), leave the journal to recover it on the next retry.
+        # A success may also leave a journal if removal is denied; reconciliation
+        # recognizes the complete set without retransferring any shard.
+        if publication_journal is not None and (
+            complete or not any(
+                _file_identity(path) == original_identity
+                for path, original_identity in published
+            )
+        ):
+            _remove_quietly(publication_journal)
     return tuple(destinations)
+
+
+def _split_request_digest(parts: Sequence[tuple[str, str]]) -> str:
+    """Bind recovery to the exact URLs and shard names without storing URLs."""
+    serialized = json.dumps(
+        list(parts), separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _write_split_publication_journal(
+    parts: Sequence[tuple[str, str]],
+    staged: Sequence[Path],
+    identities: Sequence[tuple[int, int, int, int]],
+    directory: Path,
+) -> Path:
+    """Atomically publish a durable owner-identity list before the first shard.
+
+    A failed journal write aborts publication, rather than leaving a partial
+    model with no provenance. On Windows/FAT use the same no-overwrite fallback
+    as ordinary model publication; never clobber a competing journal.
+    """
+    token = uuid4().hex
+    temporary = directory / f".split-publish-{token}.tmp"
+    journal = directory / f".split-publish-{token}.json"
+    payload = {
+        "version": 1,
+        "request_digest": _split_request_digest(parts),
+        "entries": [
+            {"name": name, "staging": source.name, "identity": list(identity)}
+            for (_url, name), source, identity in zip(parts, staged, identities, strict=True)
+        ],
+    }
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as destination:
+            json.dump(payload, destination, ensure_ascii=True, separators=(",", ":"))
+            destination.flush()
+            os.fsync(destination.fileno())
+        # Like _publish, a hard link is an atomic no-replace write. On
+        # filesystems without hard links, use the strict no-replace move.
+        try:
+            os.link(temporary, journal)
+        except OSError:
+            _move_no_replace(temporary, journal)
+        return journal
+    finally:
+        _remove_quietly(temporary)
+
+
+def _read_matching_split_journal(
+    path: Path,
+    parts: Sequence[tuple[str, str]],
+    directory: Path,
+) -> list[tuple[Path, Path, tuple[int, int, int, int]]] | None:
+    """Validate an untrusted, bounded manifest before acting on any path."""
+    if _SPLIT_JOURNAL_PATTERN.fullmatch(path.name) is None:
+        return None
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not (0 < info.st_size <= _MAX_SPLIT_JOURNAL_BYTES):
+            return None
+        contents = path.read_bytes()
+        if len(contents) > _MAX_SPLIT_JOURNAL_BYTES:
+            return None
+        manifest = json.loads(contents)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+        return None
+    if manifest.get("request_digest") != _split_request_digest(parts):
+        return None
+    entries = manifest.get("entries")
+    if not isinstance(entries, list) or len(entries) != len(parts):
+        return None
+    verified: list[tuple[Path, Path, tuple[int, int, int, int]]] = []
+    used_staging: set[str] = set()
+    for entry, (_url, name) in zip(entries, parts, strict=True):
+        if not isinstance(entry, dict) or entry.get("name") != name:
+            return None
+        stage_name = entry.get("staging")
+        identity_values = entry.get("identity")
+        if (
+            not isinstance(stage_name, str)
+            or _SPLIT_STAGING_PATTERN.fullmatch(stage_name) is None
+            or stage_name in used_staging
+            or not isinstance(identity_values, list)
+            or len(identity_values) != 4
+            or not all(type(value) is int and value >= 0 for value in identity_values)
+            or identity_values[1] == 0
+        ):
+            return None
+        used_staging.add(stage_name)
+        identity = tuple(identity_values)
+        verified.append((directory / name, directory / stage_name, identity))
+    return verified
+
+
+def _recover_split_publication(
+    parts: Sequence[tuple[str, str]], directory: Path,
+) -> tuple[Path, ...] | None:
+    """Reconcile a crashed publication only when it was this exact request.
+
+    All shards must match our pre-publication identity for the set to count as
+    complete. Otherwise roll back only our old regular files using the same
+    race-safe quarantine check as cancellation, then allow a clean re-download.
+    Unknown/replaced files remain untouched and the normal collision guard
+    refuses to overwrite them.
+    """
+    candidates: list[tuple[Path, list[tuple[Path, Path, tuple[int, int, int, int]]]]] = []
+    try:
+        journals = sorted(directory.glob(".split-publish-*.json"))
+    except OSError:
+        journals = []
+    for journal in journals:
+        record = _read_matching_split_journal(journal, parts, directory)
+        if record is not None:
+            candidates.append((journal, record))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        raise GGUFDownloadError(
+            "Multiple interrupted publications match this split model; review the model folder before retrying."
+        )
+    journal, record = candidates[0]
+    complete = all(_file_identity(target) == identity for target, _stage, identity in record)
+    if not complete:
+        for target, _stage, identity in record:
+            if _file_identity(target) == identity:
+                _rollback_published(target, identity)
+        if any(_file_identity(target) == identity for target, _stage, identity in record):
+            raise GGUFDownloadError(
+                "An interrupted split download could not be rolled back safely. "
+                "Close any program using its shards and retry."
+            )
+    for _target, stage, identity in record:
+        if _file_identity(stage) == identity:
+            _remove_quietly(stage)
+    _remove_quietly(journal)
+    if complete:
+        return tuple(target for target, _stage, _identity in record)
+    return None
 
 
 def _raise_if_cancelled(cancellation_event: Event | None) -> None:
