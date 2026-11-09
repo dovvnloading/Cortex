@@ -163,6 +163,52 @@ def test_replay_after_answer_saved_returns_original_answer_without_generating_ag
         assert client.get(f"/api/v1/chats/{thread_id}", headers=headers).json() == original_chat
 
 
+def test_existing_terminal_replay_does_not_prune_itself_during_reservation() -> None:
+    """A replay of a retained record must not force the pruning that erases it."""
+    from cortex_backend.api.jobs import JobRegistry
+
+    chats = InMemoryChatRepository()
+    app = _app_with_chats(chats)
+    app.state.jobs = JobRegistry(max_terminal_jobs=1)
+    payloads = [
+        {"request_id": "terminal-before-prune", "user_input": "Original answer"},
+        {"request_id": "different-terminal", "user_input": "Other answer"},
+    ]
+    original = None
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        for payload in payloads:
+            started = client.post("/api/v1/generations", json=payload, headers=headers)
+            assert started.status_code == 202
+            if original is None:
+                original = started.json()
+            with client.stream(
+                "GET", f"/api/v1/generations/{started.json()['job_id']}/events",
+                headers=headers,
+            ) as response:
+                events = parse_sse_events("".join(response.iter_text()))
+            assert events[-1]["event"] == "generation.completed"
+
+        assert original is not None
+        # Only the THIRD reserve triggers pruning at a one-terminal limit;
+        # a plain lookup still sees the first completed job before replay.
+        assert app.state.jobs.request_snapshot(
+            kind="generation", owner=OWNER, request_id=payloads[0]["request_id"],
+        ) is not None
+        before = client.get(
+            f"/api/v1/chats/{original['thread_id']}", headers=headers,
+        ).json()
+
+        replay = client.post("/api/v1/generations", json=payloads[0], headers=headers)
+        assert replay.status_code == 202
+        assert replay.json()["job_id"] == original["job_id"]
+        assert replay.json()["thread_id"] == original["thread_id"]
+        assert replay.json()["user_message_id"] == original["user_message_id"]
+        assert client.get(
+            f"/api/v1/chats/{original['thread_id']}", headers=headers,
+        ).json() == before
+
+
 def test_pruning_a_completed_job_does_not_expire_the_durable_replay_key() -> None:
     """A bounded in-memory job log must not turn a replay into a second chat."""
     from cortex_backend.api.jobs import JobRegistry
