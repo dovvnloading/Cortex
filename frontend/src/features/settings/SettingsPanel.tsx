@@ -153,6 +153,10 @@ export function SettingsPanel({
   const [draft, setDraft] = useState(settings);
   const [baseline, setBaseline] = useState(settings);
   const [section, setSection] = useState<SettingsSection>("general");
+  // A separate editor holds permanent-memory changes that must be protected
+  // by the SAME route and beforeunload guard as the settings document.
+  // null = clean; [] = unsaved removal of every remembered fact.
+  const [pendingMemoryEdits, setPendingMemoryEdits] = useState<string[] | null>(null);
   // Adopt fields changed elsewhere while keeping local edits. This happens
   // while rendering rather than in an effect so that `dirty` below is never
   // computed against a draft that has not caught up: an effect would show
@@ -173,7 +177,8 @@ export function SettingsPanel({
   const ggufOperationsBusy = unknownBusy
     || (modelBusy && activeModelJobKind === "gguf_download")
     || secondaryKinds.includes("gguf_download");
-  const dirty = !valuesEqual(draft, settings);
+  const settingsDirty = !valuesEqual(draft, settings);
+  const dirty = settingsDirty || pendingMemoryEdits !== null;
   const dirtyRef = useRef(dirty);
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -293,16 +298,22 @@ export function SettingsPanel({
 
   const saveAndLeave = async () => {
     setLeaveSaving(true);
-    let saved: boolean;
+    let saved = false;
     try {
-      // `undefined` is a save that reported nothing; only an explicit null failed.
-      saved = (await saveDraft()) !== null;
+      // Permanent memory and settings use independent CAS documents. Save the
+      // memory draft first, and never proceed to an unchanged settings PUT.
+      // On a memory conflict/failed write, KEEP the editor and its pending
+      // rows mounted; the workspace callback reports the conflict.
+      if (!memoryBusy) {
+        if (pendingMemoryEdits !== null) await onReplaceMemory(pendingMemoryEdits);
+        // `undefined` is a successful legacy onSave result; null means failure.
+        saved = !settingsDirty || (await saveDraft()) !== null;
+      }
     } catch {
       saved = false;
     } finally {
       setLeaveSaving(false);
     }
-    // A failed save leaves the edits on screen; the caller has already said why.
     settleLeave(saved);
   };
 
@@ -440,8 +451,14 @@ export function SettingsPanel({
             </section>
           )}
 
-          {section === "memory" && (
-            <section className="settings-section" aria-labelledby="memory-settings-title">
+          {/* Keep the memory editor mounted across tab changes so its unsaved
+              edits cannot disappear when the user temporarily views General. */}
+          <section
+            className="settings-section"
+            aria-labelledby="memory-settings-title"
+            hidden={section !== "memory"}
+            style={section !== "memory" ? { display: "none" } : undefined}
+          >
               <div className="section-heading">
                 <p className="eyebrow">MEMORY</p>
                 <h3 id="memory-settings-title">Permanent memory</h3>
@@ -450,9 +467,8 @@ export function SettingsPanel({
                 <span><strong>Use permanent memory</strong><small>Allow relevant saved facts in generation context.</small></span>
                 <input id="memory-enabled" type="checkbox" checked={memory.enabled ?? true} onChange={(event) => update({ memory: { ...memory, enabled: event.target.checked } })} />
               </label>
-              <MemoryPanel memos={memos} load={memoryLoad} onRetry={onRetryMemory} busy={memoryBusy} onAdd={onAddMemory} onReplace={onReplaceMemory} onClear={onClearMemory} />
-            </section>
-          )}
+              <MemoryPanel memos={memos} load={memoryLoad} onRetry={onRetryMemory} busy={memoryBusy} onAdd={onAddMemory} onReplace={onReplaceMemory} onClear={onClearMemory} onPendingChange={setPendingMemoryEdits} />
+          </section>
 
           {section === "translation" && (
             <section className="settings-section" aria-labelledby="translation-settings-title">
@@ -536,7 +552,7 @@ export function SettingsPanel({
 
       <footer className="settings-dialog-footer">
         <button className="button button-secondary" type="button" onClick={onClose}>Close</button>
-        <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving || !dirty}>
+        <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving || !settingsDirty}>
           <Save aria-hidden="true" size={16} /> {saving ? "Saving..." : "Save settings"}
         </button>
       </footer>
@@ -546,7 +562,7 @@ export function SettingsPanel({
           <DialogContent>
             <AlertDialog.Title>Save your changes?</AlertDialog.Title>
             <AlertDialog.Description className="delete-dialog-description">
-              You have unsaved changes to your settings. Leaving now would discard them.
+              You have unsaved settings or permanent memory changes. Leaving now would discard them.
             </AlertDialog.Description>
             <div className="dialog-actions">
               <button type="button" className="button button-secondary" onClick={() => settleLeave(false)} disabled={leaveSaving}>Keep editing</button>
