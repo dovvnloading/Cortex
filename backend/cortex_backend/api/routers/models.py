@@ -21,6 +21,7 @@ from cortex_backend.api.routes import (
     _load_settings,
     _model_response,
     _model_sets,
+    _request_fingerprint,
 )
 from cortex_backend.api.schemas import (
     HuggingFaceFileEntry,
@@ -123,6 +124,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 owner=_durable_owner(principal),
                 thread_id=None,
                 runner=runner,
+                request_id=payload.request_id,
+                request_fingerprint=(
+                    _request_fingerprint("ollama_model_pull", payload)
+                    if payload.request_id is not None else None
+                ),
             )
         except JobRegistryClosed as exc:
             raise HTTPException(
@@ -278,6 +284,11 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 owner=_durable_owner(principal),
                 thread_id=None,
                 runner=runner,
+                request_id=payload.request_id,
+                request_fingerprint=(
+                    _request_fingerprint("gguf_download", payload)
+                    if payload.request_id is not None else None
+                ),
             )
         except JobRegistryClosed as exc:
             raise HTTPException(
