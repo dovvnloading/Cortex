@@ -18,7 +18,7 @@ import {
   SeedField,
   type GenerationPatch,
 } from "../generation/GenerationControls";
-import type { ActiveModelJob, ModelProgress } from "../../stores/useModelStore";
+import type { ActiveModelJob, ModelJobKind, ModelProgress } from "../../stores/useModelStore";
 import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
 import type { ListGGUFFiles } from "../models/GGUFDownloadForm";
 import { ModelsPanel } from "../models/ModelsPanel";
@@ -43,6 +43,8 @@ export type SettingsPanelProps = {
   onClearMemory: (expectedMemos: string[]) => Promise<void>;
   models: ModelResponse;
   modelBusy: boolean;
+  /** Kind of the primary model operation, if one is currently followed. */
+  activeModelJobKind?: ModelJobKind | null;
   modelProgress: ModelProgress | null;
   secondaryModelJobs?: Record<string, ActiveModelJob>;
   secondaryModelProgress?: Record<string, ModelProgress>;
@@ -134,6 +136,7 @@ export function SettingsPanel({
   onClearMemory,
   models,
   modelBusy,
+  activeModelJobKind = null,
   modelProgress,
   secondaryModelJobs,
   secondaryModelProgress,
@@ -158,6 +161,18 @@ export function SettingsPanel({
     setBaseline(settings);
     setDraft(mergeChangedValues(draft, baseline, settings));
   }
+  // A download and an Ollama check/pull use independent backend job kinds.
+  // The global spinner is still used by the progress rows, but it must not
+  // disable an unrelated operation in Settings. During an unknown pre-admit
+  // state conservatively keep both unavailable until a kind is known.
+  const secondaryKinds = Object.values(secondaryModelJobs ?? {}).map((job) => job.kind);
+  const unknownBusy = modelBusy && activeModelJobKind === null && secondaryKinds.length === 0;
+  const modelOperationsBusy = unknownBusy
+    || (modelBusy && activeModelJobKind === "models")
+    || secondaryKinds.includes("models");
+  const ggufOperationsBusy = unknownBusy
+    || (modelBusy && activeModelJobKind === "gguf_download")
+    || secondaryKinds.includes("gguf_download");
   const dirty = !valuesEqual(draft, settings);
   const dirtyRef = useRef(dirty);
   useEffect(() => {
@@ -460,19 +475,19 @@ export function SettingsPanel({
                       <Select id="translation-model" aria-labelledby="translation-model-label" value={selectedTranslationModel} options={modelOptions} placeholder={`${configuredTranslationModel} is not installed`} onChange={(translationModel) => update({ models: { ...modelSettings, translation: translationModel } })} />
                     </div>
                   ) : <p className="field-error">Install a local model before enabling translation.</p>}
-                  {!installedModels.includes(DEFAULT_TRANSLATION_MODEL) && <div className={`translation-install${modelBusy ? " translation-install-active" : ""}`}>
+                  {!installedModels.includes(DEFAULT_TRANSLATION_MODEL) && <div className={`translation-install${modelOperationsBusy ? " translation-install-active" : ""}`}>
                     <span><strong>Default translation model</strong><small>{DEFAULT_TRANSLATION_MODEL} is optional and is only used when translation is enabled.</small></span>
                     <button
                       className="button button-secondary translation-install-button"
                       type="button"
                       onClick={() => void onPullModel(DEFAULT_TRANSLATION_MODEL)}
-                      disabled={modelBusy}
-                      aria-busy={modelBusy}
+                      disabled={modelOperationsBusy}
+                      aria-busy={modelOperationsBusy}
                     >
-                      {modelBusy && <span className="loading-spinner button-loading-spinner" aria-hidden="true" />}
-                      {modelBusy ? (modelProgress?.model === DEFAULT_TRANSLATION_MODEL ? "Installing…" : "Working…") : "Install default"}
+                      {modelOperationsBusy && <span className="loading-spinner button-loading-spinner" aria-hidden="true" />}
+                      {modelOperationsBusy ? (modelProgress?.model === DEFAULT_TRANSLATION_MODEL ? "Installing…" : "Working…") : "Install default"}
                     </button>
-                    {modelBusy && (
+                    {modelOperationsBusy && (
                       <div className="translation-install-status" role="status" aria-label="Model installation status" aria-live="polite">
                         <span className="loading-spinner translation-install-status-spinner" aria-hidden="true" />
                         <span className="translation-install-status-copy">
@@ -491,6 +506,7 @@ export function SettingsPanel({
             <ModelsPanel
               models={models}
               busy={modelBusy}
+              modelsBusy={modelOperationsBusy}
               progress={modelProgress}
               secondaryJobs={secondaryModelJobs}
               secondaryProgress={secondaryModelProgress}
@@ -503,7 +519,7 @@ export function SettingsPanel({
                 directoryDirty: (modelSettings.gguf_directory ?? "") !== (settings.models?.gguf_directory ?? ""),
                 onDirectoryChange: (value) => update({ models: { ...modelSettings, gguf_directory: value || null } }),
                 onDownload: onDownloadGGUF,
-                busy: modelBusy,
+                busy: ggufOperationsBusy,
                 onListFiles: onListHuggingFaceFiles,
               }}
               runtime={{
