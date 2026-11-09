@@ -208,7 +208,7 @@ def _regenerate(seeded: _Seeded, message_id: str, **extra: object) -> httpx.Resp
 def _fork_an_unknown_message(seeded: _Seeded) -> httpx.Response:
     return seeded.client.post(
         f"/api/v1/chats/{seeded.thread_id}/forks",
-        json={"message_id": "no-such-message"},
+        json={"message_id": "no-such-message", "request_id": "fork-unknown-message"},
         headers=seeded.headers,
     )
 
