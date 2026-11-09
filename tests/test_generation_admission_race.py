@@ -191,6 +191,59 @@ def test_sequential_exact_generation_replay_retains_acceptance_metadata():
         )
 
 
+@pytest.mark.parametrize("existing_thread", [False, True])
+def test_generation_admission_never_reads_overview_after_committing_user_turn(
+    monkeypatch: pytest.MonkeyPatch, existing_thread: bool
+):
+    """No failure-prone read may run after add_message has committed.
+
+    A post-commit overview failure once aborted the request-id reservation even
+    though the user turn already existed. The same replay then duplicated a new
+    chat or failed with stale_revision on an existing one.
+    """
+    dependencies = build_demo_dependencies()
+    chats = dependencies.chats
+    original_add = chats.add_message
+    original_overview = chats.get_chat_overview
+    committed = {"value": False}
+
+    def add_message(*args, **kwargs):
+        result = original_add(*args, **kwargs)
+        if len(args) > 1 and args[1] == "user":
+            committed["value"] = True
+        return result
+
+    def overview(thread_id):
+        if committed["value"]:
+            raise AssertionError("generation admission read after durable user insert")
+        return original_overview(thread_id)
+
+    monkeypatch.setattr(chats, "add_message", add_message)
+    monkeypatch.setattr(chats, "get_chat_overview", overview)
+    if existing_thread:
+        chats.create_chat(THREAD_ID, "Existing")
+    payload = {
+        "request_id": f"postcommit-overview-{existing_thread}",
+        "user_input": "Calculate 2 + 2",
+        "base_revision": 0,
+    }
+    if existing_thread:
+        payload["thread_id"] = THREAD_ID
+
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        accepted = client.post("/api/v1/generations", json=payload, headers=headers)
+        assert accepted.status_code == 202, accepted.text
+        assert committed["value"]
+        replay = client.post("/api/v1/generations", json=payload, headers=headers)
+        assert replay.status_code == 202, replay.text
+        assert replay.json()["job_id"] == accepted.json()["job_id"]
+        assert replay.json()["thread_id"] == accepted.json()["thread_id"]
+        assert replay.json()["user_message_id"] == accepted.json()["user_message_id"]
+        assert len(chats.list_summaries()) == 1
+
+
 def test_generation_retry_replays_after_model_inventory_changes():
     ollama_state = FakeOllamaState()
     app = create_app(
