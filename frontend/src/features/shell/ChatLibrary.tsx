@@ -116,8 +116,12 @@ export function ChatLibrary({
                   type="button"
                   // Explicit, so the control announces the action rather than
                   // reading out "Research 3" from its own contents.
-                  aria-label={`${collapsed ? "Expand" : "Collapse"} ${group.name}`}
+                  aria-label={searching
+                    ? `${group.name} is expanded for search`
+                    : `${collapsed ? "Expand" : "Collapse"} ${group.name}`}
+                  title={searching ? "Search results stay expanded. Clear the search to change this preference." : undefined}
                   aria-expanded={!collapsed}
+                  disabled={searching}
                   onClick={() => onToggleGroup(group.id, !collapsed)}
                 >
                   <ChevronRight className="chat-group-chevron" aria-hidden="true" size={13} />
