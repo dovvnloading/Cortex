@@ -47,7 +47,6 @@ from cortex_backend.core.settings import (
 )
 from cortex_backend.repositories.chats import (
     ChatNotFound,
-    ChatRepositoryError,
 )
 from cortex_backend.repositories.settings import (
     SettingsMigrationReport,
@@ -556,12 +555,12 @@ async def _start_generation_job(
                     "This chat changed. Reload it before generating again.",
                     code="stale_revision",
                 ) from exc
-            # Only the revision is needed here, so read the overview
-            # rather than every message of what may be a long thread.
-            overview = deps.chats.get_chat_overview(thread_id)
-            if overview is None:
-                raise ChatRepositoryError("Chat did not persist the user message.")
-            prepared_revision = int(overview["revision"])
+            # add_message atomically appends exactly one message and increments
+            # the guarded revision by one (both memory and SQLite repositories).
+            # Do not issue a separate fallible read after that durable commit:
+            # an exception there aborts the request-id reservation even though
+            # the user turn already exists, so a replay duplicates the chat.
+            prepared_revision = admission_revision + 1
             # The service pops a trailing user turn as the one being answered,
             # which is what it did when it re-read the transcript after this
             # write. Ending on a stand-in for that turn keeps an earlier
