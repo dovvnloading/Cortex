@@ -126,6 +126,46 @@ def test_a_malformed_host_header_is_a_400_not_a_500(app_factory_client, raw_host
     )
 
 
+
+@pytest.mark.parametrize(
+    "raw_origin",
+    [
+        "http://[",
+        "http://[::1",
+        "http://[::1]evil.com",
+        "http://localhost:not-a-port",
+        "http://127.0.0.1:70000",
+        "http://127.0.0.1:0",
+        "http://user@localhost",
+        "http://localhost/evil",
+    ],
+)
+def test_malformed_origin_is_a_403_not_an_unhandled_500(
+    app_factory_client, raw_origin: str,
+) -> None:
+    """Origin is checked before auth, so untrusted parser errors must be safe."""
+    response = app_factory_client.get(
+        "/api/v1/health/live",
+        headers={"Host": "127.0.0.1", "Origin": raw_origin},
+    )
+    assert response.status_code == 403, f"Origin {raw_origin!r}: {response.text}"
+    assert response.json()["detail"] == "invalid local origin"
+
+
+@pytest.mark.parametrize(
+    "raw_origin",
+    ["http://127.0.0.1:8000", "http://localhost:5173", "http://[::1]:8080"],
+)
+def test_valid_local_origins_are_still_accepted(
+    app_factory_client, raw_origin: str,
+) -> None:
+    response = app_factory_client.get(
+        "/api/v1/health/live",
+        headers={"Host": "127.0.0.1", "Origin": raw_origin},
+    )
+    assert response.status_code == 200, f"Origin {raw_origin!r}: {response.text}"
+
+
 def test_an_out_of_range_last_event_id_is_refused_before_the_stream_opens(app_factory_client) -> None:
     """SQLite cannot bind above 2**63-1.
 

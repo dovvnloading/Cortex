@@ -215,9 +215,32 @@ class SessionManager:
             )
         origin = request.headers.get("origin")
         if origin:
-            parsed = urlsplit(origin)
-            origin_host = (parsed.hostname or "").lower()
-            if parsed.scheme != "http" or origin_host not in self._allowed_hosts:
+            try:
+                parsed = urlsplit(origin)
+                origin_host = (parsed.hostname or "").lower()
+                # Accessing .port validates that it is numeric and <= 65535,
+                # which urlsplit alone does not. Bracketed hosts need the same
+                # strict authority check used for Host on older Python builds.
+                origin_port = parsed.port
+                malformed_brackets = parsed.netloc.startswith("[") and (
+                    _BRACKETED_AUTHORITY.fullmatch(parsed.netloc) is None
+                )
+                userinfo = parsed.username is not None or parsed.password is not None
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="invalid local origin",
+                ) from None
+            if (
+                parsed.scheme != "http"
+                or origin_host not in self._allowed_hosts
+                or (origin_port is not None and origin_port == 0)
+                or malformed_brackets
+                or userinfo
+                or parsed.path not in ("", "/")
+                or parsed.query
+                or parsed.fragment
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="invalid local origin",
