@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
+import { registerNavigationGuard } from "../../lib/navigation";
 import { AppShell } from "./AppShell";
 
 const CONNECTED = { success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>;
@@ -107,6 +108,67 @@ describe("AppShell", () => {
     fireEvent.click(link, { button: 0 });
     expect(onOpenSettings).toHaveBeenCalledOnce();
     expect(window.location.pathname).toBe("/settings");
+  });
+
+  it.each(["new thread", "saved chat"])(
+    "keeps the compact sidebar open while %s navigation is denied",
+    async (destination) => {
+      vi.stubGlobal("matchMedia", vi.fn(() => ({
+        matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      })));
+      window.history.replaceState({}, "", "/settings");
+      let release!: (allowed: boolean) => void;
+      const awaitingChoice = new Promise<boolean>((resolve) => { release = resolve; });
+      const chat: ChatSummary = {
+        id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z",
+      };
+      const view = renderShell({ chats: [chat] });
+      const unregister = registerNavigationGuard(() => awaitingChoice);
+      const user = userEvent.setup();
+      try {
+        await user.click(screen.getByRole("button", { name: "Show chat history" }));
+        const sidebar = document.querySelector(".sidebar");
+        expect(sidebar).toHaveAttribute("aria-hidden", "false");
+        await user.click(screen.getByRole("button", {
+          name: destination === "new thread" ? "New thread" : "Quarterly planning",
+        }));
+        // The modal hasn't returned a verdict; the route has not changed.
+        expect(window.location.pathname).toBe("/settings");
+        expect(sidebar).toHaveAttribute("aria-hidden", "false");
+        await act(async () => release(false));
+        expect(window.location.pathname).toBe("/settings");
+        expect(sidebar).toHaveAttribute("aria-hidden", "false");
+      } finally {
+        unregister();
+        view.unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("closes the compact sidebar after a route change has been approved", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    })));
+    window.history.replaceState({}, "", "/settings");
+    let release!: (allowed: boolean) => void;
+    const awaitingChoice = new Promise<boolean>((resolve) => { release = resolve; });
+    const view = renderShell();
+    const unregister = registerNavigationGuard(() => awaitingChoice);
+    const user = userEvent.setup();
+    try {
+      await user.click(screen.getByRole("button", { name: "Show chat history" }));
+      const sidebar = document.querySelector(".sidebar");
+      await user.click(screen.getByRole("button", { name: "New thread" }));
+      expect(sidebar).toHaveAttribute("aria-hidden", "false");
+      await act(async () => release(true));
+      await waitFor(() => expect(window.location.pathname).toBe("/chat/new"));
+      await waitFor(() => expect(sidebar).toHaveAttribute("aria-hidden", "true"));
+    } finally {
+      unregister();
+      view.unmount();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("confirms a chat delete in one step, without typing the title", async () => {

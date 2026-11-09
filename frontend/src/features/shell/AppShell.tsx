@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
@@ -58,6 +58,7 @@ export function AppShell({
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
   const [chatQuery, setChatQuery] = useState("");
+  const previousPathnameRef = useRef(pathname);
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
   const activeTitle = isSettings
@@ -82,14 +83,32 @@ export function AppShell({
     return () => compactLayout.removeEventListener("change", closeForCompactLayout);
   }, []);
 
+  // Listen for the router's *committed* navigation event, rather than
+  // closing when a link is clicked. This callback runs in response to an
+  // external event (not synchronously inside an effect), and only after the
+  // Settings guard approves the route transition.
+  useEffect(() => {
+    const onCommittedNavigation = () => {
+      const nextPathname = window.location.pathname;
+      if (previousPathnameRef.current === nextPathname) return;
+      previousPathnameRef.current = nextPathname;
+      if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches) {
+        setSidebarVisible(false);
+      }
+    };
+    window.addEventListener("cortex:navigation", onCommittedNavigation);
+    return () => window.removeEventListener("cortex:navigation", onCommittedNavigation);
+  }, []);
+
   const createChat = () => {
-    navigate("/chat/new");
-    closeSidebarOnCompactLayout();
+    if (pathname === "/chat/new") closeSidebarOnCompactLayout();
+    else navigate("/chat/new");
   };
 
   const selectChat = (id: string) => {
-    navigate(chatPath(id));
-    closeSidebarOnCompactLayout();
+    const destination = chatPath(id);
+    if (pathname === destination) closeSidebarOnCompactLayout();
+    else navigate(destination);
   };
 
   return (
