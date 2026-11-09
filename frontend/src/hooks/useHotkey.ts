@@ -40,6 +40,10 @@ export function useHotkey(key: string, withModifier: boolean, handler: () => voi
         : !event.ctrlKey && !event.metaKey && !event.altKey;
       if (!modifierMatches) return;
       if (!withModifier && isEditableTarget(event.target)) return;
+      // An open modal owns keyboard input. Plain-character shortcuts must
+      // not open a second dialog above a destructive confirmation or compete
+      // with its focus and Escape handling.
+      if (!withModifier && document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
       event.preventDefault();
       handlerRef.current();
     };
