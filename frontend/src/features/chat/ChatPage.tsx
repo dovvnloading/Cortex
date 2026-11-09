@@ -671,9 +671,13 @@ export function ChatPage({
     // for this case.
     const messages = chat?.messages;
     const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
-    const danglingUserMessageId = lastMessage?.role === "user" ? lastMessage.id ?? undefined : undefined;
-    if (danglingUserMessageId) {
-      const started = await startGeneration(lastPrompt, danglingUserMessageId, lastAttachments);
+    const recoverMessageId = lastMessage?.role === "user" || (
+      lastMessage?.role === "assistant" && lastMessage.stats?.stop_reason === "error"
+    ) ? lastMessage.id ?? undefined : undefined;
+    if (recoverMessageId) {
+      // A genuine engine fault can save an explicitly incomplete assistant
+      // answer. Retry must replace it, not append a second user question.
+      const started = await startGeneration(lastPrompt, recoverMessageId, lastAttachments);
       if (started) settle(started);
       if (started && !threadId) onThreadCreated(started.threadId);
       return Boolean(started);
