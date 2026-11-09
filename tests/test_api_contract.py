@@ -396,6 +396,63 @@ def test_generation_selects_a_live_local_model_and_translation_is_opt_in():
         )
 
 
+@pytest.mark.parametrize("storage_kind", ["memory", "sqlite"])
+def test_settings_save_does_not_report_failure_when_only_postcommit_readback_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, storage_kind: str,
+) -> None:
+    """The persisted revision is authoritative even when post-save load fails."""
+    dependencies = build_demo_dependencies()
+    if storage_kind == "sqlite":
+        from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository
+
+        dependencies.settings = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        original = client.get("/api/v1/settings", headers=headers).json()["settings"]
+        previous_revision = original["revision"]
+        updated = {
+            **original,
+            "appearance": {**original["appearance"], "theme": "light"},
+        }
+
+        original_save = dependencies.settings.save
+        original_load = dependencies.settings.load
+        committed = False
+        refused = False
+
+        def save_then_fail_readback(*args, **kwargs):
+            nonlocal committed
+            result = original_save(*args, **kwargs)
+            committed = True
+            return result
+
+        def fail_one_postcommit_readback(*args, **kwargs):
+            nonlocal refused
+            if committed and not refused:
+                refused = True
+                raise OSError("synthetic postcommit read failure")
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(dependencies.settings, "save", save_then_fail_readback)
+        monkeypatch.setattr(dependencies.settings, "load", fail_one_postcommit_readback)
+
+        response = client.put(
+            "/api/v1/settings",
+            json={"settings": updated, "expected_revision": previous_revision},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert committed and refused
+        assert response.json()["source"] == "committed"
+        assert response.json()["settings"]["revision"] == previous_revision + 1
+        assert response.json()["settings"]["appearance"]["theme"] == "light"
+
+        persisted = client.get("/api/v1/settings", headers=headers)
+        assert persisted.status_code == 200
+        assert persisted.json()["settings"] == response.json()["settings"]
+
+
 def test_resource_routes_persist_and_require_confirmation_for_clear():
     app, client = _client()
     with client:
