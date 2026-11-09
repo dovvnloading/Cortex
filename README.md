@@ -419,6 +419,14 @@ Build the one-folder package with:
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
+By default, packaging requires Python 3.11 and installs the same hash-locked
+runtime dependencies as release CI (`requirements.lock.txt`). Run from a fresh
+Python environment for the closest parity with release artifacts. An explicitly
+unlocked development package may be built with `-UnlockedDependencies`;
+`-SkipDependencyInstall` uses the existing environment and is not release-equivalent.
+The script checks the packaged executable's loopback health endpoint before
+reporting a successful build.
+
 The result is written to `dist/Cortex/Cortex.exe`. The package contains the
 frontend, prompt assets, Python runtime, pywebview bridge, and the signed
 Evergreen WebView2 bootstrapper. A packaged launch does not require Node.js, a

@@ -74,7 +74,14 @@ Use `-SkipFrontend` or `-SkipBackend` to narrow the run while iterating.
 
 Packaging (PyInstaller) and WebView2 signature verification are deliberately
 left out of both tiers: they take 35+ minutes and need Windows packaging
-tooling. CI covers them.
+tooling. CI covers them. The local packaging script
+(`packaging/build_windows.ps1`) uses `requirements.lock.txt` with
+`--require-hashes` and Python 3.11 by default, like release CI. Run it from
+a clean environment. Use `-UnlockedDependencies` only for an explicitly
+non-release-equivalent development build or `-SkipDependencyInstall` only when
+you accept that the existing environment is not lock-verified; neither mode
+proves release dependency parity. The script also runs the packaged headless
+health smoke before reporting success.
 
 ### Run the checks automatically before a push
 
