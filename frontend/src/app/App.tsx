@@ -22,6 +22,7 @@ import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
+import { persistLatestWrite, type LatestWrite } from "../lib/latestWrite";
 import {
   beginOllamaPullAdmission,
   clearOllamaPullAdmission,
@@ -349,6 +350,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const mountedRef = useRef(false);
   const workspaceLoadGenerationRef = useRef(0);
   const groupLoadGenerationRef = useRef(0);
+  const chatMoveWritesRef = useRef(new Map<string, LatestWrite<string | null>>());
+  const groupCollapseWritesRef = useRef(new Map<string, LatestWrite<boolean>>());
   const modelGenerationRef = useRef(0);
   const memoryGenerationRef = useRef(0);
 
@@ -701,7 +704,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const group = await api.updateChatGroup(groupId, { name });
       if (mountedRef.current) {
         ++groupLoadGenerationRef.current;
-        upsertGroup(group);
+        // A rename response may have started before a newer local collapse.
+        // Preserve the latest visual preference rather than replacing it with
+        // the stale collapsed field echoed back with the renamed group.
+        const local = useChatStore.getState().groups.find((item) => item.id === groupId);
+        upsertGroup(local ? { ...group, collapsed: local.collapsed } : group);
       }
       return true;
     } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); return false; }
@@ -723,38 +730,50 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
 
   const toggleGroup = (groupId: string, collapsed: boolean) => {
     const previous = useChatStore.getState().groups.find((group) => group.id === groupId);
-    if (!previous) return;
+    if (!previous || previous.collapsed === collapsed) return;
     ++groupLoadGenerationRef.current;
-    // Optimistic: collapsing is a high-frequency, zero-risk interaction and
-    // must feel instant. The persisted value is only a preference, so a
-    // failed write rolls the row back and stays quiet.
+    // Update immediately, but serialize persistence for this one group.
+    // Quick collapse/expand/collapse sequences retain their most recent intent.
     upsertGroup({ ...previous, collapsed });
-    void api.updateChatGroup(groupId, { collapsed }).catch(() => {
-      if (!mountedRef.current) return;
-      // Roll back only the failed preference field. A later rename or toggle
-      // may have legitimately changed other fields while this request was in
-      // flight, and must not be clobbered by the old whole-row snapshot.
-      setGroups((current) => current.map((group) => (
-        group.id === groupId && group.collapsed === collapsed
-          ? { ...group, collapsed: previous.collapsed }
-          : group
-      )));
-    });
+    persistLatestWrite(
+      groupCollapseWritesRef.current,
+      groupId, previous.collapsed, collapsed,
+      (value) => api.updateChatGroup(groupId, { collapsed: value }),
+      (failed, confirmed) => {
+        if (!mountedRef.current) return;
+        // Only roll back the field of the last failed intent; a concurrent
+        // rename or unrelated group edit is never overwritten by this.
+        setGroups((current) => current.map((group) => (
+          group.id === groupId && group.collapsed === failed
+            ? { ...group, collapsed: confirmed }
+            : group
+        )));
+      },
+    );
   };
 
   const moveChat = (threadId: string, groupId: string | null) => {
-    const previous = useChatStore.getState().chats.find((chat) => chat.id === threadId)?.group_id ?? null;
+    const chat = useChatStore.getState().chats.find((item) => item.id === threadId);
+    if (!chat) return;
+    const previous = chat.group_id ?? null;
+    if (previous === groupId) return;
     setChatGroup(threadId, groupId);
-    void api.moveChatToGroup(threadId, groupId).catch((error) => {
-      // Only undo our own optimistic write. A second move issued while this
-      // one was in flight may have already landed, and rolling back blindly
-      // would drag the chat out of the group the user just watched it reach.
-      const current = useChatStore.getState().chats.find((chat) => chat.id === threadId);
-      if (current !== undefined && current.group_id === groupId) {
-        setChatGroup(threadId, previous);
-      }
-      notify(apiMessage(error, "Could not move chat."), "error");
-    });
+    // The backend commits requests in arrival order, not click order. Never
+    // allow two writes for the same chat to overtake each other on the wire.
+    persistLatestWrite(
+      chatMoveWritesRef.current,
+      threadId, previous, groupId,
+      (value) => api.moveChatToGroup(threadId, value),
+      (failed, confirmed, error) => {
+        if (mountedRef.current) {
+          const current = useChatStore.getState().chats.find((item) => item.id === threadId);
+          if (current && (current.group_id ?? null) === failed) {
+            setChatGroup(threadId, confirmed);
+          }
+        }
+        notify(apiMessage(error, "Could not move chat."), "error");
+      },
+    );
   };
 
   /** Resolves to the saved document, or null when nothing was saved. */
