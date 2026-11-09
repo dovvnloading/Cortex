@@ -67,7 +67,14 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 update={"revision": expected_revision + 1}
             )
             deps.settings.save(updated, expected_revision=expected_revision)
-            loaded = deps.settings.load()
+            try:
+                loaded = deps.settings.load()
+            except Exception:
+                # The save is already durable; an independent failed readback
+                # must not be reported to the browser as a rejected mutation.
+                # Its optional metadata is unavailable, so return the exact
+                # validated document committed by the repository.
+                return SettingsResponse(settings=updated, source="committed")
         except SettingsRevisionConflict as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except Exception as exc:
