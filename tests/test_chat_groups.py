@@ -1023,3 +1023,99 @@ def test_chat_and_message_text_is_trimmed_and_rejects_invisible_input(client, he
         json={"thread_id": thread_id, "user_input": " \n\t "},
         headers=headers,
     ).status_code == 422
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_group_creation_request_key_survives_lost_postcommit_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    """An identical replay must find the one committed row, not add a folder."""
+    from fastapi.testclient import TestClient
+
+    from cortex_backend.api import create_app
+    from cortex_backend.testing import build_demo_dependencies
+    from support import session_headers
+
+    deps = build_demo_dependencies()
+    deps.chats = _repositories(tmp_path)[0 if kind == "memory" else 1]
+    original_list = deps.chats.list_groups
+    refused = False
+
+    def fail_first_postcommit_read():
+        nonlocal refused
+        groups = original_list()
+        if groups and not refused:
+            refused = True
+            raise OSError("synthetic failure reading the committed group")
+        return groups
+
+    monkeypatch.setattr(deps.chats, "list_groups", fail_first_postcommit_read)
+    app = create_app(
+        deps, allowed_hosts=("testserver",),
+        installation_principal_id="a" * 64,
+    )
+    with TestClient(app) as client:
+        headers = {**session_headers(client, app), "Idempotency-Key": "group-create-1"}
+        first = client.post(
+            "/api/v1/chat-groups", json={"name": "Research"}, headers=headers,
+        )
+        assert first.status_code == 500, first.text
+        assert refused
+        assert len(original_list()) == 1
+
+        replay = client.post(
+            "/api/v1/chat-groups", json={"name": "Research"}, headers=headers,
+        )
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["id"] == original_list()[0]["id"]
+        assert len(original_list()) == 1
+        assert client.post(
+            "/api/v1/chat-groups", json={"name": "Planning"}, headers=headers,
+        ).status_code == 409
+        assert len(original_list()) == 1
+
+        # A different user action must still be allowed to create a second
+        # same-named folder, with a different key and a new position.
+        another = client.post(
+            "/api/v1/chat-groups", json={"name": "Research"},
+            headers={**headers, "Idempotency-Key": "group-create-2"},
+        )
+        assert another.status_code == 201, another.text
+        assert another.json()["id"] != replay.json()["id"]
+        assert [g["position"] for g in original_list()] == [0, 1]
+
+        invalid = client.post(
+            "/api/v1/chat-groups", json={"name": "Research"},
+            headers={**headers, "Idempotency-Key": "invalid key"},
+        )
+        assert invalid.status_code == 422
+        assert len(original_list()) == 2
+
+
+def test_group_creation_idempotency_survives_sqlite_reopen(tmp_path: Path) -> None:
+    """A fresh process can recover a committed group from the row's stable ID."""
+    from fastapi.testclient import TestClient
+
+    from cortex_backend.api import create_app
+    from cortex_backend.testing import build_demo_dependencies
+    from support import session_headers
+
+    path = tmp_path / "group-replay.sqlite"
+    headers = {"Idempotency-Key": "replayed-after-restart"}
+    ids = []
+    for _ in range(2):
+        deps = build_demo_dependencies()
+        deps.chats = LegacyDatabaseChatRepository(DatabaseManager(db_path=str(path)))
+        app = create_app(
+            deps, allowed_hosts=("testserver",),
+            installation_principal_id="a" * 64,
+        )
+        with TestClient(app) as client:
+            auth = {**session_headers(client, app), **headers}
+            response = client.post(
+                "/api/v1/chat-groups", json={"name": "Research"}, headers=auth,
+            )
+            assert response.status_code == 201, response.text
+            ids.append(response.json()["id"])
+            assert len(client.get("/api/v1/chat-groups", headers=auth).json()) == 1
+    assert ids[0] == ids[1]
