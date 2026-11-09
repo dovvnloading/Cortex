@@ -716,8 +716,16 @@ def _verified_split_intent(
         if not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024 * 1024:
             raise ValueError("invalid journal file")
         doc = json.loads(manifest.read_text(encoding="utf-8"))
-        expected_parts = [[url, name] for url, name in parts]
-        if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("parts") != expected_parts:
+        expected_names = [name for _url, name in parts]
+        source_fingerprint = hashlib.sha256(
+            json.dumps([[url, name] for url, name in parts], separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if (
+            not isinstance(doc, dict)
+            or doc.get("version") != 1
+            or doc.get("names") != expected_names
+            or doc.get("source_fingerprint") != source_fingerprint
+        ):
             raise ValueError("journal does not belong to this requested download")
         entries = doc.get("entries")
         if not isinstance(entries, list) or len(entries) != len(parts):
@@ -796,9 +804,14 @@ def _create_split_intent(
                 "This filesystem cannot verify shard ownership for crash-safe split-model publication."
             )
         entries.append({"filename": name, "stage": staging.name, "identity": list(identity)})
+    # Store only a digest of the sources: signed download URLs can carry
+    # short-lived credentials and must not be persisted in a recovery file.
     document = {
         "version": 1,
-        "parts": [[url, name] for url, name in parts],
+        "names": [name for _url, name in parts],
+        "source_fingerprint": hashlib.sha256(
+            json.dumps([[url, name] for url, name in parts], separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
         "entries": entries,
     }
     temporary = manifest.with_name(f".split-intent-{uuid4().hex}.part")
@@ -916,9 +929,14 @@ def download_gguf_set(
                 # Also cover an exception *after* _publish committed but
                 # before the append to 'published'. The manifest was written
                 # before the first visible move and carries every identity.
-                for destination, _staging, identity in _verified_split_intent(manifest, parts):
-                    if _file_identity(destination) == identity:
-                        _rollback_published(destination, identity)
+                try:
+                    for destination, _staging, identity in _verified_split_intent(manifest, parts):
+                        if _file_identity(destination) == identity:
+                            _rollback_published(destination, identity)
+                except GGUFDownloadError:
+                    # Cleanup is best effort and must not replace the original
+                    # cancellation or publication failure.
+                    logger.warning("Could not verify split publication journal during rollback.")
         for path in staged:
             _remove_quietly(path)
         if journaled:
@@ -932,6 +950,8 @@ def download_gguf_set(
                     _remove_quietly(manifest)
                 # Otherwise leave the verified journal so a later retry can
                 # complete cleanup without touching another writer's file.
+            except GGUFDownloadError:
+                logger.warning("Could not verify split publication cleanup; leaving its journal.")
             finally:
                 _ACTIVE_SPLIT_MANIFESTS.discard(manifest)
     return tuple(destinations)
