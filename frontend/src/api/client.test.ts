@@ -266,6 +266,55 @@ describe("CortexApi", () => {
     expect(new Headers(request.headers).get("Last-Event-ID")).toBe("0");
   });
 
+  it.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+    ["CR", "\r"],
+  ])("delivers ordered job events and terminal status with %s framing", async (_label, newline) => {
+    const first = { id: 1, job_id: "job-1", kind: "progress", status: "running" };
+    const last = { id: 2, job_id: "job-1", kind: "completed", status: "succeeded" };
+    const frame = (value: typeof first) =>
+      `id: ${value.id}${newline}data: ${JSON.stringify(value)}${newline}${newline}`;
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(frame(first) + frame(last), { status: 200 }),
+    );
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const received: string[] = [];
+
+    const terminal = await new CortexApi("/api/v1", fetcher).streamJob(
+      "job-1", (event) => received.push(event.kind),
+    );
+    expect(received).toEqual(["progress", "completed"]);
+    expect(terminal).toMatchObject(last);
+  });
+
+  it("handles mixed line endings and UTF-8 characters split between byte reads", async () => {
+    const first = { id: 1, job_id: "job-1", kind: "progress", status: "running", data: { message: "🧪" } };
+    const last = { id: 2, job_id: "job-1", kind: "completed", status: "succeeded" };
+    // CRLF between id/data, mixed LF+CR to close frame one, then CR and
+    // CRLF for frame two. One byte per read deliberately splits CR/LF pairs
+    // and even the multibyte UTF-8 character within JSON data.
+    const wire = `id: 1\r\ndata: ${JSON.stringify(first)}\n\rid: 2\rdata: ${JSON.stringify(last)}\r\n\r\n`;
+    const bytes = new TextEncoder().encode(wire);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    ));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const events: SSEEvent[] = [];
+    const terminal = await new CortexApi("/api/v1", fetcher).streamJob(
+      "job-1", (event) => events.push(event),
+    );
+
+    expect(events).toEqual([first, last]);
+    expect(terminal).toMatchObject(last);
+  });
+
   it("skips a malformed SSE frame instead of failing the whole stream", async () => {
     const sse = [
       'id: 1\nevent: generation.queued\ndata: {"event_id":1,"event":"generation.queued","job_id":"job-1","thread_id":"thread-1","data":{}}\n\n',
