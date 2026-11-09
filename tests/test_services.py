@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from threading import Event
+from threading import Event, Thread
 import unittest
 
 from cortex_backend.core.generation import (
@@ -976,6 +976,125 @@ class ModelServiceTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.details, "ConnectionError")
         self.assertNotIn("private transport detail", result.message)
+
+    def test_stalled_ollama_pull_cancel_closes_its_own_transport_without_waiting_for_timeout(self):
+        """Stop must interrupt a blocked next(), leaving the shared Ollama client intact."""
+        stalled = Event()
+        release_read = Event()
+        closed = Event()
+        shared_pulls: list[str] = []
+        results: list[bool] = []
+        errors: list[BaseException] = []
+        reported: list[object] = []
+
+        class StalledStream:
+            reads = 0
+            finished = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.reads += 1
+                if self.reads == 1:
+                    return {"status": "pulling", "completed": 10, "total": 100}
+                stalled.set()
+                assert release_read.wait(timeout=4), "a stalled pull was not interrupted"
+                raise OSError("read on the closed Ollama client")
+
+            def close(self):
+                self.finished = True
+
+        stream = StalledStream()
+
+        class OwnedPullClient:
+            def pull(self, model, *, stream=True):
+                assert model == "fixture:1b"
+                assert stream is True
+                return stalled_stream
+
+            def close(self):
+                closed.set()
+                release_read.set()
+
+        stalled_stream = stream
+
+        class SharedGateway:
+            def pull(self, model, *, stream=True):
+                shared_pulls.append(model)
+                raise AssertionError("a cancellable pull must not use the shared transport")
+
+            def list(self):
+                return {"models": []}
+
+        cancellation = Event()
+        service = ModelService(
+            SharedGateway(), pull_client_factory=OwnedPullClient
+        )
+
+        def run():
+            try:
+                results.append(service.pull_model(
+                    "fixture:1b", cancellation_event=cancellation,
+                    progress_callback=reported.append, verify=False,
+                ))
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(stalled.wait(timeout=3), "the iterator did not reach its blocked read")
+            self.assertEqual(len(reported), 1)
+            cancellation.set()
+            self.assertTrue(closed.wait(timeout=3), "Stop never closed the owned Ollama connection")
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive(), "the cancelled pull blocked behind its HTTP timeout")
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [False])
+            self.assertTrue(stream.finished)
+            self.assertEqual(shared_pulls, [])
+        finally:
+            cancellation.set()
+            release_read.set()
+            worker.join(timeout=3)
+
+    def test_finished_ollama_pull_closes_stream_and_dedicated_client(self):
+        """A successful pull also releases the dedicated transport and iterator."""
+        class Stream:
+            closed = False
+
+            def __iter__(self):
+                yield {"status": "success", "completed": 20, "total": 20}
+
+            def close(self):
+                self.closed = True
+
+        stream = Stream()
+        closed_clients: list[str] = []
+
+        class Owned:
+            def pull(self, model, *, stream=True):
+                assert model == "fixture:1b"
+                return response
+
+            def close(self):
+                closed_clients.append("closed")
+
+        response = stream
+
+        class Shared:
+            def list(self):
+                return {"models": [{"name": "fixture:1b"}]}
+
+            def pull(self, model, *, stream=False):
+                raise AssertionError("dedicated pull client should be used")
+
+        service = ModelService(Shared(), pull_client_factory=Owned)
+        self.assertTrue(service.pull_model("fixture:1b", cancellation_event=Event()))
+        self.assertTrue(stream.closed)
+        self.assertEqual(closed_clients, ["closed"])
+
 
     def test_missing_required_tags_are_reported_after_an_unsuccessful_pull(self):
         gateway = _FakeGateway(
