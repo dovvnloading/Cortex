@@ -615,10 +615,31 @@ async def _start_generation_job(
                     history_messages=prepared_history,
                 )
             except Exception:
-                # A stopped engine raises; which error depends on where Stop
-                # landed. When the user asked for it, keep what they saw.
+                # Stop is a cancellation, not a failure; preserve its existing
+                # semantics. A genuine engine fault must still fail the job,
+                # but a partial answer the user has already watched appear
+                # should survive reload, explicitly marked as incomplete.
                 if cancel_event.is_set():
                     return keep_stopped_answer(shown)
+                if shown.content.strip() and (
+                    target_message_id is None or target_is_dangling_user_turn
+                ):
+                    try:
+                        deps.chats.add_message(
+                            thread_id,
+                            "assistant",
+                            shown.content,
+                            thoughts=shown.thinking or None,
+                            stats={"stop_reason": "error"},
+                            expected_revision=prepared_revision,
+                        )
+                    except Exception as save_exc:
+                        # Preserve the original runtime failure and its failed
+                        # job result; saving an incomplete reply is best effort.
+                        logger.warning(
+                            "Cortex could not keep a failed partial answer (%s).",
+                            type(save_exc).__name__,
+                        )
                 raise
             # The generation service checks cancellation around its model work,
             # while the API owns streaming and persistence. Keep everything

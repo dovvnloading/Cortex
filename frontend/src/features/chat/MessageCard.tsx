@@ -80,6 +80,7 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
             into the context limit, and the answer ends wherever that fell:
             without this it reads as though it finished. */}
         {message.role === "assistant" && message.stats?.stop_reason === "length" && <p className="muted-note" role="note">This answer was cut short by the context limit. Raising the Context window gives answers more room.</p>}
+        {message.role === "assistant" && message.stats?.stop_reason === "error" && <p className="muted-note" role="note">The model failed before finishing this answer. This is the partial response; you can regenerate it.</p>}
         {message.sources && message.sources.length > 0 && <details className="sources"><summary><span>Sources</span><span className="disclosure-hint">{message.sources.length} {message.sources.length === 1 ? "item" : "items"}</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.sources.map((source) => typeof source === "string" ? source : JSON.stringify(source)).join("\n\n")} /></div></div></details>}
       </div>
       {message.role === "assistant" && message.id && onSaveMemory && proposedMemories && proposedMemories.length > 0 && (
