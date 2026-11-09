@@ -42,6 +42,8 @@ export type RuntimeControls = {
 type Props = {
   models: ModelResponse;
   busy: boolean;
+  /** Whether the Ollama check/pull kind is busy, independently of GGUF. */
+  modelsBusy?: boolean;
   progress: Progress | null;
   /** Stops the identified backend job; no ID means the primary row. */
   onCancel?: (jobId?: string) => void;
@@ -72,7 +74,7 @@ function describeRuntimeBackend(status: LlamaCppRuntimeStatus): string {
   return `GPU (Vulkan) · ${onGpu}/${total} layers on the GPU`;
 }
 
-export function ModelsPanel({ models, busy, progress, onCancel, secondaryJobs, secondaryProgress, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
+export function ModelsPanel({ models, busy, modelsBusy = busy, progress, onCancel, secondaryJobs, secondaryProgress, setupUrl, onCheck, llamacppStatus, gguf, runtime }: Props) {
   const connection = models.connection;
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
@@ -93,7 +95,7 @@ export function ModelsPanel({ models, busy, progress, onCancel, secondaryJobs, s
         <a href={setupUrl} target="_blank" rel="noreferrer" className="setup-link">
           Ollama setup <ExternalLink aria-hidden="true" size={14} />
         </a>
-        <button className="button button-quiet" onClick={() => void onCheck()} disabled={busy}>
+        <button className="button button-quiet" onClick={() => void onCheck()} disabled={modelsBusy}>
           <RefreshCw aria-hidden="true" size={15} /> Rescan local models
         </button>
       </div>
