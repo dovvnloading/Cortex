@@ -87,6 +87,7 @@ export interface ChatSummary {
 export interface ClearMemoryRequest {
   confirm?: boolean;
   confirmation_intent?: "clear_permanent_memory" | null;
+  expected_memos: Array<string>;
 }
 
 export interface CodeCapabilitiesRequest {

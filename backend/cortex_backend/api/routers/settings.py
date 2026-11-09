@@ -145,7 +145,14 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 detail="A clear-memory confirmation intent is required.",
             )
         try:
-            deps.memories.clear_memos()
-            return MemoryResponse(memos=deps.memories.get_memos())
+            # Compare and clear under the same repository lock. A separate
+            # read-then-clear would still race concurrent writes.
+            return MemoryResponse(
+                memos=deps.memories.replace_memos_if_current(
+                    [], expected_memos=payload.expected_memos
+                )
+            )
+        except MemoryRevisionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             _raise_repository_error("clear memories", exc)
