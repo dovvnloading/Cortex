@@ -987,7 +987,7 @@ class _LaterClock(datetime):
         return datetime.now(tz) + timedelta(days=31)
 
 
-def test_a_follow_up_whose_earlier_document_expired_still_gets_an_answer(
+def test_a_follow_up_whose_earlier_document_expired_requires_reattachment(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     app, seen = _follow_up_app()
@@ -995,19 +995,25 @@ def test_a_follow_up_whose_earlier_document_expired_still_gets_an_answer(
         headers = _session(client, app)
         report = _stage_file(client, headers, "secret-report.md", b"confidential text")
         _turn(client, headers, "expired-1", "Summarise this.", attachments=[report])
+        before = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
         monkeypatch.setattr(attachments_module, "datetime", _LaterClock)
         with caplog.at_level("INFO"):
-            _turn(client, headers, "expired-2", "Now list its section headings.")
-        chat = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
+            response = client.post("/api/v1/generations", headers=headers, json={
+                "request_id": "expired-2", "thread_id": "follow-up-thread",
+                "user_input": "Now list its section headings.",
+            })
+        after = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
 
-    assert seen[-1] == ()
-    assert chat["messages"][-1]["content"] == "Echo: Now list its section headings."
+    assert response.status_code == 422, response.text
+    assert "reattach" in response.json()["detail"].lower()
+    assert len(seen) == 1  # The follow-up never runs a source-less model call.
+    assert before["messages"] == after["messages"]
     # Counted, never named: neither the file name nor its text reaches the log.
-    assert "1 document(s) from the previous message" in caplog.text
+    assert "1 unavailable previous document(s)" in caplog.text
     assert "secret-report" not in caplog.text and "confidential" not in caplog.text
 
 
-def test_a_follow_up_whose_earlier_document_was_deleted_still_gets_an_answer(tmp_path: Path):
+def test_a_follow_up_whose_one_earlier_document_was_deleted_refuses_all_context(tmp_path: Path):
     repository, service = _durable(tmp_path)
     app, seen = _follow_up_app(attachments=service)
     with TestClient(app) as client:
@@ -1015,12 +1021,91 @@ def test_a_follow_up_whose_earlier_document_was_deleted_still_gets_an_answer(tmp
         report = _stage_file(client, headers, "report.md", _REPORT)
         kept = _stage_file(client, headers, "kept.md", b"still here")
         _turn(client, headers, "deleted-1", "Summarise these.", attachments=[report, kept])
+        before = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
         repository.delete_artifact(report["attachment_id"])
-        _turn(client, headers, "deleted-2", "Now list their section headings.")
+        response = client.post("/api/v1/generations", headers=headers, json={
+            "request_id": "deleted-2", "thread_id": "follow-up-thread",
+            "user_input": "Now list their section headings.",
+        })
+        after = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
 
     assert _documents(seen[0]) == [
         ("report.md", _REPORT.decode(), False),
         ("kept.md", "still here", False),
     ]
-    # The one that is gone is left out; the other still comes back.
-    assert _documents(seen[-1]) == [("kept.md", "still here", True)]
+    assert response.status_code == 422, response.text
+    assert "reattach" in response.json()["detail"].lower()
+    assert len(seen) == 1  # Even one missing document blocks an incomplete answer.
+    assert before["messages"] == after["messages"]
+
+
+def test_expired_previous_document_refuses_uninformed_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not admit a grounded follow-up if the older source bytes are gone."""
+    deps = build_demo_dependencies()
+    app = create_app(deps, allowed_hosts=ALLOWED_HOSTS)
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        old = client.post(
+            "/api/v1/attachments", headers=headers,
+            json={
+                "request_id": "previous-document-stage",
+                "filename": "notes.md",
+                "content_base64": base64.b64encode(b"# First heading\\nSource material").decode("ascii"),
+            },
+        )
+        assert old.status_code == 201, old.text
+
+        thread_id = "expired-document-thread"
+        deps.chats.add_message(
+            thread_id, "user", "Read the document.",
+            attachments=[old.json()], thread_title="New Chat",
+        )
+        deps.chats.add_message(thread_id, "assistant", "I have read it.")
+        before = deps.chats.get_chat(thread_id)
+        assert before is not None
+        original_resolve = deps.attachments.resolve
+
+        def expired(*, owner, descriptor):
+            if descriptor["attachment_id"] == old.json()["attachment_id"]:
+                raise ChatAttachmentError("attachment_unavailable")
+            return original_resolve(owner=owner, descriptor=descriptor)
+
+        monkeypatch.setattr(deps.attachments, "resolve", expired)
+        followup = client.post(
+            "/api/v1/generations", headers=headers,
+            json={
+                "request_id": "followup-with-expired-source",
+                "thread_id": thread_id,
+                "user_input": "Quote the document's first heading.",
+            },
+        )
+        assert followup.status_code == 422, followup.text
+        detail = followup.json()["detail"].lower()
+        assert "previous document" in detail
+        assert "reattach" in detail
+        assert "notes.md" not in detail
+        assert deps.chats.get_chat(thread_id)["messages"] == before["messages"]
+
+        # A newly staged document explicitly attached to the request is
+        # independent of the expired previous-turn source and may proceed.
+        new = client.post(
+            "/api/v1/attachments", headers=headers,
+            json={
+                "request_id": "replacement-document-stage",
+                "filename": "updated-notes.md",
+                "content_base64": base64.b64encode(b"# Updated heading\\nNew reference").decode("ascii"),
+            },
+        )
+        assert new.status_code == 201, new.text
+        recovered = client.post(
+            "/api/v1/generations", headers=headers,
+            json={
+                "request_id": "followup-with-fresh-source",
+                "thread_id": thread_id,
+                "user_input": "Quote the updated heading.",
+                "attachments": [new.json()],
+            },
+        )
+        assert recovered.status_code == 202, recovered.text
