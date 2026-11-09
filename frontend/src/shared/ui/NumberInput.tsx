@@ -24,9 +24,19 @@ type Props = {
 function parse(raw: string, decimals: number): number | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  // Integers tolerate grouping ("8,192"); decimals tolerate a comma point ("0,7").
-  const normalized = decimals === 0 ? trimmed.replace(/[\s,_]/g, "") : trimmed.replace(",", ".");
-  const value = Number(normalized);
+  if (decimals === 0) {
+    // Context-window integers are displayed with locale grouping. Accept
+    // comma, dot, whitespace (including NBSP/narrow NBSP), or underscore,
+    // but only in complete groups of three. An ungrouped "1.5" must not
+    // become 1.5 and then silently clamp to the minimum on blur.
+    if (/^[+-]?\d+$/.test(trimmed)) return Number(trimmed);
+    const grouped = /^([+-]?\d{1,3})([.,\s_])\d{3}(?:\2\d{3})*$/.test(trimmed);
+    if (!grouped) return null;
+    const value = Number(trimmed.replace(/[.,\s_]/g, ""));
+    return Number.isFinite(value) ? value : null;
+  }
+  // Decimal controls still accept a comma decimal point, e.g. "0,7".
+  const value = Number(trimmed.replace(",", "."));
   return Number.isFinite(value) ? value : null;
 }
 
