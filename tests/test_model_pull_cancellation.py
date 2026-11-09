@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from threading import Event, Thread
-import time
 
 from fastapi.testclient import TestClient
 
