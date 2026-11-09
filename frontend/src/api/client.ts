@@ -342,10 +342,13 @@ export class CortexApi {
     return this.request<ChatGroup[]>("/chat-groups");
   }
 
-  createChatGroup(name: string): Promise<ChatGroup> {
+  createChatGroup(name: string, requestId?: string): Promise<ChatGroup> {
     const payload: CreateChatGroupRequest = { name };
     return this.request<ChatGroup>("/chat-groups", {
       method: "POST",
+      // This stable key survives a lost HTTP 201. The backend derives the same
+      // group ID for exact replays without affecting the generated body schema.
+      headers: requestId ? { "Idempotency-Key": requestId } : undefined,
       body: JSON.stringify(payload),
     });
   }

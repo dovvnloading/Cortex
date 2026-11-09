@@ -20,6 +20,7 @@ import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
+import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { persistLatestWrite, type LatestWrite } from "../lib/latestWrite";
@@ -685,18 +686,35 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   const createGroup = async (name: string): Promise<boolean> => {
+    let requestId: string | null = null;
     try {
-      const group = await api.createChatGroup(name);
+      // Save the intent before the network call. A lost 201 or post-commit 500
+      // must never make the next click insert a second same-named folder.
+      const intent = beginGroupCreate(name);
+      requestId = intent.requestId;
+      const group = await api.createChatGroup(intent.name, intent.requestId);
+      clearGroupCreate(intent.requestId);
       if (mountedRef.current) {
-        // Invalidate the initial snapshot only once the mutation succeeded.
-        // A failed mutation must still allow that snapshot to populate the
-        // library, while a late successful snapshot must not erase this row.
+        // A failed mutation must still allow the initial snapshot to populate
+        // the library, while a late snapshot must not erase the new row.
         ++groupLoadGenerationRef.current;
         upsertGroup(group);
       }
       notify("Group created.", "success");
       return true;
-    } catch (error) { notify(apiMessage(error, "Could not create group."), "error"); return false; }
+    } catch (error) {
+      if (requestId && isDefinitiveRejection(error)) clearGroupCreate(requestId);
+      const ambiguous = requestId && (
+        !(error instanceof ApiError) || error.kind === "network" || error.status >= 500
+      );
+      notify(
+        ambiguous
+          ? "Group creation was not confirmed. Retry the same name to recover it without duplicates."
+          : apiMessage(error, "Could not create group."),
+        "error",
+      );
+      return false;
+    }
   };
 
   const renameGroup = async (groupId: string, name: string): Promise<boolean> => {

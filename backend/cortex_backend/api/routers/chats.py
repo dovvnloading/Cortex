@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
@@ -168,21 +169,69 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
     )
     def create_chat_group(
         payload: CreateChatGroupRequest,
+        request: Request,
         deps: BackendDependenciesProtocol = Depends(dependencies),
-        _: SessionPrincipal = Depends(require_session),
+        principal: SessionPrincipal = Depends(require_session),
     ) -> ChatGroup:
-        group_id = uuid4().hex
+        # Older clients without a key keep the legacy create behavior. New
+        # clients keep the same key after an ambiguous/lost HTTP 201, even
+        # across a UI reload. A stable destination ID makes the inserted row
+        # itself the durable replay record without a second journal write.
+        request_id = request.headers.get("Idempotency-Key")
+        if request_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", request_id):
+                raise HTTPException(
+                    status_code=422, detail="Invalid group creation idempotency key."
+                )
+            fingerprint = json.dumps(
+                ["cortex-group-v1", _durable_owner(principal), request_id],
+                ensure_ascii=True, separators=(",", ":"),
+            )
+            group_id = uuid5(NAMESPACE_URL, fingerprint).hex
+        else:
+            group_id = uuid4().hex
+
+        name = payload.name.strip()
         try:
-            deps.chats.create_group(group_id, payload.name.strip())
+            # For an exact retry, do not perform another INSERT (which would
+            # either conflict or consume a new position). A failed response
+            # read after commit is harmless because the row is already here.
             created = next(
                 (item for item in deps.chats.list_groups() if item["id"] == group_id),
                 None,
-            )
+            ) if request_id is not None else None
+            if created is None:
+                try:
+                    deps.chats.create_group(group_id, name)
+                except Exception:
+                    # Two requests with the same key may race, or the first
+                    # insert may commit before an acknowledgement exception.
+                    # Only suppress the failure if the target row really exists.
+                    if request_id is None:
+                        raise
+                    created = next(
+                        (item for item in deps.chats.list_groups() if item["id"] == group_id),
+                        None,
+                    )
+                    if created is None:
+                        raise
+                if created is None:
+                    created = next(
+                        (item for item in deps.chats.list_groups() if item["id"] == group_id),
+                        None,
+                    )
         except Exception as exc:
             _raise_repository_error("create chat group", exc)
         if created is None:
             raise HTTPException(
                 status_code=500, detail="Chat group creation did not persist."
+            )
+        if created["name"] != name:
+            # A caller reused a key for another name (or the group was
+            # renamed since its original creation). Never create a second row.
+            raise HTTPException(
+                status_code=409,
+                detail="This group creation key already belongs to another group name.",
             )
         return ChatGroup.model_validate(created)
 
