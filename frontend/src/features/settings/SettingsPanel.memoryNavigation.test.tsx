@@ -22,7 +22,7 @@ function renderMemorySettings(memos: string[]) {
   window.history.replaceState({}, "", "/settings");
   const onReplaceMemory = vi.fn<(next: string[]) => Promise<void>>().mockResolvedValue(undefined);
   const onSave = vi.fn<(next: CortexSettings) => Promise<CortexSettings | null>>()
-    .mockResolvedValue({ ...settings, revision: settings.revision + 1 });
+    .mockResolvedValue({ ...settings, revision: (settings.revision ?? 0) + 1 });
   const props: SettingsPanelProps = {
     settings,
     memos,
