@@ -417,6 +417,50 @@ describe("how a download ends", () => {
     expect(onDownload).toHaveBeenCalledTimes(1);
   });
 
+  it("does not erase a new Hugging Face selection when the previous download succeeds", async () => {
+    let finish!: () => void;
+    const olderDownload = new Promise<void>((resolve) => { finish = resolve; });
+    const onDownload = vi.fn(() => olderDownload);
+    const { user } = renderPanel({ onListFiles: null, onDownload });
+
+    await user.type(screen.getByLabelText(/Repo id/), "old/repository");
+    await user.type(fileNameInput(), "old.gguf");
+    await user.click(screen.getByRole("button", { name: "Download model" }));
+    expect(onDownload).toHaveBeenCalledWith({
+      source: "huggingface", repo_id: "old/repository", filename: "old.gguf",
+    });
+
+    await user.clear(screen.getByLabelText(/Repo id/));
+    await user.type(screen.getByLabelText(/Repo id/), "new/repository");
+    await user.clear(fileNameInput());
+    await user.type(fileNameInput(), "new.gguf");
+    await act(async () => finish());
+
+    expect(screen.getByLabelText(/Repo id/)).toHaveValue("new/repository");
+    expect(fileNameInput()).toHaveValue("new.gguf");
+    expect(screen.getByRole("status")).toHaveTextContent(/Earlier download \(old.gguf\) completed/);
+    expect(screen.getByRole("button", { name: "Download model" })).toBeEnabled();
+    expect(onDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves an unsent Direct URL and attributes an older failure correctly", async () => {
+    let reject!: (error: Error) => void;
+    const olderDownload = new Promise<void>((_, fail) => { reject = fail; });
+    const { user } = renderPanel({ onListFiles: null, onDownload: () => olderDownload });
+
+    await user.type(screen.getByLabelText(/Repo id/), "old/repository");
+    await user.type(fileNameInput(), "old.gguf");
+    await user.click(screen.getByRole("button", { name: "Download model" }));
+
+    await user.click(screen.getByRole("button", { name: "Direct URL" }));
+    await user.type(screen.getByLabelText("Direct .gguf URL"), "https://example.org/new.gguf");
+    await act(async () => reject(new Error("earlier request failed")));
+
+    expect(screen.getByLabelText("Direct .gguf URL")).toHaveValue("https://example.org/new.gguf");
+    expect(screen.getByRole("alert")).toHaveTextContent("Earlier download (old.gguf): earlier request failed");
+    expect(screen.getByRole("button", { name: "Download model" })).toBeEnabled();
+  });
+
   it("cannot start a second download while one is running", () => {
     renderPanel({ busy: true });
 
