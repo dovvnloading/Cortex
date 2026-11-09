@@ -971,7 +971,7 @@ export function ChatPage({
               clearPendingGenerationAdmission();
             }
             setGenerationError(null);
-          }
+          }}
           generationOptions={threadOptions}
           generationDefaults={generationDefaults}
           onGenerationOptionsChange={(next) => setThreadOptions(threadOptionsKey, next)}
