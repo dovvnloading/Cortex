@@ -777,7 +777,7 @@ def test_a_v4_database_upgrades_through_5_and_6_with_each_chats_revision_set_to_
 
     database = DatabaseManager(db_path=str(path))
 
-    assert _user_version(path) == 6
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert database.load_chat_overview("busy")["revision"] == 3
     assert database.load_chat_overview("empty")["revision"] == 0
     assert [message["content"] for message in database.load_chat("busy")["messages"]] == ["m0", "m1", "m2"]
@@ -803,7 +803,7 @@ def test_a_v5_database_upgrades_to_v6_keeping_its_originals_and_backfilling_revi
 
     database = DatabaseManager(db_path=str(path))
 
-    assert _user_version(path) == 6
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert database.load_chat_overview("busy")["revision"] == 3
     assert database.load_chat_overview("empty")["revision"] == 0
     messages = database.load_chat("busy")["messages"]
@@ -824,7 +824,7 @@ def test_the_previous_release_refuses_the_upgraded_database_and_the_named_snapsh
 ) -> None:
     """The rollback procedure for the revision column, end to end.
 
-    Schema 6 is what this release writes. The release before it reads schema 5
+    Schema 7 is what this release writes. Earlier releases read schema 5
     and the one before that reads 4. Each must refuse the upgraded file without
     touching it and name the snapshot to go back to; following that advice (move
     the database and its logs aside, copy the snapshot into place) gives back
@@ -837,7 +837,7 @@ def test_the_previous_release_refuses_the_upgraded_database_and_the_named_snapsh
     monkeypatch.setattr(DatabaseManager, "SCHEMA_VERSION", previous_release_reads)
     snapshot_name = f"{path.name}.pre-v{previous_release_reads}.bak"
 
-    with pytest.raises(PersistenceError, match="schema version 6") as refused:
+    with pytest.raises(PersistenceError, match="schema version 7") as refused:
         DatabaseManager(db_path=str(path))
     assert snapshot_name in str(refused.value)
 
@@ -859,7 +859,7 @@ def test_the_previous_release_refuses_the_upgraded_database_and_the_named_snapsh
     # Going forward again upgrades the restored file once more.
     monkeypatch.undo()
     again = DatabaseManager(db_path=str(path))
-    assert _user_version(path) == 6
+    assert _user_version(path) == DatabaseManager.SCHEMA_VERSION
     assert again.load_chat_overview("busy")["revision"] == 3
 
 
