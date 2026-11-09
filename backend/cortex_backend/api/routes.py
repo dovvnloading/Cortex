@@ -354,78 +354,86 @@ async def _start_generation_job(
                 or (payload.thread_id is not None and payload.thread_id != admitted.thread_id)
             ):
                 raise JobConflict("This request ID was already used for a different payload.")
-            if jobs.request_snapshot(
+            existing_job = jobs.request_snapshot(
                 kind="generation", owner=owner, request_id=payload.request_id
-            ) is None:
-                saved = await asyncio.to_thread(deps.chats.get_chat, admitted.thread_id)
-                if saved is None:
-                    raise ChatDomainError(
-                        "The original chat no longer exists. Review your chats before retrying.",
-                        code="stale_revision",
-                    )
-                saved_messages = list(saved.get("messages") or ())
-                index = next((
-                    i for i, message in enumerate(saved_messages)
-                    if message.get("role") == "user"
-                    and str(message.get("id")) == admitted.user_message_id
-                ), -1)
-                if index < 0:
-                    raise ChatDomainError(
-                        "The saved user turn could not be verified. Reload the conversation.",
-                        code="stale_revision",
-                    )
-                following = saved_messages[index + 1:]
-                next_user = next(
-                    (i for i, message in enumerate(following) if message.get("role") == "user"),
-                    len(following),
-                )
-                assistant = next(
-                    (message for message in following[:next_user] if message.get("role") == "assistant"),
-                    None,
-                )
-                if assistant is not None:
-                    # A committed answer must NEVER be generated again merely
-                    # because its volatile job record was lost. A harmless
-                    # completed replay job lets the existing frontend reload
-                    # the saved conversation through its normal completion path.
-                    result = {
-                        "thread_id": admitted.thread_id,
-                        "user_message_id": admitted.user_message_id,
-                        "assistant_message_id": str(assistant.get("id")),
-                        "recovered": True,
-                    }
-                    snapshot = await jobs.start(
-                        kind="generation", owner=owner, thread_id=admitted.thread_id,
-                        request_id=payload.request_id, request_fingerprint=request_fingerprint,
-                        runner=lambda _sink, _cancel: result,
-                    )
-                    return snapshot, admitted.user_message_id
-
-                if index != len(saved_messages) - 1:
-                    raise ChatDomainError(
-                        "The chat advanced after the original request. Review it before retrying.",
-                        code="stale_revision",
-                    )
-                # The original user turn is still unanswered. Reuse it as a
-                # regeneration target; prepare() will NOT insert a new turn.
-                current_revision = int(saved["revision"])
-                recovered_payload = payload.model_copy(update={
-                    "thread_id": admitted.thread_id,
-                    "base_revision": current_revision,
-                })
-                recovered_reservation = jobs.reserve(
-                    kind="generation", owner=owner, thread_id=admitted.thread_id,
-                    request_id=payload.request_id, request_fingerprint=request_fingerprint,
-                )
-                snapshot, _ = await _start_generation_job(
-                    request, deps, principal, recovered_payload,
-                    request_fingerprint=request_fingerprint,
-                    reservation=recovered_reservation,
-                    target_message_id=admitted.user_message_id,
-                    transcript=saved_messages,
-                    transcript_revision=current_revision,
+            )
+            if existing_job is not None:
+                # Do not call reserve() again here: it prunes terminal records
+                # before checking the request index, which could evict this
+                # very record and turn an exact replay into a second admission.
+                snapshot, _ = await jobs.wait_until_prepared(
+                    existing_job.job_id, owner=owner,
                 )
                 return snapshot, admitted.user_message_id
+            saved = await asyncio.to_thread(deps.chats.get_chat, admitted.thread_id)
+            if saved is None:
+                raise ChatDomainError(
+                    "The original chat no longer exists. Review your chats before retrying.",
+                    code="stale_revision",
+                )
+            saved_messages = list(saved.get("messages") or ())
+            index = next((
+                i for i, message in enumerate(saved_messages)
+                if message.get("role") == "user"
+                and str(message.get("id")) == admitted.user_message_id
+            ), -1)
+            if index < 0:
+                raise ChatDomainError(
+                    "The saved user turn could not be verified. Reload the conversation.",
+                    code="stale_revision",
+                )
+            following = saved_messages[index + 1:]
+            next_user = next(
+                (i for i, message in enumerate(following) if message.get("role") == "user"),
+                len(following),
+            )
+            assistant = next(
+                (message for message in following[:next_user] if message.get("role") == "assistant"),
+                None,
+            )
+            if assistant is not None:
+                # A committed answer must NEVER be generated again merely
+                # because its volatile job record was lost. A harmless
+                # completed replay job lets the existing frontend reload
+                # the saved conversation through its normal completion path.
+                result = {
+                    "thread_id": admitted.thread_id,
+                    "user_message_id": admitted.user_message_id,
+                    "assistant_message_id": str(assistant.get("id")),
+                    "recovered": True,
+                }
+                snapshot = await jobs.start(
+                    kind="generation", owner=owner, thread_id=admitted.thread_id,
+                    request_id=payload.request_id, request_fingerprint=request_fingerprint,
+                    runner=lambda _sink, _cancel: result,
+                )
+                return snapshot, admitted.user_message_id
+
+            if index != len(saved_messages) - 1:
+                raise ChatDomainError(
+                    "The chat advanced after the original request. Review it before retrying.",
+                    code="stale_revision",
+                )
+            # The original user turn is still unanswered. Reuse it as a
+            # regeneration target; prepare() will NOT insert a new turn.
+            current_revision = int(saved["revision"])
+            recovered_payload = payload.model_copy(update={
+                "thread_id": admitted.thread_id,
+                "base_revision": current_revision,
+            })
+            recovered_reservation = jobs.reserve(
+                kind="generation", owner=owner, thread_id=admitted.thread_id,
+                request_id=payload.request_id, request_fingerprint=request_fingerprint,
+            )
+            snapshot, _ = await _start_generation_job(
+                request, deps, principal, recovered_payload,
+                request_fingerprint=request_fingerprint,
+                reservation=recovered_reservation,
+                target_message_id=admitted.user_message_id,
+                transcript=saved_messages,
+                transcript_revision=current_revision,
+            )
+            return snapshot, admitted.user_message_id
 
     candidate_thread_id = payload.thread_id or uuid4().hex
     if reservation is None:
