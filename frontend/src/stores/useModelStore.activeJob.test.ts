@@ -7,9 +7,12 @@ const job: ActiveModelJob = { jobId: "job-1", kind: "gguf_download", model: "dem
 describe("the model job a tab is following", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
+    useModelStore.getState().clearSecondaryJobs();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    useModelStore.getState().clearSecondaryJobs();
     window.sessionStorage.clear();
   });
 
