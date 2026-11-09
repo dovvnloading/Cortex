@@ -6,6 +6,7 @@ import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-
 import { ApiError, CortexApi } from "../../api/client";
 import { trackGeneration } from "../../hooks/useGenerationStream";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
+import { storePendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
@@ -849,6 +850,79 @@ describe("ChatPage composer integration", () => {
     expect(regenerate.mock.calls[0][0]).toBe("thread-a");
     expect(regenerate.mock.calls[0][1].message_id).toBe("message-user-1");
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays the exact accepted admission after ChatPage unmount and remount", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("The first 202 response was lost"))
+      .mockResolvedValueOnce({
+        job_id: "recovered-after-reload",
+        kind: "generation" as const,
+        status: "queued" as const,
+        thread_id: "thread-a",
+        user_message_id: "saved-user",
+      });
+    const api = chatApi({ generate });
+    const originalPage = renderChat(api);
+
+    await user.type(await screen.findByLabelText("Message Cortex"), "Keep this exact request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Retry last message" });
+    const originalPayload = generate.mock.calls[0][0];
+
+    originalPage.unmount(); // Settings navigation or a tab reload unmounts the page.
+    renderChat(api);
+    const recover = await screen.findByRole("button", { name: "Retry last message" });
+    expect(screen.getByText(/previous message may have started/i)).toBeInTheDocument();
+    await user.click(recover);
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toEqual(originalPayload);
+    expect(generate.mock.calls[1][0].request_id).toBe(originalPayload.request_id);
+  });
+
+  it("restores the original attachments and options rather than a newer chat context", async () => {
+    const user = userEvent.setup();
+    const attachment: ChatAttachment = {
+      attachment_id: "retained-doc",
+      filename: "saved.txt",
+      mime_type: "text/plain",
+      size: 12,
+      sha256: "a".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    storePendingGenerationAdmission({
+      requestId: "retry-original-payload",
+      operation: "generate",
+      threadId: "thread-a",
+      baseRevision: 3,
+      prompt: "Summarize the saved attachment",
+      attachments: [attachment],
+      options: { temperature: 0.2 },
+      createdAt: Date.now(),
+    });
+    const generate = vi.fn().mockResolvedValue({
+      job_id: "accepted-again",
+      kind: "generation",
+      status: "queued",
+      thread_id: "thread-a",
+      user_message_id: "saved-user",
+    });
+    useChatStore.getState().setThreadOptions("thread-a", { temperature: 0.8 });
+    const api = chatApi({ chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 9 })), generate });
+    renderChat(api);
+
+    await user.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    expect(generate.mock.calls[0][0]).toEqual(expect.objectContaining({
+      request_id: "retry-original-payload",
+      user_input: "Summarize the saved attachment",
+      attachments: [attachment],
+      base_revision: 3,
+      options: { temperature: 0.2 },
+    }));
   });
 
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
