@@ -57,6 +57,57 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
     useChatStore.getState().recordFailure({ threadId, message });
   }, []);
 
+  const onMissingJob = useCallback(async (
+    threadId: string,
+    userMessageId: string | undefined,
+    safelyMissing: boolean,
+  ): Promise<void> => {
+    // The in-memory registry may have disappeared after the assistant answer
+    // was committed. Reconcile the durable chat, never assume a missing job
+    // means the answer was not saved.
+    let chat: ChatResponse;
+    try {
+      chat = await api.chat(threadId);
+      useChatStore.getState().upsertChatSummary(chat);
+    } catch {
+      useChatStore.getState().recordFailure({
+        threadId,
+        message: "The generation could not be verified and the saved chat could not be reloaded. Open the chat again before retrying.",
+        retryable: false,
+      });
+      useChatStore.getState().recordCompletion({ jobId: null, threadId, chat: null, clearRequested: false });
+      return;
+    }
+
+    const messages = chat.messages ?? [];
+    const userIndex = userMessageId
+      ? messages.findIndex((message) => message.role === "user" && message.id === userMessageId)
+      : -1;
+    const afterUser = userIndex >= 0 ? messages.slice(userIndex + 1) : [];
+    const nextUserIndex = afterUser.findIndex((message) => message.role === "user");
+    const sameTurn = nextUserIndex < 0 ? afterUser : afterUser.slice(0, nextUserIndex);
+    const savedReply = sameTurn.some((message) => message.role === "assistant");
+
+    if (!savedReply) {
+      // Only a positively identified unanswered final user turn, together
+      // with a missing 404 job, is safe to offer Retry. 403 and legacy
+      // admissions without turn identity are explicitly unverified.
+      const last = messages[messages.length - 1];
+      const retryable = safelyMissing && userIndex >= 0
+        && last?.role === "user" && last.id === userMessageId;
+      useChatStore.getState().recordFailure({
+        threadId,
+        message: retryable
+          ? "The previous generation ended without a saved answer. Retry the unanswered turn."
+          : "The previous generation is no longer available. Review the reloaded conversation before submitting again.",
+        retryable,
+      });
+    }
+    // The transcript is always published, including when the result is
+    // uncertain, so a committed answer is visible without a manual reload.
+    useChatStore.getState().recordCompletion({ jobId: null, threadId, chat, clearRequested: false });
+  }, [api]);
+
   useEffect(() => stop, [stop]);
 
   // Attach to whatever job the store tracks: one kept across a workspace
@@ -79,7 +130,7 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
         authAttempt = 0;
       }
       attachedJobIdRef.current = job.jobId;
-      void consume(job, onCompleted, onFailed).then((outcome) => {
+      void consume(job, onCompleted, onFailed, onMissingJob).then((outcome) => {
         if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
         // The consumer is now *fully* stopped, including its status fallback,
         // so dropping this guard cannot create concurrent SSE readers.
@@ -117,7 +168,7 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
           const job: PersistedJob = { ...stored, lastEventId: 0 };
           attachedJobIdRef.current = job.jobId;
           beginGeneration(job.jobId, job.threadId);
-          void consume(job, onCompleted, onFailed).then((outcome) => {
+          void consume(job, onCompleted, onFailed, onMissingJob).then((outcome) => {
             if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
             attachedJobIdRef.current = null;
             const delayMs = reconnectDelay(authAttempt);
@@ -140,7 +191,7 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       unsubscribe();
     };
-  }, [consume, onCompleted, onFailed]);
+  }, [consume, onCompleted, onFailed, onMissingJob]);
 
   return null;
 }
