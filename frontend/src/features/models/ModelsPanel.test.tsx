@@ -399,7 +399,7 @@ describe("concurrent backend model operations", () => {
       onCancel: cancel,
     });
 
-    expect(screen.getAllByRole("status", { name: /Model operation progress:/ })).toHaveLength(2);
+    expect(screen.getAllByRole("status", { name: /Model operation progress/ })).toHaveLength(2);
     expect(screen.getByText("Scanning models")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel local model inventory" }));
     expect(cancel).toHaveBeenCalledWith("rescan-1");
