@@ -259,6 +259,7 @@ export interface ExecutionTaskSummary {
 
 export interface ForkRequest {
   message_id: string;
+  request_id: string;
 }
 
 export interface GenerationEvent {
