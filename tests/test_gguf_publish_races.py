@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -265,3 +267,136 @@ def test_split_rollback_removes_only_its_own_unmodified_shard(
     assert not first.exists()
     assert second.read_bytes() == b"other writer's shard"
     assert not list(tmp_path.glob(".rollback-*.part"))
+
+
+def _terminate_after_shard_publish(directory: Path, *, after: int) -> None:
+    """Reproduce an OS process death, bypassing Python's finally/rollback."""
+    root = Path(__file__).resolve().parents[1]
+    code = """
+import os
+import sys
+from pathlib import Path
+from cortex_backend.llamacpp import download as gguf
+
+target = Path(sys.argv[1])
+exit_after = int(sys.argv[2])
+class StubTransfer:
+    def __init__(self, *, staging_path, **_kwargs):
+        self.path = staging_path
+    def run(self):
+        self.path.write_bytes(b"GGUF" + bytes(28))
+
+gguf._GGUFTransfer = StubTransfer
+gguf._validate_gguf_file = lambda _path: None
+original_publish = gguf._publish
+published = [0]
+def publish_then_die(staged, destination, *, allow_overwrite):
+    original_publish(staged, destination, allow_overwrite=allow_overwrite)
+    if destination.suffix.lower() == ".gguf":
+        published[0] += 1
+        if published[0] == exit_after:
+            os._exit(70 + exit_after)
+
+gguf._publish = publish_then_die
+parts = (
+    ("https://example.com/first", "model-00001-of-00002.gguf"),
+    ("https://example.com/second", "model-00002-of-00002.gguf"),
+)
+gguf.download_gguf_set(parts, target)
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "backend") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(directory), str(after)],
+        env=env, cwd=root, capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode == 70 + after, (
+        "The child did not die at the requested publication barrier: "
+        f"{result.returncode}; stderr={result.stderr[-1200:]}"
+    )
+
+
+@pytest.mark.parametrize("published_before_crash", [1, 2])
+def test_split_publication_can_recover_after_a_real_process_death(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published_before_crash: int,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    unrelated = tmp_path / "somebody-elses.gguf"
+    unrelated.write_bytes(b"independent user's existing model")
+    _terminate_after_shard_publish(tmp_path, after=published_before_crash)
+
+    assert first.is_file()
+    assert second.exists() is (published_before_crash == 2)
+    assert len(list(tmp_path.glob(".split-publish-*.json"))) == 1
+
+    if published_before_crash == 1:
+        # A partially published set is conditionally rolled back and retried
+        # safely. Staged downloads no longer have to be located by the user.
+        _stub_network(monkeypatch)
+    else:
+        # A fully published set needs no network even when the success
+        # acknowledgement and journal cleanup were lost at process exit.
+        class NoTransfer:
+            def __init__(self, **_kwargs):
+                raise AssertionError("a fully published split set must not redownload")
+        monkeypatch.setattr(gguf_download, "_GGUFTransfer", NoTransfer)
+
+    recovered = gguf_download.download_gguf_set(parts, tmp_path)
+    assert recovered == (first, second)
+    assert first.read_bytes() == second.read_bytes() == b"GGUF" + bytes(28)
+    assert unrelated.read_bytes() == b"independent user's existing model"
+    assert not list(tmp_path.glob(".split-publish-*.json"))
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
+def test_crash_recovery_does_not_remove_a_foreign_shard_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    _terminate_after_shard_publish(tmp_path, after=1)
+    assert list(tmp_path.glob(".split-publish-*.json"))
+    foreign = tmp_path / "foreign-replacement.part"
+    contents = b"somebody else's new shard"
+    foreign.write_bytes(contents)
+    os.replace(foreign, first)  # Different inode; original owner identity gone.
+
+    _stub_network(monkeypatch)
+    with pytest.raises(gguf_download.GGUFDownloadError, match="already exists"):
+        gguf_download.download_gguf_set(parts, tmp_path)
+
+    assert first.read_bytes() == contents
+    assert not second.exists()
+    assert not list(tmp_path.glob(".split-publish-*.json"))
+
+
+def test_crash_recovery_fails_closed_for_different_download_with_same_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, _second = _split_paths(tmp_path)
+    _terminate_after_shard_publish(tmp_path, after=1)
+    _stub_network(monkeypatch)
+    another_source = tuple(
+        (url.replace("example.com", "different.example.org"), name)
+        for url, name in parts
+    )
+    with pytest.raises(gguf_download.GGUFDownloadError, match="already exists"):
+        gguf_download.download_gguf_set(another_source, tmp_path)
+    assert first.exists()
+    assert len(list(tmp_path.glob(".split-publish-*.json"))) == 1
+
+
+def test_crash_recovery_can_restart_when_unpublished_stage_was_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts, first, second = _split_paths(tmp_path)
+    _terminate_after_shard_publish(tmp_path, after=1)
+    for stage in tmp_path.glob(".download-*.part"):
+        stage.unlink()
+    _stub_network(monkeypatch)
+
+    assert gguf_download.download_gguf_set(parts, tmp_path) == (first, second)
+    assert first.exists() and second.exists()
+    assert not list(tmp_path.glob(".split-publish-*.json"))
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
