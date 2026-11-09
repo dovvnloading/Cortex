@@ -110,7 +110,7 @@ function ParamsPanel({
         </div>
       </div>
 
-      <p className="params-popover-hint">Applies to this chat only. Defaults for every chat live in Settings → AI Model.</p>
+      <p className="params-popover-hint">Saved on this device for this chat. Defaults for every chat live in Settings → AI Model.</p>
     </>
   );
 }

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ChatGroup, ChatResponse, ChatSummary, GenerationOptionsOverride } from "../../../contracts/cortex-api";
 import { GENERATION_GAP_NOTICE } from "../lib/generationStatus";
+import { readPersistedGenerationOptions, writePersistedGenerationOptions } from "../lib/persistedGenerationOptions";
 
 /** A brand-new, not-yet-created chat has no thread id yet; scope its draft options under this key. */
 export const NEW_THREAD_OPTIONS_KEY = "new";
@@ -158,7 +159,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   generationCursor: 0,
   lastCompletion: null,
   lastFailure: null,
-  generationOptionsByThread: {},
+  generationOptionsByThread: readPersistedGenerationOptions(),
   untranslatedMessageIds: {},
   proposedMemoriesByMessage: {},
 
@@ -278,7 +279,8 @@ export const useChatStore = create<ChatStoreState>((set) => ({
     set((state) => {
       const next = { ...state.generationOptionsByThread };
       if (options === null) delete next[threadKey];
-      else next[threadKey] = options;
+      else { delete next[threadKey]; next[threadKey] = options; }
+      writePersistedGenerationOptions(next);
       return { generationOptionsByThread: next };
     }),
   markUntranslated: (messageId) =>
