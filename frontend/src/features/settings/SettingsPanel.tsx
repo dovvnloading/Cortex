@@ -18,7 +18,7 @@ import {
   SeedField,
   type GenerationPatch,
 } from "../generation/GenerationControls";
-import type { ModelProgress } from "../../stores/useModelStore";
+import type { ActiveModelJob, ModelProgress } from "../../stores/useModelStore";
 import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
 import type { ListGGUFFiles } from "../models/GGUFDownloadForm";
 import { ModelsPanel } from "../models/ModelsPanel";
@@ -44,8 +44,10 @@ export type SettingsPanelProps = {
   models: ModelResponse;
   modelBusy: boolean;
   modelProgress: ModelProgress | null;
-  /** Stops the model operation whose progress is shown; without it the row has no Cancel. */
-  onCancelModelJob?: () => void;
+  secondaryModelJobs?: Record<string, ActiveModelJob>;
+  secondaryModelProgress?: Record<string, ModelProgress>;
+  /** Stops a specific backend model job; defaults to the primary when no ID is provided. */
+  onCancelModelJob?: (jobId?: string) => void;
   setupUrl: string;
   onCheckModels: () => Promise<void>;
   onPullModel: (model: string) => Promise<void>;
@@ -133,6 +135,8 @@ export function SettingsPanel({
   models,
   modelBusy,
   modelProgress,
+  secondaryModelJobs,
+  secondaryModelProgress,
   onCancelModelJob,
   setupUrl,
   onCheckModels,
@@ -488,6 +492,8 @@ export function SettingsPanel({
               models={models}
               busy={modelBusy}
               progress={modelProgress}
+              secondaryJobs={secondaryModelJobs}
+              secondaryProgress={secondaryModelProgress}
               onCancel={onCancelModelJob}
               setupUrl={setupUrl}
               onCheck={onCheckModels}
