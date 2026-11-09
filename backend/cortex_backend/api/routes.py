@@ -91,6 +91,7 @@ from cortex_backend.execution.scratch_compute import (
 
 from .app_types import BackendDependenciesProtocol
 from .jobs import (
+    JobConflict,
     JobKind,
     JobNotFound,
     JobOwnershipError,
