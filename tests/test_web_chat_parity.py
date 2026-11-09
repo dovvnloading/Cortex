@@ -622,7 +622,7 @@ def test_fork_and_regeneration_use_message_ids_and_preserve_original_until_succe
 
         fork = client.post(
             f"/api/v1/chats/{accepted['thread_id']}/forks",
-            json={"message_id": assistant_id},
+            json={"message_id": assistant_id, "request_id": "fork-parity-1"},
             headers=headers,
         )
         assert fork.status_code == 201
