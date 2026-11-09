@@ -269,6 +269,29 @@ def test_split_rollback_removes_only_its_own_unmodified_shard(
     assert not list(tmp_path.glob(".rollback-*.part"))
 
 
+def test_post_publish_exception_is_rolled_back_even_before_the_loop_marks_it_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem publication may succeed immediately before its wrapper fails."""
+    _stub_network(monkeypatch)
+    parts, first, second = _split_paths(tmp_path)
+    original_publish = gguf_download._publish
+
+    def publish_then_fail(staged: Path, destination: Path, *, allow_overwrite: bool) -> None:
+        original_publish(staged, destination, allow_overwrite=allow_overwrite)
+        if destination == first:
+            raise OSError("failure after first shard appeared")
+
+    monkeypatch.setattr(gguf_download, "_publish", publish_then_fail)
+    with pytest.raises(OSError, match="after first shard"):
+        gguf_download.download_gguf_set(parts, tmp_path)
+
+    assert not first.exists()
+    assert not second.exists()
+    assert not list(tmp_path.glob(".split-publish-*.json"))
+    assert not list(tmp_path.glob(".download-*.part"))
+
+
 def _terminate_after_shard_publish(directory: Path, *, after: int) -> None:
     """Reproduce an OS process death, bypassing Python's finally/rollback."""
     root = Path(__file__).resolve().parents[1]
