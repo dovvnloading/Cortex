@@ -134,6 +134,13 @@ function hasClearRequest(value: unknown): boolean {
   return (result.memory_command as { clear_requested?: unknown }).clear_requested === true;
 }
 
+/** Terminal cancelled jobs with a persisted assistant turn are stopped, not failed. */
+function hasSavedStoppedAnswer(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const id = (value as { assistant_message_id?: unknown }).assistant_message_id;
+  return typeof id === "string" && id.length > 0;
+}
+
 /** A job result whose translation failed carries the untranslated answer and a translation_error. */
 function noteTranslationFailure(value: unknown): void {
   if (!value || typeof value !== "object") return;
@@ -368,8 +375,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   // stopped. Only a stop with nothing to keep, or a real
                   // failure, gets the error and its Retry.
                   const keptAnswer = event.event === "generation.cancelled"
-                    && typeof data.assistant_message_id === "string"
-                    && data.assistant_message_id.length > 0;
+                    && hasSavedStoppedAnswer(data);
                   if (!keptAnswer) {
                     onFailed(job.threadId, typeof data.message === "string" ? data.message : "Generation did not complete.");
                   }
@@ -396,7 +402,13 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               const snapshot = await api.generationStatus(job.jobId, { signal: controller.signal });
               if (snapshot.status === "succeeded" || snapshot.status === "failed" || snapshot.status === "cancelled") {
                 terminal = true;
-                if (snapshot.status !== "succeeded") {
+                if (
+                  snapshot.status !== "succeeded"
+                  && !(snapshot.status === "cancelled" && hasSavedStoppedAnswer(snapshot.result))
+                ) {
+                  // A saved partial answer is also a completed user-visible
+                  // reply after Stop: reload it instead of offering a
+                  // duplicate-send Retry from the status fallback.
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 } else {
                   noteTranslationFailure(snapshot.result);
