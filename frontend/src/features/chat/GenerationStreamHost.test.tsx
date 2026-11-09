@@ -55,6 +55,7 @@ describe("GenerationStreamHost", () => {
     window.sessionStorage.clear();
     const { generation, endGeneration } = useChatStore.getState();
     if (generation.jobId) endGeneration(generation.jobId);
+    useChatStore.setState({ lastCompletion: null, lastFailure: null });
   });
 
   it("attaches to a job a page starts tracking, from its first event", async () => {
@@ -305,6 +306,69 @@ describe("GenerationStreamHost", () => {
       clearRequested: false,
     });
     expect(readActiveJob()).toBeNull();
+  });
+
+  it("shows the saved answer after the backend restarts and forgets the generation job", async () => {
+    const restored = {
+      ...savedChat("thread-a"),
+      messages: [
+        { id: "user-committed", role: "user" as const, content: "Explain this issue" },
+        { id: "assistant-committed", role: "assistant" as const, content: "Saved answer" },
+      ],
+    };
+    const chat = vi.fn(async () => restored);
+    const { api } = fakeStreamApi({
+      chat: chat as unknown as CortexApi["chat"],
+      streamGeneration: vi.fn().mockRejectedValue(new ApiError(404, "Previous stream missing.")) as unknown as CortexApi["streamGeneration"],
+      generationStatus: vi.fn().mockRejectedValue(new ApiError(404, "Previous job missing.")) as unknown as CortexApi["generationStatus"],
+    });
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => trackGeneration("job-forgotten", "thread-a", "user-committed"));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(chat).toHaveBeenCalledWith("thread-a");
+    expect(useChatStore.getState().lastCompletion).toMatchObject({
+      threadId: "thread-a",
+      chat: restored,
+      clearRequested: false,
+    });
+    expect(useChatStore.getState().lastFailure).toBeNull();
+    expect(readActiveJob()).toBeNull();
+  });
+
+  it("offers retry only for the specific unanswered final user turn", async () => {
+    const restored = {
+      ...savedChat("thread-a"),
+      messages: [{ id: "user-unanswered", role: "user" as const, content: "Will you answer?" }],
+    };
+    const { api } = fakeStreamApi({
+      chat: vi.fn(async () => restored) as unknown as CortexApi["chat"],
+      streamGeneration: vi.fn().mockRejectedValue(new ApiError(404, "Previous stream missing.")) as unknown as CortexApi["streamGeneration"],
+      generationStatus: vi.fn().mockRejectedValue(new ApiError(404, "Previous job missing.")) as unknown as CortexApi["generationStatus"],
+    });
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => trackGeneration("job-forgotten", "thread-a", "user-unanswered"));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(useChatStore.getState().lastCompletion?.chat).toEqual(restored);
+    expect(useChatStore.getState().lastFailure).toMatchObject({
+      threadId: "thread-a",
+      retryable: true,
+    });
+  });
+
+  it("does not offer a duplicate retry when the job and saved chat are both inaccessible", async () => {
+    const { api } = fakeStreamApi({
+      chat: vi.fn().mockRejectedValue(new ApiError(503, "Chat unavailable.")) as unknown as CortexApi["chat"],
+      streamGeneration: vi.fn().mockRejectedValue(new ApiError(404, "Previous stream missing.")) as unknown as CortexApi["streamGeneration"],
+      generationStatus: vi.fn().mockRejectedValue(new ApiError(404, "Previous job missing.")) as unknown as CortexApi["generationStatus"],
+    });
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => trackGeneration("job-forgotten", "thread-a", "user-committed"));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(useChatStore.getState().lastCompletion).toMatchObject({ threadId: "thread-a", chat: null });
+    expect(useChatStore.getState().lastFailure).toMatchObject({ retryable: false });
   });
 
   it("publishes a completion without a chat when the reload fails, and still ends the generation", async () => {
