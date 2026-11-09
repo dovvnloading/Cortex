@@ -325,9 +325,14 @@ export function useModelJobs(dependencies: Dependencies): {
       ? primary?.jobId === jobId ? primary : untracked.current.get(jobId)
       : primary ?? untracked.current.values().next().value;
     if (!tracking || tracking.cancelRequested) return;
-    tracking.cancelRequested = true;
-    const store = useModelStore.getState();
     const isPrimary = primary === tracking;
+    // Mutate only the owned tracking ref, never an aliased hook value.
+    if (isPrimary && tracked.current) tracked.current.cancelRequested = true;
+    else {
+      const secondary = untracked.current.get(tracking.jobId);
+      if (secondary) secondary.cancelRequested = true;
+    }
+    const store = useModelStore.getState();
     const before = isPrimary ? store.modelProgress : store.secondaryProgress[tracking.jobId] ?? null;
     const setProgress = (progress: ModelProgress | null) => {
       if (isPrimary) store.setModelProgress(progress);
@@ -337,7 +342,11 @@ export function useModelJobs(dependencies: Dependencies): {
     try {
       await latest.current.api.cancelJob(tracking.jobId);
     } catch (error) {
-      tracking.cancelRequested = false;
+      if (isPrimary && tracked.current?.jobId === tracking.jobId) tracked.current.cancelRequested = false;
+      else {
+        const secondary = untracked.current.get(tracking.jobId);
+        if (secondary) secondary.cancelRequested = false;
+      }
       // Restore only this job's row; another concurrent job is unaffected.
       const now = useModelStore.getState();
       const visible = isPrimary ? now.modelProgress : now.secondaryProgress[tracking.jobId];
