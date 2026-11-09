@@ -285,7 +285,8 @@ export function useModelJobs(dependencies: Dependencies): {
         if (attached()) {
           const current = useModelStore.getState();
           if (settled) current.forgetSecondaryJob(job.jobId);
-          current.setModelBusy(Boolean(current.activeJob) || Object.keys(current.secondaryJobs).length > 0);
+          const remaining = useModelStore.getState();
+          remaining.setModelBusy(Boolean(remaining.activeJob) || Object.keys(remaining.secondaryJobs).length > 0);
         }
       }
     }
