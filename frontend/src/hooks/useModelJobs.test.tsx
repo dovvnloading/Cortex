@@ -126,6 +126,52 @@ describe("following a job the backend just accepted", () => {
     expect(remembered()).toBeNull();
   });
 
+  it("does not misreport a completed GGUF job as failed when inventory reload fails", async () => {
+    const { result, streams, api, notify, onModels } = setup();
+    api.models.mockRejectedValue(new ApiError(500, "Could not read inventory."));
+
+    let outcome!: Promise<ModelJobResult>;
+    act(() => {
+      outcome = result.current.run(
+        accepted("completed-download"), "demo.Q4_K_M.gguf",
+        { checkOllamaConnection: false, notifyOnSuccess: false },
+      );
+    });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    await act(async () => streams[0].finish(succeeded(2)));
+
+    expect(await outcome).toEqual({
+      succeeded: true,
+      data: { filename: "demo.Q4_K_M.gguf" },
+      failure: null,
+      cancelled: false,
+      detached: false,
+    });
+    expect(notify).toHaveBeenCalledWith(
+      "Model operation completed, but the model list could not be refreshed. Rescan models to update it.",
+      "info",
+    );
+    expect(notify).not.toHaveBeenCalledWith("Could not read inventory.", "error");
+    expect(onModels).not.toHaveBeenCalled();
+    expect(state().activeJob).toBeNull();
+    expect(remembered()).toBeNull();
+    expect(state().modelBusy).toBe(false);
+  });
+
+  it("still runs a resumed GGUF download's completion callback after inventory failure", async () => {
+    state().setActiveJob(job({ lastEventId: 3 }));
+    const { streams, api, onDownloaded, notify } = setup();
+    api.models.mockRejectedValue(new ApiError(500, "Inventory failed."));
+
+    await waitFor(() => expect(streams).toHaveLength(1));
+    await act(async () => streams[0].finish(succeeded(4)));
+    await waitFor(() => expect(onDownloaded).toHaveBeenCalledWith(
+      "demo.Q4_K_M.gguf", undefined, undefined,
+    ));
+    expect(notify).not.toHaveBeenCalledWith("Inventory failed.", "error");
+    expect(state().activeJob).toBeNull();
+  });
+
   it("announces success unless the caller words it itself", async () => {
     const { result, streams, notify } = setup();
 
@@ -571,6 +617,36 @@ describe("a second job while one is being followed", () => {
 
     await act(async () => { await result.current.cancel(); });
     expect(api.cancelJob).toHaveBeenCalledWith("download-1");
+  });
+
+  it("never applies an older inventory result after a newer concurrent refresh", async () => {
+    const { result, streams, api, onModels } = setup();
+    const resolves: Array<(models: ModelResponse) => void> = [];
+    api.models.mockImplementation(() => new Promise<ModelResponse>((resolve) => { resolves.push(resolve); }));
+
+    let first!: Promise<ModelJobResult>;
+    let second!: Promise<ModelJobResult>;
+    act(() => {
+      first = result.current.run(accepted("pull-1", "models"), "model-one");
+      second = result.current.run(accepted("download-2"), "model-two");
+    });
+    await waitFor(() => expect(streams).toHaveLength(2));
+    await act(async () => streams.find((stream) => stream.jobId === "pull-1")!.finish(succeeded(1, {})));
+    await waitFor(() => expect(resolves).toHaveLength(1));
+    await act(async () => streams.find((stream) => stream.jobId === "download-2")!.finish(succeeded(1)));
+    await waitFor(() => expect(resolves).toHaveLength(2));
+
+    const newer = { ...inventory, installed_models: ["gguf:model-two.gguf", "model-one"] };
+    const older = { ...inventory, installed_models: ["model-one"] };
+    await act(async () => resolves[1](newer));
+    expect((await second).succeeded).toBe(true);
+    expect(onModels).toHaveBeenCalledTimes(1);
+    expect(onModels).toHaveBeenCalledWith(newer);
+
+    await act(async () => resolves[0](older));
+    expect((await first).succeeded).toBe(true);
+    expect(onModels).toHaveBeenCalledTimes(1);
+    expect(onModels).not.toHaveBeenCalledWith(older);
   });
 
   it("persists both jobs and their independent cursors, then resumes and cancels either after reload", async () => {

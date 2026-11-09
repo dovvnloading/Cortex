@@ -6,7 +6,7 @@ import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-
 import { ApiError, CortexApi } from "../../api/client";
 import { trackGeneration } from "../../hooks/useGenerationStream";
 import { humanizeGenerationStatus } from "../../lib/generationStatus";
-import { storePendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
+import { readPendingGenerationAdmission, storePendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
 import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
@@ -1076,6 +1076,74 @@ describe("ChatPage composer integration", () => {
     await user.click(screen.getByRole("button", { name: "Retry last message" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     expect(generate.mock.calls[1][0]).toEqual(originalPayload);
+  });
+
+  it("unblocks other chats only after confirming abandonment of an unresolved send", async () => {
+    const user = userEvent.setup();
+    storePendingGenerationAdmission({
+      requestId: "lost-response-thread-a",
+      operation: "generate",
+      threadId: "thread-a",
+      baseRevision: 0,
+      prompt: "First message may be running",
+      attachments: [],
+      createdAt: Date.now(),
+    });
+    const generate = vi.fn().mockResolvedValue({
+      job_id: "job-new-thread-b",
+      kind: "generation",
+      status: "queued",
+      thread_id: "thread-b",
+      user_message_id: "user-in-b",
+    });
+    renderChat(chatApi({ generate }), "thread-b");
+
+    const composer = await screen.findByLabelText("Message Cortex");
+    await user.type(composer, "A different message");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(generate).not.toHaveBeenCalled();
+    expect(readPendingGenerationAdmission()?.threadId).toBe("thread-a");
+
+    await user.click(screen.getByRole("button", { name: "Abandon pending request" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("will not cancel");
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Keep recovery" }));
+    expect(readPendingGenerationAdmission()).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Abandon pending request" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Abandon recovery" }));
+    expect(readPendingGenerationAdmission()).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0][0].thread_id).toBe("thread-b");
+  });
+
+  it("offers abandonment when the original pending chat cannot be loaded", async () => {
+    const user = userEvent.setup();
+    storePendingGenerationAdmission({
+      requestId: "lost-response-deleted-chat",
+      operation: "generate",
+      threadId: "thread-a",
+      baseRevision: 0,
+      prompt: "Message in deleted chat",
+      attachments: [],
+      createdAt: Date.now(),
+    });
+    const chat = vi.fn(async (id: string) => {
+      if (id === "thread-a") throw new ApiError(404, "Conversation was deleted.");
+      return emptyChat(id);
+    });
+    const api = chatApi({ chat });
+    const view = renderChat(api, "thread-a");
+
+    expect(await screen.findByRole("heading", { name: "Conversation unavailable" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Abandon pending request" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Abandon recovery" }));
+    expect(readPendingGenerationAdmission()).toBeNull();
+
+    view.rerender(chatElement(api, "thread-b"));
+    expect(await screen.findByLabelText("Message Cortex")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Abandon pending request" })).not.toBeInTheDocument();
   });
 
   it("uses a fresh admission key for a new turn after explicitly abandoning ambiguous recovery", async () => {

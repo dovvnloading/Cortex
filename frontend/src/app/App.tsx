@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SystemResponse } from "../../../contracts/cortex-api";
+import type { ChatResponse, CortexSettings, ExecutionApprovalDecisionRequest, ExecutionStatusResponse, ExecutionTaskSummary, JobAccepted, LlamaCppRuntimeStatus, MemoryResponse, ModelDownloadRequest, ModelResponse, SystemResponse } from "../../../contracts/cortex-api";
 import {
   CortexApi,
   ApiError,
@@ -554,16 +554,51 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
+  // A lost approval HTTP response is not evidence that authorization failed:
+  // the worker can already be executing. Reconcile by the exact job ID before
+  // describing the result, and keep the local tray accurate if polling fails.
+  const applyExecutionStatus = (status: ExecutionStatusResponse) => {
+    setExecutionTasks((current) => current.map((task) => (
+      task.job_id === status.job_id ? { ...task, ...status } : task
+    )));
+  };
+
   const decideExecutionApproval = async (
     jobId: string,
     decision: ExecutionApprovalDecisionRequest["decision"],
   ) => {
+    const confirmation = decision === "approved"
+      ? "Background task approved once."
+      : "Background task denied.";
     try {
-      await api.decideExecutionApproval(jobId, decision);
+      const status = await api.decideExecutionApproval(jobId, decision);
+      applyExecutionStatus(status);
       await refreshExecutionTasks();
-      notify(decision === "approved" ? "Background task approved once." : "Background task denied.", "success");
+      notify(confirmation, "success");
     } catch (error) {
-      notify(apiMessage(error, "Could not record the approval decision."), "error");
+      let current: ExecutionStatusResponse;
+      try {
+        // Safe owner-scoped GET: never replay a side-effecting approval POST.
+        current = await api.executionStatus(jobId);
+      } catch {
+        notify("Approval status could not be verified. The task may already be running; check its status before trying again.", "error");
+        return;
+      }
+      applyExecutionStatus(current);
+      await refreshExecutionTasks();
+      if (current.approval_state === decision) {
+        notify(confirmation, "success");
+      } else if (current.approval_state === "approved") {
+        notify("The task was already approved and may be running; the requested denial did not take effect.", "error");
+      } else if (current.approval_state === "denied") {
+        notify("The task was denied; the requested approval did not take effect.", "error");
+      } else if (current.approval_state === "expired") {
+        notify(apiMessage(error, "Approval has expired."), "error");
+      } else if (current.approval_state === "pending" && isDefinitiveRejection(error)) {
+        notify(apiMessage(error, "Approval decision was rejected."), "error");
+      } else {
+        notify("Approval decision was not confirmed. The request may still complete; check task status before trying again.", "error");
+      }
     }
   };
 
