@@ -13,7 +13,9 @@ export function NavigationLink({
   ...props
 }: Props) {
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    onClick?.(event);
+    // Modified clicks belong to the browser (new tab/window, context action).
+    // Do not run same-tab navigation hooks before checking modifiers: Settings
+    // uses one to remember the route it should return to.
     if (
       event.defaultPrevented
       || event.button !== 0
@@ -26,6 +28,8 @@ export function NavigationLink({
       return;
     }
 
+    onClick?.(event);
+    if (event.defaultPrevented) return;
     event.preventDefault();
     navigate(to, { replace });
   };
