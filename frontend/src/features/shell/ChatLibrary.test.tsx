@@ -87,6 +87,35 @@ describe("ChatLibrary", () => {
     expect(screen.getByRole("button", { name: "Vector stores" })).toBeVisible();
   });
 
+  it("prevents invisible collapse preference writes while search forces groups open", async () => {
+    const user = userEvent.setup();
+    const groups = [group("g1", "Research", false)];
+    const chats = [chat("c1", "Vector stores", "g1")];
+    const view = renderLibrary({ groups, chats, query: "vector" });
+    const toggle = screen.getByRole("button", { name: "Research is expanded for search" });
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAttribute("title", expect.stringContaining("Clear the search"));
+    await user.click(toggle);
+    expect(view.props.onToggleGroup).not.toHaveBeenCalled();
+
+    view.rerender(<ChatLibrary {...view.props} query="" />);
+    expect(screen.getByRole("button", { name: "Collapse Research" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Vector stores" })).toBeVisible();
+  });
+
+  it("shows matches in previously collapsed groups without changing their saved collapsed state", () => {
+    const groups = [group("g1", "Research", true)];
+    const chats = [chat("c1", "Vector stores", "g1")];
+    const view = renderLibrary({ groups, chats, query: "vector" });
+    expect(screen.getByRole("button", { name: "Research is expanded for search" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Vector stores" })).toBeVisible();
+    view.rerender(<ChatLibrary {...view.props} query="" />);
+    expect(screen.getByRole("button", { name: "Expand Research" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Vector stores" })).not.toBeInTheDocument();
+    expect(view.props.onToggleGroup).not.toHaveBeenCalled();
+  });
+
   it("drops groups with no match from the search results", () => {
     renderLibrary({
       groups: [group("g1", "Research"), group("g2", "Empty")],
@@ -94,7 +123,7 @@ describe("ChatLibrary", () => {
       query: "vector",
     });
 
-    expect(screen.getByRole("button", { name: "Collapse Research" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Research is expanded for search" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: /Collapse Empty|Expand Empty/ })).not.toBeInTheDocument();
   });
 
