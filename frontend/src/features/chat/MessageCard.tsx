@@ -26,6 +26,8 @@ type MessageCardProps = {
   /** Position in the transcript. Handed back to `onRegenerate` so one callback can serve every card. */
   index: number;
   isFinalAssistant: boolean;
+  /** A saved final user turn has no assistant reply, even after a fresh mount. */
+  isFinalUnansweredUser?: boolean;
   busy: boolean;
   forking: boolean;
   /**
@@ -49,7 +51,7 @@ type MessageCardProps = {
  * its own busy/final/forking state changes, not whenever the transcript around
  * it does. That is what keeps a long chat cheap while a reply streams in.
  */
-export const MessageCard = memo(function MessageCard({ message, index, isFinalAssistant, busy, forking, onRegenerate, onFork, onSaveMemory }: MessageCardProps) {
+export const MessageCard = memo(function MessageCard({ message, index, isFinalAssistant, isFinalUnansweredUser = false, busy, forking, onRegenerate, onFork, onSaveMemory }: MessageCardProps) {
   const [copied, setCopied] = useState(false);
   const untranslated = useChatStore((state) => (message.id ? state.untranslatedMessageIds[message.id] === true : false));
   const proposedMemories = useChatStore((state) => (message.id ? state.proposedMemoriesByMessage[message.id] : undefined));
@@ -92,6 +94,9 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
       <div className="message-footer">
         <div className="message-actions" aria-label="Message actions">
           <button className="icon-button icon-button-small" type="button" aria-label={copied ? "Message copied" : "Copy message"} title={copied ? "Copied" : "Copy message"} onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="message-action-feedback">Copied</span>}</button>
+          {message.role === "user" && isFinalUnansweredUser && message.id && (
+            <button className="icon-button icon-button-small" type="button" aria-label="Retry response" title="Retry response" disabled={busy} onClick={() => onRegenerate(message, index)}><RefreshCw size={14} aria-hidden="true" /></button>
+          )}
           {message.role === "assistant" && <>
             <button className="icon-button icon-button-small" type="button" aria-label="Regenerate response" title="Regenerate response" disabled={!isFinalAssistant || busy} onClick={() => onRegenerate(message, index)}><RefreshCw size={14} aria-hidden="true" /></button>
             <button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" title="Fork chat from this message" disabled={busy || forking || !message.id} onClick={() => onFork(message)}><GitBranch size={14} aria-hidden="true" /></button>

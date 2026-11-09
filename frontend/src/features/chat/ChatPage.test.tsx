@@ -311,6 +311,66 @@ describe("ChatPage composer integration", () => {
     expect(api.addMemory).not.toHaveBeenCalled();
   });
 
+  it("recovers an unanswered persisted user turn after a fresh mount without duplicating it", async () => {
+    const attachment: ChatAttachment = {
+      attachment_id: "saved-document",
+      filename: "notes.txt",
+      mime_type: "text/plain",
+      size: 12,
+      sha256: "a".repeat(64),
+      kind: "document",
+      expires_at: "2099-01-01T00:00:00Z",
+    };
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 1,
+      messages: [{ id: "saved-user", role: "user", content: "Read my notes", attachments: [attachment] }],
+    };
+    const api = chatApi({
+      chat: vi.fn(async () => transcript),
+      regenerate: vi.fn().mockResolvedValue({
+        job_id: "reply-after-restart",
+        kind: "generation",
+        status: "queued",
+        thread_id: "thread-a",
+      }),
+    });
+
+    renderChat(api);
+    expect(await screen.findByText("Read my notes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry response" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry response" }));
+
+    await waitFor(() => expect(api.regenerate).toHaveBeenCalledWith("thread-a", expect.objectContaining({
+      message_id: "saved-user",
+      user_input: "Read my notes",
+      attachments: [attachment],
+    })));
+    expect(api.generate).not.toHaveBeenCalled();
+    // Reuse the existing saved user message; do not submit another user turn.
+    expect(screen.getAllByLabelText("Your message")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Retry response" })).toBeDisabled();
+  });
+
+  it("does not offer recovery on answered or earlier user turns", async () => {
+    const api = chatApi({
+      chat: vi.fn(async (): Promise<ChatResponse> => ({
+        ...emptyChat("thread-a"),
+        revision: 3,
+        messages: [
+          { id: "old-user", role: "user", content: "first" },
+          { id: "assistant", role: "assistant", content: "answer" },
+          { id: "latest-user", role: "user", content: "second" },
+          { id: "latest-assistant", role: "assistant", content: "another answer" },
+        ],
+      })),
+    });
+    renderChat(api);
+    expect(await screen.findByText("another answer")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry response" })).toBeNull();
+  });
+
   it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {
     const transcript: ChatResponse = {
       id: "thread-a",
