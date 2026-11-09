@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readStoredModelJob, useModelStore, type ActiveModelJob } from "./useModelStore";
+import { readStoredModelJob, readStoredSecondaryModelJobs, useModelStore, type ActiveModelJob } from "./useModelStore";
 
 const KEY = "cortex.active.model-job";
 const job: ActiveModelJob = { jobId: "job-1", kind: "gguf_download", model: "demo.Q4_K_M.gguf", lastEventId: 0 };
@@ -7,9 +7,12 @@ const job: ActiveModelJob = { jobId: "job-1", kind: "gguf_download", model: "dem
 describe("the model job a tab is following", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
+    useModelStore.getState().clearSecondaryJobs();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    useModelStore.getState().clearSecondaryJobs();
     window.sessionStorage.clear();
   });
 
@@ -81,4 +84,30 @@ describe("the model job a tab is following", () => {
     expect(() => useModelStore.getState().setActiveJob(null)).not.toThrow();
     expect(useModelStore.getState().activeJob).toBeNull();
   });
+  it("retains independent secondary job cursors without replacing the primary", () => {
+    useModelStore.getState().setActiveJob(job);
+    const scan: ActiveModelJob = { jobId: "scan-2", kind: "models", model: "inventory", lastEventId: 0 };
+    useModelStore.getState().rememberSecondaryJob(scan);
+    useModelStore.getState().advanceSecondaryJob("scan-2", 5);
+    useModelStore.getState().advanceSecondaryJob("scan-2", 3);
+
+    expect(readStoredModelJob()).toEqual(job);
+    expect(readStoredSecondaryModelJobs()).toEqual([{ ...scan, lastEventId: 5 }]);
+    useModelStore.getState().forgetSecondaryJob("scan-2");
+    expect(readStoredSecondaryModelJobs()).toEqual([]);
+    expect(readStoredModelJob()).toEqual(job);
+    useModelStore.getState().setActiveJob(null);
+  });
+
+  it("rejects damaged secondary storage and keeps an in-memory job if storage is denied", () => {
+    window.sessionStorage.setItem("cortex.active.model-jobs.secondary", "[{\"jobId\":3}]");
+    expect(readStoredSecondaryModelJobs()).toEqual([]);
+    const scan: ActiveModelJob = { jobId: "scan-3", kind: "models", model: "inventory", lastEventId: 0 };
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new DOMException("denied", "SecurityError"); });
+    useModelStore.getState().rememberSecondaryJob(scan);
+    useModelStore.getState().advanceSecondaryJob("scan-3", 7);
+    expect(useModelStore.getState().secondaryJobs["scan-3"].lastEventId).toBe(7);
+    useModelStore.getState().clearSecondaryJobs();
+  });
+
 });

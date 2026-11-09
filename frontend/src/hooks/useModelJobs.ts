@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { JobAccepted, JobStatusResponse, ModelResponse } from "../../../contracts/cortex-api";
 import { ApiError, describeApiError, type CortexApi } from "../api/client";
 import { describeModelProgress } from "../lib/modelJobs";
-import { readStoredModelJob, useModelStore, type ActiveModelJob } from "../stores/useModelStore";
+import { readStoredModelJob, readStoredSecondaryModelJobs, useModelStore, type ActiveModelJob, type ModelProgress } from "../stores/useModelStore";
 import type { ToastKind } from "../stores/useUiStore";
 
 /** How a model job ended, for the caller that started it. */
@@ -93,7 +93,7 @@ export function useModelJobs(dependencies: Dependencies): {
   /** Follow a job the backend just accepted, to its end. Never rejects. */
   run: (accepted: JobAccepted, label?: string, options?: ModelJobOptions) => Promise<ModelJobResult>;
   /** Ask the backend to stop the job being followed. */
-  cancel: () => Promise<void>;
+  cancel: (jobId?: string) => Promise<void>;
 } {
   const latest = useRef(dependencies);
   useEffect(() => {
@@ -101,7 +101,7 @@ export function useModelJobs(dependencies: Dependencies): {
   });
   const alive = useRef(false);
   const tracked = useRef<Tracking | null>(null);
-  const untracked = useRef(new Set<AbortController>());
+  const untracked = useRef(new Map<string, Tracking>());
 
   const follow = useCallback(async (
     job: ActiveModelJob,
@@ -112,6 +112,7 @@ export function useModelJobs(dependencies: Dependencies): {
     const store = useModelStore.getState();
     if (!alive.current) {
       if (store.activeJob === null) store.setActiveJob(job);
+      else if (store.activeJob.jobId !== job.jobId) store.rememberSecondaryJob(job);
       return DETACHED;
     }
     const { api, notify, onModels } = latest.current;
@@ -119,22 +120,39 @@ export function useModelJobs(dependencies: Dependencies): {
     const tracking: Tracking | null = tracked.current === null
       ? { jobId: job.jobId, controller, cancelRequested: false }
       : null;
+    const secondaryTracking: Tracking | null = tracking === null
+      ? { jobId: job.jobId, controller, cancelRequested: false }
+      : null;
+    const initialProgress: ModelProgress = {
+      model: job.model,
+      status: job.lastEventId > 0 ? "Reconnecting..." : "Starting...",
+      percent: null,
+    };
     if (tracking) {
       tracked.current = tracking;
+      // A secondary stored before a remount may become the only primary job.
+      store.forgetSecondaryJob(job.jobId);
       store.setActiveJob(job);
-      store.setModelBusy(true);
-      store.setModelProgress({
-        model: job.model,
-        status: job.lastEventId > 0 ? "Reconnecting..." : "Starting...",
-        percent: null,
-      });
-    } else {
-      untracked.current.add(controller);
+      store.setModelProgress(initialProgress);
+    } else if (secondaryTracking) {
+      untracked.current.set(job.jobId, secondaryTracking);
+      store.rememberSecondaryJob(job);
+      store.setSecondaryProgress(job.jobId, initialProgress);
     }
+    store.setModelBusy(true);
     // While attached this screen may show what happens; once its stream is cut
     // (the screen closed, or a newer one took over) it must not.
     const attached = () => alive.current && !controller.signal.aborted;
-    const cancelled = () => tracking?.cancelRequested === true;
+    const cancelled = () => tracking?.cancelRequested === true || secondaryTracking?.cancelRequested === true;
+    const recordProgress = (progress: ModelProgress): void => {
+      const current = useModelStore.getState();
+      if (tracking) current.setModelProgress(progress);
+      else if (secondaryTracking) current.setSecondaryProgress(job.jobId, progress);
+    };
+    const currentProgress = (): ModelProgress | null => {
+      const current = useModelStore.getState();
+      return tracking ? current.modelProgress : current.secondaryProgress[job.jobId] ?? null;
+    };
     // Whether the job is finished as far as this screen can tell, so the
     // reminder of it can be dropped. A job that may still be running stays.
     let settled = false;
@@ -151,13 +169,12 @@ export function useModelJobs(dependencies: Dependencies): {
         try {
           const terminalEvent = await api.streamJob(job.jobId, (event) => {
             lastEventId = Math.max(lastEventId, event.id);
-            if (tracking && attached()) {
-              useModelStore.getState().advanceActiveJob(job.jobId, event.id);
+            if (attached()) {
+              if (tracking) useModelStore.getState().advanceActiveJob(job.jobId, event.id);
+              else useModelStore.getState().advanceSecondaryJob(job.jobId, event.id);
               const progress = describeModelProgress(event, job.model);
               if (progress) {
-                useModelStore.getState().setModelProgress(
-                  cancelled() ? { ...progress, status: "Cancelling...", cancelling: true } : progress,
-                );
+                recordProgress(cancelled() ? { ...progress, status: "Cancelling...", cancelling: true } : progress);
               }
             }
             if (event.kind === "completed") completedData = event.data ?? null;
@@ -194,9 +211,9 @@ export function useModelJobs(dependencies: Dependencies): {
           }
         }
 
-        if (tracking) {
-          const current = useModelStore.getState().modelProgress;
-          useModelStore.getState().setModelProgress({
+        if (tracking || secondaryTracking) {
+          const current = currentProgress();
+          recordProgress({
             model: job.model,
             percent: current?.percent ?? null,
             status: cancelled() ? "Cancelling..." : "Reconnecting...",
@@ -215,7 +232,7 @@ export function useModelJobs(dependencies: Dependencies): {
         settled = true;
         const byRequest = terminalStatus === "cancelled" && cancelled();
         if (byRequest) {
-          if (tracking) useModelStore.getState().setModelProgress({ model: job.model, status: "Cancelled.", percent: null });
+          if (tracking || secondaryTracking) recordProgress({ model: job.model, status: "Cancelled.", percent: null });
           notify(job.kind === "gguf_download" ? "Download cancelled." : "Model operation cancelled.", "info");
           return { succeeded: false, data: null, failure: null, cancelled: true, detached: false };
         }
@@ -255,11 +272,22 @@ export function useModelJobs(dependencies: Dependencies): {
         if (tracked.current === tracking) tracked.current = null;
         if (attached()) {
           const current = useModelStore.getState();
-          current.setModelBusy(false);
-          if (settled) current.setActiveJob(null);
+          if (settled) {
+            current.setActiveJob(null);
+            // When the primary ends before the secondary, do not show the
+            // completed primary row as a still-busy operation.
+            if (Object.keys(current.secondaryJobs).length) current.setModelProgress(null);
+          }
+          current.setModelBusy(Object.keys(current.secondaryJobs).length > 0);
         }
-      } else {
-        untracked.current.delete(controller);
+      } else if (secondaryTracking) {
+        if (untracked.current.get(job.jobId) === secondaryTracking) untracked.current.delete(job.jobId);
+        if (attached()) {
+          const current = useModelStore.getState();
+          if (settled) current.forgetSecondaryJob(job.jobId);
+          const remaining = useModelStore.getState();
+          remaining.setModelBusy(Boolean(remaining.activeJob) || Object.keys(remaining.secondaryJobs).length > 0);
+        }
       }
     }
   }, []);
@@ -291,37 +319,68 @@ export function useModelJobs(dependencies: Dependencies): {
     );
   }, [follow]);
 
-  const cancel = useCallback(async () => {
-    const tracking = tracked.current;
+  const cancel = useCallback(async (jobId?: string) => {
+    const primary = tracked.current;
+    const tracking = jobId
+      ? primary?.jobId === jobId ? primary : untracked.current.get(jobId)
+      : primary ?? untracked.current.values().next().value;
     if (!tracking || tracking.cancelRequested) return;
-    tracking.cancelRequested = true;
+    const isPrimary = primary === tracking;
+    // Mutate only the owned tracking ref, never an aliased hook value.
+    if (isPrimary && tracked.current) tracked.current.cancelRequested = true;
+    else {
+      const secondary = untracked.current.get(tracking.jobId);
+      if (secondary) secondary.cancelRequested = true;
+    }
     const store = useModelStore.getState();
-    const before = store.modelProgress;
-    if (before) store.setModelProgress({ ...before, status: "Cancelling...", cancelling: true });
+    const before = isPrimary ? store.modelProgress : store.secondaryProgress[tracking.jobId] ?? null;
+    const setProgress = (progress: ModelProgress | null) => {
+      if (isPrimary) store.setModelProgress(progress);
+      else store.setSecondaryProgress(tracking.jobId, progress);
+    };
+    if (before) setProgress({ ...before, status: "Cancelling...", cancelling: true });
     try {
       await latest.current.api.cancelJob(tracking.jobId);
     } catch (error) {
-      tracking.cancelRequested = false;
-      // Put the row back as it was unless a newer update has already replaced it.
-      if (useModelStore.getState().modelProgress?.cancelling) store.setModelProgress(before);
+      if (isPrimary && tracked.current?.jobId === tracking.jobId) tracked.current.cancelRequested = false;
+      else {
+        const secondary = untracked.current.get(tracking.jobId);
+        if (secondary) secondary.cancelRequested = false;
+      }
+      // Restore only this job's row; another concurrent job is unaffected.
+      const now = useModelStore.getState();
+      const visible = isPrimary ? now.modelProgress : now.secondaryProgress[tracking.jobId];
+      if (visible?.cancelling) setProgress(before);
       latest.current.notify(describeApiError(error, "Could not cancel the model operation."), "error");
     }
   }, []);
 
   useEffect(() => {
     alive.current = true;
-    const remembered = useModelStore.getState().activeJob ?? readStoredModelJob();
+    const current = useModelStore.getState();
+    const remembered = current.activeJob ?? readStoredModelJob();
     if (remembered && tracked.current === null) {
       void attach(remembered).catch(() => {
         // Picking the job up again is best effort; the job is unaffected.
       });
+    }
+    // Restore every job the backend admitted, not just the first one that
+    // occupied the progress row. The backend allows separate models/GGUF kinds.
+    const secondary = Object.values(current.secondaryJobs);
+    const extras = secondary.length ? secondary : readStoredSecondaryModelJobs();
+    for (const job of extras) {
+      if (job.jobId !== remembered?.jobId) {
+        void attach(job).catch(() => {
+          // Reconciliation is best effort; the backend job remains durable.
+        });
+      }
     }
     const followers = untracked.current;
     return () => {
       alive.current = false;
       tracked.current?.controller.abort();
       tracked.current = null;
-      followers.forEach((controller) => controller.abort());
+      followers.forEach((tracking) => tracking.controller.abort());
       followers.clear();
       // The job itself is durable on the backend and stays remembered, but
       // this screen's ownership of it ends here. Do not strand a busy flag in
@@ -329,6 +388,7 @@ export function useModelJobs(dependencies: Dependencies): {
       const store = useModelStore.getState();
       store.setModelBusy(false);
       store.setModelProgress(null);
+      for (const jobId of Object.keys(store.secondaryProgress)) store.setSecondaryProgress(jobId, null);
     };
   }, [attach]);
 

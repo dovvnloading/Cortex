@@ -41,7 +41,9 @@ type PanelOptions = {
   onDownload?: (request: unknown) => Promise<void>;
   busy?: boolean;
   progress?: { model: string; status: string; percent: number | null; cancelling?: boolean } | null;
-  onCancel?: (() => void) | null;
+  onCancel?: ((jobId?: string) => void) | null;
+  secondaryJobs?: Record<string, { jobId: string; model: string }>;
+  secondaryProgress?: Record<string, { model: string; status: string; percent: number | null; cancelling?: boolean }>;
 };
 
 function renderPanel(options: PanelOptions = {}) {
@@ -56,6 +58,8 @@ function renderPanel(options: PanelOptions = {}) {
       busy={options.busy ?? false}
       progress={options.progress ?? null}
       onCancel={onCancel}
+      secondaryJobs={options.secondaryJobs}
+      secondaryProgress={options.secondaryProgress}
       setupUrl="https://ollama.com/download"
       onCheck={vi.fn().mockResolvedValue(undefined)}
       llamacppStatus={llamacppStatus}
@@ -381,6 +385,26 @@ describe("how a download ends", () => {
     renderPanel({ busy: true });
 
     expect(screen.getByRole("button", { name: "Downloading…" })).toBeDisabled();
+  });
+});
+
+describe("concurrent backend model operations", () => {
+  it("renders a separate, correctly targeted Cancel button for each job", async () => {
+    const cancel = vi.fn<(jobId?: string) => void>();
+    const { user } = renderPanel({
+      busy: true,
+      progress: { model: "large.gguf", status: "Downloading", percent: 37 },
+      secondaryJobs: { "rescan-1": { jobId: "rescan-1", model: "local model inventory" } },
+      secondaryProgress: { "rescan-1": { model: "local model inventory", status: "Scanning models", percent: null } },
+      onCancel: cancel,
+    });
+
+    expect(screen.getAllByRole("status", { name: /Model operation progress/ })).toHaveLength(2);
+    expect(screen.getAllByText("Scanning models")).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Cancel local model inventory" }));
+    expect(cancel).toHaveBeenCalledWith("rescan-1");
+    await user.click(screen.getByRole("button", { name: "Cancel large.gguf" }));
+    expect(cancel).toHaveBeenCalledWith();
   });
 });
 
