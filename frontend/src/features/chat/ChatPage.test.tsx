@@ -1014,7 +1014,7 @@ describe("ChatPage composer integration", () => {
     expect(generate.mock.calls[1][0]).toEqual(originalPayload);
   });
 
-  it("uses a fresh admission key for a deliberate new user turn after failure", async () => {
+  it("uses a fresh admission key for a new turn after explicitly abandoning ambiguous recovery", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()
       .mockRejectedValueOnce(new Error("The connection was lost."))
@@ -1033,8 +1033,13 @@ describe("ChatPage composer integration", () => {
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await screen.findByRole("button", { name: "Retry last message" });
 
+    // A fresh send is blocked while the earlier HTTP response could still
+    // represent a running backend worker. An explicit Dismiss abandons it.
     await user.clear(composer);
     await user.type(composer, "Second turn");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(generate).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
