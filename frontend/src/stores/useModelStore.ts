@@ -156,7 +156,8 @@ export const useModelStore = create<ModelStoreState>((set, get) => ({
     set({ activeJob });
   },
   rememberSecondaryJob: (job) => {
-    const secondaryJobs = { ...get().secondaryJobs, [job.jobId]: job };
+    const remembered = Object.fromEntries(readStoredSecondaryModelJobs().map((saved) => [saved.jobId, saved]));
+    const secondaryJobs = { ...remembered, ...get().secondaryJobs, [job.jobId]: job };
     storeSecondaryJobs(secondaryJobs);
     set({ secondaryJobs });
   },
@@ -174,7 +175,10 @@ export const useModelStore = create<ModelStoreState>((set, get) => ({
     return { secondaryProgress };
   }),
   forgetSecondaryJob: (jobId) => {
-    const secondaryJobs = { ...get().secondaryJobs };
+    // This can be called while promoting a stored secondary to primary on a
+    // cold start. It may exist only in sessionStorage, not in memory yet.
+    const remembered = Object.fromEntries(readStoredSecondaryModelJobs().map((saved) => [saved.jobId, saved]));
+    const secondaryJobs = { ...remembered, ...get().secondaryJobs };
     if (!(jobId in secondaryJobs)) return;
     delete secondaryJobs[jobId];
     const secondaryProgress = { ...get().secondaryProgress };
