@@ -770,7 +770,8 @@ def _recover_split_intent(
         if _file_identity(staging) == identity:
             _rollback_published(staging, identity)
     if any(
-        _file_identity(destination) == identity or _file_identity(staging) == identity
+        ((not complete) and _file_identity(destination) == identity)
+        or _file_identity(staging) == identity
         for destination, staging, identity in entries
     ):
         raise GGUFDownloadError(
@@ -855,6 +856,12 @@ def download_gguf_set(
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
     destinations = [directory / name for name in names]
+    manifest = _split_manifest_path(directory, names)
+    # A prior process may have died after publishing only part one. Reconcile
+    # its durable intent before treating that owned incomplete set as a
+    # permanent existing-file conflict. A complete set needs no re-download.
+    if _recover_split_intent(manifest, parts):
+        return tuple(destinations)
     if any(destination.exists() for destination in destinations):
         raise GGUFDownloadError(
             "A file of this split model already exists in the models folder; refusing to overwrite it."
@@ -865,6 +872,7 @@ def download_gguf_set(
     published: list[tuple[Path, tuple[int, int, int, int] | None]] = []
     fetched_bytes = 0
     complete = False
+    journaled = False
     try:
         for position, (url, _name) in enumerate(parts):
             staging_path = directory / f".download-{uuid4().hex}.part"
@@ -882,6 +890,9 @@ def download_gguf_set(
             _validate_gguf_file(staging_path)
             _raise_if_cancelled(cancellation_event)
             fetched_bytes += staging_path.stat().st_size
+        _create_split_intent(manifest, parts, staged)
+        journaled = True
+        _ACTIVE_SPLIT_MANIFESTS.add(manifest)
         for staging_path, destination in zip(staged, destinations, strict=True):
             _raise_if_cancelled(cancellation_event)
             # Capture the identity while this is still our private staged file.
@@ -901,8 +912,28 @@ def download_gguf_set(
         if not complete:
             for path, original_identity in published:
                 _rollback_published(path, original_identity)
+            if journaled:
+                # Also cover an exception *after* _publish committed but
+                # before the append to 'published'. The manifest was written
+                # before the first visible move and carries every identity.
+                for destination, _staging, identity in _verified_split_intent(manifest, parts):
+                    if _file_identity(destination) == identity:
+                        _rollback_published(destination, identity)
         for path in staged:
             _remove_quietly(path)
+        if journaled:
+            try:
+                entries = _verified_split_intent(manifest, parts)
+                if complete or not any(
+                    _file_identity(destination) == identity
+                    or _file_identity(staging) == identity
+                    for destination, staging, identity in entries
+                ):
+                    _remove_quietly(manifest)
+                # Otherwise leave the verified journal so a later retry can
+                # complete cleanup without touching another writer's file.
+            finally:
+                _ACTIVE_SPLIT_MANIFESTS.discard(manifest)
     return tuple(destinations)
 
 
