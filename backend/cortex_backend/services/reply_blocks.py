@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from heapq import merge
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +73,62 @@ def _inline_code_spans(line: str, base: int) -> list[tuple[int, int]]:
     return spans
 
 
+def _indent_columns(line: str) -> int:
+    """Count Markdown indentation, with tabs advancing to a 4-column stop."""
+    column = 0
+    for char in line:
+        if char == " ":
+            column += 1
+        elif char == "\t":
+            column += 4 - column % 4
+        else:
+            break
+    return column
+
+
+def _indented_code_spans(text: str) -> list[tuple[int, int]]:
+    """CommonMark-style four-column code blocks, including blank lines.
+
+    An indented block starts at the document beginning or after a blank line,
+    not in the middle of a running paragraph. Once opened, further indented
+    lines and intervening blank lines belong to that block until a nonblank
+    dedented line ends it. Indentation beyond four columns remains quoted.
+    """
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    start: int | None = None
+    end = 0
+    previous_blank = True
+    for line in text.splitlines(keepends=True):
+        line_start = offset
+        offset += len(line)
+        blank = not line.strip()
+        indented = _indent_columns(line) >= 4
+
+        if start is not None:
+            if blank or indented:
+                end = offset
+                previous_blank = blank
+                continue
+            spans.append((start, end))
+            start = None
+
+        if indented and previous_blank and not blank:
+            start = line_start
+            end = offset
+        previous_blank = blank
+
+    if start is not None:
+        spans.append((start, end))
+    return spans
+
+
 def quoted_spans(text: str) -> list[tuple[int, int]]:
     """Half-open ``(start, end)`` ranges of ``text`` that are quoted code.
 
-    Fenced blocks (a fence left open runs to the end, as in Markdown) and
-    single-line inline code spans. The result is sorted and never overlaps.
+    Fenced blocks (a fence left open runs to the end, as in Markdown),
+    single-line inline code spans and four-column indented code blocks.
+    The result is sorted and never overlaps.
     """
     spans: list[tuple[int, int]] = []
     offset = 0
@@ -109,7 +161,16 @@ def quoted_spans(text: str) -> list[tuple[int, int]]:
         spans.extend(_inline_code_spans(line, line_start))
     if fence_char:
         spans.append((fence_start, offset))
-    return spans
+    # Both scanners emit spans in input order. Merge their ordered streams
+    # instead of sorting (or filtering once per tag): even enormous malformed
+    # model replies remain bounded to linear work.
+    combined: list[tuple[int, int]] = []
+    for start, end in merge(spans, _indented_code_spans(text)):
+        if combined and start <= combined[-1][1]:
+            combined[-1] = (combined[-1][0], max(combined[-1][1], end))
+        else:
+            combined.append((start, end))
+    return combined
 
 
 def extract_tag_blocks(text: str, tag: str) -> tuple[list[TagBlock], str]:
