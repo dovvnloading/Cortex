@@ -102,6 +102,9 @@ export function useModelJobs(dependencies: Dependencies): {
   const alive = useRef(false);
   const tracked = useRef<Tracking | null>(null);
   const untracked = useRef(new Map<string, Tracking>());
+  // Successful jobs can refresh the shared inventory concurrently. Order by
+  // request start, not arrival of responses, so an old snapshot cannot win.
+  const inventoryRequestGeneration = useRef(0);
 
   const follow = useCallback(async (
     job: ActiveModelJob,
@@ -241,14 +244,31 @@ export function useModelJobs(dependencies: Dependencies): {
         notify(failure, "error");
         return { succeeded: false, data: null, failure, cancelled: false, detached: false };
       }
-      const refreshedModels = await api.models();
-      if (!attached()) return DETACHED;
+      // The worker has already reported a terminal success; inventory lookup
+      // is an independent, fallible read and must not turn it into a failed
+      // download or suppress one-time GGUF completion handling.
       settled = true;
-      onModels(refreshedModels);
-      if (options.checkOllamaConnection && !refreshedModels.connection?.success) {
-        notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
-      } else if (options.notifyOnSuccess) {
-        notify(job.model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
+      const refreshGeneration = ++inventoryRequestGeneration.current;
+      let refreshedModels: ModelResponse | null = null;
+      try {
+        refreshedModels = await api.models();
+      } catch {
+        if (attached()) {
+          notify("Model operation completed, but the model list could not be refreshed. Rescan models to update it.", "info");
+        }
+      }
+      if (!attached()) return DETACHED;
+      if (refreshedModels !== null && refreshGeneration === inventoryRequestGeneration.current) {
+        onModels(refreshedModels);
+        if (options.checkOllamaConnection && !refreshedModels.connection?.success) {
+          notify(refreshedModels.connection?.message ?? "Cortex could not reach Ollama.", "error");
+        } else if (options.notifyOnSuccess) {
+          notify(job.model === "local model inventory" ? "Local model inventory refreshed." : "Model operation completed.", "success");
+        }
+      } else if (refreshedModels !== null && options.notifyOnSuccess) {
+        // A newer snapshot has already taken precedence; the job itself did
+        // succeed, but claiming that this old inventory was applied is wrong.
+        notify("Model operation completed.", "success");
       }
       return { succeeded: true, data: completedData, failure: null, cancelled: false, detached: false };
     } catch (error) {
@@ -261,7 +281,12 @@ export function useModelJobs(dependencies: Dependencies): {
       if (isJobGone(error)) {
         // Most likely it finished while nothing was watching. The folder may
         // have changed, so look again rather than leave a stale list.
-        void api.models().then((models) => { if (alive.current) latest.current.onModels(models); }).catch(() => undefined);
+        const refreshGeneration = ++inventoryRequestGeneration.current;
+        void api.models().then((models) => {
+          if (alive.current && refreshGeneration === inventoryRequestGeneration.current) {
+            latest.current.onModels(models);
+          }
+        }).catch(() => undefined);
         return { succeeded: false, data: null, failure: null, cancelled: false, detached: false };
       }
       const failure = describeApiError(error, "Model operation failed.");
@@ -378,6 +403,7 @@ export function useModelJobs(dependencies: Dependencies): {
     const followers = untracked.current;
     return () => {
       alive.current = false;
+      ++inventoryRequestGeneration.current;
       tracked.current?.controller.abort();
       tracked.current = null;
       followers.forEach((tracking) => tracking.controller.abort());
