@@ -211,7 +211,10 @@ class GGUFModelDirectory:
 
     def __init__(self, directory: Callable[[], Path]) -> None:
         self._directory = directory
-        self._cache: dict[str, tuple[_CacheKey, InstalledModel]] = {}
+        # Relative names are not unique across selectable model directories.
+        # Include the canonical root so a same-sized, same-mtime model in a
+        # different folder can never inherit stale metadata or an old path.
+        self._cache: dict[tuple[Path, str], tuple[_CacheKey, InstalledModel]] = {}
         # Split sets found incomplete by the previous scan. A scan runs on every
         # model-list request, so one that stays broken is reported once, not
         # once per scan; it is reported again if it is repaired and breaks again.
@@ -237,7 +240,7 @@ class GGUFModelDirectory:
         except OSError:
             return ()
         models: list[InstalledModel] = []
-        fresh_cache: dict[str, tuple[_CacheKey, InstalledModel]] = {}
+        fresh_cache: dict[tuple[Path, str], tuple[_CacheKey, InstalledModel]] = {}
         incomplete_sets: set[tuple[Path, _ShardKey]] = set()
         for path in self._candidates(root, incomplete_sets):
             try:
@@ -246,9 +249,10 @@ class GGUFModelDirectory:
             except (OSError, ValueError):
                 continue
             key = _CacheKey(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
-            cached = self._cache.get(relative)
+            identity = (root, relative)
+            cached = self._cache.get(identity)
             if cached is not None and cached[0] == key:
-                fresh_cache[relative] = cached
+                fresh_cache[identity] = cached
                 models.append(cached[1])
                 continue
             if not is_valid_gguf_file(path):
@@ -269,7 +273,7 @@ class GGUFModelDirectory:
                 continue
             if model is None:
                 continue
-            fresh_cache[relative] = (key, model)
+            fresh_cache[identity] = (key, model)
             models.append(model)
         self._cache = fresh_cache
         self._reported_incomplete_sets = incomplete_sets
