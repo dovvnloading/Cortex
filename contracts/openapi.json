@@ -2582,6 +2582,19 @@
             ],
             "title": "Repo Id"
           },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
           "source": {
             "enum": [
               "url",
@@ -2617,6 +2630,19 @@
             "minLength": 1,
             "title": "Model",
             "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
           }
         },
         "required": [

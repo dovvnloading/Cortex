@@ -416,10 +416,12 @@ export interface ModelDownloadRequest {
   url?: string | null;
   repo_id?: string | null;
   filename?: string | null;
+  request_id?: string | null;
 }
 
 export interface ModelPullRequest {
   model: string;
+  request_id?: string | null;
 }
 
 export interface ModelResponse {

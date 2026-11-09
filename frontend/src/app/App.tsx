@@ -5,6 +5,7 @@ import {
   ApiError,
   describeApiError,
   discardLegacyHandoffSecret,
+  isDefinitiveRejection,
 } from "../api/client";
 import { AppShell } from "../features/shell/AppShell";
 import type { ExecutionArtifactResult } from "../features/shell/ExecutionTaskTray";
@@ -21,6 +22,12 @@ import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
+import {
+  beginGGUFAdmission,
+  clearGGUFAdmission,
+  readPendingGGUFAdmission,
+  type PendingGGUFAdmission,
+} from "../lib/pendingModelAdmission";
 import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../lib/navigation";
 import { applyStoredTheme, DEFAULT_THEME_PREFERENCE, nextThemePreference } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
@@ -832,36 +839,111 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const downloadGGUFModel = async (request: ModelDownloadRequest) => {
-    const label = request.source === "huggingface" ? request.filename ?? "GGUF model" : "GGUF model";
-    const modelsAtStart = useSettingsStore.getState().settings?.models;
-    const selectedChatModelAtStart = modelsAtStart?.chat ?? null;
-    const ggufDirectoryAtStart = modelsAtStart?.gguf_directory ?? null;
+  const followPendingGGUFAdmission = async (pending: PendingGGUFAdmission) => {
+    // The backend reserves jobs idempotently by request_id. If the original
+    // HTTP 202 disappeared after admission, the same POST returns its job ID.
+    // One immediate safe replay recovers ordinary dropped connections without
+    // asking the person to click Download a second time.
     let accepted: JobAccepted;
     try {
-      accepted = await api.downloadGGUFModel(request);
+      accepted = await api.downloadGGUFModel(pending.payload);
     } catch (error) {
-      const message = apiMessage(error, "Could not start the model download.");
+      if (isDefinitiveRejection(error)) {
+        clearGGUFAdmission(pending.payload.request_id);
+        throw error;
+      }
+      try {
+        accepted = await api.downloadGGUFModel(pending.payload);
+      } catch (retryError) {
+        if (isDefinitiveRejection(retryError)) clearGGUFAdmission(pending.payload.request_id);
+        throw retryError;
+      }
+    }
+    const label = pending.payload.source === "huggingface"
+      ? pending.payload.filename ?? "GGUF model" : "GGUF model";
+    const followed = modelJobs.run(accepted, label, {
+      checkOllamaConnection: false,
+      notifyOnSuccess: false,
+      selectedChatModelAtStart: pending.selectedChatModelAtStart,
+      ggufDirectoryAtStart: pending.ggufDirectoryAtStart,
+    });
+    // The active-job ID has now been put into the model store/session storage;
+    // the pending acceptance record is no longer needed.
+    clearGGUFAdmission(pending.payload.request_id);
+    return followed;
+  };
+
+  const didRecoverGGUFAdmissionRef = useRef(false);
+  const ggufRecoveryCallbacksRef = useRef({
+    followPendingGGUFAdmission,
+    finishGGUFDownload,
+    notify,
+  });
+  useEffect(() => {
+    ggufRecoveryCallbacksRef.current = { followPendingGGUFAdmission, finishGGUFDownload, notify };
+  });
+  useEffect(() => {
+    if (didRecoverGGUFAdmissionRef.current) return;
+    didRecoverGGUFAdmissionRef.current = true;
+    const pending = readPendingGGUFAdmission();
+    if (!pending) return;
+    let mounted = true;
+    void (async () => {
+      try {
+        const result = await ggufRecoveryCallbacksRef.current.followPendingGGUFAdmission(pending);
+        if (!mounted || result.detached || !result.succeeded) return;
+        const filename = typeof result.data?.filename === "string" ? result.data.filename : null;
+        if (filename) {
+          await ggufRecoveryCallbacksRef.current.finishGGUFDownload(
+            filename, pending.selectedChatModelAtStart, pending.ggufDirectoryAtStart,
+          );
+        }
+      } catch {
+        if (mounted) {
+          ggufRecoveryCallbacksRef.current.notify(
+            "The previous download could not be reconnected. Retry the same download to recover its job.",
+            "error",
+          );
+        }
+      }
+    })();
+    return () => { mounted = false; };
+  }, [api, modelJobs.run]);
+
+  const downloadGGUFModel = async (request: ModelDownloadRequest) => {
+    const modelsAtStart = useSettingsStore.getState().settings?.models;
+    let pending: PendingGGUFAdmission;
+    try {
+      pending = beginGGUFAdmission(
+        request, modelsAtStart?.chat ?? null, modelsAtStart?.gguf_directory ?? null,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not start the model download.";
       notify(message, "error");
       throw new Error(message, { cause: error });
     }
-    const result = await modelJobs.run(accepted, label, {
-      checkOllamaConnection: false,
-      notifyOnSuccess: false,
-      selectedChatModelAtStart,
-      ggufDirectoryAtStart,
-    });
+    let result;
+    try {
+      result = await followPendingGGUFAdmission(pending);
+    } catch (error) {
+      const message = apiMessage(
+        error, "Could not confirm model download acceptance. Retry the same download safely.",
+      );
+      notify(message, "error");
+      throw new Error(message, { cause: error });
+    }
     // The workspace closed first; the download carries on and is picked up
     // again (and selected) by the next one.
     if (result.detached) return;
     if (result.cancelled) throw new ModelJobCancelledError();
-    const filename = result.succeeded && typeof result.data?.filename === "string" ? result.data.filename : null;
+    const filename = result.succeeded && typeof result.data?.filename === "string"
+      ? result.data.filename : null;
     if (!filename) {
-      // The job's own toast already gave the specific failure reason; the form
-      // shows the same sentence beside its button.
       throw new Error(result.failure ?? "Model download failed.");
     }
-    await finishGGUFDownload(filename, selectedChatModelAtStart, ggufDirectoryAtStart);
+    await finishGGUFDownload(
+      filename, pending.selectedChatModelAtStart, pending.ggufDirectoryAtStart,
+    );
   };
 
   const unloadLocalModel = async () => {

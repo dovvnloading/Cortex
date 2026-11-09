@@ -72,6 +72,7 @@ function backend(options: {
   chat?: string | null;
   ggufDirectory?: string | null;
   listing?: () => Response;
+  lostAcceptanceResponses?: number;
 } = {}) {
   const installed = options.installed ?? [];
   const streams: ReturnType<typeof handFedStream>[] = [];
@@ -89,6 +90,11 @@ function backend(options: {
     }
     if (url.endsWith("/models/gguf/downloads") && init?.method === "POST") {
       downloads.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      // The backend has already accepted the request and started transferring
+      // bytes, but the client loses its HTTP response before seeing the job ID.
+      if (downloads.length <= (options.lostAcceptanceResponses ?? 0)) {
+        throw new TypeError("Synthetic network reset after backend admission");
+      }
       return respond({ job_id: "gguf-job", kind: "gguf_download", status: "queued" }, 202);
     }
     if (url.endsWith("/jobs/gguf-job/cancel") && init?.method === "POST") {
@@ -202,6 +208,55 @@ describe("a model download", () => {
     expect(server.settingsWrites[0].models.chat).toBe(`gguf:${FILE}`);
     await waitFor(() => expect(remembered()).toBeNull(), WAIT);
     expect(useModelStore.getState().modelBusy).toBe(false);
+  });
+
+  it("automatically replays a lost GGUF acceptance reply and tracks the same backend job", async () => {
+    const server = backend({ lostAcceptanceResponses: 1 });
+    const { user } = await openApp(server);
+    await openSystem(user);
+    await startDownload(user);
+
+    await waitFor(() => expect(server.downloads).toHaveLength(2), WAIT);
+    expect(server.downloads[0]).toEqual(server.downloads[1]);
+    expect(server.downloads[0].request_id).toEqual(expect.any(String));
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+    expect(remembered()).toMatchObject({ jobId: "gguf-job" });
+    expect(window.sessionStorage.getItem("cortex.pending.gguf-admission")).toBeNull();
+
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(remembered()).toBeNull(), WAIT);
+    expect(server.downloads).toHaveLength(2); // both POSTs refer to one job
+  });
+
+  it("reconnects a lost GGUF acceptance after a full workspace remount", async () => {
+    const server = backend({ lostAcceptanceResponses: 2 });
+    const first = await openApp(server);
+    await openSystem(first.user);
+    await startDownload(first.user);
+    await waitFor(() => expect(server.downloads).toHaveLength(2), WAIT);
+    expect(server.downloads[0]).toEqual(server.downloads[1]);
+
+    const pendingBefore = window.sessionStorage.getItem("cortex.pending.gguf-admission");
+    expect(pendingBefore).not.toBeNull();
+    expect(remembered()).toBeNull();
+    first.unmount();
+
+    // A new workspace automatically replays the original request key. The
+    // backend returns the already-running transfer, rather than starting one
+    // more. Progress and Cancel become available without another button click.
+    const { user } = await reopenSettings(server);
+    await waitFor(() => expect(server.downloads).toHaveLength(3), WAIT);
+    expect(server.downloads[2]).toEqual(server.downloads[0]);
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+    expect(window.sessionStorage.getItem("cortex.pending.gguf-admission")).toBeNull();
+    expect(remembered()).toMatchObject({ jobId: "gguf-job" });
+
+    await user.click(await screen.findByRole("button", { name: "System" }, WAIT));
+    expect(screen.getByRole("button", { name: `Cancel ${FILE}` })).toBeEnabled();
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(remembered()).toBeNull(), WAIT);
   });
 
   it("is cancelled from the progress row, and the form says so without calling it a failure", async () => {
@@ -341,7 +396,8 @@ describe("a model download", () => {
     await user.click(screen.getByRole("button", { name: "Download model" }));
 
     await waitFor(() => expect(server.downloads).toHaveLength(1), WAIT);
-    expect(server.downloads[0]).toEqual({ source: "huggingface", repo_id: "owner/name", filename: "weights/model.Q8_0.gguf" });
+    expect(server.downloads[0]).toMatchObject({ source: "huggingface", repo_id: "owner/name", filename: "weights/model.Q8_0.gguf" });
+    expect(server.downloads[0].request_id).toEqual(expect.any(String));
     expect(String(server.calls("?repo_id=owner%2Fname")[0]?.[0])).toContain("/models/gguf/huggingface-files");
   });
 
