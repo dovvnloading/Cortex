@@ -429,6 +429,10 @@ export function useModelJobs(dependencies: Dependencies): {
       tracked.current = null;
       followers.forEach((tracking) => tracking.controller.abort());
       followers.clear();
+      // React StrictMode immediately reattaches during the next effect setup.
+      // A detached promise from the previous effect must not be reused: the
+      // next mount needs its own live SSE subscription, not DETACHED.
+      inFlightFollowers.current.clear();
       // The job itself is durable on the backend and stays remembered, but
       // this screen's ownership of it ends here. Do not strand a busy flag in
       // the process-wide store after logout or a remount.
