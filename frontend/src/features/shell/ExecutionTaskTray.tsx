@@ -408,30 +408,73 @@ function GenericResult({
   onDownloadArtifact?: (artifact: ExecutionArtifactResult) => Promise<void>;
 }) {
   const artifact = readExecutionArtifact(result);
-  if (artifact) {
-    return (
-      <div className="execution-task-result execution-task-artifact">
-        <div className="execution-task-result-heading"><span>Artifact</span><span>{formatBytes(artifact.size)}</span></div>
-        <span className="execution-task-result-empty">{artifact.mime_type}</span>
-        {onDownloadArtifact && (
-          <button
-            className="button button-secondary execution-task-artifact-download"
-            type="button"
-            onClick={() => void onDownloadArtifact(artifact)}
-            aria-label={`Download ${artifact.mime_type} artifact`}
-          >
-            <Download aria-hidden="true" size={13} />
-            Download artifact
-          </button>
-        )}
-      </div>
-    );
-  }
+  if (artifact) return <ArtifactResult artifact={artifact} onDownloadArtifact={onDownloadArtifact} />;
 
   return (
     <div className="execution-task-result">
       <div className="execution-task-result-heading"><span>Result</span></div>
       <pre aria-label="Task result">{formatGenericResult(result)}</pre>
+    </div>
+  );
+}
+
+function ArtifactResult({
+  artifact, onDownloadArtifact,
+}: {
+  artifact: ExecutionArtifactResult;
+  onDownloadArtifact?: (artifact: ExecutionArtifactResult) => Promise<void>;
+}) {
+  const expiresAt = artifact.expires_at ? Date.parse(artifact.expires_at) : Number.NaN;
+  const validDeadline = Number.isFinite(expiresAt) ? expiresAt : null;
+  const [now, setNow] = useState(() => Date.now());
+  const expired = validDeadline !== null && now >= validDeadline;
+
+  useEffect(() => {
+    if (validDeadline === null || now >= validDeadline) return undefined;
+    const remaining = validDeadline - Date.now();
+    if (remaining <= 0) {
+      // Schedule the state update, rather than cascading another render from
+      // this effect itself. The deadline may pass between render and effect.
+      const immediate = window.setTimeout(() => setNow(Date.now()), 0);
+      return () => window.clearTimeout(immediate);
+    }
+    // setTimeout has a finite maximum delay. Very distant expiry dates can
+    // re-arm until the actual deadline rather than silently staying enabled.
+    const timer = window.setTimeout(
+      () => setNow(Date.now()), Math.min(remaining + 10, 2 ** 31 - 1),
+    );
+    return () => window.clearTimeout(timer);
+  }, [validDeadline, now]);
+
+  const download = () => {
+    // A click can arrive between the deadline and the timer repaint.
+    if (validDeadline !== null && Date.now() >= validDeadline) {
+      setNow(Date.now());
+      return;
+    }
+    void onDownloadArtifact?.(artifact);
+  };
+  return (
+    <div className="execution-task-result execution-task-artifact">
+      <div className="execution-task-result-heading"><span>Artifact</span><span>{formatBytes(artifact.size)}</span></div>
+      <span className="execution-task-result-empty">{artifact.mime_type}</span>
+      {validDeadline !== null && (
+        <small className="muted-note" role="status">
+          {expired ? "Artifact expired" : "Available until"} {new Date(validDeadline).toLocaleString()}
+        </small>
+      )}
+      {onDownloadArtifact && (
+        <button
+          className="button button-secondary execution-task-artifact-download"
+          type="button"
+          onClick={download}
+          disabled={expired}
+          aria-label={expired ? "Download unavailable: artifact expired" : `Download ${artifact.mime_type} artifact`}
+        >
+          <Download aria-hidden="true" size={13} />
+          Download artifact
+        </button>
+      )}
     </div>
   );
 }
