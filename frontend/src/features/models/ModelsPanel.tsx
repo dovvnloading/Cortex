@@ -127,6 +127,7 @@ export function ModelsPanel({ models, busy, progress, onCancel, secondaryJobs, s
           key={job.jobId}
           progress={secondaryProgress?.[job.jobId] ?? { model: job.model, status: "Reconnecting...", percent: null }}
           busy
+          secondary
           onCancel={onCancel ? () => onCancel(job.jobId) : undefined}
         />
       ))}
@@ -135,9 +136,9 @@ export function ModelsPanel({ models, busy, progress, onCancel, secondaryJobs, s
   );
 }
 
-function ModelProgressRow({ progress, busy, onCancel }: { progress: Progress; busy: boolean; onCancel?: () => void }) {
+function ModelProgressRow({ progress, busy, secondary = false, onCancel }: { progress: Progress; busy: boolean; secondary?: boolean; onCancel?: () => void }) {
   return (
-    <div className="model-progress" role="status" aria-label={`Model operation progress: ${progress.model}`} aria-live="polite" aria-busy={busy || undefined}>
+    <div className="model-progress" role="status" aria-label={secondary ? `Model operation progress: ${progress.model}` : "Model operation progress"} aria-live="polite" aria-busy={busy || undefined}>
       <div className="model-progress-heading">
         <span className="model-progress-model">
           {busy && <span className="loading-spinner model-progress-spinner" aria-hidden="true" />}
