@@ -128,6 +128,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       message={message}
       index={index}
       isFinalAssistant={message.id === finalAssistantId}
+      isFinalUnansweredUser={message.role === "user" && index === messages.length - 1}
       busy={busy}
       // Passed through as received, not wrapped: a closure per card would be a
       // new prop on every render and defeat MessageCard's memo. Callers keep
