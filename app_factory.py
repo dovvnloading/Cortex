@@ -135,7 +135,9 @@ def build_app(
     # ollama.Client.pull is overloaded on a Literal `stream`, one overload per
     # value, so it cannot match ModelGateway's single `stream: bool` signature
     # structurally even though both forms are accepted at runtime.
-    model_catalog = CombinedModelCatalog(ModelService(client), gguf_model_directory)  # type: ignore[arg-type]
+    model_catalog = CombinedModelCatalog(
+        ModelService(client, pull_client_factory=new_ollama_client), gguf_model_directory
+    )  # type: ignore[arg-type]
     llamacpp_chat_client = LlamaCppChatClient(
         llamacpp_manager, models_directory=gguf_directory, verify=ssl_context
     )
