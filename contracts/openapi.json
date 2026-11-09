@@ -1493,10 +1493,17 @@
             "minLength": 1,
             "title": "Message Id",
             "type": "string"
+          },
+          "request_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
           }
         },
         "required": [
-          "message_id"
+          "message_id",
+          "request_id"
         ],
         "title": "ForkRequest",
         "type": "object"

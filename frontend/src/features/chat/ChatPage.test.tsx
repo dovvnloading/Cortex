@@ -1372,6 +1372,15 @@ describe("ChatPage composer integration", () => {
     expect(await screen.findByText("Could not fork this chat.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry last message" })).not.toBeInTheDocument();
     expect(generate).toHaveBeenCalledTimes(1);
+    const request = (api.forkChat as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(request[0]).toBe("thread-a");
+    expect(request[2]).toEqual(expect.any(String));
+    // The 500 is ambiguous: the next click must replay the same fork.
+    await user.click((await screen.findAllByRole("button", { name: "Fork chat from this message" }))[0]);
+    await waitFor(() => expect(api.forkChat).toHaveBeenCalledTimes(2));
+    const replay = (api.forkChat as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(replay).toEqual(request);
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 
   it("clears the composer when a retry succeeds", async () => {

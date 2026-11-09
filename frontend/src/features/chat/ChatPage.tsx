@@ -133,6 +133,9 @@ export function ChatPage({
   const [generationError, setGenerationError] = useState<ScopedError | null>(null);
   const [starting, setStarting] = useState(false);
   const [forkingMessage, setForkingMessage] = useState<string | null>(null);
+  // If session storage is unavailable, the in-memory backup still preserves
+  // a fork's request ID between retries in the same mounted workspace.
+  const pendingForkRef = useRef<{ threadId: string; messageId: string; requestId: string } | null>(null);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   // Thumbnails are object URLs of the files as they were picked, by attachment
@@ -697,10 +700,23 @@ export function ChatPage({
   const fork = async (message: ChatMessage) => {
     if (!threadId || !message.id || forkingMessage || generation.jobId || starting) return;
     setForkingMessage(message.id);
+    const previous = pendingForkRef.current;
+    const requestId = previous?.threadId === threadId && previous.messageId === message.id
+      ? previous.requestId
+      : findOrCreateForkRequestId(threadId, message.id);
+    pendingForkRef.current = { threadId, messageId: message.id, requestId };
     try {
-      const forked = await api.forkChat(threadId, message.id);
+      const forked = await api.forkChat(threadId, message.id, requestId);
+      clearForkRequestId(threadId, message.id);
+      pendingForkRef.current = null;
       onForked(forked);
     } catch (requestError) {
+      // A lost response does not mean the fork failed; replay with the same
+      // request ID on the next attempt so the backend finds the saved copy.
+      if (isDefinitiveRejection(requestError)) {
+        clearForkRequestId(threadId, message.id);
+        pendingForkRef.current = null;
+      }
       // Forking is not a generation. The thread is answered and unchanged.
       setGenerationError({
         threadId,
@@ -987,6 +1003,37 @@ function MemoryClearConfirmDialog({
       </DialogContent>
     </Dialog.Root>
   );
+}
+
+const FORK_ID_PREFIX = "cortex.pending.chat-fork:";
+
+function forkStorageKey(threadId: string, messageId: string): string {
+  return `${FORK_ID_PREFIX}${encodeURIComponent(threadId)}:${encodeURIComponent(messageId)}`;
+}
+
+function findOrCreateForkRequestId(threadId: string, messageId: string): string {
+  const key = forkStorageKey(threadId, messageId);
+  try {
+    const remembered = window.sessionStorage.getItem(key);
+    if (remembered && remembered.length <= 200) return remembered;
+  } catch {
+    // The in-memory ref is still a fallback when browser storage is blocked.
+  }
+  const requestId = createRequestId();
+  try {
+    window.sessionStorage.setItem(key, requestId);
+  } catch {
+    // Best effort across reloads; no error should stop the actual fork.
+  }
+  return requestId;
+}
+
+function clearForkRequestId(threadId: string, messageId: string): void {
+  try {
+    window.sessionStorage.removeItem(forkStorageKey(threadId, messageId));
+  } catch {
+    // The in-memory ref was cleared already.
+  }
 }
 
 function createRequestId(): string {

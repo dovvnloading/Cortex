@@ -7,6 +7,7 @@ in cortex_backend.api.routes.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import APIRouter
 from cortex_backend.api.app_types import BackendDependenciesProtocol
@@ -56,7 +57,7 @@ from fastapi import (
     Request,
     status,
 )
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 
 # The fields of a chat's overview that make up its sidebar summary.
@@ -268,17 +269,33 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         _: SessionPrincipal = Depends(require_session),
     ) -> ChatResponse:
         try:
-            # Only the ids are needed to check the message is in this chat.
-            # The fork itself copies every field, but reading and decoding the
-            # whole transcript here as well was a second full read for one
-            # membership test.
-            source_ids = deps.chats.get_messages(thread_id, columns=("id",))
-            if source_ids is None:
-                raise HTTPException(status_code=404, detail="Chat not found.")
-            message_position({"messages": source_ids}, payload.message_id)
-            new_thread_id = uuid4().hex
-            deps.chats.fork_chat(thread_id, payload.message_id, new_thread_id)
-            forked = deps.chats.get_chat(new_thread_id)
+            # The destination ID is stable for an exact replay of a user's
+            # request, even across process restarts. No extra mapping table is
+            # needed: the committed fork itself is the durable replay record.
+            fingerprint = json.dumps(
+                ["cortex-fork-v1", thread_id, payload.message_id, payload.request_id],
+                ensure_ascii=True, separators=(",", ":"),
+            )
+            new_thread_id = uuid5(NAMESPACE_URL, fingerprint).hex
+            if deps.chats.chat_exists(new_thread_id):
+                # A prior POST may have committed all copied messages but
+                # failed while serializing the response or lost its 201.
+                forked = deps.chats.get_chat(new_thread_id)
+            else:
+                # Only the ids are needed to check the message is in this chat.
+                source_ids = deps.chats.get_messages(thread_id, columns=("id",))
+                if source_ids is None:
+                    raise HTTPException(status_code=404, detail="Chat not found.")
+                message_position({"messages": source_ids}, payload.message_id)
+                try:
+                    deps.chats.fork_chat(thread_id, payload.message_id, new_thread_id)
+                except Exception:
+                    # Two identical POSTs may race: one wins the unique ID
+                    # insert and the other sees a duplicate, not a second fork.
+                    # Re-raise a real failure if neither attempt committed.
+                    if not deps.chats.chat_exists(new_thread_id):
+                        raise
+                forked = deps.chats.get_chat(new_thread_id)
         except HTTPException:
             raise
         except ChatDomainError as exc:

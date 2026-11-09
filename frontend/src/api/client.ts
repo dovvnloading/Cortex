@@ -374,8 +374,8 @@ export class CortexApi {
     );
   }
 
-  forkChat(threadId: string, messageId: string): Promise<ChatResponse> {
-    const payload: ForkRequest = { message_id: messageId };
+  forkChat(threadId: string, messageId: string, requestId: string): Promise<ChatResponse> {
+    const payload: ForkRequest = { message_id: messageId, request_id: requestId };
     return this.request<ChatResponse>(
       `/chats/${encodeURIComponent(threadId)}/forks`,
       { method: "POST", body: JSON.stringify(payload) },

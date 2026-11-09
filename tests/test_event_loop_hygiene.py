@@ -337,19 +337,19 @@ def test_a_fork_checks_its_message_without_reading_the_whole_transcript() -> Non
         probe.reset()
         forked = client.post(
             f"/api/v1/chats/{thread_id}/forks",
-            json={"message_id": messages[0]["id"]},
+            json={"message_id": messages[0]["id"], "request_id": "fork-hygiene-success"},
             headers=headers,
         )
         fork_reads = Counter(probe.calls)
 
         missing = client.post(
             f"/api/v1/chats/{thread_id}/forks",
-            json={"message_id": "no-such-message"},
+            json={"message_id": "no-such-message", "request_id": "fork-hygiene-bad-message"},
             headers=headers,
         )
         unknown_chat = client.post(
             "/api/v1/chats/no-such-chat/forks",
-            json={"message_id": messages[0]["id"]},
+            json={"message_id": messages[0]["id"], "request_id": "fork-hygiene-bad-chat"},
             headers=headers,
         )
 

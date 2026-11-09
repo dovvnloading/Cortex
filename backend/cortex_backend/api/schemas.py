@@ -722,6 +722,9 @@ class GenerationRequest(NonBlankTextModel):
 
 class ForkRequest(APIModel):
     message_id: str = Field(min_length=1, max_length=200)
+    # A caller retries the same ID after an ambiguous 500 or lost response;
+    # the destination fork remains stable and cannot be duplicated.
+    request_id: str = Field(min_length=1, max_length=200)
 
 
 class RegenerationRequest(NonBlankTextModel):
