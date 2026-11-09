@@ -803,6 +803,40 @@ class GenerationServiceTests(unittest.TestCase):
 
 
 class ModelServiceTests(unittest.TestCase):
+    def test_tag_only_model_names_need_no_ollama_show_round_trips(self):
+        class LibraryGateway:
+            def __init__(self):
+                self.list_calls = 0
+                self.show_calls: list[str] = []
+
+            def list(self):
+                self.list_calls += 1
+                return {"models": [{"name": f"model-{n:03}:latest"} for n in range(80)]}
+
+            def show(self, model: str):
+                self.show_calls.append(model)
+                return {"capabilities": ["completion"]}
+
+        gateway = LibraryGateway()
+        service = ModelService(gateway)
+        names = service.list_installed()
+        self.assertEqual(names, tuple(f"model-{n:03}:latest" for n in range(80)))
+        self.assertEqual(gateway.list_calls, 1)
+        self.assertEqual(gateway.show_calls, [])
+
+        detailed, connection = service.inventory()
+        self.assertTrue(connection.success)
+        self.assertEqual(tuple(model.name for model in detailed), names)
+        self.assertEqual(gateway.list_calls, 2)
+        self.assertEqual(gateway.show_calls, list(names))
+
+    def test_tag_only_list_preserves_safe_empty_result_on_connection_failure(self):
+        class OfflineGateway:
+            def list(self):
+                raise ConnectionError("private network address")
+
+        self.assertEqual(ModelService(OfflineGateway()).list_installed(), ())
+
     def test_inventory_exposes_ollama_capabilities_and_vision_support(self):
         class CapabilityGateway:
             def list(self):
