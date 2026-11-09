@@ -778,6 +778,19 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         } catch (refreshError) {
           notify(apiMessage(refreshError, "Could not refresh settings after the conflict."), "error");
         }
+      } else if (
+        error instanceof ApiError
+        && (error.kind === "network" || error.status >= 500)
+      ) {
+        // The backend may already have committed this write. An ambiguous
+        // acknowledgement must not leave an obsolete revision in the UI.
+        try {
+          const latest = await api.settings();
+          setSettings(latest.settings);
+          notify("Settings save was not confirmed. Current settings were reloaded; review them before saving again.", "info");
+        } catch {
+          notify("Settings save could not be verified. Reload Settings before retrying to avoid overwriting newer values.", "error");
+        }
       } else {
         notify(apiMessage(error, "Could not save settings."), "error");
       }
