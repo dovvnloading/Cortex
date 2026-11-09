@@ -172,6 +172,72 @@ describe("ExecutionTaskTray", () => {
     expect(screen.getByText(/"value": "second"/)).toBeVisible();
   });
 
+  it("disables known-expired artifacts and explains retention instead of calling the backend", async () => {
+    const user = userEvent.setup();
+    const onDownloadArtifact = vi.fn().mockResolvedValue(undefined);
+    render(<ExecutionTaskTray
+      tasks={[{
+        ...task, status: "succeeded", can_cancel: false,
+        result: { artifact_id: "expired-artifact", mime_type: "image/png", size: 100, expires_at: "2020-01-01T00:00:00Z" },
+      }]}
+      onDownloadArtifact={onDownloadArtifact}
+    />);
+    expect(screen.getByText(/Artifact expired/)).toBeVisible();
+    const button = screen.getByRole("button", { name: "Download unavailable: artifact expired" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(onDownloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it.each(["not-a-date", undefined])(
+    "leaves download usable when expiry metadata is invalid or missing: %s",
+    async (expires_at) => {
+      const user = userEvent.setup();
+      const onDownloadArtifact = vi.fn().mockResolvedValue(undefined);
+      render(<ExecutionTaskTray
+        tasks={[{
+          ...task, status: "succeeded", can_cancel: false,
+          result: {
+            artifact_id: "available-artifact", mime_type: "image/png", size: 500,
+            ...(expires_at === undefined ? {} : { expires_at }),
+          },
+        }]}
+        onDownloadArtifact={onDownloadArtifact}
+      />);
+      const button = screen.getByRole("button", { name: "Download image/png artifact" });
+      expect(button).toBeEnabled();
+      expect(screen.queryByText(/Artifact expired|Available until/)).not.toBeInTheDocument();
+      await user.click(button);
+      expect(onDownloadArtifact).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("updates availability when a visible artifact expires, without a tray remount", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T12:00:00Z"));
+    try {
+      const onDownloadArtifact = vi.fn().mockResolvedValue(undefined);
+      render(<ExecutionTaskTray
+        tasks={[{
+          ...task, status: "succeeded", can_cancel: false,
+          result: {
+            artifact_id: "expires-in-place", mime_type: "image/png", size: 100,
+            expires_at: "2026-11-09T12:00:01Z",
+          },
+        }]}
+        onDownloadArtifact={onDownloadArtifact}
+      />);
+      expect(screen.getByText(/Available until/)).toBeVisible();
+      expect(screen.getByRole("button", { name: "Download image/png artifact" })).toBeEnabled();
+      act(() => vi.advanceTimersByTime(1100));
+      expect(screen.getByText(/Artifact expired/)).toBeVisible();
+      expect(screen.getByRole("button", { name: "Download unavailable: artifact expired" })).toBeDisabled();
+      expect(onDownloadArtifact).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders pending approval as a non-modal action card without a spinner", async () => {
     const user = userEvent.setup();
     let finishDecision: (() => void) | undefined;
