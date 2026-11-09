@@ -977,7 +977,7 @@ def test_a_full_disk_is_reported_as_insufficient_storage_and_the_chat_is_unchang
         headers = session_headers(client, app)
         disk_full_when(monkeypatch, _writes_a_message)
 
-        full = client.post(fork_url, json={"message_id": first_message}, headers=headers)
+        full = client.post(fork_url, json={"message_id": first_message, "request_id": "fork-persistence-1"}, headers=headers)
         monkeypatch.undo()
 
         assert full.status_code == 507
@@ -990,7 +990,7 @@ def test_a_full_disk_is_reported_as_insufficient_storage_and_the_chat_is_unchang
         assert manager.load_chat("t") == before
         assert [item["id"] for item in manager.get_all_chats_summary()] == ["t"]
         # The same request goes through once there is room.
-        again = client.post(fork_url, json={"message_id": first_message}, headers=headers)
+        again = client.post(fork_url, json={"message_id": first_message, "request_id": "fork-persistence-1"}, headers=headers)
         assert again.status_code == 201
         assert [message["content"] for message in again.json()["messages"]] == ["kept"]
         assert again.json()["revision"] == 1
@@ -1022,7 +1022,7 @@ def test_a_failure_that_is_not_a_full_disk_is_still_an_internal_error(
     with TestClient(app) as client:
         headers = session_headers(client, app)
         monkeypatch.setattr(manager, "create_chat_from_messages", broken)
-        response = client.post(fork_url, json={"message_id": first_message}, headers=headers)
+        response = client.post(fork_url, json={"message_id": first_message, "request_id": "fork-persistence-1"}, headers=headers)
         monkeypatch.setattr(manager, "create_chat_from_messages", real_fork)
 
     assert response.status_code == 500
