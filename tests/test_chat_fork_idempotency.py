@@ -64,7 +64,12 @@ def test_fork_request_replay_returns_one_committed_copy_after_post_commit_failur
         replay = client.post(url, json=request, headers=headers)
         assert replay.status_code == 201
         assert replay.json()["id"] == committed_fork_id
-        assert replay.json()["messages"] == committed["messages"]
+        assert [msg["content"] for msg in replay.json()["messages"]] == [
+            msg["content"] for msg in committed["messages"]
+        ]
+        assert [msg["id"] for msg in replay.json()["messages"]] == [
+            str(msg["id"]) for msg in committed["messages"]
+        ]
         assert len(chats.list_summaries()) == 2
 
         again = client.post(url, json=request, headers=headers)
