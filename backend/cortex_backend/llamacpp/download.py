@@ -8,6 +8,8 @@ afterward, so there is no separate download-tracking state to maintain.
 from __future__ import annotations
 
 import errno
+import hashlib
+import json
 import ipaddress
 import logging
 import os
@@ -684,6 +686,134 @@ def _checked_limits(max_download_bytes: int | None, min_free_space_bytes: int | 
     if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
         raise GGUFDownloadError("The download free-space reserve is invalid.")
     return maximum, reserve
+
+
+# The process owns manifests it is actively publishing. An idempotent replay
+# during an active transfer must never roll back that transfer's own files.
+_ACTIVE_SPLIT_MANIFESTS: set[Path] = set()
+_SPLIT_MANIFEST_PREFIX = ".split-publish-"
+
+
+def _split_manifest_path(directory: Path, names: Sequence[str]) -> Path:
+    """A fixed hidden journal name for one set of shard filenames."""
+    digest = hashlib.sha256(
+        json.dumps(sorted(name.casefold() for name in names), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return directory / f"{_SPLIT_MANIFEST_PREFIX}{digest}.json"
+
+
+def _verified_split_intent(
+    manifest: Path, parts: Sequence[tuple[str, str]],
+) -> tuple[tuple[Path, Path, tuple[int, int, int, int]], ...]:
+    """Read a bounded, exact-match durable publication intent.
+
+    Never trust disk JSON as a pathname or an unlink instruction. Names must
+    match the validated requested shard set, stage names must be internal
+    hidden paths, and file identities must be real regular-file identities.
+    """
+    try:
+        info = manifest.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024 * 1024:
+            raise ValueError("invalid journal file")
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+        expected_parts = [[url, name] for url, name in parts]
+        if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("parts") != expected_parts:
+            raise ValueError("journal does not belong to this requested download")
+        entries = doc.get("entries")
+        if not isinstance(entries, list) or len(entries) != len(parts):
+            raise ValueError("journal has wrong shard count")
+        verified = []
+        for (_url, filename), entry in zip(parts, entries, strict=True):
+            if not isinstance(entry, dict) or entry.get("filename") != filename:
+                raise ValueError("journal shard does not match requested filename")
+            stage_name = entry.get("stage")
+            identity = entry.get("identity")
+            if (
+                not isinstance(stage_name, str)
+                or re.fullmatch(r"\\.download-[0-9a-f]{32}\\.part", stage_name) is None
+                or not isinstance(identity, list)
+                or len(identity) != 4
+                or any(type(value) is not int or value < 0 for value in identity)
+                or identity[1] == 0
+            ):
+                raise ValueError("journal has unverified staging identity")
+            verified.append((manifest.parent / filename, manifest.parent / stage_name, tuple(identity)))
+        return tuple(verified)
+    except (OSError, ValueError, UnicodeError, TypeError) as exc:
+        raise GGUFDownloadError(
+            "An interrupted split-model publication could not be verified. "
+            "Review the hidden publication record before retrying; Cortex will not delete existing files."
+        ) from exc
+
+
+def _recover_split_intent(
+    manifest: Path, parts: Sequence[tuple[str, str]],
+) -> bool:
+    """Recover after process death without deleting any unowned model file.
+
+    Returns True when every shard was already published successfully, False
+    when owned incomplete shards were cleaned and the download may retry.
+    If identity proof or safe removal fails, preserve all uncertain bytes and
+    refuse the retry instead of overwriting any existing file.
+    """
+    if not manifest.exists():
+        return False
+    if manifest in _ACTIVE_SPLIT_MANIFESTS:
+        raise GGUFDownloadError("The split model is already being published.")
+    entries = _verified_split_intent(manifest, parts)
+    complete = all(_file_identity(dest) == identity for dest, _stage, identity in entries)
+    if not complete:
+        for destination, _stage, identity in entries:
+            if _file_identity(destination) == identity:
+                _rollback_published(destination, identity)
+    for _destination, staging, identity in entries:
+        if _file_identity(staging) == identity:
+            _rollback_published(staging, identity)
+    if any(
+        _file_identity(destination) == identity or _file_identity(staging) == identity
+        for destination, staging, identity in entries
+    ):
+        raise GGUFDownloadError(
+            "An interrupted model download could not be cleaned safely. "
+            "Review the hidden publication record before retrying."
+        )
+    _remove_quietly(manifest)
+    return complete
+
+
+def _create_split_intent(
+    manifest: Path,
+    parts: Sequence[tuple[str, str]],
+    staged: Sequence[Path],
+) -> None:
+    """Journal all verified shard identities before the first visible move."""
+    entries = []
+    for (_url, name), staging in zip(parts, staged, strict=True):
+        identity = _file_identity(staging)
+        if identity is None:
+            raise GGUFDownloadError(
+                "This filesystem cannot verify shard ownership for crash-safe split-model publication."
+            )
+        entries.append({"filename": name, "stage": staging.name, "identity": list(identity)})
+    document = {
+        "version": 1,
+        "parts": [[url, name] for url, name in parts],
+        "entries": entries,
+    }
+    temporary = manifest.with_name(f".split-intent-{uuid4().hex}.part")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(document, output, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        _move_no_replace(temporary, manifest)
+    except OSError as exc:
+        raise GGUFDownloadError(
+            "Could not durably record split-model publication; no shards were published."
+        ) from exc
+    finally:
+        _remove_quietly(temporary)
 
 
 def download_gguf_set(
