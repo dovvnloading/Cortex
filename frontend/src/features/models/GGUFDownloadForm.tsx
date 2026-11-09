@@ -45,6 +45,9 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
   const [picked, setPicked] = useState(false);
   const [url, setUrl] = useState("");
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  // A ref closes the synchronous double-click window before React rerenders.
+  const submittingRef = useRef(false);
   const [listing, setListing] = useState<Listing>({ status: "idle" });
   const [manualOpen, setManualOpen] = useState(false);
   const listRequest = useRef<AbortController | null>(null);
@@ -91,6 +94,9 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
   };
 
   const submit = async () => {
+    if (submittingRef.current || busy || directoryDirty) return;
+    submittingRef.current = true;
+    setSubmitting(true);
     setOutcome(null);
     const request: ModelDownloadRequest =
       source === "huggingface"
@@ -108,6 +114,9 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
         ? caught.message
         : "The download did not complete. Check the details above and try again.";
       setOutcome({ message, cancelled: caught instanceof ModelJobCancelledError });
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -261,9 +270,9 @@ export function GGUFDownloadForm({ onDownload, busy, directoryDirty, onListFiles
         className="button button-secondary"
         type="button"
         onClick={() => void submit()}
-        disabled={!canSubmit || busy || directoryDirty}
+        disabled={!canSubmit || busy || submitting || directoryDirty}
       >
-        <Download aria-hidden="true" size={15} /> {busy ? "Downloading…" : "Download model"}
+        <Download aria-hidden="true" size={15} /> {busy || submitting ? "Downloading…" : "Download model"}
       </button>
     </div>
   );
