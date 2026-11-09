@@ -545,6 +545,58 @@ describe("useGenerationStream", () => {
     expect(onFailed).not.toHaveBeenCalled();
   });
 
+  it("reconciles a saved stopped answer after SSE disconnect without offering a failed Retry", async () => {
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-stopped-status",
+      kind: "generation",
+      status: "cancelled",
+      sequence: 6,
+      result: { cancelled: true, assistant_message_id: "assistant-kept" },
+    });
+    const streamGeneration = vi.fn().mockRejectedValue(new Error("connection dropped"));
+    const api = fakeApi({ streamGeneration, generationStatus });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    const onFailed = vi.fn();
+
+    act(() => {
+      result.current.start("job-stopped-status", "thread-stopped-status", onCompleted, onFailed);
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-stopped-status"));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(generationStatus).toHaveBeenCalledWith(
+      "job-stopped-status", expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(readActiveJob()).toBeNull();
+  });
+
+  it.each([
+    ["cancelled without a saved answer", "cancelled", { cancelled: true }],
+    ["cancelled with a blank assistant ID", "cancelled", { assistant_message_id: "" }],
+    ["real failure even when a saved ID is present", "failed", { assistant_message_id: "assistant-kept" }],
+  ] as const)(
+    "the status fallback still reports %s as failed rather than inventing a kept answer",
+    async (_label, status, data) => {
+      const api = fakeApi({
+        streamGeneration: vi.fn().mockRejectedValue(new Error("connection dropped")),
+        generationStatus: vi.fn().mockResolvedValue({
+          job_id: "job-not-kept", kind: "generation", status, sequence: 4,
+          error: "Generation did not finish.", result: data,
+        }),
+      });
+      const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+      const onCompleted = vi.fn().mockResolvedValue(undefined);
+      const onFailed = vi.fn();
+      act(() => result.current.start("job-not-kept", "thread-not-kept", onCompleted, onFailed));
+      await waitFor(() => expect(onFailed).toHaveBeenCalledWith("thread-not-kept", "Generation did not finish."));
+      await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("thread-not-kept"));
+      expect(onCompleted).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("a stop with nothing to keep still reports it, so Retry stays reachable", async () => {
     const { streamGeneration, emitEvent } = terminalAwareStream();
     const api = fakeApi({ streamGeneration });
