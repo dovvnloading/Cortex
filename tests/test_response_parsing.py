@@ -227,6 +227,58 @@ def test_a_code_request_quoted_in_backticks_or_a_fence_is_prose_not_a_request() 
         assert answer == reply
 
 
+@pytest.mark.parametrize(
+    "command,code_eligible",
+    [
+        (_TEA_COMMAND, False),
+        (_VALID_CODE_BLOCK, True),
+    ],
+)
+def test_four_space_indented_markdown_commands_remain_literal_code(
+    command: str, code_eligible: bool,
+) -> None:
+    reply = f"Here is a literal example:\\n\\n    {command}\\n\\nNo action was requested."
+    agent, answer, _thoughts, memory = _parse(reply, code_eligible=code_eligible)
+
+    assert answer == reply
+    assert not memory.has_actions
+    assert agent.last_code_proposal is None
+    assert agent.last_code_rejection is None
+
+
+def test_nested_indented_examples_and_blank_lines_do_not_swallow_real_later_commands() -> None:
+    indented = (
+        "Format:\\n\\n"
+        f"    {_TEA_COMMAND}\\n"
+        "        deeper nesting is still literal\\n"
+        "    \\n"
+        f"    {_VALID_CODE_BLOCK}\\n"
+        "\\n"
+    )
+    text = indented + f"Saved. {_TEA_COMMAND}"
+    agent, answer, _thoughts, command = _parse(text, code_eligible=True)
+
+    assert _TEA_COMMAND in answer
+    assert _VALID_CODE_BLOCK in answer
+    assert answer.endswith("Saved.")
+    assert command == MemoryCommand(("User likes tea",), False)
+    assert agent.last_code_proposal is None
+    assert agent.last_code_rejection is None
+
+
+def test_tab_indented_markdown_tag_is_quoted_but_dedented_tag_is_live() -> None:
+    from cortex_backend.services.reply_blocks import quoted_spans
+
+    text = f"\\t{_TEA_COMMAND}\\n\\nSaved. {_TEA_COMMAND}"
+    spans = quoted_spans(text)
+    assert spans
+    assert text[spans[0][0]:spans[0][1]].startswith("\\t<")
+    _agent, answer, _thoughts, command = _parse(text)
+    assert answer.startswith(f"\\t{_TEA_COMMAND}")
+    assert answer.endswith("Saved.")
+    assert command == MemoryCommand(("User likes tea",), False)
+
+
 def test_a_real_command_after_a_quoted_example_is_still_applied() -> None:
     reply = (
         'Use `<memory_command>{"add":[],"clear":true}</memory_command>` to reset. '
