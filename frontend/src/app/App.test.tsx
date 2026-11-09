@@ -636,6 +636,47 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "No local models found" })).not.toBeInTheDocument();
   });
 
+  it("recovers a created group after a lost 201 without inserting a duplicate", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const created = new Map<string, { id: string; name: string; collapsed: boolean; position: number; timestamp: string }>();
+    const sentKeys: string[] = [];
+    let firstResponseLost = true;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/chat-groups") && init?.method === "POST") {
+        const key = new Headers(init.headers).get("Idempotency-Key");
+        if (!key) return respond({ detail: "Missing operation key." }, 422);
+        const name = (JSON.parse(String(init.body)) as { name: string }).name;
+        sentKeys.push(key);
+        if (!created.has(key)) {
+          created.set(key, { id: "group-created", name, collapsed: false, position: 0, timestamp: "2026-11-09T18:00:00Z" });
+        }
+        if (firstResponseLost) {
+          firstResponseLost = false;
+          return respond({ detail: "Lost response after group commit." }, 500);
+        }
+        return respond(created.get(key), 201);
+      }
+      if (url.endsWith("/chat-groups")) return respond([...created.values()]);
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "New group" }));
+    await user.type(screen.getByRole("textbox", { name: "Group name" }), "Research");
+    await user.click(screen.getByRole("button", { name: "Create group" }));
+    expect(await screen.findByText(/Group creation was not confirmed/)).toBeVisible();
+    expect(created.size).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Create group" }));
+    expect(await screen.findByRole("button", { name: "Collapse Research" })).toBeVisible();
+    expect(sentKeys).toHaveLength(2);
+    expect(sentKeys[0]).toBe(sentKeys[1]);
+    expect(created.size).toBe(1);
+    expect(useChatStore.getState().groups).toHaveLength(1);
+  });
+
   it("does not let a stale initial group response replace a newly created group", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
