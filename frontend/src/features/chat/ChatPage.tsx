@@ -1,8 +1,9 @@
 import { Paperclip } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ChatAttachment, ChatMessage, ChatResponse, GenerationOptionsOverride } from "../../../../contracts/cortex-api";
+import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
 import { displayChatTitle } from "../../lib/chatTitle";
+import { clearPendingGenerationAdmission, readPendingGenerationAdmission, storePendingGenerationAdmission, type PendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
 import { useShallow } from "zustand/react/shallow";
@@ -61,15 +62,6 @@ type AttachmentDraftTarget = {
   threadId: string | null;
 };
 
-type PendingAdmission = {
-  requestId: string;
-  operation: "generate" | "regenerate";
-  threadId: string | null;
-  baseRevision?: number;
-  options?: GenerationOptionsOverride;
-  messageId?: string;
-};
-
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENTS = 8;
@@ -123,14 +115,21 @@ export function ChatPage({
   const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, ChatAttachment[]>>(() => ({
     [composerAttachmentKey(threadId)]: readComposerAttachments(threadId),
   }));
-  const [lastPrompt, setLastPrompt] = useState("");
-  const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>([]);
+  const [restoredPending] = useState(readPendingGenerationAdmission);
+  const [lastPrompt, setLastPrompt] = useState(restoredPending?.prompt ?? "");
+  const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>(restoredPending?.attachments ?? []);
   const [chatLoad, setChatLoad] = useState<ChatLoadState>({
     threadId,
     loading: true,
     error: null,
   });
-  const [generationError, setGenerationError] = useState<ScopedError | null>(null);
+  const [generationError, setGenerationError] = useState<ScopedError | null>(
+    restoredPending ? {
+      threadId: restoredPending.threadId,
+      message: "A previous message may have started before its response was lost. Retry last message to reconnect safely, or Dismiss to abandon recovery.",
+      retryable: true,
+    } : null,
+  );
   const [starting, setStarting] = useState(false);
   const [forkingMessage, setForkingMessage] = useState<string | null>(null);
   // If session storage is unavailable, the in-memory backup still preserves
@@ -166,7 +165,7 @@ export function ChatPage({
   // admission instead of creating a second job (or a second new-chat thread).
   // A deliberate submit does not pass this key and therefore starts a new
   // user turn with a fresh request id.
-  const pendingAdmissionRef = useRef<PendingAdmission | null>(null);
+  const pendingAdmissionRef = useRef<PendingGenerationAdmission | null>(restoredPending);
   const handledClearRequestsRef = useRef(new Set<string>());
   const handledCompletionsRef = useRef(new Set<number>());
 
@@ -393,10 +392,20 @@ export function ChatPage({
     regenerateMessageId?: string,
     suppliedAttachments: readonly ChatAttachment[] = attachments,
     requestIdOverride?: string,
-    admissionOverride?: PendingAdmission,
+    admissionOverride?: PendingGenerationAdmission,
   ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
     if (!input || generation.jobId || startingRef.current) return null;
+    if (!requestIdOverride && pendingAdmissionRef.current) {
+      // Never overwrite an unresolved acceptance with a new request ID.
+      // A lost 202 may represent a live generation still running on the backend.
+      setGenerationError({
+        threadId,
+        message: "An earlier message may already be running. Return to that chat and Retry to recover it, or Dismiss its warning to abandon recovery.",
+        retryable: pendingAdmissionRef.current.threadId === threadId,
+      });
+      return null;
+    }
     if (!runtimeReady) {
       setGenerationError({
         threadId,
@@ -417,16 +426,22 @@ export function ChatPage({
     const baseRevision = admissionOverride
       ? admissionOverride.baseRevision
       : currentChat?.revision ?? 0;
-    const pendingAdmission: PendingAdmission = admissionOverride ?? {
+    const pendingAdmission: PendingGenerationAdmission = admissionOverride ?? {
       requestId,
       operation: regenerateMessageId ? "regenerate" : "generate",
       threadId: requestThreadId,
       baseRevision: regenerateMessageId ? undefined : baseRevision,
       options,
       messageId: regenerateMessageId,
+      prompt: input,
+      attachments: [...suppliedAttachments],
+      createdAt: Date.now(),
     };
     try {
-      if (!requestIdOverride) pendingAdmissionRef.current = pendingAdmission;
+      if (!requestIdOverride) {
+        pendingAdmissionRef.current = pendingAdmission;
+        storePendingGenerationAdmission(pendingAdmission);
+      }
       const accepted = regenerateMessageId
         ? await api.regenerate(requestThreadId ?? "", {
             request_id: requestId,
@@ -450,6 +465,7 @@ export function ChatPage({
       trackGeneration(accepted.job_id, jobThreadId);
       if (pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
+        clearPendingGenerationAdmission();
       }
       if (!regenerateMessageId) {
         setChat((current) => ({
@@ -487,6 +503,7 @@ export function ChatPage({
       // the backend may have admitted the job before the response was lost.
       if (isDefinitiveRejection(requestError) && pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
+        clearPendingGenerationAdmission();
       }
       setGenerationError({
         threadId,
@@ -672,6 +689,22 @@ export function ChatPage({
     // as a brand new message -- which used to duplicate the user's turn.
     // The backend's dangling-user-turn regenerate support exists exactly
     // for this case.
+    const pendingAdmission = pendingAdmissionRef.current;
+    if (pendingAdmission) {
+      // Prefer exact idempotent admission replay even if the transcript now
+      // contains the user's saved turn. Regenerating instead could race the
+      // original worker and duplicate an answer.
+      const started = await startGeneration(
+        pendingAdmission.prompt,
+        pendingAdmission.operation === "regenerate" ? pendingAdmission.messageId : undefined,
+        pendingAdmission.attachments,
+        pendingAdmission.requestId,
+        pendingAdmission,
+      );
+      if (started) settle(started);
+      if (started && (!threadId || started.threadId !== threadId)) onThreadCreated(started.threadId);
+      return Boolean(started);
+    }
     const messages = chat?.messages;
     const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
     const recoverMessageId = lastMessage?.role === "user" || (
@@ -688,14 +721,7 @@ export function ChatPage({
     // Otherwise the failure was ambiguous -- the admission POST itself may
     // or may not have reached the backend -- so replay the same request id
     // instead, which the backend treats idempotently if it already landed.
-    const pendingAdmission = pendingAdmissionRef.current;
-    const started = await startGeneration(
-      lastPrompt,
-      pendingAdmission?.operation === "regenerate" ? pendingAdmission.messageId : undefined,
-      lastAttachments,
-      pendingAdmission?.requestId,
-      pendingAdmission ?? undefined,
-    );
+    const started = await startGeneration(lastPrompt, undefined, lastAttachments);
     if (started) settle(started);
     if (started && !threadId) onThreadCreated(started.threadId);
     return Boolean(started);
@@ -957,7 +983,15 @@ export function ChatPage({
           onSelectModel={onSelectModel}
           onRescanModels={onRescanModels}
           onRetry={lastPrompt && visibleError?.retryable ? retryLastPrompt : undefined}
-          onDismissError={() => setGenerationError(null)}
+          onDismissError={() => {
+            // Dismiss is the explicit escape hatch from an ambiguous request;
+            // merely navigating away must never lose its idempotency key.
+            if (pendingAdmissionRef.current?.threadId === threadId) {
+              pendingAdmissionRef.current = null;
+              clearPendingGenerationAdmission();
+            }
+            setGenerationError(null);
+          }}
           generationOptions={threadOptions}
           generationDefaults={generationDefaults}
           onGenerationOptionsChange={(next) => setThreadOptions(threadOptionsKey, next)}
