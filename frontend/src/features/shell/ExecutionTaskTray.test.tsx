@@ -121,6 +121,57 @@ describe("ExecutionTaskTray", () => {
     expect(onDownloadArtifact).toHaveBeenCalledWith({ artifact_id: "artifact-1", mime_type: "image/png", size: 2048, sha256: "a".repeat(64) });
   });
 
+  it("keeps both downloads when terminal tasks have identical status but distinct artifacts", async () => {
+    const user = userEvent.setup();
+    const onDownloadArtifact = vi.fn<(artifact: {
+      artifact_id: string; mime_type: string; size: number;
+    }) => Promise<void>>().mockResolvedValue();
+    const tasks: ExecutionTaskSummary[] = [
+      {
+        ...task, job_id: "artifact-job-a", status: "succeeded", phase: "completed",
+        message: "Completed.", can_cancel: false,
+        result: { artifact_id: "artifact-a", mime_type: "image/png", size: 100 },
+      },
+      {
+        ...task, job_id: "artifact-job-b", status: "succeeded", phase: "completed",
+        message: "Completed.", can_cancel: false,
+        result: { artifact_id: "artifact-b", mime_type: "image/png", size: 200 },
+      },
+    ];
+    render(<ExecutionTaskTray tasks={tasks} onDownloadArtifact={onDownloadArtifact} />);
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.queryByText("2 × Completed.")).not.toBeInTheDocument();
+    const downloads = screen.getAllByRole("button", { name: "Download image/png artifact" });
+    expect(downloads).toHaveLength(2);
+    await user.click(downloads[0]);
+    await user.click(downloads[1]);
+    expect(onDownloadArtifact).toHaveBeenCalledTimes(2);
+    expect(onDownloadArtifact).toHaveBeenNthCalledWith(1, {
+      artifact_id: "artifact-a", mime_type: "image/png", size: 100,
+    });
+    expect(onDownloadArtifact).toHaveBeenNthCalledWith(2, {
+      artifact_id: "artifact-b", mime_type: "image/png", size: 200,
+    });
+  });
+
+  it("keeps distinct JSON results readable even with identical completion messages", () => {
+    render(<ExecutionTaskTray tasks={[
+      {
+        ...task, job_id: "json-a", status: "succeeded", phase: "completed",
+        message: "Completed.", can_cancel: false, result: { value: "first" },
+      },
+      {
+        ...task, job_id: "json-b", status: "succeeded", phase: "completed",
+        message: "Completed.", can_cancel: false, result: { value: "second" },
+      },
+    ]} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByLabelText("Task result")).toHaveLength(2);
+    expect(screen.getByText(/"value": "first"/)).toBeVisible();
+    expect(screen.getByText(/"value": "second"/)).toBeVisible();
+  });
+
   it("renders pending approval as a non-modal action card without a spinner", async () => {
     const user = userEvent.setup();
     let finishDecision: (() => void) | undefined;
