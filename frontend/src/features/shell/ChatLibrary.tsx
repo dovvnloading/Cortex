@@ -181,7 +181,9 @@ export function ChatLibrary({
       {deleteGroupTarget && (
         <DeleteGroupDialog
           group={deleteGroupTarget}
-          chatCount={(byGroup.buckets.get(deleteGroupTarget.id) ?? []).length}
+          // Confirmation describes every chat that will be moved, not just
+          // those that currently match the sidebar search filter.
+          chatCount={chats.filter((chat) => chat.group_id === deleteGroupTarget.id).length}
           onClose={() => setDeleteGroupTarget(null)}
           onConfirm={async () => {
             const result = await onDeleteGroup(deleteGroupTarget.id);
