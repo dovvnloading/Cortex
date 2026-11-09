@@ -992,7 +992,7 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/chat/thread-command-palette");
   });
 
-  it("keeps an approval actionable and reports a safe API failure", async () => {
+  it("reconciles an expired approval and removes its stale approval control", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
       status,
@@ -1036,8 +1036,8 @@ describe("App", () => {
     await user.click(allow);
 
     expect(await screen.findByText("Approval has expired.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Allow background task approval-job once" })).toBeEnabled();
-    expect(screen.getByText("Create a larger staged image preview.")).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Allow background task approval-job once" })).not.toBeInTheDocument());
+    expect(screen.getByText("Expired")).toBeVisible();
   });
 
   it("reconciles a committed execution approval after the POST returns 500", async () => {
@@ -1048,7 +1048,7 @@ describe("App", () => {
     });
     const pendingTask = {
       job_id: "approval-job",
-      profile: "code.exec.v1",
+      profile: "artifact.extended.v1",
       status: "queued",
       sequence: 2,
       phase: "approval",
@@ -1077,7 +1077,7 @@ describe("App", () => {
         return json({ detail: "Postcommit readback failed." }, 500);
       }
       if (url.endsWith("/execution/approval-job") && init?.method !== "POST") {
-        return json({ job_id: "approval-job", request_id: "approval-request", profile: "code.exec.v1", status: "running", sequence: 3, approval_state: "approved" });
+        return json({ job_id: "approval-job", request_id: "approval-request", profile: "artifact.extended.v1", status: "running", sequence: 3, approval_state: "approved" });
       }
       return json({ detail: "Unexpected test route." }, 404);
     });
