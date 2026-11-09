@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { createEvent, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { NumberInput } from "./NumberInput";
@@ -34,6 +34,41 @@ describe("NumberInput", () => {
     await user.clear(screen.getByRole("textbox", { name: "Integer" }));
     await user.type(screen.getByRole("textbox", { name: "Integer" }), "12,288");
     expect(onInteger).toHaveBeenLastCalledWith(12288);
+  });
+
+  it("leaves composing Enter and arrow keys to the IME without mutating numeric settings", () => {
+    const onCommit = vi.fn();
+    render(<NumberInput aria-label="Amount" value={10} min={0} max={200} step={1} onCommit={onCommit} />);
+    const input = screen.getByRole("textbox", { name: "Amount" });
+
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "12" } });
+    expect(input).toHaveValue("12");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    for (const key of ["Enter", "ArrowUp", "ArrowDown"]) {
+      const event = createEvent.keyDown(input, { key, code: key, isComposing: true });
+      fireEvent(input, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(onCommit).not.toHaveBeenCalled();
+      expect(input).toHaveValue("12");
+    }
+    fireEvent.compositionEnd(input);
+    expect(onCommit).toHaveBeenCalledExactlyOnceWith(12);
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(onCommit).toHaveBeenLastCalledWith(13);
+  });
+
+  it("ignores native composing events even before compositionstart has been observed", () => {
+    const onCommit = vi.fn();
+    render(<NumberInput aria-label="Amount" value={10} min={0} max={200} onCommit={onCommit} />);
+    const input = screen.getByRole("textbox", { name: "Amount" });
+    const event = createEvent.keyDown(input, { key: "ArrowDown", code: "ArrowDown", isComposing: true });
+    fireEvent(input, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("10");
   });
 
   it("restores the last good value when the text is unusable", async () => {

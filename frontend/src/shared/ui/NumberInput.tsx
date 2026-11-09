@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 
 type Props = {
   id?: string;
@@ -56,6 +56,7 @@ export function NumberInput({
   ...aria
 }: Props) {
   const [raw, setRaw] = useState<string | null>(null);
+  const composingRef = useRef(false);
   const shown = raw ?? (value === null ? "" : format ? format(value) : String(value));
   const clamp = (next: number) => {
     const factor = 10 ** decimals;
@@ -81,6 +82,9 @@ export function NumberInput({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // Enter confirms an IME candidate, and arrows move through its choices.
+    // Never treat either as a numeric commit/step during composition.
+    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter") {
       event.preventDefault();
       settle();
@@ -105,7 +109,15 @@ export function NumberInput({
       value={shown}
       placeholder={placeholder}
       disabled={disabled}
-      onChange={(event) => edit(event.target.value)}
+      onChange={(event) => {
+        if (composingRef.current) setRaw(event.target.value);
+        else edit(event.target.value);
+      }}
+      onCompositionStart={() => { composingRef.current = true; }}
+      onCompositionEnd={(event) => {
+        composingRef.current = false;
+        edit(event.currentTarget.value);
+      }}
       onBlur={settle}
       onKeyDown={handleKeyDown}
       {...aria}
