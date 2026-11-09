@@ -116,6 +116,8 @@ export function ChatPage({
     [composerAttachmentKey(threadId)]: readComposerAttachments(threadId),
   }));
   const [restoredPending] = useState(readPendingGenerationAdmission);
+  // Render-visible mirror; refs are reserved for asynchronous event handlers.
+  const [pendingRecovery, setPendingRecovery] = useState<PendingGenerationAdmission | null>(restoredPending);
   const [lastPrompt, setLastPrompt] = useState(restoredPending?.prompt ?? "");
   const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>(restoredPending?.attachments ?? []);
   const [chatLoad, setChatLoad] = useState<ChatLoadState>({
@@ -461,6 +463,7 @@ export function ChatPage({
     try {
       if (!requestIdOverride) {
         pendingAdmissionRef.current = pendingAdmission;
+        setPendingRecovery(pendingAdmission);
         storePendingGenerationAdmission(pendingAdmission);
       }
       const accepted = regenerateMessageId
@@ -486,6 +489,7 @@ export function ChatPage({
       trackGeneration(accepted.job_id, jobThreadId);
       if (pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
+        setPendingRecovery(null);
         clearPendingGenerationAdmission();
       }
       if (!regenerateMessageId) {
@@ -524,6 +528,7 @@ export function ChatPage({
       // the backend may have admitted the job before the response was lost.
       if (isDefinitiveRejection(requestError) && pendingAdmissionRef.current?.requestId === requestId) {
         pendingAdmissionRef.current = null;
+        setPendingRecovery(null);
         clearPendingGenerationAdmission();
       }
       setGenerationError({
@@ -955,6 +960,7 @@ export function ChatPage({
   // does not imply the backend worker has been cancelled.
   const abandonPendingRecovery = () => {
     pendingAdmissionRef.current = null;
+    setPendingRecovery(null);
     clearPendingGenerationAdmission();
     setGenerationError(null);
     setAbandonPendingOpen(false);
@@ -963,8 +969,8 @@ export function ChatPage({
       "info",
     );
   };
-  const pendingElsewhere = pendingAdmissionRef.current !== null
-    && pendingAdmissionRef.current.threadId !== threadId;
+  const pendingElsewhere = pendingRecovery !== null
+    && pendingRecovery.threadId !== threadId;
   const pendingRecoveryAction = (
     <div className="stack-sm" role="status">
       <p>An earlier message may still be running. Returning to its chat and retrying the original request is safer than sending it again.</p>
@@ -994,7 +1000,7 @@ export function ChatPage({
       <h2>Conversation unavailable</h2>
       <p>{chatLoad.error}</p>
       <button className="button button-primary" onClick={() => void loadChat()}>Retry</button>
-      {pendingAdmissionRef.current && pendingRecoveryAction}
+      {pendingRecovery && pendingRecoveryAction}
       {abandonPendingDialog}
     </div>
   );
@@ -1057,6 +1063,7 @@ export function ChatPage({
             }
             if (pendingAdmissionRef.current?.threadId === threadId) {
               pendingAdmissionRef.current = null;
+              setPendingRecovery(null);
               clearPendingGenerationAdmission();
             }
             setGenerationError(null);
