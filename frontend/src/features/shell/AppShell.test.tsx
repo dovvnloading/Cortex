@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
@@ -83,6 +83,28 @@ describe("AppShell", () => {
 
     await user.click(screen.getByRole("link", { name: "Settings" }));
 
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+    expect(window.location.pathname).toBe("/settings");
+  });
+
+  it("leaves the original chat untouched on Ctrl/Command-click Settings", () => {
+    window.history.replaceState({}, "", "/chat/chat-1");
+    const onOpenSettings = vi.fn();
+    const chat: ChatSummary = {
+      id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z",
+    };
+    renderShell({ chats: [chat], activeChatId: chat.id, onOpenSettings });
+    const link = screen.getByRole("link", { name: "Settings" });
+    expect(link).toHaveAttribute("href", "/settings");
+
+    fireEvent.click(link, { button: 0, ctrlKey: true });
+    fireEvent.click(link, { button: 0, metaKey: true });
+    fireEvent.click(link, { button: 1 });
+    expect(onOpenSettings).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/chat/chat-1");
+
+    // Plain left click still captures the return chat and navigates.
+    fireEvent.click(link, { button: 0 });
     expect(onOpenSettings).toHaveBeenCalledOnce();
     expect(window.location.pathname).toBe("/settings");
   });
