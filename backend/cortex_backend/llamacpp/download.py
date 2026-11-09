@@ -750,7 +750,6 @@ def download_gguf_set(
     reporter = _ProgressReporter(progress_callback or (lambda progress: None), names[0])
     reporter.starting()
     staged: list[Path] = []
-    published: list[tuple[Path, tuple[int, int, int, int] | None]] = []
     fetched_bytes = 0
     complete = False
     publication_journal: Path | None = None
@@ -786,12 +785,9 @@ def download_gguf_set(
         publication_journal = _write_split_publication_journal(
             parts, staged, journal_identities, directory
         )
-        for staging_path, destination, original_identity in zip(
-            staged, destinations, journal_identities, strict=True
-        ):
+        for staging_path, destination in zip(staged, destinations, strict=True):
             _raise_if_cancelled(cancellation_event)
             _publish(staging_path, destination, allow_overwrite=False)
-            published.append((destination, original_identity))
             _raise_if_cancelled(cancellation_event)
         reporter.success(fetched_bytes)
         _raise_if_cancelled(cancellation_event)
@@ -801,7 +797,12 @@ def download_gguf_set(
         # removed (antivirus holding it open, say) must neither stop the rest
         # being removed nor replace the reason the download failed.
         if not complete:
-            for path, original_identity in published:
+            # Never rely on a post-_publish append to learn which names were
+            # published: the filesystem operation can succeed and then raise.
+            # The journal's pre-publish identities cover that gap too.
+            for path, original_identity in zip(
+                destinations, journal_identities, strict=False
+            ):
                 _rollback_published(path, original_identity)
         for path in staged:
             _remove_quietly(path)
@@ -812,7 +813,7 @@ def download_gguf_set(
         if publication_journal is not None and (
             complete or not any(
                 _file_identity(path) == original_identity
-                for path, original_identity in published
+                for path, original_identity in zip(destinations, journal_identities, strict=True)
             )
         ):
             _remove_quietly(publication_journal)
