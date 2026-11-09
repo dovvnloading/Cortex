@@ -121,6 +121,24 @@ describe("MemoryPanel", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
+  it("submits the confirmed snapshot, not one updated while the dialog is open", async () => {
+    const user = userEvent.setup();
+    const onClear = vi.fn<(expectedMemos: string[]) => Promise<void>>().mockRejectedValue(new Error("409 conflict"));
+    const props = {
+      busy: false,
+      onAdd: vi.fn<(memo: string) => Promise<void>>().mockResolvedValue(),
+      onReplace: vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue(),
+      onClear,
+    };
+    const { rerender } = render(<MemoryPanel memos={["Original"]} {...props} />);
+    await user.click(screen.getByRole("button", { name: "Clear all" }));
+    rerender(<MemoryPanel memos={["Original", "Newer from another window"]} {...props} />);
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear all memories" }));
+    expect(onClear).toHaveBeenCalledWith(["Original"]);
+    expect(await screen.findByRole("textbox", { name: "Memory 2" })).toHaveValue("Newer from another window");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
   it("clears the draft after clear succeeds", async () => {
     const user = userEvent.setup();
     render(

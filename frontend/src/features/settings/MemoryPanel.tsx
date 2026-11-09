@@ -17,7 +17,7 @@ type Props = {
   busy: boolean;
   onAdd: (memo: string) => Promise<void>;
   onReplace: (memos: string[]) => Promise<void>;
-  onClear: () => Promise<void>;
+  onClear: (expectedMemos: string[]) => Promise<void>;
 };
 
 type DraftRow = {
@@ -86,22 +86,23 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
     }).catch(() => undefined);
   };
 
-  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  // Keep the list shown when the dialog opened, even if it changes before confirmation.
+  const [clearSnapshot, setClearSnapshot] = useState<string[] | null>(null);
   const [clearing, setClearing] = useState(false);
 
   // The dialog stays up while the clear runs and closes either way: a failure
   // is reported by the workspace, and the list is left exactly as it was.
   const confirmClear = async () => {
-    if (clearing) return;
+    if (clearing || clearSnapshot === null) return;
     setClearing(true);
     try {
-      await onClear();
+      await onClear(clearSnapshot);
       setDraft([]);
     } catch {
-      // Reported by the workspace callback; the draft is kept.
+      // The workspace reports the conflict and refreshes the server list.
     } finally {
       setClearing(false);
-      setClearDialogOpen(false);
+      setClearSnapshot(null);
     }
   };
 
@@ -189,11 +190,11 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
       )}
       <div className="memory-actions">
         {memos.length > 0 && <button className="button button-secondary" type="button" onClick={saveChanges} disabled={busy || !dirty}><Save aria-hidden="true" size={16} /> Save changes</button>}
-        {draft.length > 0 && <button className="button button-quiet danger-action" type="button" onClick={() => setClearDialogOpen(true)} disabled={busy}><Eraser aria-hidden="true" size={16} /> Clear all</button>}
+        {draft.length > 0 && <button className="button button-quiet danger-action" type="button" onClick={() => setClearSnapshot([...memos])} disabled={busy}><Eraser aria-hidden="true" size={16} /> Clear all</button>}
         {/* Always present, so a screen reader hears the text appear. */}
         <span className="memory-unsaved" role="status">{dirty ? "Unsaved changes" : ""}</span>
       </div>
-      {clearDialogOpen && <ClearMemoriesDialog busy={busy || clearing} onClose={() => setClearDialogOpen(false)} onConfirm={confirmClear} />}
+      {clearSnapshot !== null && <ClearMemoriesDialog busy={busy || clearing} onClose={() => setClearSnapshot(null)} onConfirm={confirmClear} />}
     </section>
   );
 }

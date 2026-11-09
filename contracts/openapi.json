@@ -479,8 +479,21 @@
               }
             ],
             "title": "Confirmation Intent"
+          },
+          "expected_memos": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Expected Memos",
+            "type": "array"
           }
         },
+        "required": [
+          "expected_memos"
+        ],
         "title": "ClearMemoryRequest",
         "type": "object"
       },

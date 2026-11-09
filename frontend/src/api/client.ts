@@ -614,10 +614,14 @@ export class CortexApi {
     });
   }
 
-  async clearMemories(): Promise<MemoryResponse> {
+  async clearMemories(expectedMemos: string[]): Promise<MemoryResponse> {
     return this.request<MemoryResponse>("/memories/clear", {
       method: "POST",
-      body: JSON.stringify({ confirm: true, confirmation_intent: "clear_permanent_memory" }),
+      body: JSON.stringify({
+        confirm: true,
+        confirmation_intent: "clear_permanent_memory",
+        expected_memos: expectedMemos,
+      }),
     });
   }
 

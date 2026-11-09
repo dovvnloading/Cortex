@@ -303,6 +303,8 @@ class ReplaceMemoryRequest(APIModel):
 class ClearMemoryRequest(APIModel):
     confirm: bool = False
     confirmation_intent: Literal["clear_permanent_memory"] | None = None
+    # A destructive clear must name the exact server snapshot the user reviewed.
+    expected_memos: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(max_length=100)
 
 
 class DatabaseRecoveryReport(APIModel):

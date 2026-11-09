@@ -439,7 +439,9 @@ def test_resource_routes_persist_and_require_confirmation_for_clear():
             == 422
         )
         assert client.post(
-            "/api/v1/memories/clear", json={"confirm": True}, headers=headers
+            "/api/v1/memories/clear",
+            json={"confirm": True, "expected_memos": ["one", "two"]},
+            headers=headers,
         ).json() == {"memos": []}
 
         models = client.get("/api/v1/models", headers=headers)
@@ -546,6 +548,42 @@ def test_stale_memory_editor_cannot_erase_another_clients_new_memory() -> None:
         assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["First revised", "Second"]
 
 
+def test_stale_memory_clear_rejects_new_facts_and_requires_reconfirmation():
+    """Never delete a memory that arrived after the confirmation opened."""
+    app, client = _client()
+    with client:
+        headers = _session(client, app)
+        client.post("/api/v1/memories", json={"memo": "Original"}, headers=headers)
+        snapshot = client.get("/api/v1/memories", headers=headers).json()["memos"]
+        assert snapshot == ["Original"]
+
+        # A separate window adds a fact before the first user accepts.
+        client.post("/api/v1/memories", json={"memo": "Newer"}, headers=headers)
+        confirmation = {"confirm": True, "confirmation_intent": "clear_permanent_memory"}
+        stale = client.post(
+            "/api/v1/memories/clear",
+            json={**confirmation, "expected_memos": snapshot},
+            headers=headers,
+        )
+        assert stale.status_code == 409
+        assert "changed" in stale.json()["detail"]
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["Original", "Newer"]
+
+        # Legacy clients cannot omit the precondition and erase newer data.
+        missing = client.post("/api/v1/memories/clear", json=confirmation, headers=headers)
+        assert missing.status_code == 422
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == ["Original", "Newer"]
+
+        confirmed = client.post(
+            "/api/v1/memories/clear",
+            json={**confirmation, "expected_memos": ["Original", "Newer"]},
+            headers=headers,
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["memos"] == []
+        assert client.get("/api/v1/memories", headers=headers).json()["memos"] == []
+
+
 def test_memory_clear_without_confirmation_is_a_client_validation_error():
     """A missing `confirm` flag is an invalid request body, not a state conflict."""
 
@@ -554,14 +592,18 @@ def test_memory_clear_without_confirmation_is_a_client_validation_error():
         headers = _session(client, app)
         client.post("/api/v1/memories", json={"memo": "Alice"}, headers=headers)
 
-        missing = client.post("/api/v1/memories/clear", json={}, headers=headers)
+        missing = client.post(
+            "/api/v1/memories/clear", json={"expected_memos": ["Alice"]}, headers=headers
+        )
         assert missing.status_code == 422
         assert missing.json()["detail"] == (
             "Clearing permanent memories requires explicit confirmation."
         )
 
         unconfirmed = client.post(
-            "/api/v1/memories/clear", json={"confirm": False}, headers=headers
+            "/api/v1/memories/clear",
+            json={"confirm": False, "expected_memos": ["Alice"]},
+            headers=headers,
         )
         assert unconfirmed.status_code == 422
         assert isinstance(unconfirmed.json()["detail"], str)

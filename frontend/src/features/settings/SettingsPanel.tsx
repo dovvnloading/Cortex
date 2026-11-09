@@ -40,7 +40,7 @@ export type SettingsPanelProps = {
   onSave: (settings: CortexSettings) => Promise<CortexSettings | null | void>;
   onAddMemory: (memo: string) => Promise<void>;
   onReplaceMemory: (memos: string[]) => Promise<void>;
-  onClearMemory: () => Promise<void>;
+  onClearMemory: (expectedMemos: string[]) => Promise<void>;
   models: ModelResponse;
   modelBusy: boolean;
   modelProgress: ModelProgress | null;
