@@ -2098,18 +2098,21 @@ def _resolve_earlier_documents(
     principal: SessionPrincipal,
     references: Sequence[ChatAttachment],
 ) -> tuple[GenerationAttachment, ...]:
-    """Resolve the previous message's documents, leaving out any that are gone.
+    """Fail closed if a carried-forward reference document is unavailable.
 
-    Unlike the user's own attachments, which refuse the turn when one cannot
-    be resolved, these were not asked for: a document deleted or expired since
-    simply does not come back, and the history still names it on the turn it
-    was attached to. Ownership and integrity are checked exactly as for a new
-    attachment. Only a count is logged, never a name or any text.
+    A follow-up may ask about a document attached to the preceding user turn.
+    If its staged bytes expired, generating without that source would look like
+    a grounded document answer even though the model never saw the document.
+    Refuse *before* persisting the new turn and tell the user to reattach it.
+    Filenames, attachment ids and user text are never logged or reflected.
     """
     try:
         service = _chat_attachment_service(request, deps)
-    except HTTPException:
-        return ()
+    except HTTPException as exc:
+        raise ChatDomainError(
+            "Previous document context is unavailable. Reattach the document before continuing.",
+            code="invalid_input",
+        ) from exc
     owner = _attachment_owner(request, principal)
     resolved: list[GenerationAttachment] = []
     unavailable = 0
@@ -2120,6 +2123,7 @@ def _resolve_earlier_documents(
             unavailable += 1
             continue
         if item.descriptor.kind != "document" or item.text_content is None:
+            unavailable += 1
             continue
         resolved.append(
             GenerationAttachment(
@@ -2133,8 +2137,12 @@ def _resolve_earlier_documents(
         )
     if unavailable:
         logger.info(
-            "Left %d document(s) from the previous message out of a follow-up: no longer available.",
-            unavailable,
+            "Refused follow-up with %d unavailable previous document(s).", unavailable,
+        )
+        raise ChatDomainError(
+            "A previous document expired or is unavailable. Reattach the document before "
+            "asking a follow-up so the answer includes its contents.",
+            code="invalid_input",
         )
     return tuple(resolved)
 
