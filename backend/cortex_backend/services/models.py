@@ -134,7 +134,14 @@ class ModelService:
         /api/show metadata belongs to inventory() for Settings, not a request
         that must be fast before the user's generation can be admitted.
         """
-        return tuple(sorted(self.extract_model_tags(self._gateway.list())))
+        try:
+            return tuple(sorted(self.extract_model_tags(self._gateway.list())))
+        except Exception as exc:
+            # Preserve the previous inventory() behavior on an unavailable
+            # gateway: admission sees no installed tags rather than an
+            # unexpected unhandled transport failure.
+            logging.error("Ollama model tag listing failed (%s).", type(exc).__name__)
+            return ()
 
     def list_installed_details(self) -> tuple[InstalledModel, ...]:
         """Return normalized installed model metadata without logging content."""
