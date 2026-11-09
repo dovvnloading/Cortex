@@ -885,6 +885,85 @@ def test_saved_answer_survives_failure_to_read_postcommit_overview(failing_overv
         assert reads_after_commit == 2
 
 
+def test_cancel_stalled_ollama_pull_releases_model_job_slot_without_http_timeout() -> None:
+    """A blocked pull read must not keep the only models job slot after Stop."""
+    from cortex_backend.services.models import ModelService
+
+    waiting_for_chunk = Event()
+    stop_releases_read = Event()
+    closed_clients: list[int] = []
+    next_client_number = 0
+
+    class SharedGateway:
+        def list(self):
+            return {"models": []}
+
+        def pull(self, model, *, stream=True):
+            raise AssertionError("model jobs must not stream through the shared client")
+
+    class OwnedPullClient:
+        def __init__(self):
+            nonlocal next_client_number
+            next_client_number += 1
+            self.number = next_client_number
+
+        def pull(self, model, *, stream=True):
+            assert stream is True
+            if self.number > 1:
+                return iter([{"status": "success", "completed": 100, "total": 100}])
+
+            def blocked():
+                yield {"status": "pulling", "completed": 1, "total": 100}
+                waiting_for_chunk.set()
+                assert stop_releases_read.wait(timeout=5), "Stop did not unblock the HTTP read"
+                raise OSError("stream closed by cancelled client")
+
+            return blocked()
+
+        def close(self):
+            closed_clients.append(self.number)
+            stop_releases_read.set()
+
+    dependencies = build_demo_dependencies()
+    dependencies.models = ModelService(
+        SharedGateway(), pull_client_factory=OwnedPullClient
+    )
+    app = create_app(dependencies, allowed_hosts=ALLOWED_HOSTS)
+    try:
+        with TestClient(app) as client:
+            headers = _session(client, app)
+            first = client.post(
+                "/api/v1/models/pulls", json={"model": "fixture:1b"}, headers=headers
+            )
+            assert first.status_code == 202
+            first_job = first.json()["job_id"]
+            assert waiting_for_chunk.wait(timeout=5), "pull stream never stalled"
+
+            stopped = client.post(f"/api/v1/jobs/{first_job}/cancel", headers=headers)
+            assert stopped.status_code == 200
+            assert stopped.json()["status"] == "cancelling"
+            wait_until(
+                lambda: client.get(f"/api/v1/jobs/{first_job}", headers=headers).json()["status"] == "cancelled",
+                timeout=5,
+                describe="a cancelled model pull to free its job slot",
+            )
+            assert 1 in closed_clients
+
+            # The second models job can start immediately, without the first
+            # waiting for Ollama's ordinary 600-second read timeout.
+            following = client.post(
+                "/api/v1/models/pulls", json={"model": "fixture:2b"}, headers=headers
+            )
+            assert following.status_code == 202
+            finished = client.get(
+                f"/api/v1/jobs/{following.json()['job_id']}/events", headers=headers
+            )
+            assert finished.status_code == 200
+            assert '"status":"succeeded"' in finished.text
+    finally:
+        stop_releases_read.set()
+
+
 def test_cancel_after_commit_reports_it_cannot_cancel():
     """A Stop that arrives after the commit point says it was not honoured.
 
