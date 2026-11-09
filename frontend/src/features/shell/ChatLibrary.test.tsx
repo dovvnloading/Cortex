@@ -268,6 +268,26 @@ describe("ChatLibrary", () => {
     expect(props.onDeleteGroup).toHaveBeenCalledWith("g1");
   });
 
+  it("reports every group member in Delete confirmation even when search shows one match", async () => {
+    const user = userEvent.setup();
+    const groups = [group("g1", "Research")];
+    const chats = [
+      chat("c1", "Vector stores", "g1"),
+      chat("c2", "Embedding notes", "g1"),
+      chat("c3", "Document search", "g1"),
+      chat("c4", "Loose thread"),
+    ];
+    const view = renderLibrary({ groups, chats, query: "vector" });
+    expect(screen.getByRole("button", { name: "Vector stores" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Embedding notes" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete group Research" }));
+    expect(screen.getByText(/3 chats in “Research” will move back/)).toBeVisible();
+    expect(screen.queryByText(/1 chat in “Research”/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete group" }));
+    expect(view.props.onDeleteGroup).toHaveBeenCalledWith("g1");
+  });
+
   it("renames a group from its row", async () => {
     const user = userEvent.setup();
     const { props } = renderLibrary({ groups: [group("g1", "Research")] });
