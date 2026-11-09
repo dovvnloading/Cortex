@@ -128,8 +128,20 @@ class ModelService:
         self._pull_client_factory = pull_client_factory
 
     def list_installed(self) -> tuple[str, ...]:
-        """Return the exact installed model tags in stable order."""
-        return tuple(item.name for item in self.list_installed_details())
+        """Read exact Ollama tags with one list call, without N metadata calls.
+
+        Admission and availability checks need names only. Rich per-model
+        /api/show metadata belongs to inventory() for Settings, not a request
+        that must be fast before the user's generation can be admitted.
+        """
+        try:
+            return tuple(sorted(self.extract_model_tags(self._gateway.list())))
+        except Exception as exc:
+            # Preserve the previous inventory() behavior on an unavailable
+            # gateway: admission sees no installed tags rather than an
+            # unexpected unhandled transport failure.
+            logging.error("Ollama model tag listing failed (%s).", type(exc).__name__)
+            return ()
 
     def list_installed_details(self) -> tuple[InstalledModel, ...]:
         """Return normalized installed model metadata without logging content."""

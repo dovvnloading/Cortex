@@ -58,7 +58,18 @@ class CombinedModelCatalog:
         return ollama_models + gguf_models, connection
 
     def list_installed(self) -> tuple[str, ...]:
-        return tuple(model.name for model in self.inventory()[0])
+        # Do not force Ollama's /api/show metadata fetches through inventory()
+        # when generation admission needs only exact model identifiers.
+        ollama_tags = self._ollama.list_installed()
+        try:
+            gguf_tags = tuple(model.name for model in self._gguf.list_installed_details())
+        except Exception as exc:
+            logger.warning(
+                "GGUF model scan failed (%s); local model files are not listed.",
+                type(exc).__name__,
+            )
+            gguf_tags = ()
+        return tuple(dict.fromkeys((*ollama_tags, *gguf_tags)))
 
     def pull_model(
         self,
