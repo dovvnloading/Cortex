@@ -99,5 +99,20 @@ export function groupGGUFFiles(entries: readonly HuggingFaceFileEntry[]): GGUFFi
   ));
 }
 
+/**
+ * The file browser shows a bounded page of choices. Group that page once,
+ * not by filtering the entire listing for every directory (quadratic for
+ * repositories containing one model per directory).
+ */
+export function directoryGroups(choices: readonly GGUFFileChoice[]): Array<{ directory: string; choices: GGUFFileChoice[] }> {
+  const groups = new Map<string, GGUFFileChoice[]>();
+  for (const choice of choices) {
+    const existing = groups.get(choice.directory);
+    if (existing) existing.push(choice);
+    else groups.set(choice.directory, [choice]);
+  }
+  return Array.from(groups, ([directory, files]) => ({ directory, choices: files }));
+}
+
 /** The `owner/name` a person can type or paste, in the form the backend accepts. */
 export const HUGGING_FACE_REPO_ID = /^[\w.-]+\/[\w.-]+$/;
