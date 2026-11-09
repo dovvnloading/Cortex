@@ -1301,7 +1301,8 @@ class DatabaseManager:
 
     @staticmethod
     def _matches_legacy_chat_already_imported(
-        conn: sqlite3.Connection, chat_data: dict, existing: sqlite3.Row
+        conn: sqlite3.Connection, chat_data: dict, existing: sqlite3.Row, *,
+        explicit_timestamp: bool,
     ) -> bool:
         """Only skip an ID collision when title, time and every message match.
 
@@ -1310,7 +1311,13 @@ class DatabaseManager:
         same JSON serialization as import, rather than materializing a second
         potentially large transcript in memory.
         """
-        if existing["title"] != chat_data["title"] or existing["timestamp"] != chat_data["timestamp"]:
+        if existing["title"] != chat_data["title"]:
+            return False
+        # Old JSON files may have had no timestamp. The parser synthesizes
+        # the current time for them, so a byte-identical file left behind after
+        # an archive failure cannot compare equal on a later run if we use the
+        # synthetic timestamp. Honor real timestamps when supplied in JSON.
+        if explicit_timestamp and existing["timestamp"] != chat_data["timestamp"]:
             return False
         stored = conn.execute(
             "SELECT role, content, sources, thoughts, attachments "
@@ -1357,7 +1364,9 @@ class DatabaseManager:
             file_path = os.path.join(self.legacy_history_dir, filename)
 
             try:
-                chat_data = self._parse_legacy_chat(self._load_legacy_chat_file(file_path))
+                raw_chat = self._load_legacy_chat_file(file_path)
+                chat_data = self._parse_legacy_chat(raw_chat)
+                explicit_timestamp = isinstance(raw_chat, dict) and bool(raw_chat.get("timestamp"))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 logging.error(
                     "Quarantining invalid legacy chat file failed (%s).",
@@ -1381,7 +1390,9 @@ class DatabaseManager:
                         (chat_data['id'],),
                     ).fetchone()
                     if existing:
-                        if self._matches_legacy_chat_already_imported(conn, chat_data, existing):
+                        if self._matches_legacy_chat_already_imported(
+                            conn, chat_data, existing, explicit_timestamp=explicit_timestamp
+                        ):
                             skipped += 1
                         else:
                             # The two histories have the same ID but different
