@@ -72,7 +72,7 @@ async function readyForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText("File name"), "model.gguf");
   return {
     rescan: screen.getByRole("button", { name: /Rescan local models/ }),
-    download: screen.getByRole("button", { name: "Download model" }),
+    download: screen.getByRole("button", { name: /^(Download model|Downloading…)$/ }),
   };
 }
 
