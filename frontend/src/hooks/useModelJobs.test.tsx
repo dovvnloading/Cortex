@@ -126,6 +126,35 @@ describe("following a job the backend just accepted", () => {
     expect(remembered()).toBeNull();
   });
 
+  it("shares one follower for duplicate admissions of the same backend job", async () => {
+    const { result, streams, api, onModels } = setup();
+    let first!: Promise<ModelJobResult>;
+    let second!: Promise<ModelJobResult>;
+
+    act(() => {
+      first = result.current.run(
+        accepted("same-gguf-job"), "demo.Q4_K_M.gguf",
+        { checkOllamaConnection: false, notifyOnSuccess: false },
+      );
+      second = result.current.run(
+        accepted("same-gguf-job"), "demo.Q4_K_M.gguf",
+        { checkOllamaConnection: false, notifyOnSuccess: false },
+      );
+    });
+
+    expect(first).toBe(second);
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(state().activeJob?.jobId).toBe("same-gguf-job");
+    expect(Object.keys(state().secondaryJobs)).toHaveLength(0);
+    await act(async () => streams[0].finish(succeeded(2)));
+    expect((await first).succeeded).toBe(true);
+    expect((await second).succeeded).toBe(true);
+    expect(api.models).toHaveBeenCalledTimes(1);
+    expect(onModels).toHaveBeenCalledTimes(1);
+    expect(state().activeJob).toBeNull();
+    expect(Object.keys(state().secondaryJobs)).toHaveLength(0);
+  });
+
   it("does not misreport a completed GGUF job as failed when inventory reload fails", async () => {
     const { result, streams, api, notify, onModels } = setup();
     api.models.mockRejectedValue(new ApiError(500, "Could not read inventory."));
