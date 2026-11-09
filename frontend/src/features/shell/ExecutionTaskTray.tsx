@@ -523,7 +523,11 @@ function groupTasks(tasks: ExecutionTaskSummary[]): TaskGroup[] {
   for (const task of tasks) {
     const approvalPending = task.approval_state === "pending";
     const terminal = !ACTIVE_STATUSES.has(task.status) && !approvalPending;
-    const key = task.profile === "code.exec.v1" || !terminal
+    // Only passive, result-less completion notifications can be coalesced.
+    // Every result (including JSON with the same status text) belongs to its
+    // own job and may carry a distinct downloadable artifact. Grouping them
+    // by message would hide all but the first Download button.
+    const key = task.profile === "code.exec.v1" || !terminal || task.result != null
       ? `job:${task.job_id}`
       : JSON.stringify(["terminal", task.profile, task.status, task.phase ?? "", task.message ?? ""]);
     const existing = groups.get(key);
