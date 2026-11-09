@@ -142,7 +142,7 @@ test("browser history Back and Forward require confirmation before losing unsave
   await page.goto("/#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByRole("link", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
 
   await page.getByRole("combobox", { name: "Theme" }).click();
   await page.getByRole("option", { name: "Light" }).click();
@@ -170,6 +170,6 @@ test("browser history Back and Forward require confirmation before losing unsave
   // to the previous Settings entry after the user discarded their changes.
   await page.evaluate(() => window.history.forward());
   await expect.poll(() => new URL(page.url()).pathname).toBe("/settings");
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
   await expect(page.getByText("Unsaved changes")).toHaveCount(0);
 });
