@@ -176,6 +176,32 @@ class PersistenceTests(unittest.TestCase):
             )
             self.assertFalse((legacy / "quarantine" / "second.json").exists())
 
+    def test_explicit_legacy_timestamps_distinguish_conversations_with_same_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            same_words = {
+                "id": "same-id",
+                "title": "Same content",
+                "messages": [{"role": "user", "content": "The same text"}],
+            }
+            (legacy / "earlier.json").write_text(
+                json.dumps({**same_words, "timestamp": "2026-01-01T00:00:00+00:00"}), encoding="utf-8"
+            )
+            second = legacy / "later.json"
+            later_bytes = json.dumps({
+                **same_words, "timestamp": "2026-02-01T00:00:00+00:00"
+            }).encode("utf-8")
+            second.write_bytes(later_bytes)
+            manager = DatabaseManager(
+                db_path=str(root / "chats.sqlite"), legacy_history_dir=str(legacy)
+            )
+            result = manager.migrate_from_json_if_needed()
+
+            self.assertEqual(result, storage.MigrationResult(migrated=1, quarantined=1))
+            self.assertEqual((legacy / "quarantine" / "later.json").read_bytes(), later_bytes)
+
     def test_legacy_chat_id_collision_preserves_the_different_conversation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
