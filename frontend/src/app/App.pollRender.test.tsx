@@ -104,6 +104,57 @@ describe("App polling", () => {
     expect(shell.renders).toBe(rendersAfterSettling);
   });
 
+  it("does not let an older failed /system response overwrite a newer healthy one", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    const state: Backend = {
+      tasks: [],
+      llamacpp: { state: "idle", binary_present: true, models_directory: "C:\\models" },
+    };
+    const ordinary = backend(state);
+    let holdPolls = false;
+    const pending: Array<(response: Response) => void> = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (holdPolls && String(input).endsWith("/system")) {
+        return new Promise<Response>((resolve) => { pending.push(resolve); });
+      }
+      return ordinary(input, init);
+    });
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    await pollOnce(fetcher);
+    expect(useModelStore.getState().llamacppStatus?.state).toBe("idle");
+
+    holdPolls = true;
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    const system = (llamacpp: Record<string, unknown>) => respond({
+      status: "ok", preview: true, session_required: true,
+      started_at: "2026-11-09T18:00:00Z", llamacpp,
+    });
+    await act(async () => {
+      pending[1](system({
+        state: "ready", binary_present: true,
+        loaded_model: "gguf:demo.Q4_K_M.gguf", models_directory: "C:\\models",
+      }));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(useModelStore.getState().llamacppStatus?.state).toBe("ready"));
+
+    await act(async () => {
+      pending[0](system({
+        state: "failed", binary_present: true, last_error: "Stale runtime failure",
+        models_directory: "C:\\models",
+      }));
+      await Promise.resolve();
+    });
+    expect(useModelStore.getState().llamacppStatus?.state).toBe("ready");
+    expect(screen.queryByText("Stale runtime failure")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Message Cortex")).toBeEnabled();
+  });
+
   it("still re-renders when a poll brings something new", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     const state: Backend = { tasks: [], llamacpp: { state: "idle", binary_present: true, models_directory: "C:\\models" } };

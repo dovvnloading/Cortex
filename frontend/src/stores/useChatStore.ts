@@ -54,6 +54,8 @@ export interface GenerationFailure {
   id: number;
   threadId: string;
   message: string;
+  /** False when a retry could duplicate a previously committed answer. */
+  retryable?: boolean;
 }
 
 interface ChatStoreState {
