@@ -64,7 +64,8 @@ _ERRORS = {
     "stale_source": (409, "A source file changed. Reopen the workspace before editing."),
     "stale_root": (409, "The project folder changed. Reopen the workspace."),
     "linked_path": (409, "A source path is now linked or unsafe."),
-    "reopen_required": (409, "Reopen the workspace to snapshot updated files."),
+    "reopen_required": (409, "Refresh the workspace before another edit."),
+    "restore_required": (409, "The previous partial patch requires recovery before refreshing."),
     "no_patch": (409, "There is no proposed patch to apply."),
     "no_checkpoint": (409, "There are no applied changes to undo."),
     "partial_rollback": (409, "Some edits could not be rolled back. Review the checkout immediately."),
@@ -98,6 +99,17 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             request.app.state.workspace_workflow.open,
             owner=principal.installation_principal_id,
             root_path=payload.root_path,
+            confirmed=payload.confirmed,
+        )
+
+    @router.post("/workspaces/{session_id}/refresh")
+    def refresh(
+        session_id: str, payload: ConfirmWorkspace, request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> Any:
+        return _call(
+            request.app.state.workspace_workflow.refresh,
+            owner=principal.installation_principal_id, session_id=session_id,
             confirmed=payload.confirmed,
         )
 
