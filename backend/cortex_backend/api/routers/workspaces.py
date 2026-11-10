@@ -6,7 +6,8 @@ consent-gated desktop feature is experimental. No route is anonymously callable.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ConfigDict, BaseModel, Field

@@ -6,6 +6,7 @@ from hashlib import sha256
 
 import pytest
 
+from cortex_backend.services.workspace_context import WorkspaceAccessError
 from cortex_backend.services.workspace_workflow import (
     WorkspaceCodingSessions, WorkspaceWorkflowError,
 )
@@ -36,7 +37,7 @@ def test_read_consent_and_owner_isolation(tmp_path):
     root.mkdir()
     (root / "main.py").write_text("answer = 42", encoding="utf-8")
     workflow = WorkspaceCodingSessions()
-    with pytest.raises(Exception):
+    with pytest.raises(WorkspaceAccessError):
         workflow.open(owner="owner", root_path=str(root), confirmed=False)
     session = workflow.open(owner="owner", root_path=str(root), confirmed=True)["session_id"]
     assert workflow.paths(owner="owner", session_id=session) == ("main.py",)
