@@ -161,12 +161,19 @@ def test_revoke_waits_for_in_flight_apply_before_revoking(tmp_path, monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         applied = pool.submit(workflow.apply, owner="owner", session_id=session, confirmed=True)
         assert entered.wait(5)
-        revoked = pool.submit(workflow.revoke, owner="owner", session_id=session)
+        revoke_entered = Event()
+
+        def revoke_request():
+            revoke_entered.set()
+            workflow.revoke(owner="owner", session_id=session)
+
+        revoked = pool.submit(revoke_request)
+        assert revoke_entered.wait(5)
         assert not revoked.done(), "revoke returned while a file write was in flight"
         finish.set()
         assert applied.result(timeout=5)["status"] == "applied"
         assert revoked.result(timeout=5) is None
-    assert path.read_bytes().endswith(b"43\\r\\n")
+    assert path.read_bytes().endswith(b"43\r\n")
     with pytest.raises(WorkspaceWorkflowError) as exc:
         workflow.preview(owner="owner", session_id=session)
     assert exc.value.code == "unavailable"
