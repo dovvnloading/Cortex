@@ -108,6 +108,52 @@ class WorkspaceCodingSessions:
             "state": session.state,
         }
 
+    def refresh(self, *, owner: str, session_id: str, confirmed: bool) -> dict[str, Any]:
+        """Reindex live source after an approved edit without dropping undo.
+
+        The next model turn must see the *new* checkout, not the obsolete
+        snapshot from before the last patch. An explicit reread renews the
+        lease; every previously applied file must still match its last
+        approved bytes, so undo remains trustworthy across rounds.
+        """
+        if confirmed is not True:
+            raise WorkspaceWorkflowError("consent_required")
+        session = self._get(owner=owner, session_id=session_id)
+        if not session.lock.acquire(blocking=False):
+            raise WorkspaceWorkflowError("busy")
+        try:
+            if session.state == "partial":
+                raise WorkspaceWorkflowError("restore_required")
+            if session.state not in {"open", "applied", "undone"}:
+                raise WorkspaceWorkflowError("reopen_required")
+            with self._write_lock:
+                self._verified_root(session)
+                for path, change in sorted(session.applied.items()):
+                    self._verified_target(session, path, change.modified_sha256)
+                snapshot = self.snapshots.refresh(
+                    owner=owner, snapshot_id=session_id,
+                    root_path=str(session.root), confirmed=True,
+                )
+                # A staged preview belongs to the previous immutable copy.
+                # It never survives an explicitly requested refresh.
+                if session.stager is not None:
+                    session.stager.discard()
+                session.stager = None
+                session.state = "open"
+                return {
+                    "session_id": session_id,
+                    "root": str(session.root),
+                    "file_count": snapshot.file_count,
+                    "total_bytes": snapshot.total_bytes,
+                    "truncated": snapshot.truncated,
+                    "skipped_entries": snapshot.skipped_entries,
+                    "expires_at": snapshot.expires_at.isoformat(),
+                    "state": session.state,
+                    "undo_available": bool(session.applied),
+                }
+        finally:
+            session.lock.release()
+
     def _prune_locked(self) -> None:
         for key, session in list(self._sessions.items()):
             try:
@@ -280,25 +326,45 @@ class WorkspaceCodingSessions:
             if not staged or not session.stager.preview().diff:
                 raise WorkspaceWorkflowError("no_patch")
             with self._write_lock:
+                # Keep the pre-first-edit bytes for undo, even when a later
+                # approved patch edits the same file again.
+                previous = dict(session.applied)
+                for path, change in sorted(previous.items()):
+                    self._verified_target(session, path, change.modified_sha256)
                 baselines: dict[str, tuple[bytes, int]] = {}
                 for path in sorted(staged):
                     source = snapshot.files[path]
                     _, info, raw = self._verified_target(session, path, source.sha256)
                     baselines[path] = (raw, info.st_mode)
-                applied: dict[str, AppliedFile] = {}
+                # This batch's rollback restores the state before this
+                # particular approval, not the state before the first patch.
+                batch: dict[str, AppliedFile] = {}
+
+                def accumulated() -> dict[str, AppliedFile]:
+                    result = dict(previous)
+                    for path, change in batch.items():
+                        first_original = (
+                            previous[path].original if path in previous else change.original
+                        )
+                        result[path] = AppliedFile(
+                            original=first_original, modified_sha256=change.modified_sha256,
+                        )
+                    return result
+
                 try:
                     for path in sorted(staged):
                         source = snapshot.files[path]
                         target, info, _ = self._verified_target(session, path, source.sha256)
                         content = staged[path].encode("utf-8")
                         self._atomic_replace(target, content, info.st_mode)
-                        applied[path] = AppliedFile(
+                        batch[path] = AppliedFile(
                             original=baselines[path][0], modified_sha256=sha256(content).hexdigest(),
                         )
                 except (OSError, WorkspaceWorkflowError):
-                    # Try to undo a partially installed multi-file patch. If a
-                    # file changed again, never overwrite that third-party edit.
-                    for path, change in reversed(list(applied.items())):
+                    # A failed multi-file batch is rolled back to the previous
+                    # approved revision, retaining its earlier undo checkpoint.
+                    # Refuse further edits if even rollback cannot finish.
+                    for path, change in reversed(list(batch.items())):
                         try:
                             target, info, _ = self._verified_target(
                                 session, path, change.modified_sha256
@@ -306,17 +372,17 @@ class WorkspaceCodingSessions:
                             self._atomic_replace(target, change.original, info.st_mode)
                         except (OSError, WorkspaceWorkflowError):
                             continue
-                        del applied[path]
-                    if applied:
-                        session.applied = applied
+                        del batch[path]
+                    if batch:
+                        session.applied = accumulated()
                         session.state = "partial"
                         raise WorkspaceWorkflowError("partial_rollback") from None
                     raise WorkspaceWorkflowError("write_failed") from None
-                session.applied = applied
+                session.applied = accumulated()
                 session.state = "applied"
                 session.stager.discard()
                 session.stager = None
-                return {"status": "applied", "paths": sorted(applied), "undo_available": True}
+                return {"status": "applied", "paths": sorted(batch), "undo_available": True}
         finally:
             session.lock.release()
 
@@ -327,7 +393,7 @@ class WorkspaceCodingSessions:
         if not session.lock.acquire(blocking=False):
             raise WorkspaceWorkflowError("busy")
         try:
-            if session.state not in {"applied", "partial"} or not session.applied:
+            if session.state not in {"open", "applied", "partial"} or not session.applied:
                 raise WorkspaceWorkflowError("no_checkpoint")
             with self._write_lock:
                 # Verify every target first, before restoring even one.
@@ -346,6 +412,9 @@ class WorkspaceCodingSessions:
                         raise WorkspaceWorkflowError("restore_failed") from None
                     restored.append(path)
                 session.applied.clear()
+                if session.stager is not None:
+                    session.stager.discard()
+                session.stager = None
                 session.state = "undone"
                 return {"status": "undone", "paths": restored, "undo_available": False}
         finally:

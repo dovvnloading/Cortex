@@ -15,6 +15,11 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Added (unreleased coding workspace)
 
+- A consented, in-session source refresh lets users inspect failed tests and
+  propose another patch without losing earlier edits' temporary undo. Each
+  patch and check still requires separate user approval; the refresh rejects
+  unexpected external changes to previously approved files.
+
 - An opt-in project workspace in the desktop UI with a native folder picker,
   bounded read-only repository snapshots, local Ollama research, and
   hash-checked in-memory patch previews.

@@ -229,3 +229,65 @@ def test_verified_regular_descriptor_reader_works_without_staging(tmp_path) -> N
     file.write_bytes(content)
     info = file.stat()
     assert ws._read_regular_source(file, info) == content
+
+
+def test_explicit_snapshot_refresh_renews_lease_without_changing_id(tmp_path):
+    time_now = [100.0]
+    registry = ws.WorkspaceSnapshotRegistry(clock=lambda: time_now[0])
+    root = _repo(tmp_path)
+    original = _capture(registry, root)
+    source = root / "src" / "app.py"
+    source.write_text("def main():\n    return 43\n", encoding="utf-8")
+    time_now[0] = 110.0
+
+    with pytest.raises(ws.WorkspaceAccessError) as error:
+        registry.refresh(
+            owner="owner", snapshot_id=original.snapshot_id,
+            root_path=str(root), confirmed=False,
+        )
+    assert error.value.code == "consent_required"
+    assert registry.get(owner="owner", snapshot_id=original.snapshot_id) is original
+
+    updated = registry.refresh(
+        owner="owner", snapshot_id=original.snapshot_id,
+        root_path=str(root), confirmed=True,
+    )
+    assert updated.snapshot_id == original.snapshot_id
+    assert updated.owner == original.owner
+    assert updated.expiry_deadline == 110.0 + ws.WORKSPACE_TTL_SECONDS
+    assert original.files["src/app.py"].text != updated.files["src/app.py"].text
+    assert "return 43" in registry.read(
+        owner="owner", snapshot_id=original.snapshot_id, path="src/app.py",
+    ).text
+    with pytest.raises(ws.WorkspaceAccessError):
+        registry.refresh(
+            owner="foreign", snapshot_id=original.snapshot_id,
+            root_path=str(root), confirmed=True,
+        )
+
+
+def test_refresh_rejects_expired_or_failed_capture_without_publishing(tmp_path, monkeypatch):
+    now = [50.0]
+    registry = ws.WorkspaceSnapshotRegistry(clock=lambda: now[0])
+    root = _repo(tmp_path)
+    snapshot = _capture(registry, root)
+
+    def unavailable(_root):
+        raise ws.WorkspaceAccessError("scan_failed")
+
+    monkeypatch.setattr(ws, "_capture_files", unavailable)
+    with pytest.raises(ws.WorkspaceAccessError) as error:
+        registry.refresh(
+            owner="owner", snapshot_id=snapshot.snapshot_id,
+            root_path=str(root), confirmed=True,
+        )
+    assert error.value.code == "scan_failed"
+    assert registry.get(owner="owner", snapshot_id=snapshot.snapshot_id) is snapshot
+
+    now[0] += ws.WORKSPACE_TTL_SECONDS + 1
+    with pytest.raises(ws.WorkspaceAccessError) as error:
+        registry.refresh(
+            owner="owner", snapshot_id=snapshot.snapshot_id,
+            root_path=str(root), confirmed=True,
+        )
+    assert error.value.code == "unavailable"

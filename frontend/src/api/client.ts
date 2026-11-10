@@ -325,6 +325,13 @@ export class CortexApi {
     });
   }
 
+  /** Re-read this same approved project while retaining its undo checkpoint. */
+  workspaceRefresh(id: string): Promise<WorkspaceOpened> {
+    return this.request<WorkspaceOpened>(`/workspaces/${encodeURIComponent(id)}/refresh`, {
+      method: "POST", body: JSON.stringify({ confirmed: true }),
+    });
+  }
+
   workspacePaths(id: string): Promise<{ paths: string[] }> {
     return this.request<{ paths: string[] }>(`/workspaces/${encodeURIComponent(id)}/paths`);
   }
