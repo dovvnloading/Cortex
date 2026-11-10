@@ -241,6 +241,11 @@ class AppPaths:
         return self.data_dir / "execution.sqlite"
 
     @property
+    def workspace_checkpoints_database(self) -> Path:
+        """Crash-recovery journal for explicitly approved workspace edits."""
+        return self.data_dir / "workspace_checkpoints.sqlite"
+
+    @property
     def execution_artifacts(self) -> Path:
         """Generated artifact root; callers must still enforce per-artifact limits."""
         return self.data_dir / "execution_artifacts"

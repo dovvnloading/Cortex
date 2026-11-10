@@ -36,6 +36,12 @@ from .workspace_context import (
     _safe_root,
 )
 from .workspace_patch import WorkspacePatchStager
+from .workspace_checkpoint import (
+    DurableCheckpoint,
+    DurableFile,
+    WorkspaceCheckpointError,
+    WorkspaceCheckpointStore,
+)
 
 MAX_CHECK_SECONDS = 120
 MAX_CHECK_OUTPUT_BYTES = 32768
@@ -80,8 +86,12 @@ class CodingSession:
 class WorkspaceCodingSessions:
     """Owner-scoped leases and checked edit/test actions; nothing persists."""
 
-    def __init__(self, *, snapshots: WorkspaceSnapshotRegistry | None = None) -> None:
+    def __init__(
+        self, *, snapshots: WorkspaceSnapshotRegistry | None = None,
+        checkpoint_store: WorkspaceCheckpointStore | None = None,
+    ) -> None:
         self.snapshots = snapshots or WorkspaceSnapshotRegistry()
+        self._checkpoints = checkpoint_store
         self._lock = RLock()
         self._write_lock = RLock()
         self._sessions: dict[str, CodingSession] = {}
