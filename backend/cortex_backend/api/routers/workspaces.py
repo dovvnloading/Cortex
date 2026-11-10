@@ -14,6 +14,7 @@ from pydantic import ConfigDict, BaseModel, Field
 
 from cortex_backend.api.security import SessionPrincipal
 from cortex_backend.services.workspace_context import WorkspaceAccessError
+from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointError
 from cortex_backend.services.workspace_patch import WorkspacePatchError
 from cortex_backend.services.workspace_workflow import WorkspaceWorkflowError
 
@@ -66,6 +67,14 @@ _ERRORS = {
     "linked_path": (409, "A source path is now linked or unsafe."),
     "reopen_required": (409, "Refresh the workspace before another edit."),
     "restore_required": (409, "The previous partial patch requires recovery before refreshing."),
+    "checkpoint_pending": (409, "A write was interrupted. Use saved recovery before another edit."),
+    "recovery_required": (409, "This project has an unfinished recovery checkpoint. Restore or discard it first."),
+    "checkpoint_limit": (409, "The recovery checkpoint storage limit was reached. Restore or discard older copies."),
+    "checkpoint_missing": (404, "That saved recovery checkpoint is unavailable."),
+    "checkpoint_corrupt": (409, "The saved recovery checkpoint failed its integrity check."),
+    "storage_unavailable": (503, "Local recovery storage is unavailable; edits were not authorized."),
+    "storage_version": (503, "Local recovery storage has an unsupported format."),
+    "recovery_unavailable": (409, "Durable recovery is not available in this build."),
     "no_patch": (409, "There is no proposed patch to apply."),
     "no_checkpoint": (409, "There are no applied changes to undo."),
     "partial_rollback": (409, "Some edits could not be rolled back. Review the checkout immediately."),
@@ -80,7 +89,10 @@ _ERRORS = {
 def _call(function: Callable[..., Any], **kwargs: Any) -> Any:
     try:
         return function(**kwargs)
-    except (WorkspaceAccessError, WorkspacePatchError, WorkspaceWorkflowError) as exc:
+    except (
+        WorkspaceAccessError, WorkspacePatchError, WorkspaceWorkflowError,
+        WorkspaceCheckpointError,
+    ) as exc:
         status, message = _ERRORS.get(exc.code, (422, "That workspace request was rejected."))
         raise HTTPException(
             status_code=status, detail={"code": exc.code, "message": message}
@@ -90,6 +102,42 @@ def _call(function: Callable[..., Any], **kwargs: Any) -> Any:
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     del dependencies
     # All methods and requests use the same bearer-session dependency as chat.
+
+    @router.get("/workspace-checkpoints")
+    def saved_checkpoints(
+        request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> Any:
+        """Metadata only: never send saved source bytes to the browser."""
+        return {"checkpoints": _call(
+            request.app.state.workspace_workflow.list_checkpoints,
+            owner=principal.installation_principal_id,
+        )}
+
+    @router.post("/workspace-checkpoints/{checkpoint_id}/restore")
+    def restore_checkpoint(
+        checkpoint_id: str, payload: ConfirmWorkspace, request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> Any:
+        return _call(
+            request.app.state.workspace_workflow.restore_checkpoint,
+            owner=principal.installation_principal_id,
+            checkpoint_id=checkpoint_id,
+            confirmed=payload.confirmed,
+        )
+
+    @router.post("/workspace-checkpoints/{checkpoint_id}/discard")
+    def discard_checkpoint(
+        checkpoint_id: str, payload: ConfirmWorkspace, request: Request,
+        principal: SessionPrincipal = Depends(require_session),
+    ) -> Any:
+        return _call(
+            request.app.state.workspace_workflow.discard_checkpoint,
+            owner=principal.installation_principal_id,
+            checkpoint_id=checkpoint_id,
+            confirmed=payload.confirmed,
+        )
+
     @router.post("/workspaces")
     def open_workspace(
         payload: OpenWorkspace, request: Request,
