@@ -267,4 +267,18 @@ describe("WorkspacePage", () => {
     expect(screen.getByRole("button", { name: "Restore originals" })).toBeInTheDocument();
   });
 
+
+  it("never reports an empty journal when recovery listing is unavailable", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi();
+    api.workspaceCheckpoints.mockRejectedValueOnce(new Error("SQLite database is unavailable"));
+    render(<WorkspacePage api={api as unknown as CortexApi} localModels={[]} selectedModel={null} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Saved recovery copies could not be checked");
+    expect(screen.queryByText("No saved recovery checkpoints.")).not.toBeInTheDocument();
+
+    api.workspaceCheckpoints.mockResolvedValueOnce({ checkpoints: [] });
+    await user.click(screen.getByRole("button", { name: "Refresh recovery list" }));
+    expect(await screen.findByText("No saved recovery checkpoints.")).toBeInTheDocument();
+  });
+
 });

@@ -70,6 +70,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   const [preview, setPreview] = useState<WorkspacePreview | null>(null);
   const [undoAvailable, setUndoAvailable] = useState(false);
   const [savedCheckpoints, setSavedCheckpoints] = useState<WorkspaceCheckpointSummary[]>([]);
+  const [recoveryListState, setRecoveryListState] = useState<"loading" | "loaded" | "unavailable">("loading");
   // A newly approved patch makes the last source snapshot obsolete.
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const [checkKind, setCheckKind] = useState("pytest");
@@ -93,10 +94,13 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   useEffect(() => {
     let mounted = true;
     void api.workspaceCheckpoints().then((result) => {
-      if (mounted) setSavedCheckpoints(result.checkpoints);
+      if (mounted) {
+        setSavedCheckpoints(result.checkpoints);
+        setRecoveryListState("loaded");
+      }
     }).catch(() => {
-      // Recovery is optional in preview/demo mode; manual Refresh reports
-      // a typed API error if the actual local store is unavailable.
+      if (mounted) setRecoveryListState("unavailable");
+      // Never mistake a failed scan for an empty list of saved originals.
     });
     return () => { mounted = false; };
   }, [api]);
@@ -118,8 +122,14 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   }
 
   async function reloadSavedCheckpoints() {
-    const result = await api.workspaceCheckpoints();
-    setSavedCheckpoints(result.checkpoints);
+    try {
+      const result = await api.workspaceCheckpoints();
+      setSavedCheckpoints(result.checkpoints);
+      setRecoveryListState("loaded");
+    } catch (cause) {
+      setRecoveryListState("unavailable");
+      throw cause;
+    }
   }
 
   async function restoreSaved(checkpoint: WorkspaceCheckpointSummary) {
@@ -138,7 +148,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
         undoRef.current = false;
         setNeedsRefresh(false);
       }
-      await reloadSavedCheckpoints();
+      await reloadSavedCheckpoints().catch(() => undefined);
       setNotice("Restored " + result.paths.length + " source files from the saved checkpoint. No model or test was run.");
     });
   }
@@ -159,7 +169,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
         undoRef.current = false;
         setNeedsRefresh(false);
       }
-      await reloadSavedCheckpoints();
+      await reloadSavedCheckpoints().catch(() => undefined);
       setNotice("Saved recovery copy discarded. Source files were not changed.");
     });
   }
@@ -297,7 +307,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
       setPreview(null);
       setNeedsRefresh(true);
       setNotice("Applied edits to " + result.paths.join(", ") + ". A recovery copy was saved locally. Run a check, then refresh source before proposing another fix.");
-      await reloadSavedCheckpoints();
+      await reloadSavedCheckpoints().catch(() => undefined);
     });
   }
 
@@ -312,7 +322,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
       setPreview(null);
       setNeedsRefresh(true);
       setNotice("Original files restored. The saved recovery checkpoint was cleared. Refresh source before proposing another edit.");
-      await reloadSavedCheckpoints();
+      await reloadSavedCheckpoints().catch(() => undefined);
     });
   }
 
@@ -395,8 +405,12 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
         Copies survive app restarts but are not encrypted independently of your operating system.
         Recovery never runs automatically.
       </p>
-      {savedCheckpoints.length === 0
-        ? <p className="coding-muted">No saved recovery checkpoints.</p>
+      {recoveryListState === "loading"
+        ? <p className="coding-muted">Checking for saved recovery checkpoints…</p>
+        : recoveryListState === "unavailable"
+          ? <p className="coding-error" role="alert">Saved recovery copies could not be checked. Do not assume there are none. Use Refresh recovery list to retry.</p>
+          : savedCheckpoints.length === 0
+            ? <p className="coding-muted">No saved recovery checkpoints.</p>
         : <div className="coding-recovery-list">
             {savedCheckpoints.map((item) => <div className="coding-recovery-row" key={item.id}>
               <div className="coding-recovery-info">

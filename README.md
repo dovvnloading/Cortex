@@ -230,8 +230,9 @@ What the capabilities reach today is deliberately narrow:
 
 The language itself is a restricted Python subset, so this suits calculations
 over data the model writes into the program -- not editing files or running
-your tests. A consent-gated workspace mode for that kind of work is the
-project's stated direction, and it is not built yet.
+your tests. The consent-gated desktop Project workspace now supports bounded
+repository research, reviewed edits, approved checks, and explicit recovery.
+Ordinary chat does not silently acquire those privileges.
 
 ### Experimental local coding workspace (desktop)
 
@@ -314,8 +315,8 @@ a published desktop release.
 ### Experimental read-only repository research (CLI)
 
 The first **read-only** slice of that workspace direction is available to
-developers through a separate terminal command, not through ordinary chat or
-the desktop UI. Pass an absolute local repository path and the explicit
+developers through a separate terminal command, independent of ordinary chat
+and the desktop Project workspace. Pass an absolute local repository path and the explicit
 `--allow-read-only` consent flag. Cortex copies eligible small UTF-8 source
 files into a bounded, short-lived **in-memory snapshot**, then searches and
 reads from the snapshot instead of returning to the working tree.
@@ -344,14 +345,15 @@ stages the replacement **in memory only**, checks for ambiguity, stale hashes
 and size limits, and returns a unified diff for inspection. The original
 checkout is never edited. A preview is not an applied patch and no tests run.
 
-**Limitations:** This is a developer-facing backend/CLI capability, not yet a
-complete UI-integrated coding agent. It is not an OS sandbox: concurrent
+**Limitations:** This developer-facing backend/CLI command remains read-only
+and independent of the desktop coding-agent workflow. It is not an OS sandbox: concurrent
 hostile filesystem mutation during snapshot capture can still create path
 races, and code files themselves may contain sensitive text. Grant access
 only to a repository you trust to share with the chosen local model. Model
 answers and file citations remain unverified until checked against source.
-Applying changes, executing tests, rollback/checkpoint persistence and any
-automatic repair loop are **not** part of this release slice.
+Applying changes, executing tests, persistent recovery and automatic repair
+are **not** part of the CLI command; the desktop workspace handles approved
+patches and recovery separately.
 
 ## Architecture
 
