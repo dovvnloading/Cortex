@@ -491,12 +491,18 @@ class WorkspaceCodingSessions:
 
     def revoke(self, *, owner: str, session_id: str) -> None:
         session = self._get(owner=owner, session_id=session_id)
+        # Interrupt a blocking research/check call before waiting for the
+        # session lock. Once revoke returns, a concurrent apply/undo must
+        # have finished: otherwise a closed workspace could keep writing.
         session.cancel_research.set()
         session.cancel_check.set()
         self._stop_check(session)
-        with self._lock:
-            self._sessions.pop(session_id, None)
-        self.snapshots.revoke(owner=owner, snapshot_id=session_id)
+        with session.lock:
+            with self._lock:
+                if self._sessions.get(session_id) is not session:
+                    raise WorkspaceWorkflowError("unavailable")
+                self._sessions.pop(session_id, None)
+            self.snapshots.revoke(owner=owner, snapshot_id=session_id)
 
     def close(self) -> None:
         with self._lock:
@@ -506,4 +512,9 @@ class WorkspaceCodingSessions:
             session.cancel_research.set()
             session.cancel_check.set()
             self._stop_check(session)
+        # A shutdown may race an approved on-disk edit. Wait for its
+        # session-level critical section to finish before clearing leases.
+        for session in sessions:
+            with session.lock:
+                pass
         self.snapshots.close()

@@ -106,6 +106,9 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   async function openProject(event?: FormEvent) {
     event?.preventDefault();
     if (!readConsent || !root.trim()) return;
+    if (undoRef.current && !window.confirm(
+      "Refreshing this project loses the temporary undo checkpoint. Applied edits will remain. Continue?",
+    )) return;
     await execute("opening", async () => {
       if (sessionRef.current) {
         await api.closeWorkspace(sessionRef.current);
@@ -147,6 +150,9 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
 
   async function closeProject() {
     if (!sessionRef.current) return;
+    if (undoRef.current && !window.confirm(
+      "Closing this project loses the temporary undo checkpoint. Applied edits will remain. Continue?",
+    )) return;
     const id = sessionRef.current;
     await execute("closing", async () => {
       await api.closeWorkspace(id);

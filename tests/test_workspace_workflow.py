@@ -140,3 +140,33 @@ def test_only_fixed_explicit_commands_are_accepted(tmp_path):
         workflow.check(owner="owner", session_id=session, command="pytest", confirmed=False)
     assert exc.value.code == "consent_required"
     assert path.read_bytes().endswith(b"42\r\n")
+
+def test_revoke_waits_for_in_flight_apply_before_revoking(tmp_path, monkeypatch):
+    """A successful close cannot be followed by writes from its old session."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    workflow, session, path = _session(tmp_path)
+    _propose(workflow, session, path)
+    entered = Event()
+    finish = Event()
+    original_replace = workflow._atomic_replace
+
+    def paused_replace(target, data, mode):
+        entered.set()
+        assert finish.wait(5), "test edit never resumed"
+        original_replace(target, data, mode)
+
+    monkeypatch.setattr(workflow, "_atomic_replace", paused_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        applied = pool.submit(workflow.apply, owner="owner", session_id=session, confirmed=True)
+        assert entered.wait(5)
+        revoked = pool.submit(workflow.revoke, owner="owner", session_id=session)
+        assert not revoked.done(), "revoke returned while a file write was in flight"
+        finish.set()
+        assert applied.result(timeout=5)["status"] == "applied"
+        assert revoked.result(timeout=5) is None
+    assert path.read_bytes().endswith(b"43\\r\\n")
+    with pytest.raises(WorkspaceWorkflowError) as exc:
+        workflow.preview(owner="owner", session_id=session)
+    assert exc.value.code == "unavailable"

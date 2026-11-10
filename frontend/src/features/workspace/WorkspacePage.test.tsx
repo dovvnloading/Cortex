@@ -112,4 +112,29 @@ describe("WorkspacePage", () => {
       "Investigate this test failure and propose a fix:\nAssertionError: expected 43",
     );
   });
+
+  it("warns before discarding undo during close or refresh", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<WorkspacePage api={api as unknown as CortexApi} localModels={["qwen3:8b"]} selectedModel="qwen3:8b" />);
+    await openProject(user, api);
+    await user.type(screen.getByRole("textbox", { name: "Question for local model" }), "Fix the bug.");
+    await user.click(screen.getByRole("button", { name: "Research project" }));
+    await screen.findByRole("button", { name: "Review & apply patch" });
+    await user.click(screen.getByRole("button", { name: "Review & apply patch" }));
+    await screen.findByRole("button", { name: "Undo applied patch" });
+    confirm.mockReturnValue(false);
+
+    await user.click(screen.getByRole("button", { name: "Close project" }));
+    expect(api.closeWorkspace).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Refresh snapshot" }));
+    expect(api.openWorkspace).toHaveBeenCalledTimes(1);
+    expect(api.closeWorkspace).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await user.click(screen.getByRole("button", { name: "Close project" }));
+    await waitFor(() => expect(api.closeWorkspace).toHaveBeenCalledWith("snapshot-1"));
+  });
+
 });
