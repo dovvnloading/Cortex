@@ -390,7 +390,7 @@ Cortex does not pull an embedding model at startup and has no semantic retrieval
 ## Requirements
 
 - Windows 10 or later
-- Python 3.10 or later
+- Python 3.11 or later
 - At least one local model, from either runtime:
   - Ollama installed and running at `http://127.0.0.1:11434`, or
   - a `.gguf` file in the local models folder, served by the managed llama.cpp

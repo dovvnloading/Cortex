@@ -12,15 +12,12 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-
-# tomllib is 3.11+. The repository supports 3.10, and CI runs the whole matrix,
-# so covering 3.11+ is enough to catch drift on the pull request that causes it.
-tomllib = pytest.importorskip("tomllib", reason="tomllib requires Python 3.11+")
 
 
 def _requirement_lines(path: Path) -> list[str]:
@@ -91,7 +88,7 @@ def test_supported_python_versions_match_the_compatibility_matrix(project: dict)
     assert requires.startswith(">="), f"unexpected requires-python form: {requires}"
     minimum = tuple(int(part) for part in requires.removeprefix(">=").strip().split("."))
 
-    assert minimum == (3, 10), "update this test if the supported floor moves"
+    assert minimum == (3, 11), "update this test if the supported floor moves"
     assert f"{minimum[0]}.{minimum[1]}" in tested, (
         f"requires-python claims {requires} but the CI matrix does not test it"
     )
@@ -111,3 +108,20 @@ def test_this_interpreter_is_one_the_project_claims_to_support(project: dict) ->
         f"running on Python {sys.version_info.major}.{sys.version_info.minor}, "
         f"but pyproject.toml requires {requires}"
     )
+
+
+@pytest.mark.parametrize("filename", ["requirements.lock.txt", "requirements-dev.lock.txt"])
+@pytest.mark.parametrize("package, minimum", [("pillow", (13, 0, 0)), ("certifi", (2026, 10, 19))])
+def test_locks_exclude_vulnerable_image_and_tls_dependencies(
+    filename: str, package: str, minimum: tuple[int, ...],
+) -> None:
+    """Do not reintroduce pre-fix Pillow decoders or certifi's compromised root."""
+    lock = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+    match = re.search(rf"^{package}==([0-9.]+) ", lock, re.MULTILINE)
+    assert match is not None, f"{package} must be hash-pinned in {filename}"
+    assert tuple(map(int, match.group(1).split("."))) >= minimum
+
+
+def test_unlocked_installs_exclude_vulnerable_image_and_tls_dependencies(project: dict) -> None:
+    assert "Pillow>=13.0,<13.1" in project["dependencies"]
+    assert "certifi>=2026.10.19" in project["dependencies"]
