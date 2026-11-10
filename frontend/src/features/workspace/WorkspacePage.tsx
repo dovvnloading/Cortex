@@ -3,7 +3,7 @@ import { Check, Code2, FolderOpen, Play, RotateCcw, Search, Square, X } from "lu
 import { CortexApi, describeApiError } from "../../api/client";
 import type {
   WorkspaceAgentAnswer, WorkspaceCheckResult, WorkspaceExcerpt, WorkspaceHit,
-  WorkspaceOpened, WorkspacePreview,
+  WorkspaceOpened, WorkspacePreview, WorkspaceCheckpointSummary,
 } from "../../api/workspaceTypes";
 import { registerNavigationGuard } from "../../lib/navigation";
 
@@ -69,6 +69,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   const [answer, setAnswer] = useState<WorkspaceAgentAnswer | null>(null);
   const [preview, setPreview] = useState<WorkspacePreview | null>(null);
   const [undoAvailable, setUndoAvailable] = useState(false);
+  const [savedCheckpoints, setSavedCheckpoints] = useState<WorkspaceCheckpointSummary[]>([]);
   // A newly approved patch makes the last source snapshot obsolete.
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const [checkKind, setCheckKind] = useState("pytest");
@@ -85,9 +86,20 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   useEffect(() => registerNavigationGuard(() => {
     if (!undoRef.current) return true;
     return window.confirm(
-      "Leaving this workspace discards the temporary undo checkpoint, but keeps edits already applied. Continue?",
+      "Applied edits will remain. Your saved local recovery checkpoint will also remain, so you can restore it later. Leave the workspace?",
     );
   }), []);
+
+  useEffect(() => {
+    let mounted = true;
+    void api.workspaceCheckpoints().then((result) => {
+      if (mounted) setSavedCheckpoints(result.checkpoints);
+    }).catch(() => {
+      // Recovery is optional in preview/demo mode; manual Refresh reports
+      // a typed API error if the actual local store is unavailable.
+    });
+    return () => { mounted = false; };
+  }, [api]);
 
   const rows = useMemo(() => diffRows(preview?.diff ?? ""), [preview]);
 
@@ -103,6 +115,53 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
     } finally {
       setBusy(null);
     }
+  }
+
+  async function reloadSavedCheckpoints() {
+    const result = await api.workspaceCheckpoints();
+    setSavedCheckpoints(result.checkpoints);
+  }
+
+  async function restoreSaved(checkpoint: WorkspaceCheckpointSummary) {
+    if (!window.confirm(
+      "Restore original source files for " + checkpoint.root + "? Cortex will verify ALL current file hashes and refuse files changed by other programs. No source will be overwritten unless it matches a recorded version.",
+    )) return;
+    await execute("restoring", async () => {
+      const result = await api.restoreWorkspaceCheckpoint(checkpoint.id);
+      if (sessionRef.current && opened?.root === checkpoint.root) {
+        await api.closeWorkspace(sessionRef.current).catch(() => undefined);
+        sessionRef.current = null;
+        setOpened(null);
+        setPreview(null);
+        setPaths([]);
+        setUndoAvailable(false);
+        undoRef.current = false;
+        setNeedsRefresh(false);
+      }
+      await reloadSavedCheckpoints();
+      setNotice("Restored " + result.paths.length + " source files from the saved checkpoint. No model or test was run.");
+    });
+  }
+
+  async function discardSaved(checkpoint: WorkspaceCheckpointSummary) {
+    if (!window.confirm(
+      "Permanently delete the saved recovery copy for " + checkpoint.root + "? Your project edits will remain and this recovery checkpoint CANNOT be restored afterward.",
+    )) return;
+    await execute("discarding", async () => {
+      await api.discardWorkspaceCheckpoint(checkpoint.id);
+      if (sessionRef.current && opened?.root === checkpoint.root) {
+        await api.closeWorkspace(sessionRef.current).catch(() => undefined);
+        sessionRef.current = null;
+        setOpened(null);
+        setPreview(null);
+        setPaths([]);
+        setUndoAvailable(false);
+        undoRef.current = false;
+        setNeedsRefresh(false);
+      }
+      await reloadSavedCheckpoints();
+      setNotice("Saved recovery copy discarded. Source files were not changed.");
+    });
   }
 
   async function refreshCurrentProject(id: string) {
@@ -133,7 +192,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
       return;
     }
     if (undoRef.current && !window.confirm(
-      "Opening another project loses this project's temporary undo checkpoint. Applied edits remain. Continue?",
+      "Opening another project keeps this project's saved local recovery checkpoint. Your applied edits also remain. Continue?",
     )) return;
     await execute("opening", async () => {
       if (existing) {
@@ -178,7 +237,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   async function closeProject() {
     if (!sessionRef.current) return;
     if (undoRef.current && !window.confirm(
-      "Closing this project loses the temporary undo checkpoint. Applied edits will remain. Continue?",
+      "Closing this project leaves your approved edits and their saved local recovery checkpoint intact. Continue?",
     )) return;
     const id = sessionRef.current;
     await execute("closing", async () => {
@@ -237,7 +296,8 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
       undoRef.current = result.undo_available;
       setPreview(null);
       setNeedsRefresh(true);
-      setNotice("Applied edits to " + result.paths.join(", ") + ". Run a check, then refresh the source before proposing another fix without losing undo.");
+      setNotice("Applied edits to " + result.paths.join(", ") + ". A recovery copy was saved locally. Run a check, then refresh source before proposing another fix.");
+      await reloadSavedCheckpoints();
     });
   }
 
@@ -251,7 +311,8 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
       undoRef.current = false;
       setPreview(null);
       setNeedsRefresh(true);
-      setNotice("Original files restored. Refresh the source snapshot before proposing another edit.");
+      setNotice("Original files restored. The saved recovery checkpoint was cleared. Refresh source before proposing another edit.");
+      await reloadSavedCheckpoints();
     });
   }
 
@@ -322,6 +383,37 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
     {error && <div className="coding-error" role="alert">{error}</div>}
     {notice && <div className="coding-notice" role="status">{notice}</div>}
 
+
+    <section className="coding-panel" aria-label="Saved recovery checkpoints">
+      <div className="coding-row">
+        <h3>Saved recovery checkpoints</h3>
+        <button type="button" className="coding-quiet" disabled={!!busy}
+          onClick={() => void execute("loading recovery", reloadSavedCheckpoints)}>Refresh recovery list</button>
+      </div>
+      <p className="coding-muted">
+        Cortex saves original source bytes in its private local SQLite database before applying a reviewed patch.
+        Copies survive app restarts but are not encrypted independently of your operating system.
+        Recovery never runs automatically.
+      </p>
+      {savedCheckpoints.length === 0
+        ? <p className="coding-muted">No saved recovery checkpoints.</p>
+        : <div className="coding-recovery-list">
+            {savedCheckpoints.map((item) => <div className="coding-recovery-row" key={item.id}>
+              <div className="coding-recovery-info">
+                <strong>{item.root}</strong>
+                <p className="coding-muted">{item.file_count} files · {item.state === "pending" ? "Interrupted/uncertain write" : "Approved edits"} · {new Date(item.updated_at).toLocaleString()}</p>
+                <p className="coding-muted">{item.paths.join(", ")}</p>
+              </div>
+              <div className="coding-row">
+                <button className="coding-quiet" type="button" disabled={!!busy}
+                  onClick={() => void restoreSaved(item)}><RotateCcw size={15} /> Restore originals</button>
+                <button className="coding-quiet" type="button" disabled={!!busy}
+                  onClick={() => void discardSaved(item)}>Discard backup</button>
+              </div>
+            </div>)}
+          </div>}
+    </section>
+
     {opened && <>
       <div className="coding-two-column">
         <section className="coding-panel">
@@ -390,7 +482,7 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
         </div>
         <div className="coding-row">
           <button className="coding-primary" type="button" disabled={!!busy} onClick={() => void apply()}><Check size={16} /> Review & apply patch</button>
-          <p className="coding-muted">Applying changes requires separate approval and exact source hash checks.</p>
+          <p className="coding-muted">Applying requires explicit consent, exact hash checks, and a durable local recovery copy.</p>
         </div>
       </section>}
       <section className="coding-panel">
