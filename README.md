@@ -233,6 +233,44 @@ over data the model writes into the program -- not editing files or running
 your tests. A consent-gated workspace mode for that kind of work is the
 project's stated direction, and it is not built yet.
 
+### Experimental local coding workspace (desktop)
+
+**Project workspace** in the desktop sidebar is an opt-in coding mode, separate
+from ordinary chat. Choose a local project with the native folder picker or
+enter its absolute path, then explicitly approve indexing its eligible source
+files. Cortex creates an **in-memory, owner-scoped, expiring snapshot** (up to
+2048 small UTF-8 files and 16 MiB, valid for 15 minutes). Secret files,
+dependencies, symlinks and binary files are excluded. Search/read and the model
+research loop use that copy, not arbitrary paths from the model.
+
+The selected **Ollama** model can investigate a problem and optionally stage
+exact, hash-checked text replacements as a **review-only unified diff**. The
+model cannot apply the patch. Review the proposed changes, then choose **Review
+& apply patch** and confirm a separate write grant. Cortex checks every
+original source hash, file identity and linked directory before installing the
+edited contents with temporary sibling files. **Undo applied patch** restores
+the captured original bytes only if the edited files are unchanged. The undo
+checkpoint is in memory, lasts only while the session remains open and is not
+durable across a crash, reload or session expiry; it is not a replacement for
+Git or another backup. A multi-file write failure may require manual recovery
+if even the best-effort rollback cannot finish. Cortex refuses to overwrite
+intervening external changes.
+
+The check controls offer only **Python pytest**, **npm test**, and **npm
+build**, and require another explicit confirmation each time. A project test
+or build script executes code with your Windows account privileges; Windows
+job objects bound its process lifetime, memory and number of descendants
+but **do not sandbox filesystem or network access**. Use this mode only on
+trusted repositories. Outputs are bounded and can be copied back into a new
+model question to request the next proposed fix; unattended
+edit/test/repair loops and arbitrary shell commands are not supported.
+
+The UI's native folder chooser is only a convenience: it never grants read,
+write or command authority by itself. The REST endpoints require Cortex's
+existing local bearer session. No project grant persists when Cortex closes.
+This is an **unreleased experimental feature** on the development branch, not
+a published desktop release.
+
 ### Experimental read-only repository research (CLI)
 
 The first **read-only** slice of that workspace direction is available to

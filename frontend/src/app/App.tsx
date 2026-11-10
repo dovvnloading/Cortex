@@ -17,6 +17,8 @@ import { GenerationStreamHost } from "../features/chat/GenerationStreamHost";
 import { Onboarding } from "../features/shell/Onboarding";
 const SettingsPanel = lazyRoute<SettingsPanelProps>(() => import("../features/settings/SettingsPanel").then(({ SettingsPanel: component }) => ({ default: component })));
 import type { SettingsPanelProps } from "../features/settings/SettingsPanel";
+import type { WorkspacePageProps } from "../features/workspace/WorkspacePage";
+const WorkspacePage = lazyRoute<WorkspacePageProps>(() => import("../features/workspace/WorkspacePage").then(({ WorkspacePage: component }) => ({ default: component })));
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
@@ -1223,6 +1225,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
             ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} modelBusy={modelBusy} activeModelJobKind={activeModelJobKind} modelProgress={modelProgress} secondaryModelJobs={secondaryModelJobs} secondaryModelProgress={secondaryModelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} onUnloadModel={unloadLocalModel} /></RouteBoundary>
+            : route.kind === "workspace"
+              ? <RouteBoundary key="workspace" name="Project workspace" scope="workspace" resetKey={pathname} onRetry={WorkspacePage.reload}><WorkspacePage api={api} localModels={localModels.filter((name) => !isGGUFModel(name))} selectedModel={selectedModel} /></RouteBoundary>
             : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>

@@ -5,6 +5,7 @@ const NAVIGATION_EVENT = "cortex:navigation";
 export type AppRoute =
   | { kind: "chat"; threadId: string | null }
   | { kind: "settings" }
+  | { kind: "workspace" }
   | { kind: "not-found" };
 
 export type NavigateOptions = {
@@ -263,6 +264,7 @@ export function useNavigate(): (to: string, options?: NavigateOptions) => void {
 export function parseAppRoute(pathname: string): AppRoute {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (normalized === "/settings") return { kind: "settings" };
+  if (normalized === "/workspace") return { kind: "workspace" };
   if (normalized === "/" || normalized === "/chat" || normalized === "/chat/new") {
     return { kind: "chat", threadId: null };
   }

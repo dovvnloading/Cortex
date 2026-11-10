@@ -239,9 +239,12 @@ class WorkspaceReadAgent:
         snapshot_id: str,
         question: str,
         cancellation_event: Event | None = None,
+        patch_stager: WorkspacePatchStager | None = None,
     ) -> WorkspaceAgentResult:
         if not isinstance(question, str) or not 0 < len(question.strip()) <= 20000:
             raise ValueError("question must be nonempty and bounded")
+        if patch_stager is not None and not self._allow_patch_preview:
+            raise ValueError("a patch stager requires preview mode")
 
         system = PromptTemplate._load_system_prompt() + "\n\n" + _WORKSPACE_TOOL_CONTRACT
         if self._allow_patch_preview:
@@ -260,7 +263,7 @@ class WorkspaceReadAgent:
         read_paths: set[str] = set()
         staged: WorkspacePatchPreview | None = None
         try:
-            stager = (
+            stager = patch_stager or (
                 WorkspacePatchStager(
                     registry=self._registry,
                     owner=owner,

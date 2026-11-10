@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { FolderCode, Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
@@ -61,8 +61,11 @@ export function AppShell({
   const previousPathnameRef = useRef(pathname);
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
-  const activeTitle = isSettings
-    ? "Settings"
+  const isWorkspace = parseAppRoute(pathname).kind === "workspace";
+  const activeTitle = isWorkspace
+    ? "Project workspace"
+    : isSettings
+      ? "Settings"
     : activeChatId
       ? displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title, "Cortex")
       : "New thread";
@@ -129,6 +132,12 @@ export function AppShell({
           </div>
         </div>
         <div className="window-actions">
+          <NavigationLink to="/workspace"
+            className={"window-control" + (isWorkspace ? " window-control-active" : "")}
+            aria-label="Project workspace" aria-current={isWorkspace ? "page" : undefined}
+            title="Local coding workspace">
+            <FolderCode aria-hidden="true" size={17} />
+          </NavigationLink>
           <NavigationLink
             to="/settings"
             className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}
@@ -159,6 +168,9 @@ export function AppShell({
             <Plus aria-hidden="true" size={16} />
             New thread
           </button>
+          <NavigationLink to="/workspace" className="new-chat-button" aria-current={isWorkspace ? "page" : undefined}>
+            <FolderCode aria-hidden="true" size={16} /> Project workspace
+          </NavigationLink>
           {chats.length > 0 && (
             <div className="sidebar-search">
               <Search aria-hidden="true" size={14} />
@@ -176,7 +188,7 @@ export function AppShell({
               chats={chats}
               groups={groups}
               activeChatId={activeChatId}
-              activeRowVisible={!isSettings}
+              activeRowVisible={!isSettings && !isWorkspace}
               query={chatQuery}
               onSelectChat={selectChat}
               onRenameChat={setRenameTarget}
@@ -190,7 +202,7 @@ export function AppShell({
           </InlineBoundary>
         </aside>
 
-        <main className={`main-content ${isSettings ? "settings-content" : "chat-content"}`}>{children}</main>
+        <main className={`main-content ${isSettings ? "settings-content" : isWorkspace ? "workspace-content" : "chat-content"}`}>{children}</main>
       </div>
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}
