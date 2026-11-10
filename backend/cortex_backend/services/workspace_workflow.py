@@ -35,7 +35,7 @@ from .workspace_context import (
     _relative_file_name,
     _safe_root,
 )
-from .workspace_patch import WorkspacePatchError, WorkspacePatchStager
+from .workspace_patch import WorkspacePatchStager
 
 MAX_CHECK_SECONDS = 120
 MAX_CHECK_OUTPUT_BYTES = 32768

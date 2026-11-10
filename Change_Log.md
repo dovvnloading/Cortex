@@ -13,6 +13,17 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ## [Unreleased]
 
+### Added (unreleased coding workspace)
+
+- An opt-in project workspace in the desktop UI with a native folder picker,
+  bounded read-only repository snapshots, local Ollama research, and
+  hash-checked in-memory patch previews.
+- Separate user approval for applying reviewed source diffs and for running
+  fixed project checks (pytest, npm test, npm build), with ephemeral undo and
+  bounded test output. Project commands are **not** an OS sandbox; they run as
+  the current user. This feature is experimental and has no published release.
+
+
 Everything merged since 2026-09-04 (pull requests #212 to #291), which this
 file had no summary of. Test-only pull requests (#228, #269, #273) and a README
 edit that was later undone (#278) are left out. Some changes are also told at
