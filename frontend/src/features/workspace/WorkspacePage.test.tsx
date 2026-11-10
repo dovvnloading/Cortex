@@ -11,6 +11,11 @@ function fakeApi() {
       total_bytes: 42, skipped_entries: 2, truncated: false,
       expires_at: "2030-01-01T00:15:00+00:00", state: "open",
     }),
+    workspaceCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [] }),
+    restoreWorkspaceCheckpoint: vi.fn().mockResolvedValue({
+      status: "restored", checkpoint_id: "checkpoint-1", paths: ["app.py"],
+    }),
+    discardWorkspaceCheckpoint: vi.fn().mockResolvedValue({ discarded: true }),
     workspaceRefresh: vi.fn().mockResolvedValue({
       session_id: "snapshot-1", root: "/tmp/project", file_count: 1,
       total_bytes: 43, skipped_entries: 2, truncated: false,
@@ -193,6 +198,73 @@ describe("WorkspacePage", () => {
     await waitFor(() => expect(api.workspaceRefresh).toHaveBeenCalledWith("snapshot-1"));
     expect(screen.queryByRole("region", { name: "Side-by-side patch preview" })).not.toBeInTheDocument();
     expect(api.workspaceApply).not.toHaveBeenCalled();
+  });
+
+
+  it("loads saved recovery metadata after restart and restores only after approval", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi();
+    const record = {
+      id: "checkpoint-1", root: "/tmp/recovered-project",
+      state: "pending", created_at: "2030-01-01T00:00:00Z",
+      updated_at: "2030-01-01T00:05:00Z", paths: ["app.py"], file_count: 1,
+    };
+    api.workspaceCheckpoints.mockResolvedValueOnce({ checkpoints: [record] })
+      .mockResolvedValue({ checkpoints: [] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<WorkspacePage api={api as unknown as CortexApi} localModels={[]} selectedModel={null} />);
+    expect(await screen.findByText("/tmp/recovered-project")).toBeInTheDocument();
+    expect(screen.getByText(/Interrupted\/uncertain write/)).toBeInTheDocument();
+    expect(api.openWorkspace).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Restore originals" }));
+    expect(api.restoreWorkspaceCheckpoint).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await user.click(screen.getByRole("button", { name: "Restore originals" }));
+    await waitFor(() => expect(api.restoreWorkspaceCheckpoint).toHaveBeenCalledWith("checkpoint-1"));
+    await waitFor(() => expect(screen.getByText("No saved recovery checkpoints.")).toBeInTheDocument());
+    expect(api.workspaceApply).not.toHaveBeenCalled();
+    expect(api.workspaceCheck).not.toHaveBeenCalled();
+  });
+
+  it("explicitly discards saved backups without restoring source files", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi();
+    const record = {
+      id: "checkpoint-2", root: "/tmp/project",
+      state: "active", created_at: "2030-01-01T00:00:00Z",
+      updated_at: "2030-01-01T00:05:00Z", paths: ["app.py"], file_count: 1,
+    };
+    api.workspaceCheckpoints.mockResolvedValueOnce({ checkpoints: [record] })
+      .mockResolvedValue({ checkpoints: [] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<WorkspacePage api={api as unknown as CortexApi} localModels={[]} selectedModel={null} />);
+    expect(await screen.findByText("/tmp/project")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Discard backup" }));
+    expect(api.discardWorkspaceCheckpoint).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await user.click(screen.getByRole("button", { name: "Discard backup" }));
+    await waitFor(() => expect(api.discardWorkspaceCheckpoint).toHaveBeenCalledWith("checkpoint-2"));
+    expect(api.restoreWorkspaceCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("keeps the recovery choice available if disk hashes conflict", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi();
+    const record = {
+      id: "checkpoint-3", root: "/tmp/project",
+      state: "active", created_at: "2030-01-01T00:00:00Z",
+      updated_at: "2030-01-01T00:05:00Z", paths: ["app.py"], file_count: 1,
+    };
+    api.workspaceCheckpoints.mockResolvedValue({ checkpoints: [record] });
+    api.restoreWorkspaceCheckpoint.mockRejectedValue(new Error("stale_source"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<WorkspacePage api={api as unknown as CortexApi} localModels={[]} selectedModel={null} />);
+    expect(await screen.findByText("/tmp/project")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Restore originals" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The workspace operation failed.");
+    expect(screen.getByRole("button", { name: "Restore originals" })).toBeInTheDocument();
   });
 
 });
