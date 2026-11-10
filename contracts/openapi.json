@@ -34,6 +34,34 @@
         "title": "AppearanceSettings",
         "type": "object"
       },
+      "AskWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "preview_edits": {
+            "default": false,
+            "title": "Preview Edits",
+            "type": "boolean"
+          },
+          "question": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "model"
+        ],
+        "title": "AskWorkspace",
+        "type": "object"
+      },
       "AttachmentStageAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -460,6 +488,27 @@
         "title": "ChatSummary",
         "type": "object"
       },
+      "CheckWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "CheckWorkspace",
+        "type": "object"
+      },
       "ClearMemoryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -661,6 +710,18 @@
           "capabilities"
         ],
         "title": "CodeExecutionSourceResponse",
+        "type": "object"
+      },
+      "ConfirmWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          }
+        },
+        "title": "ConfirmWorkspace",
         "type": "object"
       },
       "ConnectionResult": {
@@ -2812,6 +2873,49 @@
         "title": "OnboardingSettings",
         "type": "object"
       },
+      "OpenWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "root_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Root Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_path"
+        ],
+        "title": "OpenWorkspace",
+        "type": "object"
+      },
+      "ReadWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "start_line": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Start Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ReadWorkspace",
+        "type": "object"
+      },
       "RecipeImageTransformAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -3010,6 +3114,42 @@
         "title": "ReplaceMemoryRequest",
         "type": "object"
       },
+      "ReplaceWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Expected Sha256",
+            "type": "string"
+          },
+          "new_text": {
+            "maxLength": 8000,
+            "title": "New Text",
+            "type": "string"
+          },
+          "old_text": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Old Text",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "expected_sha256",
+          "old_text",
+          "new_text"
+        ],
+        "title": "ReplaceWorkspace",
+        "type": "object"
+      },
       "ResizeStep": {
         "additionalProperties": false,
         "properties": {
@@ -3190,6 +3330,22 @@
           "expression"
         ],
         "title": "ScratchComputeRequest",
+        "type": "object"
+      },
+      "SearchWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "maxLength": 120,
+            "minLength": 2,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "SearchWorkspace",
         "type": "object"
       },
       "SessionExchangeRequest": {
@@ -5634,6 +5790,603 @@
           }
         ],
         "summary": "Shutdown"
+      }
+    },
+    "/api/v1/workspaces": {
+      "post": {
+        "operationId": "open_workspace_api_v1_workspaces_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Open Workspace Api V1 Workspaces Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Open Workspace"
+      }
+    },
+    "/api/v1/workspaces/{session_id}": {
+      "delete": {
+        "operationId": "revoke_api_v1_workspaces__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Revoke Api V1 Workspaces  Session Id  Delete"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Revoke"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/apply": {
+      "post": {
+        "operationId": "apply_api_v1_workspaces__session_id__apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Apply Api V1 Workspaces  Session Id  Apply Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Apply"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/ask": {
+      "post": {
+        "operationId": "ask_api_v1_workspaces__session_id__ask_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Ask Api V1 Workspaces  Session Id  Ask Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Ask"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/cancel": {
+      "post": {
+        "operationId": "cancel_api_v1_workspaces__session_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Cancel Api V1 Workspaces  Session Id  Cancel Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Cancel"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/checks": {
+      "post": {
+        "operationId": "check_api_v1_workspaces__session_id__checks_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Check Api V1 Workspaces  Session Id  Checks Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Check"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/paths": {
+      "get": {
+        "operationId": "paths_api_v1_workspaces__session_id__paths_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Paths Api V1 Workspaces  Session Id  Paths Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Paths"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/preview": {
+      "get": {
+        "operationId": "preview_api_v1_workspaces__session_id__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Preview Api V1 Workspaces  Session Id  Preview Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Preview"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/read": {
+      "post": {
+        "operationId": "read_api_v1_workspaces__session_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Read Api V1 Workspaces  Session Id  Read Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Read"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/replace": {
+      "post": {
+        "operationId": "replace_api_v1_workspaces__session_id__replace_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Replace Api V1 Workspaces  Session Id  Replace Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Replace"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/search": {
+      "post": {
+        "operationId": "search_api_v1_workspaces__session_id__search_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Search Api V1 Workspaces  Session Id  Search Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Search"
+      }
+    },
+    "/api/v1/workspaces/{session_id}/undo": {
+      "post": {
+        "operationId": "undo_api_v1_workspaces__session_id__undo_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Undo Api V1 Workspaces  Session Id  Undo Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Undo"
       }
     }
   },

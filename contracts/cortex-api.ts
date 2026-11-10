@@ -9,6 +9,12 @@ export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
 
+export interface AskWorkspace {
+  question: string;
+  model: string;
+  preview_edits?: boolean;
+}
+
 export interface AttachmentStageAccepted {
   job_id: string;
   request_id: string;
@@ -84,6 +90,11 @@ export interface ChatSummary {
   group_id?: string | null;
 }
 
+export interface CheckWorkspace {
+  confirmed?: boolean;
+  command: string;
+}
+
 export interface ClearMemoryRequest {
   confirm?: boolean;
   confirmation_intent?: "clear_permanent_memory" | null;
@@ -122,6 +133,10 @@ export interface CodeExecutionSourceResponse {
   source_digest: string;
   intent_summary: string;
   capabilities: CodeCapabilitiesRequest;
+}
+
+export interface ConfirmWorkspace {
+  confirmed?: boolean;
 }
 
 export interface ConnectionResult {
@@ -450,6 +465,16 @@ export interface OnboardingSettings {
   agreement_accepted?: boolean;
 }
 
+export interface OpenWorkspace {
+  root_path: string;
+  confirmed?: boolean;
+}
+
+export interface ReadWorkspace {
+  path: string;
+  start_line?: number;
+}
+
 export interface RecipeImageTransformAccepted {
   job_id: string;
   request_id: string;
@@ -483,6 +508,13 @@ export interface ReplaceMemoryRequest {
   expected_memos: Array<string>;
 }
 
+export interface ReplaceWorkspace {
+  path: string;
+  expected_sha256: string;
+  old_text: string;
+  new_text: string;
+}
+
 export interface ResizeStep {
   op: "resize";
   width: number;
@@ -514,6 +546,10 @@ export interface ScratchComputeAccepted {
 export interface ScratchComputeRequest {
   request_id: string;
   expression: string;
+}
+
+export interface SearchWorkspace {
+  query: string;
 }
 
 export interface SessionExchangeRequest {
