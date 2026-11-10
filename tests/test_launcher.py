@@ -1334,9 +1334,10 @@ def test_native_window_follows_system_app_theme(
 
     # The page can move the title bar when a pinned theme differs from Windows'.
     assert [getattr(function, "__name__", None) for function in exposed] == [
-        "set_title_bar_dark"
+        "set_title_bar_dark", "choose_workspace_directory"
     ]
     set_title_bar_dark = exposed[0]
+    assert exposed[1]() is None  # No picker attached in the fake window.
     title_bar_calls.clear()
     assert set_title_bar_dark(False) is True
     assert set_title_bar_dark(True) is True

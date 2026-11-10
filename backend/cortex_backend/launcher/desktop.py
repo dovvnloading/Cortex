@@ -195,9 +195,32 @@ def run_desktop_window(
             return False
         return _apply_windows_title_bar_theme(pid=os.getpid(), title=config.title, dark=dark)
 
+    def choose_workspace_directory() -> str | None:
+        """Use a visible, user-controlled native directory picker.
+
+        This hook returns only the selected path. It never reads a file,
+        creates a source grant, or authorizes edits; the workspace API still
+        requires the user's separate read-consent checkbox.
+        """
+        chooser = getattr(window, "create_file_dialog", None)
+        folder_dialog = getattr(webview, "FOLDER_DIALOG", None)
+        if not callable(chooser) or folder_dialog is None:
+            return None
+        try:
+            selected = chooser(folder_dialog)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return None
+        if isinstance(selected, str):
+            return selected if selected else None
+        if isinstance(selected, (list, tuple)) and len(selected) == 1:
+            value = selected[0]
+            return value if isinstance(value, str) and value else None
+        return None
+
     expose = getattr(window, "expose", None)
     if callable(expose):
         expose(set_title_bar_dark)
+        expose(choose_workspace_directory)
     startup_errors: list[Exception] = []
 
     def after_start() -> None:
