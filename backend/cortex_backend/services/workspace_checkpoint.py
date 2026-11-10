@@ -19,7 +19,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-import os
 from pathlib import Path
 import sqlite3
 from threading import RLock
