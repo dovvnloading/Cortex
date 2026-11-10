@@ -35,6 +35,10 @@ import type {
   SSEEvent,
 } from "../../../contracts/cortex-api";
 import { normalizeApiBaseUrl } from "./baseUrl";
+import type {
+  WorkspaceOpened, WorkspaceHit, WorkspaceExcerpt, WorkspaceAgentAnswer,
+  WorkspacePreview, WorkspaceActionResult, WorkspaceCheckResult,
+} from "./workspaceTypes";
 
 /**
  * What kind of failure an {@link ApiError} is, so callers stop inferring it
@@ -312,6 +316,69 @@ export class CortexApi {
    */
   unloadLlamaCpp(): Promise<LlamaCppRuntimeStatus> {
     return this.request<LlamaCppRuntimeStatus>("/llamacpp/unload", { method: "POST" });
+  }
+
+  /** Index eligible files only after deliberate user consent. */
+  openWorkspace(rootPath: string): Promise<WorkspaceOpened> {
+    return this.request<WorkspaceOpened>("/workspaces", {
+      method: "POST", body: JSON.stringify({ root_path: rootPath, confirmed: true }),
+    });
+  }
+
+  workspacePaths(id: string): Promise<{ paths: string[] }> {
+    return this.request<{ paths: string[] }>("/workspaces/" + encodeURIComponent(id) + "/paths");
+  }
+
+  workspaceSearch(id: string, query: string): Promise<{ matches: WorkspaceHit[] }> {
+    return this.request<{ matches: WorkspaceHit[] }>("/workspaces/" + encodeURIComponent(id) + "/search", {
+      method: "POST", body: JSON.stringify({ query }),
+    });
+  }
+
+  workspaceRead(id: string, path: string, startLine = 1): Promise<WorkspaceExcerpt> {
+    return this.request<WorkspaceExcerpt>("/workspaces/" + encodeURIComponent(id) + "/read", {
+      method: "POST", body: JSON.stringify({ path, start_line: startLine }),
+    });
+  }
+
+  workspaceAsk(id: string, question: string, model: string, previewEdits: boolean): Promise<WorkspaceAgentAnswer> {
+    return this.request<WorkspaceAgentAnswer>("/workspaces/" + encodeURIComponent(id) + "/ask", {
+      method: "POST", body: JSON.stringify({ question, model, preview_edits: previewEdits }),
+    });
+  }
+
+  workspacePreview(id: string): Promise<WorkspacePreview> {
+    return this.request<WorkspacePreview>("/workspaces/" + encodeURIComponent(id) + "/preview");
+  }
+
+  workspaceApply(id: string): Promise<WorkspaceActionResult> {
+    return this.request<WorkspaceActionResult>("/workspaces/" + encodeURIComponent(id) + "/apply", {
+      method: "POST", body: JSON.stringify({ confirmed: true }),
+    });
+  }
+
+  workspaceUndo(id: string): Promise<WorkspaceActionResult> {
+    return this.request<WorkspaceActionResult>("/workspaces/" + encodeURIComponent(id) + "/undo", {
+      method: "POST", body: JSON.stringify({ confirmed: true }),
+    });
+  }
+
+  workspaceCheck(id: string, command: string): Promise<WorkspaceCheckResult> {
+    return this.request<WorkspaceCheckResult>("/workspaces/" + encodeURIComponent(id) + "/checks", {
+      method: "POST", body: JSON.stringify({ confirmed: true, command }),
+    });
+  }
+
+  workspaceCancel(id: string): Promise<{ cancelled: boolean }> {
+    return this.request<{ cancelled: boolean }>("/workspaces/" + encodeURIComponent(id) + "/cancel", {
+      method: "POST",
+    });
+  }
+
+  closeWorkspace(id: string): Promise<{ revoked: boolean }> {
+    return this.request<{ revoked: boolean }>("/workspaces/" + encodeURIComponent(id), {
+      method: "DELETE",
+    });
   }
 
   chats(): Promise<ChatSummary[]> {
