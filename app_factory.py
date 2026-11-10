@@ -142,10 +142,11 @@ def build_app(
     llamacpp_chat_client = LlamaCppChatClient(
         llamacpp_manager, models_directory=gguf_directory, verify=ssl_context
     )
+    ollama_chat_client = OllamaChatClient(client, stream_client_factory=new_ollama_client)
     routing_chat_client = RoutingChatClient(
         # A turn Stop can reach streams through a client of its own, which Stop
         # closes to abort a read in flight; the shared one stays untouched.
-        OllamaChatClient(client, stream_client_factory=new_ollama_client),
+        ollama_chat_client,
         llamacpp_chat_client,
     )
     generation_service = GenerationService(
@@ -213,6 +214,7 @@ def build_app(
         installation_principal_id=execution_repository.installation_principal_id,
         llamacpp_manager=llamacpp_manager,
         llamacpp_chat_client=llamacpp_chat_client,
+        workspace_chat_client=ollama_chat_client,
         default_gguf_models_dir=paths.default_gguf_models_dir,
         closeables=(client,),
     )

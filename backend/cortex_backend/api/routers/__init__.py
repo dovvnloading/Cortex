@@ -20,11 +20,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from cortex_backend.api.app_types import BackendDependenciesProtocol
 from cortex_backend.api.security import SessionPrincipal
 
-from . import chats, execution, generations, models, session, settings, system
+from . import chats, execution, generations, models, session, settings, system, workspaces
 
 
 # Registration order is the declaration order FastAPI matches on.
-_RESOURCES = (session, system, chats, settings, models, execution, generations)
+_RESOURCES = (session, system, chats, settings, models, execution, generations, workspaces)
 
 # What the OpenAPI document says about the tags a resource module puts on its
 # routes; each module that tags routes supplies the descriptions.
