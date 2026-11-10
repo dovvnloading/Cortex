@@ -6227,6 +6227,60 @@
         "summary": "Read"
       }
     },
+    "/api/v1/workspaces/{session_id}/refresh": {
+      "post": {
+        "operationId": "refresh_api_v1_workspaces__session_id__refresh_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Refresh Api V1 Workspaces  Session Id  Refresh Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Refresh"
+      }
+    },
     "/api/v1/workspaces/{session_id}/replace": {
       "post": {
         "operationId": "replace_api_v1_workspaces__session_id__replace_post",

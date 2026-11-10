@@ -261,9 +261,24 @@ build**, and require another explicit confirmation each time. A project test
 or build script executes code with your Windows account privileges; Windows
 job objects bound its process lifetime, memory and number of descendants
 but **do not sandbox filesystem or network access**. Use this mode only on
-trusted repositories. Outputs are bounded and can be copied back into a new
-model question to request the next proposed fix; unattended
-edit/test/repair loops and arbitrary shell commands are not supported.
+trusted repositories.
+
+**Continue after a failed check:** select *Refresh source & investigate
+failure* to explicitly recapture eligible files into the same temporary
+workspace, then review the test output loaded into the next model question.
+The refresh is a new consented read; it never runs the model, applies code or
+executes another check on its own. It extends that session's 15-minute lease,
+preserves its original-file undo checkpoint and invalidates any old unapplied
+preview. Cortex refuses refresh if any previously applied source file has
+changed outside the approved edit, preventing silent loss of undo. Several
+separately approved patches can now be applied to the same or different files,
+and **Undo applied patch** restores the pre-first-edit bytes across all of
+them, only when all current file hashes still match. The checkpoint remains
+in memory and is not durable across restart or expiry.
+
+Unattended edit/test/repair loops and arbitrary shell commands remain
+unsupported: each iteration requires a deliberate user-initiated refresh,
+model prompt, reviewed patch approval and separate command confirmation.
 
 The UI's native folder chooser is only a convenience: it never grants read,
 write or command authority by itself. The REST endpoints require Cortex's
