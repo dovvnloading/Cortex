@@ -36,6 +36,12 @@ from .workspace_context import (
     _safe_root,
 )
 from .workspace_patch import WorkspacePatchStager
+from .workspace_checkpoint import (
+    DurableCheckpoint,
+    DurableFile,
+    WorkspaceCheckpointError,
+    WorkspaceCheckpointStore,
+)
 
 MAX_CHECK_SECONDS = 120
 MAX_CHECK_OUTPUT_BYTES = 32768
@@ -80,8 +86,12 @@ class CodingSession:
 class WorkspaceCodingSessions:
     """Owner-scoped leases and checked edit/test actions; nothing persists."""
 
-    def __init__(self, *, snapshots: WorkspaceSnapshotRegistry | None = None) -> None:
+    def __init__(
+        self, *, snapshots: WorkspaceSnapshotRegistry | None = None,
+        checkpoint_store: WorkspaceCheckpointStore | None = None,
+    ) -> None:
         self.snapshots = snapshots or WorkspaceSnapshotRegistry()
+        self._checkpoints = checkpoint_store
         self._lock = RLock()
         self._write_lock = RLock()
         self._sessions: dict[str, CodingSession] = {}
@@ -336,6 +346,23 @@ class WorkspaceCodingSessions:
                     source = snapshot.files[path]
                     _, info, raw = self._verified_target(session, path, source.sha256)
                     baselines[path] = (raw, info.st_mode)
+                # Journal the pre-first-edit bytes and both candidate SHA
+                # values before the FIRST filesystem replacement.
+                if self._checkpoints is not None:
+                    self._checkpoints.prepare(
+                        owner=owner,
+                        checkpoint_id=session_id,
+                        root=session.root,
+                        root_identity=session.root_identity,
+                        candidates={
+                            path: (
+                                baselines[path][0],
+                                staged[path].encode("utf-8"),
+                                baselines[path][1],
+                            )
+                            for path in sorted(staged)
+                        },
+                    )
                 # This batch's rollback restores the state before this
                 # particular approval, not the state before the first patch.
                 batch: dict[str, AppliedFile] = {}
@@ -376,8 +403,39 @@ class WorkspaceCodingSessions:
                     if batch:
                         session.applied = accumulated()
                         session.state = "partial"
+                        # Keep the pending journal; it has both possible
+                        # hashes and is the only safe route after a failed
+                        # rollback or an interrupted source replacement.
                         raise WorkspaceWorkflowError("partial_rollback") from None
+                    if self._checkpoints is not None:
+                        try:
+                            # A replacement may have happened just before an
+                            # I/O exception. Only drop the pending journal
+                            # after every file is BACK at its prior digest.
+                            for path in sorted(staged):
+                                self._verified_target(
+                                    session, path, snapshot.files[path].sha256,
+                                )
+                            self._checkpoints.abort_pending(
+                                owner=owner, checkpoint_id=session_id,
+                            )
+                        except (WorkspaceWorkflowError, WorkspaceCheckpointError):
+                            session.applied = accumulated()
+                            session.state = "partial"
+                            raise WorkspaceWorkflowError("checkpoint_pending") from None
                     raise WorkspaceWorkflowError("write_failed") from None
+                if self._checkpoints is not None:
+                    try:
+                        self._checkpoints.commit_pending(
+                            owner=owner, checkpoint_id=session_id,
+                        )
+                    except WorkspaceCheckpointError:
+                        # Source is already changed. A pending checkpoint is
+                        # durable and explicitly recoverable even if the final
+                        # status update failed. Refuse another edit for now.
+                        session.applied = accumulated()
+                        session.state = "partial"
+                        raise WorkspaceWorkflowError("checkpoint_pending") from None
                 session.applied = accumulated()
                 session.state = "applied"
                 session.stager.discard()
@@ -396,6 +454,20 @@ class WorkspaceCodingSessions:
             if session.state not in {"open", "applied", "partial"} or not session.applied:
                 raise WorkspaceWorkflowError("no_checkpoint")
             with self._write_lock:
+                if self._checkpoints is not None:
+                    paths = self._restore_saved_locked(
+                        owner=owner, checkpoint_id=session_id,
+                    )
+                    session.applied.clear()
+                    if session.stager is not None:
+                        session.stager.discard()
+                    session.stager = None
+                    session.state = "undone"
+                    return {
+                        "status": "undone", "paths": paths,
+                        "undo_available": False,
+                    }
+                # Legacy ephemeral mode for in-memory preview/demo tests.
                 # Verify every target first, before restoring even one.
                 for path, change in sorted(session.applied.items()):
                     self._verified_target(session, path, change.modified_sha256)
@@ -419,6 +491,128 @@ class WorkspaceCodingSessions:
                 return {"status": "undone", "paths": restored, "undo_available": False}
         finally:
             session.lock.release()
+
+    def list_checkpoints(self, *, owner: str) -> list[dict[str, object]]:
+        """Only safe metadata; raw source bytes never leave the local journal."""
+        if self._checkpoints is None:
+            return []
+        return self._checkpoints.list(owner=owner)
+
+    @staticmethod
+    def _restorable_target(
+        session: CodingSession, entry: DurableFile,
+    ) -> tuple[Path, os.stat_result, bytes]:
+        # An interrupted batch can leave its previous or proposed content,
+        # and a prior recovery attempt can have restored an original. No
+        # other byte sequence may be overwritten without a new user choice.
+        allowed = {entry.original_sha, entry.expected_sha}
+        if entry.pending_sha is not None:
+            allowed.add(entry.pending_sha)
+        for digest in sorted(allowed):
+            try:
+                return WorkspaceCodingSessions._verified_target(
+                    session, entry.path, digest,
+                )
+            except WorkspaceWorkflowError as exc:
+                if exc.code != "stale_source":
+                    raise
+        raise WorkspaceWorkflowError("stale_source")
+
+    def _restore_saved_locked(self, *, owner: str, checkpoint_id: str) -> list[str]:
+        """Restore a durable record under the global checkout write lock.
+
+        Preflight every path before changing ANY target. A crash in the middle
+        of restore leaves the journal in place; a later explicit attempt
+        accepts both already-restored originals and still-edited bytes.
+        """
+        store = self._checkpoints
+        if store is None:
+            raise WorkspaceWorkflowError("recovery_unavailable")
+        record: DurableCheckpoint = store.get(
+            owner=owner, checkpoint_id=checkpoint_id,
+        )
+        reference = CodingSession(
+            owner=owner,
+            snapshot_id=checkpoint_id,
+            root=Path(record.root),
+            root_identity=record.root_identity,
+        )
+        for entry in record.files:
+            self._restorable_target(reference, entry)
+        restored: list[str] = []
+        for entry in record.files:
+            try:
+                target, info, current = self._restorable_target(reference, entry)
+                if current != entry.original:
+                    self._atomic_replace(target, entry.original, info.st_mode)
+            except (OSError, WorkspaceWorkflowError):
+                # Do not erase the journal: a partial explicit restore must
+                # be retryable without accepting any new unapproved bytes.
+                raise WorkspaceWorkflowError("restore_failed") from None
+            restored.append(entry.path)
+        store.delete(owner=owner, checkpoint_id=checkpoint_id)
+        return restored
+
+    def restore_checkpoint(
+        self, *, owner: str, checkpoint_id: str, confirmed: bool,
+    ) -> dict[str, object]:
+        if confirmed is not True:
+            raise WorkspaceWorkflowError("consent_required")
+        # Checkpoints outlive workspace snapshots. An app restart therefore
+        # needs no live lease to restore one; the installation owner and root
+        # identity remain mandatory.
+        with self._lock:
+            active = self._sessions.get(checkpoint_id)
+        if active is not None and not active.lock.acquire(blocking=False):
+            raise WorkspaceWorkflowError("busy")
+        try:
+            with self._write_lock:
+                paths = self._restore_saved_locked(
+                    owner=owner, checkpoint_id=checkpoint_id,
+                )
+                if active is not None:
+                    active.applied.clear()
+                    if active.stager is not None:
+                        active.stager.discard()
+                    active.stager = None
+                    active.state = "undone"
+                return {
+                    "status": "restored", "paths": paths,
+                    "checkpoint_id": checkpoint_id,
+                }
+        finally:
+            if active is not None:
+                active.lock.release()
+
+    def discard_checkpoint(
+        self, *, owner: str, checkpoint_id: str, confirmed: bool,
+    ) -> dict[str, object]:
+        """Explicitly forget the recovery copy; NEVER touch project files."""
+        if confirmed is not True:
+            raise WorkspaceWorkflowError("consent_required")
+        store = self._checkpoints
+        if store is None:
+            raise WorkspaceWorkflowError("recovery_unavailable")
+        with self._lock:
+            active = self._sessions.get(checkpoint_id)
+        if active is not None and not active.lock.acquire(blocking=False):
+            raise WorkspaceWorkflowError("busy")
+        try:
+            with self._write_lock:
+                store.delete(owner=owner, checkpoint_id=checkpoint_id)
+                if active is not None:
+                    # The old checkout edit remains; drop the in-memory grant
+                    # to prevent silently treating its modified bytes as a
+                    # fresh original checkpoint.
+                    active.applied.clear()
+                    if active.stager is not None:
+                        active.stager.discard()
+                    active.stager = None
+                    active.state = "discarded"
+            return {"discarded": True, "checkpoint_id": checkpoint_id}
+        finally:
+            if active is not None:
+                active.lock.release()
 
     @staticmethod
     def _stop_check(session: CodingSession) -> None:

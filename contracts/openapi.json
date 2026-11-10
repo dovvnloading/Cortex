@@ -5792,6 +5792,138 @@
         "summary": "Shutdown"
       }
     },
+    "/api/v1/workspace-checkpoints": {
+      "get": {
+        "description": "Metadata only: never send saved source bytes to the browser.",
+        "operationId": "saved_checkpoints_api_v1_workspace_checkpoints_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Saved Checkpoints Api V1 Workspace Checkpoints Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Saved Checkpoints"
+      }
+    },
+    "/api/v1/workspace-checkpoints/{checkpoint_id}/discard": {
+      "post": {
+        "operationId": "discard_checkpoint_api_v1_workspace_checkpoints__checkpoint_id__discard_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "checkpoint_id",
+            "required": true,
+            "schema": {
+              "title": "Checkpoint Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Discard Checkpoint Api V1 Workspace Checkpoints  Checkpoint Id  Discard Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Discard Checkpoint"
+      }
+    },
+    "/api/v1/workspace-checkpoints/{checkpoint_id}/restore": {
+      "post": {
+        "operationId": "restore_checkpoint_api_v1_workspace_checkpoints__checkpoint_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "checkpoint_id",
+            "required": true,
+            "schema": {
+              "title": "Checkpoint Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Restore Checkpoint Api V1 Workspace Checkpoints  Checkpoint Id  Restore Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Restore Checkpoint"
+      }
+    },
     "/api/v1/workspaces": {
       "post": {
         "operationId": "open_workspace_api_v1_workspaces_post",

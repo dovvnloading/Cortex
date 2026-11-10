@@ -28,6 +28,7 @@ from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelCatalog
 from cortex_backend.services.workspace_workflow import WorkspaceCodingSessions
+from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.lifecycle import ExecutionLifecycle, LifecycleCoordinator
 from cortex_backend.execution.repository import ExecutionRepository
@@ -225,6 +226,7 @@ def create_app(
     llamacpp_manager: LlamaServerManager | None = None,
     llamacpp_chat_client: object | None = None,
     workspace_chat_client: object | None = None,
+    workspace_checkpoint_store: WorkspaceCheckpointStore | None = None,
     default_gguf_models_dir: Path | None = None,
     closeables: Iterable[object] = (),
 ) -> FastAPI:
@@ -385,7 +387,9 @@ def create_app(
     )
     app.state.session_manager = manager
     app.state.jobs = JobRegistry()
-    app.state.workspace_workflow = WorkspaceCodingSessions()
+    app.state.workspace_workflow = WorkspaceCodingSessions(
+        checkpoint_store=workspace_checkpoint_store
+    )
     app.state.workspace_chat_client = workspace_chat_client
     app.state.execution_lifecycle = execution_lifecycle
     # The ordinary/demo API accepts protocol-compatible fakes in tests.  The

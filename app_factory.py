@@ -48,6 +48,7 @@ from cortex_backend.services.attachments import ChatAttachmentService  # noqa: E
 from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
 from cortex_backend.services.model_catalog import CombinedModelCatalog  # noqa: E402
 from cortex_backend.services.models import ModelService  # noqa: E402
+from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore  # noqa: E402
 
 
 def build_app(
@@ -215,6 +216,7 @@ def build_app(
         llamacpp_manager=llamacpp_manager,
         llamacpp_chat_client=llamacpp_chat_client,
         workspace_chat_client=ollama_chat_client,
+        workspace_checkpoint_store=WorkspaceCheckpointStore(paths.workspace_checkpoints_database),
         default_gguf_models_dir=paths.default_gguf_models_dir,
         closeables=(client,),
     )
