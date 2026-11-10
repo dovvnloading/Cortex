@@ -11,7 +11,7 @@ evidence expected in a handoff.
 
 ## Development setup
 
-Install Git, Python 3.10+, Node.js 22+, npm, and Ollama. Then:
+Install Git, Python 3.11+, Node.js 22+, npm, and Ollama. Then:
 
 ```powershell
 git clone https://github.com/dovvnloading/Cortex.git

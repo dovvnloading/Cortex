@@ -13,6 +13,13 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ## [Unreleased]
 
+### Security
+
+- Upgrade Pillow to 13.0 and require certifi 2026.10.19 or later to remove
+  vulnerable image decoders and a compromised certificate authority trust root.
+  Both hash-pinned Python locks are refreshed for these packages. Pillow 13
+  requires Python 3.11+, which is now the minimum supported Python version.
+
 ### Added (unreleased coding workspace)
 
 - Durable, owner-bound source checkpoints are saved to a dedicated private
