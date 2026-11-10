@@ -189,6 +189,16 @@ class WorkspacePatchStager:
                 ),
             )
 
+    def files_for_application(self) -> tuple[WorkspaceSnapshot, dict[str, str]]:
+        """Verified snapshot and independent staged content for a trusted host.
+
+        The model never receives this method or a host path. The application
+        layer must separately seek explicit write approval and revalidate
+        original file bytes immediately before any filesystem operation.
+        """
+        with self._lock:
+            return self._snapshot(), dict(self._staged)
+
     def discard(self) -> None:
         """Forget all proposed changes, including after revoke or expiry."""
         with self._lock:
