@@ -351,6 +351,40 @@ class WorkspaceSnapshotRegistry:
             self._snapshots[key] = snapshot
             return snapshot
 
+    def refresh(
+        self, *, owner: str, snapshot_id: str, root_path: str, confirmed: bool = False
+    ) -> WorkspaceSnapshot:
+        """Atomically replace one expired-safe lease's immutable source copy.
+
+        This is a new *explicit* read grant for the same approved project,
+        not an automatic background rescan. The opaque id stays unchanged so
+        the trusted host can keep its undo checkpoint. A successful refresh
+        extends the 15-minute lease; a failed scan leaves the old copy intact.
+        """
+        if confirmed is not True:
+            raise WorkspaceAccessError("consent_required")
+        # Refuse unknown, foreign or expired leases before inspecting disk.
+        self.get(owner=owner, snapshot_id=snapshot_id)
+        root = _safe_root(root_path)
+        files, total, scanned, skipped, truncated = _capture_files(root)
+        with self._lock:
+            # A snapshot may have been revoked or expired while scanning.
+            original = self.get(owner=owner, snapshot_id=snapshot_id)
+            now = self._clock()
+            refreshed = WorkspaceSnapshot(
+                snapshot_id=original.snapshot_id,
+                owner=original.owner,
+                files=files,
+                total_bytes=total,
+                scanned_entries=scanned,
+                skipped_entries=skipped,
+                truncated=truncated,
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=WORKSPACE_TTL_SECONDS),
+                expiry_deadline=now + WORKSPACE_TTL_SECONDS,
+            )
+            self._snapshots[snapshot_id] = refreshed
+            return refreshed
+
     def _expire(self, now: float) -> None:
         for key, snapshot in list(self._snapshots.items()):
             if snapshot.expiry_deadline <= now:
