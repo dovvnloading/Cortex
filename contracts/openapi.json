@@ -5794,6 +5794,7 @@
     },
     "/api/v1/workspace-checkpoints": {
       "get": {
+        "description": "Metadata only: never send saved source bytes to the browser.",
         "operationId": "saved_checkpoints_api_v1_workspace_checkpoints_get",
         "responses": {
           "200": {
