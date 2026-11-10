@@ -46,6 +46,11 @@ def test_workspace_requires_bearer_and_explicit_consent(tmp_path):
         assert client.get(f"/api/v1/workspaces/{session_id}/paths", headers=headers).status_code == 404
 
 
-def test_workspace_routes_do_not_change_the_generated_api_contract():
+def test_workspace_routes_are_described_in_the_generated_api_contract():
     app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
-    assert "/api/v1/workspaces" not in app.openapi()["paths"]
+    spec = app.openapi()
+    assert spec["paths"]["/api/v1/workspaces"]["post"]["security"] == [
+        {"CortexSession": []}
+    ]
+    assert "/api/v1/workspaces/{session_id}/checks" in spec["paths"]
+    assert "/api/v1/workspaces/{session_id}" in spec["paths"]

@@ -1,7 +1,7 @@
 """Authenticated, ephemeral local coding workspace endpoints.
 
-Deliberately excluded from the generated public v1 contract while this
-consent-gated desktop feature is experimental. No route is anonymously callable.
+All desktop client calls are included in the versioned OpenAPI contract;
+access nevertheless requires the same bearer session as ordinary chat.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _call(function: Callable[..., Any], **kwargs: Any) -> Any:
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     del dependencies
     # All methods and requests use the same bearer-session dependency as chat.
-    @router.post("/workspaces", include_in_schema=False)
+    @router.post("/workspaces")
     def open_workspace(
         payload: OpenWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -101,7 +101,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             confirmed=payload.confirmed,
         )
 
-    @router.get("/workspaces/{session_id}/paths", include_in_schema=False)
+    @router.get("/workspaces/{session_id}/paths")
     def paths(
         session_id: str, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -111,7 +111,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             owner=principal.installation_principal_id, session_id=session_id,
         )}
 
-    @router.post("/workspaces/{session_id}/search", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/search")
     def search(
         session_id: str, payload: SearchWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -122,7 +122,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             query=payload.query,
         )}
 
-    @router.post("/workspaces/{session_id}/read", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/read")
     def read(
         session_id: str, payload: ReadWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -133,7 +133,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             path=payload.path, start_line=payload.start_line,
         )
 
-    @router.post("/workspaces/{session_id}/ask", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/ask")
     def ask(
         session_id: str, payload: AskWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -151,7 +151,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             preview_edits=payload.preview_edits, chat_client=chat_client,
         )
 
-    @router.post("/workspaces/{session_id}/replace", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/replace")
     def replace(
         session_id: str, payload: ReplaceWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -163,7 +163,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             old_text=payload.old_text, new_text=payload.new_text,
         )
 
-    @router.get("/workspaces/{session_id}/preview", include_in_schema=False)
+    @router.get("/workspaces/{session_id}/preview")
     def preview(
         session_id: str, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -173,7 +173,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             owner=principal.installation_principal_id, session_id=session_id,
         )
 
-    @router.post("/workspaces/{session_id}/apply", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/apply")
     def apply(
         session_id: str, payload: ConfirmWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -184,7 +184,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             confirmed=payload.confirmed,
         )
 
-    @router.post("/workspaces/{session_id}/undo", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/undo")
     def undo(
         session_id: str, payload: ConfirmWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -195,7 +195,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             confirmed=payload.confirmed,
         )
 
-    @router.post("/workspaces/{session_id}/checks", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/checks")
     def check(
         session_id: str, payload: CheckWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -206,7 +206,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             confirmed=payload.confirmed, command=payload.command,
         )
 
-    @router.post("/workspaces/{session_id}/cancel", include_in_schema=False)
+    @router.post("/workspaces/{session_id}/cancel")
     def cancel(
         session_id: str, request: Request,
         principal: SessionPrincipal = Depends(require_session),
@@ -216,7 +216,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
             owner=principal.installation_principal_id, session_id=session_id,
         )
 
-    @router.delete("/workspaces/{session_id}", include_in_schema=False)
+    @router.delete("/workspaces/{session_id}")
     def revoke(
         session_id: str, request: Request,
         principal: SessionPrincipal = Depends(require_session),

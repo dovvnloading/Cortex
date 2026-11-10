@@ -359,8 +359,13 @@ class WorkspaceCodingSessions:
         if session.check_job is not None:
             session.check_job.close()
         elif os.name != "nt":
-            with suppress(OSError):
-                os.killpg(process.pid, signal.SIGKILL)
+            # Windows stubs do not export POSIX-only killpg/SIGKILL, even
+            # though this branch only executes on a POSIX host.
+            kill_group = getattr(os, "killpg", None)
+            kill_signal = getattr(signal, "SIGKILL", None)
+            if callable(kill_group) and kill_signal is not None:
+                with suppress(OSError):
+                    kill_group(process.pid, kill_signal)
         with suppress(OSError):
             process.kill()
 
