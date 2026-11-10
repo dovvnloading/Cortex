@@ -38,6 +38,7 @@ import { normalizeApiBaseUrl } from "./baseUrl";
 import type {
   WorkspaceOpened, WorkspaceHit, WorkspaceExcerpt, WorkspaceAgentAnswer,
   WorkspacePreview, WorkspaceActionResult, WorkspaceCheckResult,
+  WorkspaceCheckpointSummary, WorkspaceRestoreResult,
 } from "./workspaceTypes";
 
 /**
@@ -316,6 +317,27 @@ export class CortexApi {
    */
   unloadLlamaCpp(): Promise<LlamaCppRuntimeStatus> {
     return this.request<LlamaCppRuntimeStatus>("/llamacpp/unload", { method: "POST" });
+  }
+
+  /** List saved recovery metadata without exposing any backed-up file bytes. */
+  workspaceCheckpoints(): Promise<{ checkpoints: WorkspaceCheckpointSummary[] }> {
+    return this.request<{ checkpoints: WorkspaceCheckpointSummary[] }>("/workspace-checkpoints");
+  }
+
+  restoreWorkspaceCheckpoint(id: string): Promise<WorkspaceRestoreResult> {
+    return this.request<WorkspaceRestoreResult>(
+      \`/workspace-checkpoints/\${encodeURIComponent(id)}/restore\`, {
+        method: "POST", body: JSON.stringify({ confirmed: true }),
+      },
+    );
+  }
+
+  discardWorkspaceCheckpoint(id: string): Promise<{ discarded: boolean }> {
+    return this.request<{ discarded: boolean }>(
+      \`/workspace-checkpoints/\${encodeURIComponent(id)}/discard\`, {
+        method: "POST", body: JSON.stringify({ confirmed: true }),
+      },
+    );
   }
 
   /** Index eligible files only after deliberate user consent. */
