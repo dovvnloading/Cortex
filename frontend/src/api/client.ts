@@ -326,7 +326,7 @@ export class CortexApi {
 
   restoreWorkspaceCheckpoint(id: string): Promise<WorkspaceRestoreResult> {
     return this.request<WorkspaceRestoreResult>(
-      \`/workspace-checkpoints/\${encodeURIComponent(id)}/restore\`, {
+      `/workspace-checkpoints/${encodeURIComponent(id)}/restore`, {
         method: "POST", body: JSON.stringify({ confirmed: true }),
       },
     );
@@ -334,7 +334,7 @@ export class CortexApi {
 
   discardWorkspaceCheckpoint(id: string): Promise<{ discarded: boolean }> {
     return this.request<{ discarded: boolean }>(
-      \`/workspace-checkpoints/\${encodeURIComponent(id)}/discard\`, {
+      `/workspace-checkpoints/${encodeURIComponent(id)}/discard`, {
         method: "POST", body: JSON.stringify({ confirmed: true }),
       },
     );
