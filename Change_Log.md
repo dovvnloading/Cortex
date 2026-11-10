@@ -15,6 +15,12 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Added (unreleased coding workspace)
 
+- Durable, owner-bound source checkpoints are saved to a dedicated private
+  SQLite recovery journal **before** applying approved patches; after a crash
+  or restart the Project workspace can list, manually restore or explicitly
+  discard copies. Recovery verifies path and source hashes, never runs by
+  itself, and rejects external modifications or corrupt backups.
+
 - A consented, in-session source refresh lets users inspect failed tests and
   propose another patch without losing earlier edits' temporary undo. Each
   patch and check still requires separate user approval; the refresh rejects

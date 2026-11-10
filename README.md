@@ -250,11 +250,35 @@ model cannot apply the patch. Review the proposed changes, then choose **Review
 original source hash, file identity and linked directory before installing the
 edited contents with temporary sibling files. **Undo applied patch** restores
 the captured original bytes only if the edited files are unchanged. The undo
-checkpoint is in memory, lasts only while the session remains open and is not
-durable across a crash, reload or session expiry; it is not a replacement for
-Git or another backup. A multi-file write failure may require manual recovery
-if even the best-effort rollback cannot finish. Cortex refuses to overwrite
-intervening external changes.
+checkpoint is retained through separately approved edits and a session refresh.
+Before ANY approved file edit, Cortex also writes a **durable local recovery
+checkpoint** to its private data directory, in
+`workspace_checkpoints.sqlite`. It records the first original file bytes and
+the expected before/after hashes before writing the checkout. If Cortex stops
+mid-edit, the checkpoint remains in the database (with a pending state) and can
+be restored manually after restarting the app. Checkpoints are separate from
+chat, model history and temporary workspace snapshots.
+
+The desktop **Saved recovery checkpoints** panel lists only paths and status,
+never backed-up contents. Select **Restore originals** and explicitly confirm:
+Cortex first verifies the project root and every current file against its
+recorded original, pre-write or proposed hashes, and refuses the entire
+restore if any file has changed unexpectedly. An interrupted restore can be
+explicitly retried; it never restores files automatically. **Discard backup**
+deletes the saved originals without touching your checkout. These source
+copies are stored as **unencrypted SQLite blobs** in the existing
+per-user-protected Cortex data directory, so protect and back up that data
+directory appropriately. The bounded journal stores up to 32 files per
+checkpoint and 64 MiB of original data across all checkpoints. When full,
+edits fail closed until older checkpoints are explicitly restored or discarded.
+Nothing here replaces Git or a separate backup; Windows file permissions and
+metadata beyond the original source bytes are not guaranteed to be preserved.
+
+A multi-file write or restore failure may still require manual recovery,
+and Cortex refuses to overwrite intervening external changes. Saved recovery
+records remain available after a crash, reload, session expiry or normal
+workspace close, but only within the same installation's private data
+directory.
 
 The check controls offer only **Python pytest**, **npm test**, and **npm
 build**, and require another explicit confirmation each time. A project test
@@ -273,8 +297,9 @@ preview. Cortex refuses refresh if any previously applied source file has
 changed outside the approved edit, preventing silent loss of undo. Several
 separately approved patches can now be applied to the same or different files,
 and **Undo applied patch** restores the pre-first-edit bytes across all of
-them, only when all current file hashes still match. The checkpoint remains
-in memory and is not durable across restart or expiry.
+them, only when all current file hashes still match. The **temporary source snapshot** remains in memory, but the approved
+original-byte recovery checkpoint is persisted in the private SQLite journal
+until restored or explicitly discarded.
 
 Unattended edit/test/repair loops and arbitrary shell commands remain
 unsupported: each iteration requires a deliberate user-initiated refresh,

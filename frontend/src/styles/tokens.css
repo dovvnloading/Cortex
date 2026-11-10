@@ -1256,3 +1256,13 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 .coding-diff-row pre { margin: 0; padding: 2px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, Consolas, monospace; }
 .coding-diff-change { background: var(--accent-soft); }
 @media (max-width: 900px) { .coding-two-column { grid-template-columns: minmax(0, 1fr); } .coding-workspace { padding: 18px 16px 48px; } }
+
+
+/* Durable source recovery panel: paths remain text-only; no raw backup content. */
+.coding-recovery-list { display: grid; gap: 10px; }
+.coding-recovery-row { border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap;
+  gap: 12px; padding: 12px; background: var(--surface-raised); }
+.coding-recovery-info { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.coding-recovery-info strong { display: block; font-size: var(--text-sm); font-weight: 650; }
+.coding-recovery-info p { margin: 3px 0 0; }
