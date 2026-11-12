@@ -51,6 +51,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      browser: ${{ steps.filter.outputs.browser }}
     steps:
       # The pull request ref is a merge commit whose first parent is the base
       # branch tip, so two commits of history are enough to list its files.
@@ -68,8 +69,11 @@ jobs:
         id: filter
         env:
           EVENT_NAME: ${{ github.event_name }}
+          # The browser tests drive the frontend against the real backend.
+          BROWSER_IF: '^(frontend/|backend/|contracts/|scripts/e2e_backend\.py|requirements\.lock\.txt|\.github/workflows/quality\.yml$)'
         run: |
           code=true
+          browser=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
             echo "Changed files:"
@@ -77,8 +81,13 @@ jobs:
             if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(README\.md|SECURITY\.md|LICENSE|docs/.*)$'; then
               code=false
             fi
+            if [ -n "$changed" ] && ! echo "$changed" | grep -qE "$BROWSER_IF"; then
+              browser=false
+            fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "browser=$browser" >> "$GITHUB_OUTPUT"
+          echo "Browser tests needed: $browser"
           echo "Code changed: $code"
 
   lint:
@@ -264,7 +273,7 @@ jobs:
   e2e:
     name: Browser tests
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.browser == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -349,6 +358,8 @@ jobs:
     # so a run that is going to fail on lint does not spend the packaging
     # minutes first; when they are skipped (document-only) so is this.
     needs: [lint, backend, frontend, e2e]
+    # Browser tests may be skipped for changes that cannot affect them.
+    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.backend.result == 'success' && needs.frontend.result == 'success' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
