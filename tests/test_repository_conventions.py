@@ -327,21 +327,31 @@ def test_superseded_pull_request_runs_are_cancelled_but_main_runs_are_not() -> N
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in header
 
 
-def test_packaging_waits_for_every_gate() -> None:
+def test_packaging_runs_beside_tests_but_maintains_required_merge_gate() -> None:
     workflow = _read(WORKFLOWS / "quality.yml")
+    package = _job_block(workflow, "package")
     heavy = _job_block(workflow, "heavy")
-    needs = re.search(r"needs: \[([^\]]*)\]", heavy)
 
-    assert needs, "the heavy job has no needs list"
+    assert "needs: changes" in package
+    assert "if: needs.changes.outputs.code == 'true'" in package
+    assert "runs-on: windows-latest" in package
+    assert "Build one-folder Windows package" in package
+    assert "Smoke-test packaged headless launcher" in package
+
+    needs = re.search(r"needs: \[([^\]]*)\]", heavy)
+    assert needs, "the final required gate must await every check"
     gates = {name.strip() for name in needs.group(1).split(",")}
-    assert {"lint", "backend", "frontend", "e2e"} <= gates
+    assert {"changes", "lint", "backend", "frontend", "e2e", "package"} <= gates
+    assert "runs-on: ubuntu-latest" in heavy
+    assert "!cancelled()" in heavy
+    assert "exit 1" in heavy, "failed upstream checks must fail the required gate"
 
 
 def test_every_gate_is_skipped_together_for_a_document_only_change() -> None:
     """Skipped jobs report success, so a required check is never left pending."""
 
     workflow = _read(WORKFLOWS / "quality.yml")
-    for job in ("lint", "backend", "frontend", "e2e"):
+    for job in ("lint", "backend", "frontend", "e2e", "package"):
         block = _job_block(workflow, job)
         assert "needs: changes" in block, f"{job} does not wait for the change classification"
         assert "if: needs.changes.outputs.code == 'true'" in block, f"{job} ignores the classification"
@@ -364,10 +374,11 @@ def test_browser_tests_require_explicit_manual_opt_in() -> None:
 
 def test_packaging_accepts_skipped_browser_tests_but_not_failed_requested_tests() -> None:
     heavy = _job_block(_read(WORKFLOWS / "quality.yml"), "heavy")
-    assert "!cancelled()" in heavy
-    for job in ("lint", "backend", "frontend"):
-        assert f"needs.{job}.result == 'success'" in heavy
-    assert "(needs.e2e.result == 'success' || needs.e2e.result == 'skipped')" in heavy
+    for job in ("lint", "backend", "frontend", "package"):
+        assert f"{job.upper()}_RESULT: ${{{{ needs.{job}.result }}}}" in heavy
+    assert "BROWSER_RESULT: ${{ needs.e2e.result }}" in heavy
+    assert 'if [ "$BROWSER_RESULT" != success ] && [ "$BROWSER_RESULT" != skipped ]; then' in heavy
+    assert "exit 1" in heavy, "a requested failing browser run must fail the final gate"
 
 
 def test_pull_requests_do_not_run_the_interpreter_matrix() -> None:
@@ -422,7 +433,7 @@ def test_coverage_is_measured_with_branches_and_has_a_floor() -> None:
 def test_the_backend_job_runs_the_suite_under_coverage_and_keeps_the_report() -> None:
     backend = _job_block(_read(WORKFLOWS / "quality.yml"), "backend")
 
-    assert "python -m coverage run -m pytest" in backend
+    assert "python -m coverage run -m pytest --durations=20" in backend
     assert "python -m coverage report" in backend
     assert "python -m coverage xml" in backend
     assert "actions/upload-artifact@" in backend

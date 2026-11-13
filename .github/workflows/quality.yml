@@ -14,9 +14,10 @@ name: Quality
 #   frontend   Types, lint, unit tests under coverage, and the bundle build.
 #   e2e        Optional Playwright browser tests, explicitly requested by dispatch.
 #
-#   heavy      Windows packaging -- the launcher bundle, the one-folder build,
-#              and a smoke test of the packaged executable. Runs only after
-#              lint, backend and frontend have passed (and optional e2e has not failed).
+#   package    Windows packaging and packaged-launcher smoke test run alongside
+#              the other checks instead of extending the critical path.
+#   heavy      Final quality gate: keep the existing required check name and
+#              reject any failed test, packaging, or requested browser check.
 #
 # The Python compatibility matrix is in python-compatibility.yml: it repeats
 # the suite on other interpreters and is not needed to review a pull request.
@@ -204,7 +205,7 @@ jobs:
       # pyproject.toml). The XML is written before the floor is checked so a
       # run that falls under it still leaves the report to read.
       - name: Run headless tests with coverage
-        run: python -m coverage run -m pytest
+        run: python -m coverage run -m pytest --durations=20
 
       - name: Write the coverage report
         run: python -m coverage xml
@@ -358,14 +359,12 @@ jobs:
       - name: Review dependency changes
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
 
-  heavy:
-    # Packaging is slow, but a green PR must prove that launcher and runtime
-    # changes still produce a build that starts. It waits for the automatic gates
-    # so a run that is going to fail on lint does not spend the packaging
-    # minutes first; when they are skipped (document-only) so is this.
-    needs: [lint, backend, frontend, e2e]
-    # An unrequested browser run is skipped; an explicitly requested failure still blocks packaging.
-    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.backend.result == 'success' && needs.frontend.result == 'success' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+  package:
+    # Keep Windows packaging and smoke coverage on every code PR, but launch it
+    # beside the test jobs. Final results are enforced by 'heavy' below.
+    name: Windows package and smoke test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -459,3 +458,34 @@ jobs:
               }
             }
           }
+
+  heavy:
+    # This check retains the historical 'heavy' job ID and is safe to require
+    # for merges. Running packaging early must never allow another failed gate
+    # (or a manually requested browser run) to pass unnoticed.
+    needs: [changes, lint, backend, frontend, e2e, package]
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify test and package gates
+        shell: bash
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          BROWSER_RESULT: ${{ needs.e2e.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          for gate in LINT BACKEND FRONTEND PACKAGE; do
+            result_name="${gate}_RESULT"
+            result="${!result_name}"
+            if [ "$result" != success ]; then
+              echo "::error::${gate} gate did not pass: ${result}"
+              exit 1
+            fi
+          done
+          if [ "$BROWSER_RESULT" != success ] && [ "$BROWSER_RESULT" != skipped ]; then
+            echo "::error::Browser gate did not pass: ${BROWSER_RESULT}"
+            exit 1
+          fi

@@ -131,15 +131,20 @@ python tools/generate_contracts.py --write
 
 ### Coverage floors and the CI layout
 
-The Quality workflow runs its gates as parallel jobs -- `lint` (locks, Ruff,
-workflow linters, mypy, contract drift), `backend` and `frontend`. Chromium
-browser tests (`e2e`) run only when the Quality workflow is manually dispatched
-with `run_browser_tests` enabled (off by default). Packaging (`heavy`) requires
-the automatic gates to pass and accepts a skipped browser job, but still stops
-if an explicitly requested browser run fails. A new push to a pull
-request cancels the run it supersedes; a pull request that changes nothing but
-`README.md`, `SECURITY.md`, `LICENSE` or `docs/` skips the gates and still ends
-green.
+The Quality workflow runs `lint` (locks, Ruff, workflow linters,
+mypy, contract drift), `backend` and `frontend` in parallel. The `package`
+job also builds and smoke-tests the Windows distribution **in parallel**,
+instead of waiting for the backend suite to finish. The lightweight `heavy`
+job retains the historical merge-check name and fails if any required test
+or packaging gate fails. Chromium browser tests (`e2e`) run only when the
+workflow is manually dispatched with `run_browser_tests` enabled (off by
+default); a failed requested browser run also blocks `heavy`, while skipped
+browser runs are accepted. The backend test job prints pytest's 20 slowest
+durations to support future optimization without altering coverage.
+
+A new push to a pull request cancels the run it supersedes; a pull request
+that changes nothing but `README.md`, `SECURITY.md`, `LICENSE` or `docs/`
+skips the gates and still ends green.
 
 Backend coverage is measured with branches over `backend/cortex_backend`
 (`[tool.coverage]` in `pyproject.toml`) and the frontend's with Vitest's V8
