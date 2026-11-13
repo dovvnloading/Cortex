@@ -131,16 +131,20 @@ python tools/generate_contracts.py --write
 
 ### Coverage floors and the CI layout
 
-The Quality workflow runs `lint` (locks, Ruff, workflow linters,
-mypy, contract drift), `backend` and `frontend` in parallel. The `package`
-job also builds and smoke-tests the Windows distribution **in parallel**,
-instead of waiting for the backend suite to finish. The lightweight `heavy`
-job retains the historical merge-check name and fails if any required test
-or packaging gate fails. Chromium browser tests (`e2e`) run only when the
-workflow is manually dispatched with `run_browser_tests` enabled (off by
-default); a failed requested browser run also blocks `heavy`, while skipped
-browser runs are accepted. The backend test job prints pytest's 20 slowest
-durations to support future optimization without altering coverage.
+The Quality workflow runs `lint` (locks, Ruff, workflow linters, mypy,
+contract drift) and `frontend` alongside four Windows `backend-shard`
+jobs and the `package` build/smoke test. Each backend shard runs a
+non-overlapping set of test modules under branch coverage. The required
+`Backend tests` job verifies all four shard manifests and JUnit reports,
+combines their coverage databases, enforces the **unchanged coverage floor**,
+and runs the artifact-boundary and deterministic-harness checks. Missing,
+failed or duplicated shard results fail this gate.
+
+The lightweight final `heavy` job retains the historical merge-check name
+and fails if any required test or packaging job fails. Chromium browser tests
+(`e2e`) run only when manually dispatched with `run_browser_tests` enabled
+(off by default); failures of requested browser runs also block `heavy`.
+Each backend shard prints its 20 slowest pytest durations.
 
 A new push to a pull request cancels the run it supersedes; a pull request
 that changes nothing but `README.md`, `SECURITY.md`, `LICENSE` or `docs/`
@@ -170,10 +174,12 @@ finds a real bug, fix it and pin the smallest input as a plain test next to it
 (see `tests/property/test_code_validator_counterexamples.py`).
 
 `python -m pytest` and a bare `pytest` (an IDE runner) both work: `pyproject.toml`
-puts the repository root on the path. The suite runs serially on purpose. CI
-measures coverage with `coverage run -m pytest`, which does not follow
-`pytest-xdist` workers, so a parallel run would report a fraction of the real
-coverage and fail the floor.
+puts the repository root on the path. The local and Python-compatibility suites run serially. Quality CI instead
+runs four **separate Windows processes** using `tools/ci_backend_shards.py`
+to partition all `test_*.py` modules. Each shard uploads its coverage data;
+the required backend job combines the databases before checking the same floor.
+This does not use pytest-xdist; coverage measurement remains complete rather
+than losing worker data. The original serial command still works locally.
 
 ### Workflow and dependency checks
 
