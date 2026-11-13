@@ -12,11 +12,11 @@ name: Quality
 #   backend    The headless test suite under branch coverage, the coverage
 #              floor, and the artifact-boundary review.
 #   frontend   Types, lint, unit tests under coverage, and the bundle build.
-#   e2e        The Playwright browser tests.
+#   e2e        Optional Playwright browser tests, explicitly requested by dispatch.
 #
 #   heavy      Windows packaging -- the launcher bundle, the one-folder build,
 #              and a smoke test of the packaged executable. Runs only after
-#              lint, backend, frontend and e2e have passed.
+#              lint, backend and frontend have passed (and optional e2e has not failed).
 #
 # The Python compatibility matrix is in python-compatibility.yml: it repeats
 # the suite on other interpreters and is not needed to review a pull request.
@@ -29,6 +29,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_browser_tests:
+        description: 'Run the optional Chromium browser tests'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -273,7 +278,8 @@ jobs:
   e2e:
     name: Browser tests
     needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.browser == 'true'
+    # Chromium is opt-in: ordinary pushes and pull requests never launch it.
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'workflow_dispatch' && inputs.run_browser_tests
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -354,11 +360,11 @@ jobs:
 
   heavy:
     # Packaging is slow, but a green PR must prove that launcher and runtime
-    # changes still produce a build that starts. It waits for every gate above
+    # changes still produce a build that starts. It waits for the automatic gates
     # so a run that is going to fail on lint does not spend the packaging
     # minutes first; when they are skipped (document-only) so is this.
     needs: [lint, backend, frontend, e2e]
-    # Browser tests may be skipped for changes that cannot affect them.
+    # An unrequested browser run is skipped; an explicitly requested failure still blocks packaging.
     if: ${{ !cancelled() && needs.lint.result == 'success' && needs.backend.result == 'success' && needs.frontend.result == 'success' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: windows-latest
     timeout-minutes: 90
