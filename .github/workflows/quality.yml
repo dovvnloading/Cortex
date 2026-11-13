@@ -14,7 +14,8 @@ name: Quality
 #   backend    Required merge gate verifies all shards and combined coverage
 #              before the remaining artifact and harness checks.
 #   frontend   Types, lint, unit tests under coverage, and the bundle build.
-#   e2e        Optional Playwright browser tests, explicitly requested by dispatch.
+#   e2e        Chromium journeys for relevant PRs and pushes to main; optional
+#              manual dispatch remains available for deliberate runs.
 #
 #   package    Windows packaging and packaged-launcher smoke test run alongside
 #              the other checks instead of extending the critical path.
@@ -340,8 +341,9 @@ jobs:
   e2e:
     name: Browser tests
     needs: changes
-    # Chromium is opt-in: ordinary pushes and pull requests never launch it.
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'workflow_dispatch' && inputs.run_browser_tests
+    # Exercise real UI journeys on UI/API-impacting PRs and every push to main.
+    # Manual dispatch remains available, but never treats a required skip as green.
+    if: ${{ needs.changes.outputs.code == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.browser == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_browser_tests)) }}
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -521,32 +523,30 @@ jobs:
           }
 
   heavy:
-    # This check retains the historical 'heavy' job ID and is safe to require
-    # for merges. Running packaging early must never allow another failed gate
-    # (or a manually requested browser run) to pass unnoticed.
-    needs: [changes, lint, backend, frontend, e2e, package]
-    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    # The longstanding required check must run even when a predecessor fails
+    # or is skipped. A failed classifier or dependency-review must not result
+    # in a successful (or silently skipped) final quality decision.
+    needs: [changes, lint, backend, frontend, e2e, package, dependency-review]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify test and package gates
-        shell: bash
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify all required quality gates
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          BROWSER_CHANGED: ${{ needs.changes.outputs.browser }}
+          EVENT_NAME: ${{ github.event_name }}
+          BROWSER_OPT_IN: ${{ inputs.run_browser_tests }}
           LINT_RESULT: ${{ needs.lint.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           BROWSER_RESULT: ${{ needs.e2e.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
-        run: |
-          for gate in LINT BACKEND FRONTEND PACKAGE; do
-            result_name="${gate}_RESULT"
-            result="${!result_name}"
-            if [ "$result" != success ]; then
-              echo "::error::${gate} gate did not pass: ${result}"
-              exit 1
-            fi
-          done
-          if [ "$BROWSER_RESULT" != success ] && [ "$BROWSER_RESULT" != skipped ]; then
-            echo "::error::Browser gate did not pass: ${BROWSER_RESULT}"
-            exit 1
-          fi
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+        run: python3 tools/ci_quality_gate.py
