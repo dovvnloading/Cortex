@@ -348,16 +348,23 @@ def test_packaging_runs_beside_tests_but_maintains_required_merge_gate() -> None
 
 
 def test_every_gate_is_skipped_together_for_a_document_only_change() -> None:
-    """Skipped jobs report success, so a required check is never left pending."""
+    """Skipped jobs report success, so required checks must never hang for docs."""
 
     workflow = _read(WORKFLOWS / "quality.yml")
-    for job in ("lint", "backend", "frontend", "e2e", "package"):
+    for job in ("lint", "frontend", "e2e", "package", "backend-shard"):
         block = _job_block(workflow, job)
-        assert "needs: changes" in block, f"{job} does not wait for the change classification"
-        assert "if: needs.changes.outputs.code == 'true'" in block, f"{job} ignores the classification"
+        assert "needs: changes" in block, f"{job} does not wait for change classification"
+        assert "needs.changes.outputs.code == 'true'" in block, f"{job} ignores classification"
+
+    backend = _job_block(workflow, "backend")
+    heavy = _job_block(workflow, "heavy")
+    assert "needs: [changes, backend-shard]" in backend
+    assert "needs.changes.outputs.code == 'true'" in backend
+    assert "needs.changes.outputs.code == 'true'" in heavy
     assert not re.search(r"^\s*paths(-ignore)?:", workflow, re.MULTILINE), (
-        "a paths filter on the trigger leaves required checks pending; use the changes job"
+        "a paths filter on a trigger leaves required checks pending; use the changes job"
     )
+
 
 
 def test_browser_tests_require_explicit_manual_opt_in() -> None:
@@ -430,10 +437,34 @@ def test_coverage_is_measured_with_branches_and_has_a_floor() -> None:
     assert any(dependency.startswith("coverage[toml]") for dependency in config["project"]["optional-dependencies"]["dev"])
 
 
-def test_the_backend_job_runs_the_suite_under_coverage_and_keeps_the_report() -> None:
+def test_backend_shards_preserve_the_entire_suite_and_upload_all_coverage() -> None:
+    shard = _job_block(_read(WORKFLOWS / "quality.yml"), "backend-shard")
+
+    assert "shard: [1, 2, 3, 4]" in shard
+    assert "fail-fast: false" in shard
+    assert "runs-on: windows-latest" in shard
+    assert "ci_backend_shards.py run --shard-index ${{ matrix.shard }} --shard-count 4" in shard
+    assert "include-hidden-files: true" in shard, "coverage databases start with a dot"
+    assert "if-no-files-found: error" in shard
+    assert ".coverage.*" in shard
+    assert "backend-shard-${{ matrix.shard }}.txt" in shard
+    assert "backend-shard-${{ matrix.shard }}.xml" in shard
+
+
+def test_backend_merge_gate_checks_every_shard_and_enforces_full_coverage() -> None:
     backend = _job_block(_read(WORKFLOWS / "quality.yml"), "backend")
 
-    assert "python -m coverage run -m pytest --durations=20" in backend
+    assert "name: Backend tests" in backend
+    assert "needs: [changes, backend-shard]" in backend
+    assert "!cancelled()" in backend, "a shard failure must make Backend tests red, not skipped"
+    assert 'SHARDS_RESULT: ${{ needs.backend-shard.result }}' in backend
+    assert 'if ($env:SHARDS_RESULT -ne "success")' in backend
+    assert "ci_backend_shards.py verify-coverage --shard-count 4" in backend
+    assert "python -m coverage combine --keep " in backend
+    for index in range(1, 5):
+        assert f"backend-shards/backend-shard-{index}" in backend
     assert "python -m coverage report" in backend
     assert "python -m coverage xml" in backend
     assert "actions/upload-artifact@" in backend
+    assert "python tools/artifact_boundary_review.py --json --strict" in backend
+    assert "python tools/harness_eval.py --check --json" in backend

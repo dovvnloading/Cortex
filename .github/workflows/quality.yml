@@ -9,8 +9,10 @@ name: Quality
 #
 #   lint       Lockfiles, Ruff, the workflow linters, mypy, byte-compilation
 #              and generated-contract drift.
-#   backend    The headless test suite under branch coverage, the coverage
-#              floor, and the artifact-boundary review.
+#   backend-shard Four independent Windows pytest processes, each running
+#              disjoint modules and uploading branch-coverage data.
+#   backend    Required merge gate verifies all shards and combined coverage
+#              before the remaining artifact and harness checks.
 #   frontend   Types, lint, unit tests under coverage, and the bundle build.
 #   e2e        Optional Playwright browser tests, explicitly requested by dispatch.
 #
@@ -179,10 +181,14 @@ jobs:
         run: |
           python tools/generate_contracts.py --check
 
-  backend:
-    name: Backend tests
+  backend-shard:
+    name: Backend tests (shard ${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -201,11 +207,67 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.lock.txt
 
-      # Branch coverage over the package (see [tool.coverage] in
-      # pyproject.toml). The XML is written before the floor is checked so a
-      # run that falls under it still leaves the report to read.
-      - name: Run headless tests with coverage
-        run: python -m coverage run -m pytest --durations=20
+      # Each runner retains its own coverage database and pytest JUnit result.
+      - name: Run test shard with branch coverage
+        run: python tools/ci_backend_shards.py run --shard-index ${{ matrix.shard }} --shard-count 4
+
+      - name: Upload shard coverage and test inventory
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-shard-${{ matrix.shard }}
+          path: |
+            .coverage.*
+            backend-shard-${{ matrix.shard }}.txt
+            backend-shard-${{ matrix.shard }}.xml
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  backend:
+    name: Backend tests
+    needs: [changes, backend-shard]
+    # Run even on shard failure; the longstanding merge check must be red.
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require every shard to have passed
+        shell: pwsh
+        env:
+          SHARDS_RESULT: ${{ needs.backend-shard.result }}
+        run: |
+          if ($env:SHARDS_RESULT -ne "success") {
+            throw "Backend shard matrix did not pass: $env:SHARDS_RESULT"
+          }
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.lock.txt
+
+      - name: Download shard coverage and test inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: backend-shard-*
+          path: backend-shards
+
+      # Reject missing, empty, stale or duplicated shards before combining.
+      - name: Verify all four test shards
+        run: python tools/ci_backend_shards.py verify-coverage --shard-count 4 --directory backend-shards
+
+      - name: Combine shard branch coverage
+        run: python -m coverage combine --keep backend-shards/backend-shard-1 backend-shards/backend-shard-2 backend-shards/backend-shard-3 backend-shards/backend-shard-4
 
       - name: Write the coverage report
         run: python -m coverage xml
@@ -227,7 +289,6 @@ jobs:
 
       - name: Check deterministic harness trajectories
         run: python tools/harness_eval.py --check --json
-
   frontend:
     name: Frontend checks
     needs: changes
