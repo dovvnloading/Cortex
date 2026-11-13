@@ -38,8 +38,9 @@ def _write_shard_artifact(tmp_path: Path, index: int, paths: tuple[str, ...], *,
     folder = tmp_path / "artifacts" / f"backend-shard-{index}"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / f"backend-shard-{index}.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")
+    module = paths[0].removesuffix(".py").replace("/", ".")
     (folder / f"backend-shard-{index}.xml").write_text(
-        f'<testsuites><testsuite tests="1"><testcase classname="tests.shard{index}" name="{name}" /></testsuite></testsuites>',
+        f'<testsuites><testsuite tests="1"><testcase classname="{module}" name="{name}" /></testsuite></testsuites>',
         encoding="utf-8",
     )
     (folder / f".coverage.run{index}").write_bytes(b"coverage-data")
@@ -64,7 +65,7 @@ def test_coverage_validation_rejects_missing_files_and_duplicate_testcases(tmp_p
         shards.verify_coverage_artifacts(tmp_path, artifacts, 2)
     _write_shard_artifact(tmp_path, 2, parts[1], name="test_2")
     (artifacts / "backend-shard-2" / "backend-shard-2.xml").write_text(
-        '<testsuites><testsuite><testcase classname="tests.shard1" name="test_1" /></testsuite></testsuites>',
+        '<testsuites><testsuite><testcase classname="tests.test_a" name="test_1" /></testsuite></testsuites>',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="repeated"):
@@ -91,3 +92,46 @@ def test_run_shard_passes_only_assigned_modules_to_coverage(tmp_path: Path, monk
     assert (tmp_path / "backend-shard-2.txt").read_text(encoding="utf-8") == "tests/test_b.py\ntests/test_d.py\n"
     with pytest.raises(ValueError, match="outside"):
         shards.run_shard(tmp_path, 3, 2)
+
+
+def test_every_assigned_module_must_have_reported_cases(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in ("test_a.py", "test_b.py", "test_c.py"):
+        (tests / name).touch()
+    plans = shards.partition_test_files(shards.discover_test_files(tmp_path), 2)
+    assert plans[0] == ("tests/test_a.py", "tests/test_c.py")
+    _write_shard_artifact(tmp_path, 1, plans[0], name="test_a")
+    _write_shard_artifact(tmp_path, 2, plans[1], name="test_b")
+
+    with pytest.raises(ValueError, match="assigned modules with no reported cases"):
+        shards.verify_coverage_artifacts(tmp_path, tmp_path / "artifacts", 2)
+
+
+def test_junit_cannot_claim_tests_from_unassigned_modules(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    for name in ("test_a.py", "test_b.py"):
+        (tmp_path / "tests" / name).touch()
+    plans = shards.partition_test_files(shards.discover_test_files(tmp_path), 2)
+    for index, modules in enumerate(plans, 1):
+        _write_shard_artifact(tmp_path, index, modules, name=f"test_{index}")
+    report = tmp_path / "artifacts" / "backend-shard-2" / "backend-shard-2.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase classname="tests.test_foreign" name="test_foreign" /></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="outside its assigned modules"):
+        shards.verify_coverage_artifacts(tmp_path, tmp_path / "artifacts", 2)
+
+
+def test_junit_reports_with_embedded_failures_are_rejected(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_only.py").touch()
+    _write_shard_artifact(tmp_path, 1, ("tests/test_only.py",), name="test_only")
+    report = tmp_path / "artifacts" / "backend-shard-1" / "backend-shard-1.xml"
+    report.write_text(
+        '<testsuite><testcase classname="tests.test_only" name="test_only"><failure /></testcase></testsuite>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="failed testcase"):
+        shards.verify_coverage_artifacts(tmp_path, tmp_path / "artifacts", 1)
