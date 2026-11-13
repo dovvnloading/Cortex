@@ -99,6 +99,16 @@ class _FakeAttempt:
         self.close_event.set()
 
 
+class _CancellationAttempt(_FakeAttempt):
+    """Pause inside transform until cancel() actually reaches the worker."""
+
+    def transform(self, _request_id: str, _job_id: str, _plan: Any, _content: bytes, cancel_event: Event) -> RecipeWorkerOutput:
+        self.started.set()
+        if not self.cancelled.wait(15):
+            raise RecipeExecutionError("worker_timeout")
+        raise RecipeExecutionError("cancelled")
+
+
 def _request(source_artifact_id: str, *, request_id: str = "recipe-request") -> RecipeImageRequest:
     return RecipeImageRequest(
         owner=OWNER,
@@ -236,20 +246,22 @@ def test_coordinator_failure_is_redacted_and_does_not_publish(tmp_path: Path):
 
 def test_coordinator_cancellation_is_terminal_and_cleans_staging(tmp_path: Path):
     repository, _source_job_id, source_artifact_id = _repository(tmp_path)
-    attempt = _FakeAttempt(_output())
+    # The previous fake returned immediately, allowing completion to race with
+    # cancellation. Hold it in transform until the coordinator sends cancel().
+    attempt = _CancellationAttempt(_output())
     coordinator = RecipeExecutionCoordinator(repository, lambda _job: attempt)
     accepted = coordinator.start_image_transform(_request(source_artifact_id))
-    assert attempt.started.wait(2)
+    assert attempt.started.wait(15), "worker never entered the transform call"
     coordinator.cancel(accepted.job_id, owner=OWNER)
     completed = coordinator.wait(accepted.job_id, timeout=15)
 
+    assert attempt.cancelled.is_set(), "worker never received the cancel request"
     assert completed.status == "cancelled"
     assert completed.error == "cancelled"
     assert completed.result is None
-    # Same reasoning as the success-path test above: attempt.close() runs in
-    # the worker thread's finally block, just after (not atomically with)
-    # the repository transition that wait() observed.
-    assert attempt.close_event.wait(2)
+    # attempt.close() follows the terminal transition in the worker's finally
+    # block, so wait for cleanup without assuming the scheduler runs instantly.
+    assert attempt.close_event.wait(15), "cancelled worker was not closed"
 
 
 def test_recovery_rejects_tampered_payload_and_never_interprets_a_path(tmp_path: Path):
