@@ -338,17 +338,17 @@ def test_packaging_runs_beside_tests_but_maintains_required_merge_gate() -> None
     assert "Build one-folder Windows package" in package
     assert "Smoke-test packaged headless launcher" in package
 
-    needs = re.search(r"needs: \[([^\]]*)\]", heavy)
-    assert needs, "the final required gate must await every check"
-    gates = {name.strip() for name in needs.group(1).split(",")}
-    assert {"changes", "lint", "backend", "frontend", "e2e", "package"} <= gates
+    assert "needs: [changes, lint, backend, frontend, e2e, package, dependency-review]" in heavy
+    assert "always() && !cancelled()" in heavy
     assert "runs-on: ubuntu-latest" in heavy
-    assert "!cancelled()" in heavy
-    assert "exit 1" in heavy, "failed upstream checks must fail the required gate"
+    assert "run: python3 tools/ci_quality_gate.py" in heavy
+    assert "CHANGES_RESULT: ${{ needs.changes.result }}" in heavy
+    assert "DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}" in heavy
+
 
 
 def test_every_gate_is_skipped_together_for_a_document_only_change() -> None:
-    """Skipped jobs report success, so required checks must never hang for docs."""
+    """The final gate validates doc-only skips instead of disappearing itself."""
 
     workflow = _read(WORKFLOWS / "quality.yml")
     for job in ("lint", "frontend", "e2e", "package", "backend-shard"):
@@ -360,32 +360,42 @@ def test_every_gate_is_skipped_together_for_a_document_only_change() -> None:
     heavy = _job_block(workflow, "heavy")
     assert "needs: [changes, backend-shard]" in backend
     assert "needs.changes.outputs.code == 'true'" in backend
-    assert "needs.changes.outputs.code == 'true'" in heavy
+    assert "always() && !cancelled()" in heavy
+    assert "CODE_CHANGED: ${{ needs.changes.outputs.code }}" in heavy
     assert not re.search(r"^\s*paths(-ignore)?:", workflow, re.MULTILINE), (
-        "a paths filter on a trigger leaves required checks pending; use the changes job"
+        "a trigger paths filter leaves required checks pending; use the changes job"
     )
 
 
 
-def test_browser_tests_require_explicit_manual_opt_in() -> None:
+def test_browser_tests_run_for_affected_pull_requests_and_main_pushes() -> None:
     workflow = _read(WORKFLOWS / "quality.yml")
     e2e = _job_block(workflow, "e2e")
+    assert "needs.changes.outputs.code == 'true'" in e2e
+    assert "github.event_name == 'push'" in e2e
+    assert "github.event_name == 'pull_request' && needs.changes.outputs.browser == 'true'" in e2e
     assert "github.event_name == 'workflow_dispatch' && inputs.run_browser_tests" in e2e
     assert re.search(
         r"run_browser_tests:\n\s+description: [^\n]+\n\s+type: boolean\n\s+default: false",
         workflow,
-    ), "browser dispatch must default to off"
+    )
     assert "npx playwright install chromium" in e2e
     assert "npm run e2e -- --workers=1" in e2e
 
 
-def test_packaging_accepts_skipped_browser_tests_but_not_failed_requested_tests() -> None:
+
+def test_final_gate_sees_every_predecessor_and_browser_decision() -> None:
     heavy = _job_block(_read(WORKFLOWS / "quality.yml"), "heavy")
     for job in ("lint", "backend", "frontend", "package"):
         assert f"{job.upper()}_RESULT: ${{{{ needs.{job}.result }}}}" in heavy
+    assert "CHANGES_RESULT: ${{ needs.changes.result }}" in heavy
+    assert "CODE_CHANGED: ${{ needs.changes.outputs.code }}" in heavy
+    assert "BROWSER_CHANGED: ${{ needs.changes.outputs.browser }}" in heavy
+    assert "BROWSER_OPT_IN: ${{ inputs.run_browser_tests }}" in heavy
     assert "BROWSER_RESULT: ${{ needs.e2e.result }}" in heavy
-    assert 'if [ "$BROWSER_RESULT" != success ] && [ "$BROWSER_RESULT" != skipped ]; then' in heavy
-    assert "exit 1" in heavy, "a requested failing browser run must fail the final gate"
+    assert "DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}" in heavy
+    assert "run: python3 tools/ci_quality_gate.py" in heavy
+
 
 
 def test_pull_requests_do_not_run_the_interpreter_matrix() -> None:
