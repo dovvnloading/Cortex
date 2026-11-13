@@ -132,8 +132,11 @@ python tools/generate_contracts.py --write
 ### Coverage floors and the CI layout
 
 The Quality workflow runs its gates as parallel jobs -- `lint` (locks, Ruff,
-workflow linters, mypy, contract drift), `backend`, `frontend` and `e2e` -- and
-packaging (`heavy`) starts only after all four pass. A new push to a pull
+workflow linters, mypy, contract drift), `backend` and `frontend`. Chromium
+browser tests (`e2e`) run only when the Quality workflow is manually dispatched
+with `run_browser_tests` enabled (off by default). Packaging (`heavy`) requires
+the automatic gates to pass and accepts a skipped browser job, but still stops
+if an explicitly requested browser run fails. A new push to a pull
 request cancels the run it supersedes; a pull request that changes nothing but
 `README.md`, `SECURITY.md`, `LICENSE` or `docs/` skips the gates and still ends
 green.

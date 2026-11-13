@@ -350,6 +350,26 @@ def test_every_gate_is_skipped_together_for_a_document_only_change() -> None:
     )
 
 
+def test_browser_tests_require_explicit_manual_opt_in() -> None:
+    workflow = _read(WORKFLOWS / "quality.yml")
+    e2e = _job_block(workflow, "e2e")
+    assert "github.event_name == 'workflow_dispatch' && inputs.run_browser_tests" in e2e
+    assert re.search(
+        r"run_browser_tests:\n\s+description: [^\n]+\n\s+type: boolean\n\s+default: false",
+        workflow,
+    ), "browser dispatch must default to off"
+    assert "npx playwright install chromium" in e2e
+    assert "npm run e2e -- --workers=1" in e2e
+
+
+def test_packaging_accepts_skipped_browser_tests_but_not_failed_requested_tests() -> None:
+    heavy = _job_block(_read(WORKFLOWS / "quality.yml"), "heavy")
+    assert "!cancelled()" in heavy
+    for job in ("lint", "backend", "frontend"):
+        assert f"needs.{job}.result == 'success'" in heavy
+    assert "(needs.e2e.result == 'success' || needs.e2e.result == 'skipped')" in heavy
+
+
 def test_pull_requests_do_not_run_the_interpreter_matrix() -> None:
     quality = _read(WORKFLOWS / "quality.yml")
     compatibility = _read(WORKFLOWS / "python-compatibility.yml")

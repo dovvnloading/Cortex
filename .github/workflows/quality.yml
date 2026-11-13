@@ -16,7 +16,7 @@ name: Quality
 #
 #   heavy      Windows packaging -- the launcher bundle, the one-folder build,
 #              and a smoke test of the packaged executable. Runs only after
-#              lint, backend and frontend have passed.
+#              lint, backend and frontend have passed (and optional e2e has not failed).
 #
 # The Python compatibility matrix is in python-compatibility.yml: it repeats
 # the suite on other interpreters and is not needed to review a pull request.
@@ -56,6 +56,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      browser: ${{ steps.filter.outputs.browser }}
     steps:
       # The pull request ref is a merge commit whose first parent is the base
       # branch tip, so two commits of history are enough to list its files.
@@ -73,8 +74,11 @@ jobs:
         id: filter
         env:
           EVENT_NAME: ${{ github.event_name }}
+          # The browser tests drive the frontend against the real backend.
+          BROWSER_IF: '^(frontend/|backend/|contracts/|scripts/e2e_backend\.py|requirements\.lock\.txt|\.github/workflows/quality\.yml$)'
         run: |
           code=true
+          browser=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
             echo "Changed files:"
@@ -82,8 +86,13 @@ jobs:
             if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(README\.md|SECURITY\.md|LICENSE|docs/.*)$'; then
               code=false
             fi
+            if [ -n "$changed" ] && ! echo "$changed" | grep -qE "$BROWSER_IF"; then
+              browser=false
+            fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "browser=$browser" >> "$GITHUB_OUTPUT"
+          echo "Browser tests needed: $browser"
           echo "Code changed: $code"
 
   lint:
@@ -270,7 +279,7 @@ jobs:
     name: Browser tests
     needs: changes
     # Chromium is opt-in: ordinary pushes and pull requests never launch it.
-    if: github.event_name == 'workflow_dispatch' && inputs.run_browser_tests && needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'workflow_dispatch' && inputs.run_browser_tests
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -354,7 +363,9 @@ jobs:
     # changes still produce a build that starts. It waits for the automatic gates
     # so a run that is going to fail on lint does not spend the packaging
     # minutes first; when they are skipped (document-only) so is this.
-    needs: [lint, backend, frontend]
+    needs: [lint, backend, frontend, e2e]
+    # An unrequested browser run is skipped; an explicitly requested failure still blocks packaging.
+    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.backend.result == 'success' && needs.frontend.result == 'success' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
