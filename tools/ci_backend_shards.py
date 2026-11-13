@@ -77,11 +77,35 @@ def verify_coverage_artifacts(root: Path, downloaded: Path, shard_count: int) ->
         cases = reports.findall(".//testcase")
         if not cases:
             raise ValueError(f"Shard {index} ran zero tests")
+
+        # JUnit's classname includes the dotted module plus any unittest
+        # classes, e.g. tests.test_services.ServiceTests. Match a full module
+        # prefix, never a substring, to reject foreign or unassigned cases.
+        module_prefixes = {
+            path: path.removesuffix(".py").replace("/", ".") for path in expected_files
+        }
+        tested_modules: set[str] = set()
         for case in cases:
             identity = (case.get("classname", ""), case.get("name", ""))
+            if not all(identity):
+                raise ValueError(f"Shard {index} has a testcase without a complete identity")
             if identity in observed_tests:
                 raise ValueError(f"Test repeated across shards: {identity}")
+            matches = [
+                path
+                for path, prefix in module_prefixes.items()
+                if identity[0] == prefix or identity[0].startswith(prefix + ".")
+            ]
+            if len(matches) != 1:
+                raise ValueError(f"Shard {index} reported a testcase outside its assigned modules: {identity}")
+            if case.find("failure") is not None or case.find("error") is not None:
+                raise ValueError(f"Shard {index} contains a failed testcase: {identity}")
             observed_tests.add(identity)
+            tested_modules.add(matches[0])
+
+        missing_modules = set(expected_files) - tested_modules
+        if missing_modules:
+            raise ValueError(f"Shard {index} assigned modules with no reported cases: {sorted(missing_modules)}")
         total_tests += len(cases)
     return total_tests
 
