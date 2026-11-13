@@ -141,10 +141,17 @@ and runs the artifact-boundary and deterministic-harness checks. Missing,
 failed or duplicated shard results fail this gate.
 
 The lightweight final `heavy` job retains the historical merge-check name
-and fails if any required test or packaging job fails. Chromium browser tests
-(`e2e`) run only when manually dispatched with `run_browser_tests` enabled
-(off by default); failures of requested browser runs also block `heavy`.
-Each backend shard prints its 20 slowest pytest durations.
+and runs even when change classification or a prerequisite fails. It verifies
+that each required check actually succeeded, that dependency review passed on
+pull requests, and that document-only PRs skipped code jobs cleanly.
+
+Chromium browser tests (`e2e`) run automatically for PRs changing the frontend,
+backend, API contracts, browser harness/dependencies or Quality workflow, and
+for every push to `main`. Other PRs skip the browser suite. Manual
+`workflow_dispatch` with `run_browser_tests` also remains available
+(default off). If browser testing was required but skipped or failed, `heavy`
+fails rather than treating it as optional. Each backend shard prints its 20
+slowest pytest durations.
 
 A new push to a pull request cancels the run it supersedes; a pull request
 that changes nothing but `README.md`, `SECURITY.md`, `LICENSE` or `docs/`
@@ -174,7 +181,9 @@ finds a real bug, fix it and pin the smallest input as a plain test next to it
 (see `tests/property/test_code_validator_counterexamples.py`).
 
 `python -m pytest` and a bare `pytest` (an IDE runner) both work: `pyproject.toml`
-puts the repository root on the path. The local and Python-compatibility suites run serially. Quality CI instead
+puts the repository root on the path. The local and Python-compatibility suites run serially. Each CI shard's
+JUnit cases are now matched against its exact assigned modules: empty modules,
+foreign test identities and embedded failures fail the backend aggregation. Quality CI instead
 runs four **separate Windows processes** using `tools/ci_backend_shards.py`
 to partition all `test_*.py` modules. Each shard uploads its coverage data;
 the required backend job combines the databases before checking the same floor.
