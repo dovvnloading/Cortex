@@ -175,7 +175,12 @@ jobs:
         run: python -m mypy
 
       - name: Compile application modules
-        run: python -m compil
+        run: python -m compileall -q main.py app_factory.py backend
+
+      - name: Verify generated API contracts
+        run: |
+          python tools/generate_contracts.py --check
+
   backend-shard:
     name: Backend tests (shard ${{ matrix.shard }}/4)
     needs: changes
@@ -284,11 +289,6 @@ jobs:
 
       - name: Check deterministic harness trajectories
         run: python tools/harness_eval.py --check --json
-fact_boundary_review.py --json --strict
-
-      - name: Check deterministic harness trajectories
-        run: python tools/harness_eval.py --check --json
-
   frontend:
     name: Frontend checks
     needs: changes
