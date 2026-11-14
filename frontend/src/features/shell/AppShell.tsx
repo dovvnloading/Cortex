@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { FolderCode, Menu, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { ArrowRight, FolderCode, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
@@ -58,6 +58,7 @@ export function AppShell({
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null);
   const [chatQuery, setChatQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const previousPathnameRef = useRef(pathname);
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
@@ -122,9 +123,11 @@ export function AppShell({
             className="window-control sidebar-toggle"
             type="button"
             aria-label={sidebarVisible ? "Hide chat history" : "Show chat history"}
+            aria-expanded={sidebarVisible}
+            aria-controls="thread-archive"
             onClick={() => setSidebarVisible((visible) => !visible)}
           >
-            <Menu aria-hidden="true" size={17} />
+            <PanelLeft aria-hidden="true" size={17} />
           </button>
           <div className="window-title-group">
             <span className="window-kicker">Cortex</span>
@@ -155,34 +158,43 @@ export function AppShell({
       <div className="workspace-body">
         {sidebarVisible && <button className="sidebar-scrim" aria-label="Close chat history" onClick={() => setSidebarVisible(false)} />}
         <aside
+          id="thread-archive"
           className="sidebar"
           aria-label="Chat history"
           aria-hidden={!sidebarVisible}
           inert={!sidebarVisible ? true : undefined}
         >
-          <div className="sidebar-brand">
-            <span className="sidebar-brand-mark" aria-hidden="true"><img src="/cortex.svg" alt="" /></span>
-            <span className="sidebar-brand-copy"><strong>Cortex</strong></span>
+          <header className="archive-cover">
+            <div className="archive-imprint"><img src="/cortex.svg" alt="" />Cortex</div>
+            <h2>Thread <em>archive</em></h2>
+          </header>
+          <div className="archive-tools">
+            <button className="new-chat-button" type="button" onClick={createChat}>
+              New thread
+              <Plus aria-hidden="true" size={18} />
+            </button>
+            {(chats.length > 0 || chatQuery.length > 0) && (
+              <div className="sidebar-search">
+                <Search aria-hidden="true" size={15} />
+                <input
+                  ref={searchRef}
+                  type="search"
+                  placeholder="Search chats"
+                  aria-label="Search chats by title"
+                  value={chatQuery}
+                  onChange={(event) => setChatQuery(event.target.value)}
+                />
+                {chatQuery && (
+                  <button type="button" className="archive-clear-search" aria-label="Clear chat search" onClick={() => {
+                    setChatQuery("");
+                    searchRef.current?.focus();
+                  }}>
+                    <X aria-hidden="true" size={14} />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
-          <button className="new-chat-button" type="button" onClick={createChat}>
-            <Plus aria-hidden="true" size={16} />
-            New thread
-          </button>
-          <NavigationLink to="/workspace" className="new-chat-button" aria-current={isWorkspace ? "page" : undefined}>
-            <FolderCode aria-hidden="true" size={16} /> Project workspace
-          </NavigationLink>
-          {chats.length > 0 && (
-            <div className="sidebar-search">
-              <Search aria-hidden="true" size={14} />
-              <input
-                type="search"
-                placeholder="Search chats"
-                aria-label="Search chats by title"
-                value={chatQuery}
-                onChange={(event) => setChatQuery(event.target.value)}
-              />
-            </div>
-          )}
           <InlineBoundary scope="chat-library" label="The chat list">
             <ChatLibrary
               chats={chats}
@@ -200,6 +212,13 @@ export function AppShell({
               onMoveChat={onMoveChat}
             />
           </InlineBoundary>
+          <footer className="archive-footer">
+            <NavigationLink to="/workspace" className="archive-workspace" aria-current={isWorkspace ? "page" : undefined}>
+              <span className="archive-workspace-icon"><FolderCode aria-hidden="true" size={17} /></span>
+              Project workspace
+              <ArrowRight aria-hidden="true" size={15} />
+            </NavigationLink>
+          </footer>
         </aside>
 
         <main className={`main-content ${isSettings ? "settings-content" : isWorkspace ? "workspace-content" : "chat-content"}`}>{children}</main>

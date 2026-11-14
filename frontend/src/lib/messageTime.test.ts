@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { formatMessageTime, formatMessageTimeTitle } from "./messageTime";
+import { formatMessageTime, formatMessageTimeTitle, parseMessageTimestamp } from "./messageTime";
+
+describe("parseMessageTimestamp", () => {
+  it("reads SQLite and Python timestamps, including microseconds and explicit offsets", () => {
+    const instant = Date.UTC(2024, 1, 29, 19, 23, 45, 123);
+    expect(parseMessageTimestamp("2024-02-29 19:23:45.123456")).toBe(instant);
+    expect(parseMessageTimestamp("2024-03-01T01:08:45.123456+05:45")).toBe(instant);
+    expect(parseMessageTimestamp("2024-02-29")).toBe(Date.UTC(2024, 1, 29));
+  });
+
+  it("rejects impossible dates instead of filing conversations in a different month", () => {
+    expect(parseMessageTimestamp("2026-02-29T10:00:00Z")).toBeNull();
+    expect(parseMessageTimestamp("2026-04-31 22:31:04")).toBeNull();
+    expect(parseMessageTimestamp("13")).toBeNull();
+  });
+});
 
 describe("formatMessageTime", () => {
   it("reads a timestamp without an offset as UTC, not local time", () => {

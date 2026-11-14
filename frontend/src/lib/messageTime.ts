@@ -7,9 +7,17 @@
  * other producer -- or a row written by an older build -- from reintroducing
  * the shift.
  */
-function parseMessageTimestamp(value?: string | null): number | null {
-  if (!value) return null;
-  const normalized = /[Zz]|[+-]\d{2}:?\d{2}$/.test(value) ? value : `${value}Z`;
+export function parseMessageTimestamp(value?: string | null): number | null {
+  if (typeof value !== "string" || !value) return null;
+  // SQLite can separate the date and time with a space. Read both forms as
+  // ISO timestamps, without relying on the WebView's nonstandard date parser.
+  const iso = value.trim().replace(" ", "T");
+  const datePart = /^(\d{4}-\d{2}-(\d{2}))(?:T|$)/.exec(iso);
+  if (!datePart) return null;
+  // Date.parse rolls February 30 into March. An impossible stored date has
+  // no month to file under.
+  if (new Date(`${datePart[1]}T00:00:00Z`).getUTCDate() !== Number(datePart[2])) return null;
+  const normalized = iso.length === 10 || /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
   const timestamp = Date.parse(normalized);
   return Number.isNaN(timestamp) ? null : timestamp;
 }

@@ -63,6 +63,40 @@ test("loads chat groups successfully and files their chats", async ({ page }) =>
   await expect(page.getByText("Research")).toBeVisible();
 });
 
+test("keeps every move destination reachable above the footer in a short drawer", async ({ page }) => {
+  await page.setViewportSize({ width: 667, height: 375 });
+  const groups = Array.from({ length: 12 }, (_, index) => ({
+    id: `folder-${index}`, name: `Folder ${index}`, collapsed: true, position: index,
+    timestamp: "2026-01-01T00:00:00Z",
+  }));
+  await stubWorkspace(page, groups);
+  await page.route("**/api/v1/chats", (route) => route.fulfill({
+    json: [{ id: "loose", title: "Loose chat", timestamp: "2026-01-01T00:00:00Z", group_id: null }],
+  }));
+  await page.goto("/#bootstrap=launcher-token");
+  await page.getByRole("button", { name: "Show chat history" }).click();
+  const trigger = page.getByRole("button", { name: "Move Loose chat to a group" });
+  await trigger.focus();
+  await trigger.press("Enter");
+  const menu = page.getByRole("menu");
+  const list = page.locator(".chat-list");
+  const fits = async () => {
+    const popup = await menu.boundingBox();
+    const area = await list.boundingBox();
+    return !!popup && !!area && popup.y >= area.y && popup.y + popup.height <= area.y + area.height;
+  };
+  await expect.poll(fits).toBe(true);
+  await page.setViewportSize({ width: 667, height: 350 });
+  await expect.poll(fits).toBe(true);
+  await page.keyboard.press("End");
+  const destination = page.getByRole("menuitem", { name: "Folder 11" });
+  await expect(destination).toBeFocused();
+  expect(await destination.evaluate((item) => {
+    const { x, y, width, height } = item.getBoundingClientRect();
+    return item.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+  })).toBe(true);
+});
+
 test("does not let a late initial group response erase a group created while loading", async ({ page }) => {
   let releaseInitialGroups!: () => void;
   const initialGroups = new Promise<void>((resolve) => { releaseInitialGroups = resolve; });

@@ -40,6 +40,58 @@ function renderLibrary(overrides: Partial<React.ComponentProps<typeof ChatLibrar
 }
 
 describe("ChatLibrary", () => {
+  it("orders local calendar months newest first, preserving row order and undated threads", () => {
+    const june = new Date(2026, 5, 1, 0, 1);
+    const earlierYear = new Date(2025, 5, 10, 12);
+    const laterInJune = new Date(2026, 5, 25, 12);
+    const month = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+    renderLibrary({
+      groups: [group("g1", "Research")],
+      chats: [
+        { ...chat("old", "Earlier year", "missing-group"), timestamp: earlierYear.toISOString() },
+        { ...chat("bad", "Imported chat"), timestamp: "not recorded" },
+        { ...chat("first", "First in June"), timestamp: june.toISOString() },
+        { ...chat("second", "Second in June"), timestamp: laterInJune.toISOString() },
+        { ...chat("filed", "Filed chat", "g1"), timestamp: june.toISOString() },
+        { ...chat("missing", "Missing date"), timestamp: "" },
+      ],
+    });
+
+    const headings = screen.getAllByRole("heading", { level: 4 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      month.format(june), month.format(earlierYear), "Date unavailable",
+    ]);
+    const visibleTitles = (heading: HTMLElement) => within(heading.closest("section")!)
+      .getAllByRole("button").filter((button) => button.classList.contains("chat-row-select")).map((button) => button.textContent);
+    expect(visibleTitles(headings[0])).toEqual(["First in June", "Second in June"]);
+    expect(visibleTitles(headings[1])).toEqual(["Earlier year"]);
+    expect(visibleTitles(headings[2])).toEqual(["Imported chat", "Missing date"]);
+    expect(within(headings[2].closest("section")!).queryByRole("time")).not.toBeInTheDocument();
+    const filed = screen.getByRole("button", { name: "Filed chat" });
+    expect(filed.compareDocumentPosition(headings[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const date = within(filed.closest("section")!).getByRole("time");
+    expect(date).toHaveAttribute("datetime", june.toISOString());
+    expect(date).toHaveTextContent(new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(june));
+  });
+
+  it("counts matching chats across groups and omits month sections during search", () => {
+    const view = renderLibrary({
+      groups: [group("g1", "Research", true)],
+      chats: [chat("one", "Plan for May", "g1"), chat("two", "Plan for June"), chat("three", "Notes")],
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("3 threads");
+    view.rerender(<ChatLibrary {...view.props} query="plan" />);
+    expect(screen.getByRole("heading", { name: "Search results" })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("2 results");
+    expect(screen.queryByRole("heading", { level: 4 })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Plan for May" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Plan for June" })).toBeVisible();
+    view.rerender(<ChatLibrary {...view.props} query="may" />);
+    expect(screen.getByRole("status")).toHaveTextContent(/^1 result$/);
+    view.rerender(<ChatLibrary {...view.props} query="nothing" />);
+    expect(screen.getByRole("status")).toHaveTextContent("0 results");
+  });
+
   it("files chats under their group and leaves the rest ungrouped", () => {
     renderLibrary({
       groups: [group("g1", "Research")],
