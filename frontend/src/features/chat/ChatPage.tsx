@@ -213,12 +213,6 @@ export function ChatPage({
 
   const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
 
-  useEffect(() => {
-    if (isNearTranscriptEnd.current) {
-      messageListRef.current?.scrollToBottom();
-    }
-  }, [currentChat?.messages?.length]);
-
   // The pending bubble reports each change to the visible reply. A reader at
   // the bottom is followed down; new text while scrolled away surfaces a "jump
   // to latest" affordance instead of yanking the viewport. Stable, because it

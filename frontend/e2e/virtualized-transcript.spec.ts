@@ -43,8 +43,11 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
   // The virtualized container is in play, not the plain scrollable transcript.
   await expect(page.locator(".transcript-virtual")).toBeVisible();
 
-  // Loaded aligned-to-bottom: the last message is visible without scrolling.
-  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeInViewport();
+  // During measurement a virtual row can intersect the viewport while hidden.
+  // Scroll as soon as the last row is both painted and physically in view.
+  const last = page.getByText(`Reply number ${messageCount - 1}.`);
+  await expect(last).toBeVisible();
+  await expect(last).toBeInViewport();
 
   // The first message is windowed out at the bottom (not present at all, or
   // present but off-screen) — scrolling up must actually bring it in, which
@@ -59,5 +62,5 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
   // covered at the unit level in MessageList.test.tsx and is unchanged by
   // virtualization, so it is not re-asserted here.
   await page.locator(".transcript-virtual").evaluate((node) => { node.scrollTo({ top: node.scrollHeight, behavior: "instant" }); });
-  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeInViewport();
+  await expect(last).toBeInViewport();
 });
