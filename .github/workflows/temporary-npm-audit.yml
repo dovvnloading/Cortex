@@ -47,6 +47,21 @@ jobs:
           console.log('=== NONBREAKING FIX DRY RUN ===');
           console.log(JSON.stringify({error:fix.error, added:fix.added, removed:fix.removed, changed:fix.changed, audit:fix.audit?.metadata?.vulnerabilities},null,2));
           NODE
+      - name: Inspect dependency chains and available patched versions
+        working-directory: frontend
+        shell: bash
+        run: |
+          echo '=== INSTALLED DEPENDENCY CHAINS ==='
+          npm ls minimatch zod vite vitest @vitest/mocker @typescript-eslint/typescript-estree --all || true
+          echo '=== PUBLISHED PATCH VERSIONS ==='
+          for package in vite vitest @vitest/coverage-v8 eslint typescript-eslint @typescript-eslint/typescript-estree @eslint/config-array minimatch zod; do
+            printf '%s ' "$package"
+            npm view "$package" version || true
+          done
+          echo '=== LATEST MINIMATCH 11 AND ESLINT METADATA ==='
+          npm view minimatch@11 version --json | tail -20
+          npm view eslint@10 version --json | tail -20
+          npm view typescript-eslint@8 version --json | tail -20
       - name: Preserve machine-readable audit reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
