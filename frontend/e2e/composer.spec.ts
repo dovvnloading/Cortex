@@ -379,3 +379,124 @@ test("explains when the selected model cannot accept an image attachment", async
   await expect(page.getByRole("alert")).toContainText("cannot accept images");
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 });
+
+const labModelId = "org/shared:stable";
+const longModelId = `tenant/${"deployment-".repeat(13)}v2:0`;
+const labCatalog = Array.from({ length: 600 }, (_, i) => `org/chat-${i.toString().padStart(3, "0")}`);
+
+async function stubCloudCatalogs(page: Page) {
+  const catalogs = new Map([
+    ["lab-a", [labModelId, ...labCatalog]],
+    ["lab-b", [labModelId, longModelId]],
+  ]);
+  await page.route("**/api/v1/cloud/providers", (route) => route.fulfill({
+    json: { providers: Array.from(catalogs.keys(), (id) => ({ id, label: id, configured: true, setup: "Test account" })) },
+  }));
+  await page.route("**/api/v1/cloud/providers/*/models", (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2)!;
+    return route.fulfill({ json: { models: (catalogs.get(id) ?? []).map((model) => `cloud:${id}:${model}`) } });
+  });
+  return catalogs;
+}
+
+test("selects the exact cloud deployment by keyboard in a compact window with duplicate model names", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await stubWorkspace(page, { models: [], selectedModel: `cloud:lab-a:${labModelId}`, connectionSuccess: false });
+  await stubCloudCatalogs(page);
+  await page.goto("/#bootstrap=launcher-token");
+  const trigger = page.getByRole("button", { name: `Selected cloud model: lab-a / ${labModelId}` });
+  await expect(page.getByText("Sending to lab-a", { exact: false })).toBeVisible();
+  await trigger.focus();
+  await trigger.press("ArrowDown");
+  const search = page.getByRole("combobox", { name: /search.*models/i });
+  await expect(search).toBeFocused();
+  await search.fill(labModelId);
+  await expect(page.getByRole("option")).toHaveCount(2);
+  await expect(page.getByRole("option", { name: `lab-a / ${labModelId}` })).toHaveAttribute("aria-selected", "true");
+  await search.fill("deployment-");
+  const option = page.getByRole("option", { name: `lab-b / ${longModelId}` });
+  await expect(option).toBeVisible();
+  const bounds = await page.getByRole("listbox").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375);
+  const persisted = page.waitForRequest((request) => request.method() === "PUT" && request.url().endsWith("/settings"));
+  await search.press("Enter");
+  expect((await persisted).postDataJSON().settings.models.chat).toBe(`cloud:lab-b:${longModelId}`);
+  await expect(page.getByRole("button", { name: `Selected cloud model: lab-b / ${longModelId}` })).toBeFocused();
+  await expect(page.getByText("Sending to lab-b", { exact: false })).toBeVisible();
+  for (const element of [page.getByRole("button", { name: "Send message" }), page.getByLabel("Message Cortex"),
+    page.getByLabel("Keyboard shortcuts", { exact: true }).getByText("lists every shortcut", { exact: false })]) {
+    const rect = await element.boundingBox();
+    expect(rect).not.toBeNull();
+    expect(rect!.x).toBeGreaterThanOrEqual(0);
+    expect(rect!.x + rect!.width).toBeLessThanOrEqual(375);
+  }
+});
+
+test("preserves a draft and shows the new destination after another window changes the chat model", async ({ page }) => {
+  const previous = `cloud:lab-a:${labModelId}`;
+  const changed = `cloud:lab-b:${labModelId}`;
+  await stubWorkspace(page, { selectedModel: previous });
+  await stubCloudCatalogs(page);
+  await page.goto("/#bootstrap=launcher-token");
+  const draft = page.getByLabel("Message Cortex");
+  await draft.fill("Keep this draft in the first window.");
+  const send = page.getByRole("button", { name: "Send message" });
+  await expect(send).toBeEnabled();
+  // A second window saved the other provider while this draft was open.
+  await page.route("**/api/v1/settings", (route) => route.fulfill({ json: {
+    source: "sqlite", present_keys: [], invalid_keys: [],
+    settings: { models: { chat: changed }, generation: {}, translation: { enabled: false }, memory: { enabled: true }, appearance: { theme: "dark" } },
+  } }));
+  let sends = 0;
+  await page.route("**/api/v1/generations", async (route) => {
+    sends++;
+    expect(route.request().postDataJSON().expected_model).toBe(previous);
+    await route.fulfill({ status: 409, json: { detail: {
+      code: "chat_model_changed", message: "The chat model changed. Check the selected model before sending again.",
+    } } });
+  });
+  await draft.press("Enter");
+  await expect(page.getByRole("alert")).toContainText("The chat model changed");
+  await expect(page.getByRole("button", { name: `Selected cloud model: lab-b / ${labModelId}` })).toBeVisible();
+  await expect(draft).toHaveValue("Keep this draft in the first window.");
+  await expect(page.getByRole("button", { name: "Retry last message" })).toHaveCount(0);
+  expect(sends).toBe(1);
+});
+
+test("shows a failed provider refresh in Settings, keeps its last catalog, then removes a retired model", async ({ page }) => {
+  const selected = `cloud:lab-b:${labModelId}`;
+  await stubWorkspace(page, { models: [], selectedModel: selected, connectionSuccess: false });
+  const catalogs = await stubCloudCatalogs(page);
+  await page.goto("/settings?section=model#bootstrap=launcher-token");
+  const provider = page.getByRole("combobox", { name: "Cloud provider" });
+  await expect(provider).toContainText("lab-b");
+  await expect(page.getByText("2 chat models available")).toBeVisible();
+  const endpoint = "**/api/v1/cloud/providers/lab-b/models";
+  await page.route(endpoint, (route) => route.fulfill({ status: 502, json: { detail: "Provider temporarily unavailable." } }));
+  const refresh = page.getByRole("button", { name: "Refresh cloud models" });
+  await page.setViewportSize({ width: 375, height: 667 });
+  expect(await refresh.evaluate((element) => {
+    const label = document.createRange();
+    label.selectNodeContents(element);
+    return label.getClientRects().length;
+  })).toBe(1);
+  await refresh.click();
+  await expect(page.getByText("Provider temporarily unavailable.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Last successful check found 2 chat models.")).toBeVisible();
+  await page.getByRole("button", { name: "Chat model", exact: true }).click();
+  const search = page.getByRole("combobox", { name: /search.*models/i });
+  await search.fill(labModelId);
+  await expect(page.getByRole("option", { name: `lab-b / ${labModelId}` })).toHaveAttribute("aria-selected", "true");
+  await search.press("Escape");
+  await page.unroute(endpoint);
+  catalogs.set("lab-b", [longModelId]);
+  await refresh.click();
+  await expect(page.getByText("1 chat model available", { exact: true })).toBeVisible();
+  await expect(page.getByText("Provider temporarily unavailable.", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await expect(page.getByRole("button", { name: `Selected cloud model: lab-b / ${labModelId}` })).toBeVisible();
+  await page.getByLabel("Message Cortex").fill("Keep this draft until I choose a model.");
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+});

@@ -312,6 +312,7 @@ export interface GenerationOptionsOverride {
 }
 
 export interface GenerationRequest {
+  expected_model?: string | null;
   request_id?: string | null;
   thread_id?: string | null;
   user_input: string;
@@ -506,6 +507,7 @@ export interface RecipeImageTransformRequest {
 }
 
 export interface RegenerationRequest {
+  expected_model?: string | null;
   request_id?: string | null;
   message_id: string;
   user_input?: string | null;

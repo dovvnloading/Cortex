@@ -29,7 +29,7 @@ function renderPalette(overrides: Partial<Parameters<typeof CommandPalette>[0]> 
 describe("CommandPalette", () => {
   it("is closed by default", () => {
     renderPalette();
-    expect(screen.queryByPlaceholderText("Type a command or search chats…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search commands, models, and chats…")).not.toBeInTheDocument();
   });
 
   it("opens on Ctrl+K and closes on a second press", async () => {
@@ -37,10 +37,10 @@ describe("CommandPalette", () => {
     const user = userEvent.setup();
 
     await user.keyboard("{Control>}k{/Control}");
-    expect(await screen.findByPlaceholderText("Type a command or search chats…")).toBeVisible();
+    expect(await screen.findByPlaceholderText("Search commands, models, and chats…")).toBeVisible();
 
     await user.keyboard("{Control>}k{/Control}");
-    expect(screen.queryByPlaceholderText("Type a command or search chats…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search commands, models, and chats…")).not.toBeInTheDocument();
   });
 
   it("runs New chat and closes the palette", async () => {
@@ -51,7 +51,7 @@ describe("CommandPalette", () => {
     await user.click(await screen.findByText("New chat"));
 
     expect(props.onNewChat).toHaveBeenCalledOnce();
-    expect(screen.queryByPlaceholderText("Type a command or search chats…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search commands, models, and chats…")).not.toBeInTheDocument();
   });
 
   it("lists installed models and marks the currently selected one", async () => {
@@ -64,6 +64,33 @@ describe("CommandPalette", () => {
 
     await user.click(screen.getByText("Switch to granite4:tiny-h"));
     expect(props.onSelectModel).toHaveBeenCalledWith("granite4:tiny-h");
+  });
+
+  it("keeps a large cloud catalog searchable without mounting every model, and allows a failed save to be retried", async () => {
+    const user = userEvent.setup();
+    const models = Array.from({ length: 1250 }, (_, i) => `cloud:lab:variant-${i}`);
+    const onSelectModel = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    renderPalette({ localModels: models, selectedModel: models[1249], onSelectModel });
+    act(() => useUiStore.getState().setCommandPaletteOpen(true));
+    const search = await screen.findByRole("combobox");
+    expect(screen.getAllByText(/^Switch to/)).toHaveLength(8);
+    expect(screen.getByText("Switch to lab / variant-1249 (cloud)").parentElement).toHaveTextContent("Current");
+    await user.type(search, "variant-1199");
+    const model = await screen.findByText("Switch to lab / variant-1199 (cloud)");
+    await user.click(model);
+    expect(search).toHaveValue("variant-1199");
+    expect(onSelectModel).toHaveBeenCalledWith(models[1199]);
+    await user.click(model);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("disables model switching in the palette while generation or another save owns the selection", async () => {
+    const props = renderPalette({ modelSelectionDisabled: true });
+    act(() => useUiStore.getState().setCommandPaletteOpen(true));
+    const option = await screen.findByRole("option", { name: /Switch to granite/ });
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(option);
+    expect(props.onSelectModel).not.toHaveBeenCalled();
   });
 
   it("lists recent chats and selects one", async () => {
@@ -102,7 +129,7 @@ describe("CommandPalette chat search", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "Topic 12");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "Topic 12");
 
     // The heading follows the mode: the list is no longer "recent".
     expect(await screen.findByText("Topic 12")).toBeVisible();
@@ -122,7 +149,7 @@ describe("CommandPalette chat search", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "Review");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "Review");
 
     await screen.findByText("Review");
     const titles = chatRows().map((row) => row.textContent);
@@ -134,7 +161,7 @@ describe("CommandPalette chat search", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "Planning");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "Planning");
 
     await waitFor(() => expect(chatRows().length).toBeGreaterThan(8));
     expect(chatRows()).toHaveLength(50);
@@ -145,7 +172,7 @@ describe("CommandPalette chat search", () => {
     // rows on screen are for the last query that paused, not for each letter.
     renderPalette({ chats: manyChats(12) });
     useUiStore.getState().setCommandPaletteOpen(true);
-    const input = await screen.findByPlaceholderText("Type a command or search chats…");
+    const input = await screen.findByPlaceholderText("Search commands, models, and chats…");
 
     // One change event and then synchronous assertions: no timer can run in
     // between, so this is "straight after typing" exactly, on any machine.
@@ -164,7 +191,7 @@ describe("CommandPalette chat search", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "zzzzqq");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "zzzzqq");
 
     expect(await screen.findByText("No results.")).toBeVisible();
   });
@@ -173,7 +200,7 @@ describe("CommandPalette chat search", () => {
     renderPalette({ chats: manyChats(12) });
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
-    const input = await screen.findByPlaceholderText("Type a command or search chats…");
+    const input = await screen.findByPlaceholderText("Search commands, models, and chats…");
     await user.type(input, "Topic 12");
     await screen.findByText("Chats");
 
@@ -187,14 +214,14 @@ describe("CommandPalette chat search", () => {
     renderPalette({ chats: manyChats(12) });
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "Topic 12");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "Topic 12");
     await screen.findByText("Chats");
 
     act(() => useUiStore.getState().setCommandPaletteOpen(false));
-    expect(screen.queryByPlaceholderText("Type a command or search chats…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search commands, models, and chats…")).not.toBeInTheDocument();
     act(() => useUiStore.getState().setCommandPaletteOpen(true));
 
-    const reopened = await screen.findByPlaceholderText("Type a command or search chats…");
+    const reopened = await screen.findByPlaceholderText("Search commands, models, and chats…");
     expect(reopened).toHaveValue("");
     expect(screen.getByText("Recent chats")).toBeVisible();
   });
@@ -225,7 +252,7 @@ describe("CommandPalette chat search", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), "aabbcc");
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), "aabbcc");
 
     expect(await screen.findByText("No results.")).toBeVisible();
     expect(screen.queryByText("Budget")).not.toBeInTheDocument();
@@ -253,7 +280,7 @@ describe("CommandPalette theme item", () => {
     await user.click(await screen.findByText("Change theme"));
 
     expect(props.onToggleTheme).toHaveBeenCalledOnce();
-    expect(screen.queryByPlaceholderText("Type a command or search chats…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search commands, models, and chats…")).not.toBeInTheDocument();
   });
 
   it.each(["dark", "light", "system", "appearance"])("is found by searching for %s", async (word) => {
@@ -261,7 +288,7 @@ describe("CommandPalette theme item", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    await user.type(await screen.findByPlaceholderText("Type a command or search chats…"), word);
+    await user.type(await screen.findByPlaceholderText("Search commands, models, and chats…"), word);
 
     expect(await screen.findByText("Change theme")).toBeVisible();
     expect(screen.queryByText("Open settings")).not.toBeInTheDocument();

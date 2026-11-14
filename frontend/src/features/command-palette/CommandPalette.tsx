@@ -1,6 +1,6 @@
 import { Command, defaultFilter } from "cmdk";
 import { Moon, Plus, Settings, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatSummary } from "../../../../contracts/cortex-api";
 import { cloudModelProvider, displayModelName } from "../../lib/localModels";
 import { displayChatTitle } from "../../lib/chatTitle";
@@ -18,7 +18,8 @@ type Props = {
   onNewChat: () => void;
   onOpenSettings: () => void;
   onToggleTheme: () => void;
-  onSelectModel: (model: string) => void;
+  onSelectModel: (model: string) => void | boolean | Promise<void | boolean>;
+  modelSelectionDisabled?: boolean;
   onSelectChat: (threadId: string) => void;
 };
 
@@ -29,11 +30,31 @@ const MAX_CHAT_RESULTS = 50;
 /**
  * How long typing must pause before the chats are searched again. Scoring a
  * title costs microseconds, but a long history is thousands of them on every
- * keystroke; the commands and models, a handful, still filter on each key.
+ * keystroke. Hosted model catalogs can also contain thousands of entries.
  */
 const CHAT_SEARCH_DELAY_MS = 120;
 
 const CHAT_VALUE_PREFIX = "chat:";
+const MODEL_VALUE_PREFIX = "model:";
+const MODEL_PREVIEW_LIMIT = 8;
+const MAX_MODEL_RESULTS = 50;
+
+function modelCommand(model: string): string {
+  return cloudModelProvider(model) ? `Switch to ${displayModelName(model)} (cloud)` : `Switch to ${model}`;
+}
+
+function searchModels(models: readonly string[], current: string | null, query: string): string[] {
+  if (!query) {
+    const preview = models.slice(0, MODEL_PREVIEW_LIMIT);
+    if (current && models.includes(current) && !preview.includes(current)) preview[preview.length - 1] = current;
+    return preview;
+  }
+  return models.map((model) => ({ model, score: defaultFilter(modelCommand(model), query) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_MODEL_RESULTS)
+    .map(({ model }) => model);
+}
 
 /**
  * Chat rows carry the chat id as their value -- so two chats with the same
@@ -43,7 +64,7 @@ const CHAT_VALUE_PREFIX = "chat:";
  * scored on their title alone; every other row is scored as cmdk would.
  */
 function paletteFilter(value: string, search: string, keywords?: string[]): number {
-  if (value.startsWith(CHAT_VALUE_PREFIX)) return defaultFilter(keywords?.join(" ") ?? "", search);
+  if (value.startsWith(CHAT_VALUE_PREFIX) || value.startsWith(MODEL_VALUE_PREFIX)) return defaultFilter(keywords?.join(" ") ?? "", search);
   return defaultFilter(value, search, keywords);
 }
 
@@ -67,6 +88,7 @@ export function CommandPalette({
   onOpenSettings,
   onToggleTheme,
   onSelectModel,
+  modelSelectionDisabled,
   onSelectChat,
 }: Props) {
   const open = useUiStore((state) => state.commandPaletteOpen);
@@ -97,8 +119,10 @@ export function CommandPalette({
         onNewChat={() => execute(onNewChat)}
         onOpenSettings={() => execute(onOpenSettings)}
         onToggleTheme={() => execute(onToggleTheme)}
-        onSelectModel={(model) => execute(() => onSelectModel(model))}
+        onSelectModel={onSelectModel}
+        modelSelectionDisabled={modelSelectionDisabled}
         onSelectChat={(id) => execute(() => onSelectChat(id))}
+        onClose={() => setOpen(false)}
       />
     </Command.Dialog>
   );
@@ -118,9 +142,31 @@ function PaletteBody({
   onOpenSettings,
   onToggleTheme,
   onSelectModel,
+  modelSelectionDisabled,
   onSelectChat,
-}: Props) {
+  onClose,
+}: Props & { onClose: () => void }) {
   const [query, setQuery] = useState("");
+  const pendingSelection = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const chooseModel = async (model: string) => {
+    if (modelSelectionDisabled || pendingSelection.current) return;
+    if (model === selectedModel) { onClose(); return; }
+    pendingSelection.current = true;
+    try {
+      if (await onSelectModel(model) !== false && mounted.current) onClose();
+    } catch {
+      // The workspace presents the save error. Preserve the search for a retry.
+    } finally {
+      pendingSelection.current = false;
+    }
+  };
+
   const trimmed = query.trim();
   const settledQuery = useDebouncedValue(trimmed, CHAT_SEARCH_DELAY_MS);
   // Clearing the box shows the recent chats at once; only searching waits.
@@ -130,6 +176,7 @@ function PaletteBody({
     () => (searching ? searchChats(chats, chatQuery) : chats.slice(0, RECENT_CHAT_LIMIT)),
     [chats, chatQuery, searching],
   );
+  const visibleModels = useMemo(() => searchModels(localModels, selectedModel, chatQuery), [localModels, selectedModel, chatQuery]);
   // Until the search has caught up with what was typed, the chat rows on screen
   // are for an earlier query, and "No results" would be premature.
   const searchPending = trimmed !== chatQuery;
@@ -139,7 +186,7 @@ function PaletteBody({
       <Command.Input
         value={query}
         onValueChange={setQuery}
-        placeholder="Type a command or search chats…"
+        placeholder="Search commands, models, and chats…"
         className="command-palette-input"
       />
       <Command.List className="command-palette-list">
@@ -160,12 +207,13 @@ function PaletteBody({
             <span className="command-palette-current">Next: {THEME_LABELS[nextThemePreference(theme)]}</span>
           </Command.Item>
         </Command.Group>
-        {localModels.length > 0 && (
+        {visibleModels.length > 0 && (
           <Command.Group heading="Model" className="command-palette-group">
-            {localModels.map((model) => (
-              <Command.Item key={model} className="command-palette-item" onSelect={() => onSelectModel(model)}>
+            {visibleModels.map((model) => (
+              <Command.Item key={model} className="command-palette-item" value={`${MODEL_VALUE_PREFIX}${model}`}
+                keywords={[modelCommand(model)]} disabled={modelSelectionDisabled} onSelect={() => void chooseModel(model)}>
                 <Sparkles size={15} aria-hidden="true" />
-                Switch to {cloudModelProvider(model) ? `${displayModelName(model)} (cloud)` : model}
+                <span className="command-palette-model-name">{modelCommand(model)}</span>
                 {model === selectedModel && <span className="command-palette-current">Current</span>}
               </Command.Item>
             ))}

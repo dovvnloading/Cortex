@@ -87,6 +87,24 @@ describe("MessageComposer", () => {
     await waitFor(() => expect(composer).toHaveValue(""));
   });
 
+  it("keeps the draft and blocks Enter, Send and Retry pending a model save", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onRetry = vi.fn();
+    render(<MessageComposer value="My draft" phase="ready" selectedModel="cloud:lab:alpha" localModels={[]}
+      error="Previous send failed." modelBusy onValueChange={vi.fn()} onSubmit={onSubmit} onRetry={onRetry}
+      onSelectModel={vi.fn()} onStop={vi.fn()} />);
+    const input = screen.getByRole("textbox", { name: "Message Cortex" });
+    expect(input).toHaveAccessibleDescription(/Saving model settings.*Sending to lab/);
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry last message" })).toBeDisabled();
+    await user.click(input);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onRetry).not.toHaveBeenCalled();
+    expect(input).toHaveValue("My draft");
+  });
+
   it("does not submit on Shift+Enter or during IME composition", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);

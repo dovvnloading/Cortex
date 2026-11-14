@@ -23,6 +23,7 @@ import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
 import type { ListGGUFFiles } from "../models/GGUFDownloadForm";
 import type { CloudCatalog } from "../../hooks/useCloudModels";
 import { CloudProvidersPanel } from "./CloudProvidersPanel";
+import { LocalModelMenu } from "../models/LocalModelMenu";
 import { ModelsPanel } from "../models/ModelsPanel";
 
 type SettingsSection = "general" | "model" | "memory" | "translation" | "system";
@@ -156,7 +157,7 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState(settings);
   const [baseline, setBaseline] = useState(settings);
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>(() => new URLSearchParams(window.location.search).get("section") === "model" ? "model" : "general");
   // A separate editor holds permanent-memory changes that must be protected
   // by the SAME route and beforeunload guard as the settings document.
   // null = clean; [] = unsaved removal of every remembered fact.
@@ -274,9 +275,8 @@ export function SettingsPanel({
       detail: [modelSource(model, detail) === "gguf" ? "GGUF file" : "Ollama", ...modelFacts(detail), ...(detail?.supports_vision ? ["Vision"] : [])].join(" · "),
     };
   });
-  const chatOptions = [...modelOptions, ...(cloud?.models ?? []).map((model) => ({
-    value: model, label: displayModelName(model), detail: "Cloud model",
-  }))];
+  const cloudModels = cloud?.models ?? [];
+  const checkingCloudModels = cloud && (cloud.providers === null || cloud.providers.some(({ id, configured }) => configured && !cloud.catalogs[id]));
   const saveDraft = async () => {
     const submitted = draft;
     const latest = mergeChangedValues(draft, baseline, settings);
@@ -395,9 +395,14 @@ export function SettingsPanel({
                       <small>Choose a local model or a configured cloud provider. Chat titles use the same model.</small>
                     </span>
                   </div>
-                  {chatOptions.length > 0 ? (
-                    <Select id="chat-model" aria-labelledby="chat-model-group" value={selectedChatModel} options={chatOptions}
+                  {cloudModels.length > 0 ? (
+                    <LocalModelMenu models={[...installedModels, ...cloudModels]} details={models.models}
+                      selectedModel={selectedChatModel} onSelect={chooseChatModel} settingsField />
+                  ) : modelOptions.length > 0 ? (
+                    <Select id="chat-model" aria-labelledby="chat-model-group" value={selectedChatModel} options={modelOptions}
                       placeholder={selectedChatModel ? `${displayModelName(selectedChatModel)} (unavailable)` : "Choose a chat model"} onChange={chooseChatModel} />
+                  ) : checkingCloudModels ? (
+                    <p className="muted-note" role="status">Checking available chat models…</p>
                   ) : (
                     <div className="model-selection-empty" role="status">
                       <strong>{selectedChatModel ? `${displayModelName(selectedChatModel)} is unavailable` : "No chat models found"}</strong>
@@ -410,7 +415,7 @@ export function SettingsPanel({
                 {chatProvider && (
                   <p className="muted-note">Sending a message shares the conversation, its attachments, and any included memories with {chatProvider}.</p>
                 )}
-                {cloud && <CloudProvidersPanel cloud={cloud} />}
+                {cloud && <CloudProvidersPanel cloud={cloud} selectedProviderId={chatProvider} />}
 
                 <section className="settings-group" aria-labelledby="generation-defaults-group">
                   <div className="settings-group-head">

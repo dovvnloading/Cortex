@@ -96,6 +96,16 @@ describe("ChatPage composer integration", () => {
     useUiStore.setState({ toasts: [] });
   });
 
+  it("still lets the user stop an admitted cloud generation after its model leaves the catalog", async () => {
+    const api = chatApi();
+    trackGeneration("job-live", "thread-a");
+    render(<ChatWithHost api={api} threadId="thread-a" runtimeReady={false} runtimeMessage="Model retired"
+      localModels={[]} selectedModel="cloud:lab:retired" modelBusy={false} onSelectModel={vi.fn()}
+      onRescanModels={vi.fn()} onThreadCreated={vi.fn()} onForked={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
+    expect(api.cancelGeneration).toHaveBeenCalledWith("job-live");
+  });
+
   it("keeps a blank conversation focused on the composer", async () => {
     renderChat(chatApi());
 
@@ -998,6 +1008,7 @@ describe("ChatPage composer integration", () => {
     };
     storePendingGenerationAdmission({
       requestId: "retry-original-payload",
+      expectedModel: "cloud:custom:original:deployment",
       operation: "generate",
       threadId: "thread-a",
       baseRevision: 3,
@@ -1021,6 +1032,7 @@ describe("ChatPage composer integration", () => {
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
     expect(generate.mock.calls[0][0]).toEqual(expect.objectContaining({
       request_id: "retry-original-payload",
+      expected_model: "cloud:custom:original:deployment",
       user_input: "Summarize the saved attachment",
       attachments: [attachment],
       base_revision: 3,

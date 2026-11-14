@@ -8,7 +8,7 @@ error mapping, coordinator lookup, and the generation job runner.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from threading import Event as ThreadEvent, Thread
@@ -267,12 +267,16 @@ def _request_fingerprint(
     path_thread_id: str | None = None,
 ) -> str:
     """Hash one validated client intent for safe request-ID idempotency."""
+    fields = payload.model_dump(mode="json", exclude={"request_id"})
+    # Keep request IDs admitted by earlier versions replayable after an upgrade.
+    if fields.get("expected_model") is None:
+        fields.pop("expected_model", None)
     canonical = json.dumps(
         {
             "version": 1,
             "operation": operation,
             "path_thread_id": path_thread_id,
-            "payload": payload.model_dump(mode="json", exclude={"request_id"}),
+            "payload": fields,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -536,6 +540,24 @@ async def _start_generation_job(
         generation_payload = payload.model_copy(
             update={"thread_id": thread_id, "attachments": attachment_refs}
         )
+        # Cloud chat works on machines without a running local runtime. Only
+        # the optional local translation step needs that inventory in this case.
+        installed_models: tuple[str, ...] = ()
+        if not is_cloud_model(settings.models.chat) or settings.translation.enabled:
+            installed_models = await asyncio.to_thread(deps.models.list_installed)
+        # A different window may have saved a model since this composer rendered.
+        # Validate the destination before resolving attachments or preparing a turn.
+        if payload.expected_model is not None and (
+            settings.models.chat != payload.expected_model
+            or (not is_cloud_model(payload.expected_model) and payload.expected_model not in installed_models)
+        ):
+            raise HTTPException(status_code=409, detail={
+                "code": "chat_model_changed",
+                "message": "The chat model changed. Check the selected model before sending again.",
+            })
+        generation_snapshot = _generation_snapshot(
+            reservation.snapshot.job_id, generation_payload, settings, installed_models,
+        )
         compute_observation = await _automatic_compute_observation(
             request,
             principal,
@@ -568,29 +590,21 @@ async def _start_generation_job(
                 if compute_observation
                 else code_observations
             )
-        # Cloud chat works on machines without a running local runtime. Only
-        # the optional local translation step needs that inventory in this case.
-        installed_models: tuple[str, ...] = ()
-        if not is_cloud_model(settings.models.chat) or settings.translation.enabled:
-            installed_models = await asyncio.to_thread(deps.models.list_installed)
         resolved_attachments = await asyncio.to_thread(
             _resolve_generation_attachments,
             request,
             deps,
             principal,
             attachment_refs,
-            model=_selected_chat_model(settings.models.chat, installed_models),
+            model=generation_snapshot.model,
         )
         if earlier_documents:
             resolved_attachments += await asyncio.to_thread(
                 _resolve_earlier_documents, request, deps, principal, earlier_documents
             )
-        generation_snapshot = _generation_snapshot(
-            reservation.snapshot.job_id,
-            generation_payload,
-            settings,
-            installed_models,
-            compute_observation=compute_observation,
+        generation_snapshot = replace(
+            generation_snapshot,
+            host_observations=compute_observation,
             attachments=resolved_attachments,
         )
         # A message the model's window cannot hold is refused here, before the
@@ -1604,9 +1618,6 @@ def _generation_snapshot(
     payload: GenerationRequest,
     settings: CortexSettings,
     installed_models: tuple[str, ...],
-    *,
-    compute_observation: str | None = None,
-    attachments: tuple[GenerationAttachment, ...] = (),
 ) -> GenerationSnapshot:
     chat_model = _selected_chat_model(settings.models.chat, installed_models)
     if chat_model is None:
@@ -1654,11 +1665,6 @@ def _generation_snapshot(
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
         user_system_instructions=instructions,
-        # Deliberately not merged into the instructions above: a worker
-        # observation is tool output, and the prompt places it in the user turn
-        # as marked untrusted data rather than in the system role.
-        host_observations=compute_observation,
-        attachments=attachments,
         code_execution_eligible=code_execution_eligible,
         bypass_system_prompt=settings.generation.bypass_system_prompt,
     )

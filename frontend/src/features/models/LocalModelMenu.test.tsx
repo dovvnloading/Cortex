@@ -174,7 +174,9 @@ describe("LocalModelMenu", () => {
     expect(screen.getAllByRole("option")).toHaveLength(models.length);
 
     await user.type(search, "zzz");
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    const emptyList = screen.getByRole("listbox");
+    expect(search).toHaveAttribute("aria-controls", emptyList.id);
+    expect(within(emptyList).queryByRole("option")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("No local model matches “zzz”.");
 
     await user.clear(search);
@@ -202,6 +204,42 @@ describe("LocalModelMenu", () => {
     // Enter on the model already in use just closes the menu -- no re-save.
     expect(onSelect).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+  });
+
+  it("pages a large live catalog, preserves the active model and searches opaque IDs across all pages", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const models = Array.from({ length: 1200 }, (_, i) => `cloud:lab:variant-${i}:v1`);
+    render(<LocalModelMenu models={models} selectedModel={models[900]} onSelect={onSelect} />);
+
+    await user.click(screen.getByRole("button", { name: /Selected cloud model/ }));
+    const search = await screen.findByRole("combobox", { name: "Search models" });
+    expect(screen.getAllByRole("option")).toHaveLength(50);
+    expect(activeOption(search)).toHaveAttribute("aria-posinset", "901");
+    expect(activeOption(search)).toHaveAttribute("aria-setsize", "1200");
+    await user.click(screen.getByRole("button", { name: "Next models" }));
+    expect(screen.getByText("951–1000 of 1200 models")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Previous models" }));
+    expect(screen.getByText("901–950 of 1200 models")).toBeVisible();
+    await user.type(search, "variant-1199");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    await user.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith(models[1199]);
+  });
+
+  it("retains keyboard focus and an actionable highlight when discovery removes the highlighted model", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const model = "cloud:lab:active";
+    const { rerender } = render(<LocalModelMenu models={[model, "cloud:lab:old"]} selectedModel={model} onSelect={onSelect} />);
+    await user.click(screen.getByRole("button", { name: /Selected cloud model/ }));
+    const search = await screen.findByRole("combobox");
+    await user.keyboard("{ArrowDown}");
+    rerender(<LocalModelMenu models={["cloud:lab:new"]} selectedModel={model} onSelect={onSelect} />);
+    expect(search).toHaveFocus();
+    expect(activeOption(search)).toBe(screen.getByRole("option", { name: "lab / new" }));
+    await user.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("cloud:lab:new");
   });
 
   it("keeps the menu open when a selection could not be saved", async () => {

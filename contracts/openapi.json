@@ -1812,6 +1812,19 @@
             ],
             "title": "Base Revision"
           },
+          "expected_model": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Model"
+          },
           "options": {
             "anyOf": [
               {
@@ -3081,6 +3094,19 @@
               }
             ],
             "title": "Base Revision"
+          },
+          "expected_model": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Model"
           },
           "message_id": {
             "maxLength": 200,

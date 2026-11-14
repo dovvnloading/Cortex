@@ -803,12 +803,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   /** Resolves to the saved document, or null when nothing was saved. */
-  const saveSettings = async (next: CortexSettings): Promise<CortexSettings | null> => {
+  const saveSettings = async (next: CortexSettings, successMessage = "Settings saved."): Promise<CortexSettings | null> => {
+    if (useSettingsStore.getState().saving) return null;
     setSaving(true);
     try {
       const response = await api.updateSettings({ settings: next, expected_revision: next.revision });
       setSettings(response.settings);
-      notify("Settings saved.", "success");
+      notify(successMessage, "success");
       return response.settings;
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -1155,24 +1156,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     // Recheck at the write point, not only at download completion. The
     // existing expected_revision also protects a simultaneous remote save.
     if (expectedCurrentModel !== undefined && (current.models?.chat ?? null) !== expectedCurrentModel) return false;
-    setSaving(true);
-    try {
-      const response = await api.updateSettings({
-        settings: {
-          ...current,
-          models: { ...current.models, chat: model, title: null },
-        },
-        expected_revision: current.revision,
-      });
-      setSettings(response.settings);
-      notify(`${displayModelName(model)} is ready for ${cloudModelProvider(model) ? "cloud" : "local"} chat.`, "success");
-      return true;
-    } catch (error) {
-      notify(apiMessage(error, "Could not save the chat model selection."), "error");
-      return false;
-    } finally {
-      setSaving(false);
-    }
+    const cloudProvider = cloudModelProvider(model);
+    const message = cloudProvider
+      ? `${displayModelName(model)} selected for cloud chat.`
+      : `${displayModelName(model)} is ready for local chat.`;
+    return Boolean(await saveSettings({
+      ...current,
+      models: { ...current.models, chat: model, title: null },
+    }, message));
   };
 
   if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace...</main>;
@@ -1235,14 +1226,16 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     await Promise.all([cloud.refresh(), local]);
   };
   const routeChatId = route.kind === "chat" ? route.threadId : null;
-  const openSettings = () => {
+  const openSettingsAt = (path: string) => {
     // Settings can be opened from either the shell header or the command
     // palette. Capture the route at the point of entry so Close returns to
     // the chat that was actually visible, including a newly-created thread.
     const currentRoute = parseAppRoute(window.location.pathname);
     if (currentRoute.kind === "chat") setSettingsReturnChatId(currentRoute.threadId);
-    navigate("/settings");
+    navigate(path);
   };
+  const openSettings = () => openSettingsAt("/settings");
+  const openModelSettings = () => openSettingsAt("/settings?section=model");
   const toggleTheme = () => {
     // System, light, dark, and round again: "system" is a choice of its own,
     // and used to be turned into "dark" by the first press.
@@ -1260,7 +1253,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
             ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} cloud={cloud} modelBusy={modelBusy} activeModelJobKind={activeModelJobKind} modelProgress={modelProgress} secondaryModelJobs={secondaryModelJobs} secondaryModelProgress={secondaryModelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} onUnloadModel={unloadLocalModel} /></RouteBoundary>
             : route.kind === "workspace"
               ? <RouteBoundary key="workspace" name="Project workspace" scope="workspace" resetKey={pathname} onRetry={WorkspacePage.reload}><WorkspacePage api={api} localModels={localModels.filter((name) => !isGGUFModel(name))} selectedModel={provider ? null : selectedModel} /></RouteBoundary>
-            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={chatModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseChatModel} onRescanModels={refreshChatModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
+            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={chatModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseChatModel} onRescanModels={refreshChatModels} onOpenModelSettings={openModelSettings} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>
       <CommandPalette
@@ -1271,7 +1264,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         onNewChat={() => navigate("/chat/new")}
         onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}
-        onSelectModel={(model) => void chooseChatModel(model)}
+        modelSelectionDisabled={saving || generationActive}
+        onSelectModel={chooseChatModel}
         onSelectChat={(id) => navigate(chatPath(id))}
       />
       <ShortcutsHelpDialog />
@@ -1279,9 +1273,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   );
 }
 
-function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: (expectedMemos: string[]) => Promise<void> }) {
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onOpenModelSettings, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onOpenModelSettings: () => void; onForked: (chat: ChatResponse) => void; onClearMemory: (expectedMemos: string[]) => Promise<void> }) {
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
+  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onOpenModelSettings={onOpenModelSettings} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
 }
 
 function SettingsRoute({ activeChatId, onLoadMemories, ...props }: Omit<SettingsPanelProps, "onClose" | "onRetryMemory"> & { activeChatId: string | null; onLoadMemories: () => Promise<void> }) {

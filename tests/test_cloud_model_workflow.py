@@ -98,12 +98,37 @@ def test_cloud_only_discovery_refresh_persistence_and_generation(tmp_path, monke
         with TestClient(app, base_url="http://127.0.0.1") as client:
             headers = session_headers(client, app)
             assert client.get("/api/v1/settings", headers=headers).json()["settings"]["models"]["chat"] == selected
-            job = client.post("/api/v1/generations", json={"user_input": "Hello!"}, headers=headers)
+            intent = {"request_id": "bound-destination", "user_input": "Hello!", "expected_model": selected}
+            stale_intent = {**intent, "expected_model": "cloud:another:org/chat:v2"}
+            rejected = client.post("/api/v1/generations", json=stale_intent, headers=headers)
+            assert rejected.status_code == 409
+            assert rejected.json()["detail"]["code"] == "chat_model_changed"
+            assert client.get("/api/v1/chats", headers=headers).json() == []
+            assert turns == []
+            job = client.post("/api/v1/generations", json=intent, headers=headers)
             assert job.status_code == 202, job.text
             events = client.get(f"/api/v1/generations/{job.json()['job_id']}/events", headers=headers)
             assert parse_sse_events(events.text)[-1]["event"] == "generation.completed"
             transcript = client.get(f"/api/v1/chats/{job.json()['thread_id']}", headers=headers).json()
             assert transcript["messages"][-1]["content"] == "A synthetic answer."
+
+            dispatched = list(turns)
+            settings = client.get("/api/v1/settings", headers=headers).json()["settings"]
+            settings["models"]["chat"] = "cloud:custom:other-model"
+            client.put("/api/v1/settings", headers=headers, json={"settings": settings}).raise_for_status()
+            # A lost 202 still identifies the original job after settings change.
+            replay = client.post("/api/v1/generations", headers=headers, json=intent)
+            assert replay.json()["job_id"] == job.json()["job_id"]
+            changed_replay = client.post("/api/v1/generations", headers=headers, json=stale_intent)
+            assert changed_replay.status_code == 409
+            retry = client.post(
+                f"/api/v1/chats/{job.json()['thread_id']}/regenerations", headers=headers,
+                json={"message_id": transcript["messages"][-1]["id"], "expected_model": selected},
+            )
+            assert retry.status_code == 409
+            assert retry.json()["detail"]["code"] == "chat_model_changed"
+            assert client.get(f"/api/v1/chats/{job.json()['thread_id']}", headers=headers).json() == transcript
+            assert turns == dispatched
         assert turns and all(turn["model"] == "org/chat:v2" for turn in turns)
 
 

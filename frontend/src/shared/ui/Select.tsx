@@ -55,7 +55,7 @@ export function Select({
           <BaseSelect.Popup className="select-popup">
             <BaseSelect.List>
               {options.map((option) => (
-                <BaseSelect.Item key={option.value} value={option.value} className="select-item" aria-label={option.label}>
+                <BaseSelect.Item key={option.value} value={option.value} className="select-item" aria-label={option.label} aria-description={option.detail}>
                   <BaseSelect.ItemText className="select-item-text">
                     <strong>{option.label}</strong>
                     {option.detail && <small>{option.detail}</small>}

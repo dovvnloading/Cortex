@@ -43,7 +43,9 @@ export function resolveRuntimeAvailability({
   const provider = cloudModelProvider(selectedModel);
   if (provider) {
     if (inventoryLoading) return { ready: false, reason: "inventory-loading", message: `Checking models from ${provider}…` };
-    if (selectedModelAvailable) return { ready: true, reason: null, message: null };
+    if (selectedModelAvailable) {
+      return { ready: true, reason: null, message: providerError ? `Showing the last model list from ${provider}. ${providerError}` : null };
+    }
     return { ready: false, reason: "model-unavailable", message: providerError ?? `The selected model is unavailable from ${provider}. Refresh cloud models in Settings or choose another model.` };
   }
   if (inventoryLoading) {

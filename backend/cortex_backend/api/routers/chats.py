@@ -422,6 +422,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         )
                     generation_payload = GenerationRequest(
                         request_id=payload.request_id,
+                        expected_model=payload.expected_model,
                         thread_id=thread_id,
                         user_input=user_input,
                         base_revision=current_revision,

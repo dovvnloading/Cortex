@@ -463,12 +463,15 @@ response translation use their existing local models.
 its window becomes visible again, and every five minutes while visible.
 Use **Refresh cloud models** in Settings or **Rescan** in the composer to
 check immediately. A service may list models for an entire region or project.
-Inference still requires permission for the selected model. If a selected
+Inference still requires permission for the selected model. After a temporary
+refresh failure, Cortex labels the last successful catalog and keeps it usable. If a selected
 model disappears, the picker keeps its name visible so you can choose another.
 
 **Deployment names and manual IDs.** Use the exact deployment name for Azure.
 Set `AZURE_FOUNDRY_PROJECT` for Foundry discovery, or set
-`AZURE_OPENAI_DEPLOYMENTS` to deployment names separated by commas. Other
+`AZURE_OPENAI_DEPLOYMENTS` to deployment names separated by commas. For a
+manually listed Foundry Claude deployment, use `anthropic/<deployment-name>`
+to select the Anthropic Messages API. Other
 providers accept `CORTEX_<PROVIDER>_MODELS` (upper-case ID with hyphens
 changed to underscores). Setting it replaces discovery for that provider.
 Use this for private deployments, accounts without listing permissions, or

@@ -93,7 +93,7 @@ describe("command palette with a chat pending deletion", () => {
   }
 
   async function searchPalette(text: string) {
-    fireEvent.change(palette().getByPlaceholderText(/search chats/i), { target: { value: text } });
+    fireEvent.change(palette().getByRole("combobox"), { target: { value: text } });
     // Past the palette's typing pause, so the chat search has caught up.
     await passTime(200);
   }

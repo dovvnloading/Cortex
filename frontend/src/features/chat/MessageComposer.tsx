@@ -68,6 +68,7 @@ export type MessageComposerProps = {
   onStop: () => Promise<void> | void;
   onSelectModel: (model: string) => Promise<void | boolean>;
   onRescanModels?: () => Promise<void> | void;
+  onOpenModelSettings?: () => void;
   onRetry?: () => Promise<void | boolean> | void | boolean;
   onDismissError?: () => void;
   attachments?: readonly ChatAttachment[];
@@ -101,6 +102,7 @@ export function MessageComposer({
   onStop,
   onSelectModel,
   onRescanModels,
+  onOpenModelSettings,
   onRetry,
   onDismissError,
   attachments = [],
@@ -126,9 +128,11 @@ export function MessageComposer({
   const [focused, setFocused] = useState(false);
   const statusId = useId();
   const counterId = useId();
+  const cloudNoteId = useId();
   const attachmentInputId = useId();
   const canSubmit = phase === "ready"
     && Boolean(value.trim() || attachments.length > 0)
+    && !modelBusy
     && !submissionPending
     && !attachmentsBusy
     && !imageInputBlocked;
@@ -245,7 +249,7 @@ export function MessageComposer({
 
   const drop = useFileDropZone({ disabled: !onAddAttachments, onFiles: stageFiles });
 
-  const status = phase === "starting"
+  const status = modelBusy && !isGenerating ? "Saving model settings…" : phase === "starting"
     ? "Starting response…"
     : phase === "stopping"
       ? "Stopping response…"
@@ -254,7 +258,7 @@ export function MessageComposer({
       : phase === "generating"
         ? generationElsewhere ? "Generating in another thread" : "Generating…"
         : phase === "unavailable"
-          ? runtimeMessage ?? "The local runtime is unavailable."
+          ? provider && runtimeMessage ? "" : runtimeMessage ?? "The local runtime is unavailable."
           : focused
             ? "Enter to send · Shift+Enter for a new line"
             : "";
@@ -262,7 +266,7 @@ export function MessageComposer({
   // control is pressed. Marked separately so narrow layouts can drop it: there
   // it would claim a row mid-click and shift the control out from under the
   // pointer before the click lands.
-  const statusIsKeyboardHint = phase === "ready" && focused;
+  const statusIsKeyboardHint = phase === "ready" && !modelBusy && focused;
 
   return (
     <div className="composer-area">
@@ -270,12 +274,17 @@ export function MessageComposer({
         <div className="composer-error" role="alert">
           <span className="composer-error-copy">{error}</span>
           <span className="composer-error-actions">
-            {onRetry && <button className="button button-quiet" type="button" onClick={() => { void Promise.resolve(onRetry()).finally(returnFocus); }}>Retry last message</button>}
+            {onRetry && <button className="button button-quiet" type="button" disabled={modelBusy} onClick={() => { void Promise.resolve(onRetry()).finally(returnFocus); }}>Retry last message</button>}
             {onDismissError && <button className="button button-quiet" type="button" onClick={onDismissError}>Dismiss</button>}
           </span>
         </div>
       )}
-      {provider && <p className="composer-cloud-note">Sending to {provider} includes this conversation, its attachments, and any included memories.</p>}
+      {provider && (
+        <div className="composer-cloud-note" id={cloudNoteId}>
+          Sending to {provider} includes this conversation, its attachments, and any included memories.
+          {runtimeMessage && (phase === "ready" || phase === "unavailable") && <p role="status">{runtimeMessage}</p>}
+        </div>
+      )}
       <form className="composer" onSubmit={handleSubmit}>
         <div
           ref={surfaceRef}
@@ -329,7 +338,7 @@ export function MessageComposer({
               rows={1}
               maxLength={MAX_MESSAGE_LENGTH}
               enterKeyHint="send"
-              aria-describedby={`${statusId}${showCounter ? ` ${counterId}` : ""}`}
+              aria-describedby={[statusId, provider && cloudNoteId, showCounter && counterId].filter(Boolean).join(" ")}
               placeholder={phase === "unavailable" && !provider ? "Write a message while the local runtime reconnects" : "Message Cortex"}
               onChange={(event) => onValueChange(event.target.value)}
               onKeyDown={handleKeyDown}
@@ -367,6 +376,7 @@ export function MessageComposer({
                   selectedModel={selectedModel}
                   onSelect={onSelectModel}
                   onRescan={onRescanModels}
+                  onOpenSettings={onOpenModelSettings}
                   disabled={controlsLocked || modelBusy}
                   runtimeStatus={runtimeStatus}
                 />

@@ -730,6 +730,7 @@ JobStatus = Literal[
 
 
 class GenerationRequest(NonBlankTextModel):
+    expected_model: str | None = Field(default=None, min_length=1, max_length=2048)
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_input: str = Field(min_length=1, max_length=100_000)
@@ -748,6 +749,7 @@ class ForkRequest(APIModel):
 
 
 class RegenerationRequest(NonBlankTextModel):
+    expected_model: str | None = Field(default=None, min_length=1, max_length=2048)
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     message_id: str = Field(min_length=1, max_length=200)
     user_input: str | None = Field(default=None, max_length=100_000)
