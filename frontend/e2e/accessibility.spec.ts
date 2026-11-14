@@ -131,8 +131,9 @@ test("the slider track is drawn: filled part in Highlight, the rest in ButtonTex
   // The track is a shadow-DOM pseudo-element, so getComputedStyle cannot see
   // it. Forced colours do not paint a gradient background at all, which made
   // the track vanish; sample the rendered pixels instead.
-  const box = (await slider.boundingBox())!;
-  const png = await page.screenshot({ clip: { x: box.x, y: box.y, width: box.width, height: box.height } });
+  // The cloud provider section above the sliders can push them below the
+  // scrollable pane. Capture the control itself, scrolling it into view.
+  const png = await slider.screenshot();
   const sampled = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${base64}`)).blob());
     const canvas = document.createElement("canvas");
