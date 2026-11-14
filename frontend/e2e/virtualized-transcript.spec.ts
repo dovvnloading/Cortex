@@ -44,13 +44,13 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
   await expect(page.locator(".transcript-virtual")).toBeVisible();
 
   // Loaded aligned-to-bottom: the last message is visible without scrolling.
-  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeVisible();
+  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeInViewport();
 
   // The first message is windowed out at the bottom (not present at all, or
   // present but off-screen) — scrolling up must actually bring it in, which
   // only a genuinely virtualized/scrollable container can do.
-  await page.locator(".transcript-virtual").evaluate((node) => { node.scrollTop = 0; });
-  await expect(page.getByText("First message in a long conversation.")).toBeVisible();
+  await page.locator(".transcript-virtual").evaluate((node) => { node.scrollTo({ top: 0, behavior: "instant" }); });
+  await expect(page.getByText("First message in a long conversation.")).toBeInViewport();
 
   // Scrolling back down returns to the tail of the conversation (proves the
   // scroll container is a real, continuously scrollable virtualized list,
@@ -58,6 +58,6 @@ test("renders and scrolls a virtualized transcript once messages cross the thres
   // streamed content arrives while scrolled away — that interaction is
   // covered at the unit level in MessageList.test.tsx and is unchanged by
   // virtualization, so it is not re-asserted here.
-  await page.locator(".transcript-virtual").evaluate((node) => { node.scrollTop = node.scrollHeight; });
-  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeVisible();
+  await page.locator(".transcript-virtual").evaluate((node) => { node.scrollTo({ top: node.scrollHeight, behavior: "instant" }); });
+  await expect(page.getByText(`Reply number ${messageCount - 1}.`)).toBeInViewport();
 });
