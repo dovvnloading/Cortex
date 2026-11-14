@@ -105,7 +105,7 @@ describe("SettingsPanel", () => {
     expect(screen.queryByRole("checkbox", { name: /follow-up suggestions/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "AI Model" }));
 
-    expect(screen.getByText(/Models installed through Ollama and local \.gguf files/)).toBeVisible();
+    expect(screen.getByText(/Choose a local model or a configured cloud provider/)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "Chat model tag" })).not.toBeInTheDocument();
     const picker = screen.getByRole("combobox", { name: "Chat model" });
     picker.focus();

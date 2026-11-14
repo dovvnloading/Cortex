@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useRef, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatMessage } from "../../../../contracts/cortex-api";
 import { usePrefersReducedMotion } from "../../hooks/useMediaQuery";
@@ -60,7 +60,13 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const reducedMotion = usePrefersReducedMotion();
   const wasVirtualizedRef = useRef(virtualized);
   const lastPlainScrollTopRef = useRef(0);
+  const nearEndRef = useRef(true);
   const lastPlainNearEndRef = useRef(true);
+  const previousCount = useRef<number | null>(null);
+  const handleNearEndChange = (nearEnd: boolean) => {
+    nearEndRef.current = nearEnd;
+    onNearEndChange(nearEnd);
+  };
 
   // The plain transcript is intentionally retained for short chats, but the
   // implementation switch at the threshold must not discard a reader's
@@ -101,26 +107,30 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   trailingRef.current = trailingContent;
   const Footer = useCallback(() => <>{trailingRef.current}</>, []);
 
-  useImperativeHandle(ref, () => ({
-    scrollToBottom: (requested = "instant") => {
-      const behavior = reducedMotion ? "instant" : requested;
-      if (virtualized) {
-        // Not scrollToIndex(last message): the in-flight streaming bubble
-        // lives in the Footer slot, *below* the final item, so targeting the
-        // last item leaves the answer being typed out of view for the whole
-        // response. Scroll the virtualized scroller to its true bottom, which
-        // is what the plain path does with the scroll height.
-        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior });
-      } else if (plainRef.current) {
-        const node = plainRef.current;
-        // An explicit behavior wins over the stylesheet's `scroll-behavior:
-        // smooth` on .transcript; assigning scrollTop would not, and would
-        // start a fresh animation on every streamed frame.
-        if (typeof node.scrollTo === "function") node.scrollTo({ top: node.scrollHeight, behavior });
-        else node.scrollTop = node.scrollHeight;
-      }
-    },
-  }), [virtualized, reducedMotion]);
+  const scrollToBottom = useCallback((requested: "instant" | "smooth" = "instant") => {
+    const behavior = reducedMotion ? "instant" : requested;
+    if (virtualized) {
+      // The pending reply lives in Virtuoso's Footer, below the last item.
+      virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior });
+    } else if (plainRef.current) {
+      const node = plainRef.current;
+      if (typeof node.scrollTo === "function") node.scrollTo({ top: node.scrollHeight, behavior });
+      else node.scrollTop = node.scrollHeight;
+    }
+  }, [reducedMotion, virtualized]);
+
+  useImperativeHandle(ref, () => ({ scrollToBottom }), [scrollToBottom]);
+
+  // Virtuoso measures rows before aligning the initial index. Exposing its
+  // tail through an earlier imperative jump lets that alignment override a
+  // reader who has already scrolled away. Let each scroller own its mount.
+  useEffect(() => {
+    const count = messages.length;
+    const previous = previousCount.current;
+    previousCount.current = count;
+    const mountingVirtualList = virtualized && (previous === null || previous < VIRTUALIZE_THRESHOLD);
+    if (count && count !== previous && !mountingVirtualList && nearEndRef.current) scrollToBottom();
+  }, [messages.length, virtualized, scrollToBottom]);
 
   const renderCard = (message: ChatMessage, index: number) => (
     <MessageCard
@@ -149,8 +159,9 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
           const node = plainRef.current;
           if (!node) return;
           lastPlainScrollTopRef.current = node.scrollTop;
-          lastPlainNearEndRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_END_PX;
-          onNearEndChange(lastPlainNearEndRef.current);
+          const nearEnd = node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_END_PX;
+          lastPlainNearEndRef.current = nearEnd;
+          handleNearEndChange(nearEnd);
         }}
       >
         {messages.map((message, index) => renderCard(message, index))}
@@ -168,10 +179,10 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       // Virtuoso animates this itself, in script, so the stylesheet's
       // reduced-motion rule does not reach it.
       followOutput={isStreaming ? (reducedMotion ? "auto" : "smooth") : false}
-      initialTopMostItemIndex={lastPlainNearEndRef.current ? messages.length - 1 : 0}
+      initialTopMostItemIndex={lastPlainNearEndRef.current ? { index: "LAST", align: "end" } : 0}
       alignToBottom
       atBottomThreshold={NEAR_END_PX}
-      atBottomStateChange={onNearEndChange}
+      atBottomStateChange={handleNearEndChange}
       itemContent={(index, message) => renderCard(message, index)}
       components={{ Footer }}
     />

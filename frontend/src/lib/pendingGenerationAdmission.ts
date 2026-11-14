@@ -6,6 +6,7 @@ export type PendingGenerationAdmission = {
   operation: "generate" | "regenerate";
   threadId: string | null;
   baseRevision?: number;
+  expectedModel?: string;
   options?: GenerationOptionsOverride;
   messageId?: string;
   prompt: string;
@@ -25,6 +26,7 @@ function isPending(value: unknown): value is PendingGenerationAdmission {
     && (v.operation === "generate" || v.operation === "regenerate")
     && (v.threadId === null || typeof v.threadId === "string")
     && (v.baseRevision === undefined || (Number.isSafeInteger(v.baseRevision) && v.baseRevision >= 0))
+    && (v.expectedModel === undefined || (typeof v.expectedModel === "string" && v.expectedModel.length > 0 && v.expectedModel.length <= 2048))
     && (v.options === undefined || (v.options !== null && typeof v.options === "object" && !Array.isArray(v.options)))
     && (v.operation === "generate" || (typeof v.messageId === "string" && v.messageId.length > 0))
     && typeof v.prompt === "string"

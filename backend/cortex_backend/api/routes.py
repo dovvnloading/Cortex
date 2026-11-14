@@ -8,7 +8,7 @@ error mapping, coordinator lookup, and the generation job runner.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from threading import Event as ThreadEvent, Thread
@@ -34,7 +34,8 @@ from cortex_backend.services.chat import (
     normalize_title,
     title_from_first_message,
 )
-from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, ollama_keep_alive
+from cortex_backend.services.chat_client import KEEP_ALIVE_OPTION, is_cloud_model, ollama_keep_alive
+from cortex_backend.services import cloud_providers
 from cortex_backend.services import token_budget
 from cortex_backend.services.code_feedback import format_execution_observation, head_tail_truncate
 from cortex_backend.services.code_prompt import should_offer_code_execution
@@ -266,12 +267,16 @@ def _request_fingerprint(
     path_thread_id: str | None = None,
 ) -> str:
     """Hash one validated client intent for safe request-ID idempotency."""
+    fields = payload.model_dump(mode="json", exclude={"request_id"})
+    # Keep request IDs admitted by earlier versions replayable after an upgrade.
+    if fields.get("expected_model") is None:
+        fields.pop("expected_model", None)
     canonical = json.dumps(
         {
             "version": 1,
             "operation": operation,
             "path_thread_id": path_thread_id,
-            "payload": payload.model_dump(mode="json", exclude={"request_id"}),
+            "payload": fields,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -535,6 +540,24 @@ async def _start_generation_job(
         generation_payload = payload.model_copy(
             update={"thread_id": thread_id, "attachments": attachment_refs}
         )
+        # Cloud chat works on machines without a running local runtime. Only
+        # the optional local translation step needs that inventory in this case.
+        installed_models: tuple[str, ...] = ()
+        if not is_cloud_model(settings.models.chat) or settings.translation.enabled:
+            installed_models = await asyncio.to_thread(deps.models.list_installed)
+        # A different window may have saved a model since this composer rendered.
+        # Validate the destination before resolving attachments or preparing a turn.
+        if payload.expected_model is not None and (
+            settings.models.chat != payload.expected_model
+            or (not is_cloud_model(payload.expected_model) and payload.expected_model not in installed_models)
+        ):
+            raise HTTPException(status_code=409, detail={
+                "code": "chat_model_changed",
+                "message": "The chat model changed. Check the selected model before sending again.",
+            })
+        generation_snapshot = _generation_snapshot(
+            reservation.snapshot.job_id, generation_payload, settings, installed_models,
+        )
         compute_observation = await _automatic_compute_observation(
             request,
             principal,
@@ -567,25 +590,21 @@ async def _start_generation_job(
                 if compute_observation
                 else code_observations
             )
-        installed_models = await asyncio.to_thread(deps.models.list_installed)
         resolved_attachments = await asyncio.to_thread(
             _resolve_generation_attachments,
             request,
             deps,
             principal,
             attachment_refs,
-            settings=settings,
+            model=generation_snapshot.model,
         )
         if earlier_documents:
             resolved_attachments += await asyncio.to_thread(
                 _resolve_earlier_documents, request, deps, principal, earlier_documents
             )
-        generation_snapshot = _generation_snapshot(
-            reservation.snapshot.job_id,
-            generation_payload,
-            settings,
-            installed_models,
-            compute_observation=compute_observation,
+        generation_snapshot = replace(
+            generation_snapshot,
+            host_observations=compute_observation,
             attachments=resolved_attachments,
         )
         # A message the model's window cannot hold is refused here, before the
@@ -1599,14 +1618,11 @@ def _generation_snapshot(
     payload: GenerationRequest,
     settings: CortexSettings,
     installed_models: tuple[str, ...],
-    *,
-    compute_observation: str | None = None,
-    attachments: tuple[GenerationAttachment, ...] = (),
 ) -> GenerationSnapshot:
-    chat_model = _selected_local_model(settings.models.chat, installed_models)
+    chat_model = _selected_chat_model(settings.models.chat, installed_models)
     if chat_model is None:
         raise ChatDomainError(
-            "No local model is available. Install one in Ollama, or add a GGUF file, then rescan Models in Settings.",
+            "No local model is available. Choose a configured cloud model in Settings, install an Ollama model, or add a GGUF file.",
             code="model_unavailable",
         )
     # Titles intentionally share the selected chat model. This keeps model
@@ -1614,7 +1630,7 @@ def _generation_snapshot(
     title_model = chat_model
     if (
         settings.translation.enabled
-        and settings.models.translation not in installed_models
+        and (is_cloud_model(settings.models.translation) or settings.models.translation not in installed_models)
     ):
         raise ChatDomainError(
             "Choose or install a local translation model before enabling translation.",
@@ -1649,24 +1665,27 @@ def _generation_snapshot(
         translation_enabled=settings.translation.enabled,
         target_language=settings.translation.target_language,
         user_system_instructions=instructions,
-        # Deliberately not merged into the instructions above: a worker
-        # observation is tool output, and the prompt places it in the user turn
-        # as marked untrusted data rather than in the system role.
-        host_observations=compute_observation,
-        attachments=attachments,
         code_execution_eligible=code_execution_eligible,
         bypass_system_prompt=settings.generation.bypass_system_prompt,
     )
 
 
-def _selected_local_model(
+def _selected_chat_model(
     configured_model: str | None,
     installed_models: tuple[str, ...],
 ) -> str | None:
-    """Use a saved local model when present, otherwise the live inventory."""
+    """Cloud inference requires an explicit selection; fallback stays local."""
+    if configured_model and is_cloud_model(configured_model):
+        provider_id = configured_model.split(":", 2)[1]
+        if provider_id not in cloud_providers.PROVIDERS or not cloud_providers.provider_configured(provider_id):
+            raise ChatDomainError(
+                "The selected cloud provider is not configured. Check its setup in Settings or choose another model.",
+                code="model_unavailable",
+            )
+        return configured_model
     if configured_model and configured_model in installed_models:
         return configured_model
-    return installed_models[0] if installed_models else None
+    return next((model for model in installed_models if not is_cloud_model(model)), None)
 
 
 def _chat_response(chat: Mapping[str, Any]) -> ChatResponse:
@@ -2001,7 +2020,7 @@ def _resolve_generation_attachments(
     principal: SessionPrincipal,
     references: list[ChatAttachment],
     *,
-    settings: CortexSettings,
+    model: str | None,
 ) -> tuple[GenerationAttachment, ...]:
     if not references:
         return ()
@@ -2014,10 +2033,10 @@ def _resolve_generation_attachments(
             "The combined attachment size is too large for one message.",
             code="invalid_input",
         )
-    installed = deps.models.list_installed()
-    model = _selected_local_model(settings.models.chat, installed)
     contains_image = any(item.kind == "image" for item in references)
-    if contains_image and model is not None:
+    # Cloud adapters transmit images to the selected model. Provider catalogs
+    # do not universally declare vision support; the provider validates input.
+    if contains_image and model is not None and not is_cloud_model(model):
         vision = deps.models.model_supports_vision(model)
         # Refuse unless vision is confirmed for a model we know cannot do it.
         # Silently dropping the image is the worst outcome available: the

@@ -38,11 +38,9 @@ class OnboardingSettings(_SettingsModel):
 
 
 class ModelSettings(_SettingsModel):
-    # Chat and title models are selected from the models Ollama reports on
-    # this machine, or from local GGUF files (id "gguf:<filename>", see
-    # cortex_backend.llamacpp.model_directory). Keeping them unset until a
-    # scan happens avoids shipping a hidden, hard-coded model preference.
-    chat: ModelTag | None = None
+    # Also accepts cloud:<provider>:<model ID>. Cloud deployment resource IDs
+    # can be much longer than an Ollama tag. An unset choice remains local.
+    chat: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)] | None = None
     # Not read by anything: titles use the chat model (see
     # ``_generation_snapshot``). Kept because a settings file saved by an
     # earlier build carries the key and this model rejects unknown ones, so

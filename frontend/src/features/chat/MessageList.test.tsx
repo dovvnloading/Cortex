@@ -411,6 +411,22 @@ describe("MessageList scrolling", () => {
     expect(onNearEndChange).toHaveBeenLastCalledWith(false);
   });
 
+  it("lets Virtuoso perform its initial bottom alignment once and follows later appends only for a reader at the end", async () => {
+    const { MockedMessageList, captured } = await loadWithVirtuoso();
+    const { rerender } = render(<MockedMessageList {...listProps(makeMessages(45))} />);
+    expect(captured.props?.initialTopMostItemIndex).toEqual({ index: "LAST", align: "end" });
+    expect(captured.scrollTo).not.toHaveBeenCalled();
+
+    captured.props?.atBottomStateChange?.(false);
+    rerender(<MockedMessageList {...listProps(makeMessages(46))} />);
+    expect(captured.scrollTo).not.toHaveBeenCalled();
+    expect(captured.props?.initialTopMostItemIndex).toEqual({ index: "LAST", align: "end" });
+
+    captured.props?.atBottomStateChange?.(true);
+    rerender(<MockedMessageList {...listProps(makeMessages(47))} />);
+    expect(captured.scrollTo).toHaveBeenCalledExactlyOnceWith({ top: Number.MAX_SAFE_INTEGER, behavior: "instant" });
+  });
+
   it("follows streamed output smoothly on the virtualized transcript, and not at all when idle", async () => {
     const { MockedMessageList, captured } = await loadWithVirtuoso();
     const { rerender } = render(<MockedMessageList {...listProps(makeMessages(45), true)} />);

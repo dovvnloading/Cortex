@@ -131,8 +131,9 @@ test("the slider track is drawn: filled part in Highlight, the rest in ButtonTex
   // The track is a shadow-DOM pseudo-element, so getComputedStyle cannot see
   // it. Forced colours do not paint a gradient background at all, which made
   // the track vanish; sample the rendered pixels instead.
-  const box = (await slider.boundingBox())!;
-  const png = await page.screenshot({ clip: { x: box.x, y: box.y, width: box.width, height: box.height } });
+  // The cloud provider section above the sliders can push them below the
+  // scrollable pane. Capture the control itself, scrolling it into view.
+  const png = await slider.screenshot();
   const sampled = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${base64}`)).blob());
     const canvas = document.createElement("canvas");
@@ -145,16 +146,24 @@ test("the slider track is drawn: filled part in Highlight, the rest in ButtonTex
     const resolve = (keyword: string) => {
       const probe = document.createElement("span");
       probe.style.color = keyword;
+      probe.style.forcedColorAdjust = "none";
       document.body.append(probe);
-      const value = getComputedStyle(probe).color.match(/\d+/g)!.slice(0, 3).map(Number);
+      const color = getComputedStyle(probe).color;
       probe.remove();
-      return value;
+      // Some system palettes use translucent Highlight. Compare the rendered
+      // colour over the slider's own backdrop, including the system alpha.
+      const sample = document.createElement("canvas").getContext("2d")!;
+      sample.putImageData(context.getImageData(1, 1, 1, 1), 0, 0);
+      sample.fillStyle = color;
+      sample.fillRect(0, 0, 1, 1);
+      return Array.from(sample.getImageData(0, 0, 1, 1).data.slice(0, 3));
     };
     return { filled: pixel(0.08), empty: pixel(0.95), highlight: resolve("Highlight"), buttonText: resolve("ButtonText") };
   }, png.toString("base64"));
 
-  expect(sampled.filled).toEqual(sampled.highlight);
-  expect(sampled.empty).toEqual(sampled.buttonText);
+  // Canvas and CSS may round a translucent system colour one channel step apart.
+  sampled.filled.forEach((channel, i) => expect(Math.abs(channel - sampled.highlight[i])).toBeLessThanOrEqual(1));
+  sampled.empty.forEach((channel, i) => expect(Math.abs(channel - sampled.buttonText[i])).toBeLessThanOrEqual(1));
 });
 
 test("the current chat row is outlined, not only tinted", async ({ page }) => {

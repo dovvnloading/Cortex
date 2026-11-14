@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 # Ollama tags are ``name:tag`` and never contain this prefix, so it
 # unambiguously identifies a GGUF model id (see llamacpp/model_directory.py).
 GGUF_PREFIX = "gguf:"
+CLOUD_PREFIX = "cloud:"
+
+
+def is_cloud_model(model: str | None) -> bool:
+    """A qualified provider ID. An ordinary Ollama tag like cloud:latest stays local."""
+    if not model or not model.startswith(CLOUD_PREFIX):
+        return False
+    provider, separator, model_id = model[len(CLOUD_PREFIX):].partition(":")
+    return bool(separator and provider and "/" not in provider and model_id)
 
 # Constrained-decoding controls that only llama-server understands (see
 # llamacpp/chat_client.py's _build_request_body). The Ollama API rejects
@@ -407,9 +416,12 @@ class RoutingChatClient:
     ``translation_model`` separately from the chat model).
     """
 
-    def __init__(self, ollama_client: ChatClient, llamacpp_client: ChatClient) -> None:
+    def __init__(
+        self, ollama_client: ChatClient, llamacpp_client: ChatClient, cloud_client: ChatClient | None = None,
+    ) -> None:
         self._ollama = ollama_client
         self._llamacpp = llamacpp_client
+        self._cloud = cloud_client
 
     def chat(
         self,
@@ -422,6 +434,10 @@ class RoutingChatClient:
         think: bool | None = None,
     ) -> dict:
         target = self._llamacpp if model.startswith(GGUF_PREFIX) else self._ollama
+        if is_cloud_model(model):
+            if self._cloud is None:
+                raise RuntimeError("Cloud inference is unavailable.")
+            target = self._cloud
         # Only forward the optional keywords when they are actually set, so
         # test doubles and any future ChatClient implementation that predates
         # one of them keep working against their original call shape.

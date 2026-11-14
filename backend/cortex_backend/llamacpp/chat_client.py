@@ -16,7 +16,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from threading import Event, Lock
@@ -25,35 +25,13 @@ from typing import Any, Concatenate, ParamSpec, TypeVar
 import httpx
 
 from cortex_backend.services.chat_client import close_when_cancelled
+from cortex_backend.services.sse import sse_payloads
 
 from .errors import LlamaCppError
 from .model_directory import resolve_gguf_path
 from .server_manager import LlamaServerProvider
 
 logger = logging.getLogger(__name__)
-
-
-def _sse_payloads(lines: Iterable[str]) -> Iterator[str]:
-    """Yield complete SSE data fields (multiple data: lines make one event).
-
-    The HTTP response iterator supplies lines, not events. Parsing each line
-    independently can discard a valid multiline JSON delta and still report a
-    completed answer. Keepalives and metadata fields are not message content.
-    """
-    data_lines: list[str] = []
-    for line in lines:
-        if not line:
-            if data_lines:
-                yield "\n".join(data_lines)
-                data_lines = []
-            continue
-        if line.startswith("data:"):
-            value = line[len("data:"):]
-            data_lines.append(value[1:] if value.startswith(" ") else value)
-    # Be permissive of EOF directly after the last data line. The caller still
-    # enforces an explicit terminal completion marker (or cancellation).
-    if data_lines:
-        yield "\n".join(data_lines)
 
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
@@ -403,7 +381,7 @@ class LlamaCppChatClient:
                     cancellation_event, response.close, name="llama-chat-cancel-watch"
                 ):
                     try:
-                        for payload in _sse_payloads(response.iter_lines()):
+                        for payload in sse_payloads(response.iter_lines()):
                             if cancellation_event.is_set():
                                 break
                             if payload.strip() == "[DONE]":

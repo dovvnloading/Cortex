@@ -80,7 +80,7 @@ function ResetButton({ label, title, onClick, disabled }: { label: string; title
   );
 }
 
-export function ContextWindowField({ idPrefix, values, defaults, onChange, disabled }: FieldProps) {
+export function ContextWindowField({ idPrefix, values, defaults, onChange, disabled, cloud = false }: FieldProps & { cloud?: boolean }) {
   const spec = PARAM_SPECS.num_ctx;
   const descriptionId = useId();
   const inputId = `${idPrefix}-num-ctx`;
@@ -116,7 +116,7 @@ export function ContextWindowField({ idPrefix, values, defaults, onChange, disab
           <span className="range-field-unit" aria-hidden="true">tokens</span>
         </span>
       </div>
-      <small id={descriptionId} className="range-field-hint">{spec.description}</small>
+      <small id={descriptionId} className="range-field-hint">{cloud ? "Maximum context Cortex prepares for the provider." : spec.description}</small>
       <SegmentedControl
         aria-label={`${spec.label} size`}
         className="generation-context-stops"

@@ -24,7 +24,7 @@ import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { prunePersistedGenerationOptions } from "../lib/persistedGenerationOptions";
 import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
-import { displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
+import { cloudModelProvider, displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { persistLatestWrite, type LatestWrite } from "../lib/latestWrite";
 import {
@@ -43,6 +43,7 @@ import { chatPath, navigate, parseAppRoute, useNavigate, usePathname } from "../
 import { applyStoredTheme, DEFAULT_THEME_PREFERENCE, nextThemePreference } from "../lib/theme";
 import { useAppliedTheme } from "../hooks/useAppliedTheme";
 import { useModelJobs, type ModelJobResult } from "../hooks/useModelJobs";
+import { useCloudModels } from "../hooks/useCloudModels";
 import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import { useChatStore } from "../stores/useChatStore";
 import { useModelStore } from "../stores/useModelStore";
@@ -310,6 +311,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const [memos, setMemos] = useState<string[]>([]);
   const [memoryLoad, setMemoryLoad] = useState<MemoryLoadState>({ status: "loading" });
   const models = useModelStore((state) => state.models);
+  const cloud = useCloudModels(api, !loading && !loadError && system !== null);
   const setModels = useModelStore((state) => state.setModels);
   const [memoryBusy, setMemoryBusy] = useState(false);
   const modelBusy = useModelStore((state) => state.modelBusy);
@@ -801,12 +803,13 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   };
 
   /** Resolves to the saved document, or null when nothing was saved. */
-  const saveSettings = async (next: CortexSettings): Promise<CortexSettings | null> => {
+  const saveSettings = async (next: CortexSettings, successMessage = "Settings saved."): Promise<CortexSettings | null> => {
+    if (useSettingsStore.getState().saving) return null;
     setSaving(true);
     try {
       const response = await api.updateSettings({ settings: next, expected_revision: next.revision });
       setSettings(response.settings);
-      notify("Settings saved.", "success");
+      notify(successMessage, "success");
       return response.settings;
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -1007,7 +1010,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       );
       return;
     }
-    const selected = await chooseLocalModel(`gguf:${filename}`, selectedChatModelAtStart);
+    const selected = await chooseChatModel(`gguf:${filename}`, selectedChatModelAtStart);
     if (!selected) {
       notify(`${filename} downloaded. Select it from the model menu to start chatting.`, "success");
     }
@@ -1143,7 +1146,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     }
   };
 
-  const chooseLocalModel = async (model: string, expectedCurrentModel?: string | null): Promise<boolean> => {
+  const chooseChatModel = async (model: string, expectedCurrentModel?: string | null): Promise<boolean> => {
     // Read the store rather than this render's `settings`: a GGUF download
     // runs for minutes before selecting what it fetched, and Settings stays
     // editable throughout. Sending the snapshot captured when the download
@@ -1153,24 +1156,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     // Recheck at the write point, not only at download completion. The
     // existing expected_revision also protects a simultaneous remote save.
     if (expectedCurrentModel !== undefined && (current.models?.chat ?? null) !== expectedCurrentModel) return false;
-    setSaving(true);
-    try {
-      const response = await api.updateSettings({
-        settings: {
-          ...current,
-          models: { ...current.models, chat: model, title: null },
-        },
-        expected_revision: current.revision,
-      });
-      setSettings(response.settings);
-      notify(`${displayModelName(model)} is ready for local chat.`, "success");
-      return true;
-    } catch (error) {
-      notify(apiMessage(error, "Could not save the local model selection."), "error");
-      return false;
-    } finally {
-      setSaving(false);
-    }
+    const cloudProvider = cloudModelProvider(model);
+    const message = cloudProvider
+      ? `Cloud model selected for ${cloudProvider}.`
+      : `${displayModelName(model)} is ready for local chat.`;
+    return Boolean(await saveSettings({
+      ...current,
+      models: { ...current.models, chat: model, title: null },
+    }, message));
   };
 
   if (loading) return <main className="loading-state" aria-live="polite"><span className="loading-spinner" />Loading local workspace...</main>;
@@ -1183,10 +1176,18 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const inventoryLoading = models === null;
   const inventory = models ?? LOADING_MODELS;
   const localModels = localModelNames(inventory);
+  const chatModels = [...localModels, ...cloud.models];
   const hasLocalInventory = Array.isArray(inventory.installed_models) || Array.isArray(inventory.models);
   const selectedModel = settings.models?.chat?.trim() || null;
   const selectedModelSupportsVision = inventory.models?.find((model) => model.name === selectedModel)?.supports_vision ?? null;
-  const selectedModelAvailable = Boolean(selectedModel && (!hasLocalInventory || localModels.includes(selectedModel)));
+  const provider = cloudModelProvider(selectedModel);
+  const catalog = provider ? cloud.catalogs[provider] : undefined;
+  const catalogLoading = cloud.providers === null || Boolean(
+    cloud.providers.some(({ id, configured }) => id === provider && configured) && !catalog,
+  );
+  const selectedModelAvailable = Boolean(selectedModel && (provider
+    ? cloud.models.includes(selectedModel)
+    : !hasLocalInventory || localModels.includes(selectedModel)));
   // The initial system response seeds the store, while polling updates it as
   // the managed runtime starts/stops. Settings must consume that live value
   // rather than the immutable workspace snapshot.
@@ -1196,20 +1197,45 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const runtimeAvailability = resolveRuntimeAvailability({
     selectedModel,
     selectedModelAvailable,
-    inventoryLoading,
+    inventoryLoading: provider ? catalogLoading : inventoryLoading,
+    providerError: cloud.error ?? catalog?.error,
     ollamaConnected: inventory.connection?.success ?? true,
     ollamaMessage: inventory.connection?.message,
     llamacppStatus,
   });
+  const modelConnection: ModelResponse["connection"] = provider
+    ? catalogLoading ? null : {
+      success: runtimeAvailability.ready,
+      status: runtimeAvailability.ready ? "connected" : "error",
+      message: runtimeAvailability.message ?? `Using ${displayModelName(selectedModel!)}`,
+    }
+    : inventory.connection;
+  const refreshChatModels = async () => {
+    if (!cloud.providers?.some(({ configured }) => configured)) {
+      await Promise.all([cloud.refresh(), checkModels()]);
+      return;
+    }
+    // A full Ollama health-check job can take minutes on a cloud-only installation.
+    // Re-read local tags and remote catalogs independently for the chat picker.
+    const generation = ++modelGenerationRef.current;
+    const local = api.models().then((result) => {
+      if (mountedRef.current && generation === modelGenerationRef.current) setModels(result);
+    }).catch(() => {
+      if (mountedRef.current && generation === modelGenerationRef.current) setModels(UNAVAILABLE_MODELS);
+    });
+    await Promise.all([cloud.refresh(), local]);
+  };
   const routeChatId = route.kind === "chat" ? route.threadId : null;
-  const openSettings = () => {
+  const openSettingsAt = (path: string) => {
     // Settings can be opened from either the shell header or the command
     // palette. Capture the route at the point of entry so Close returns to
     // the chat that was actually visible, including a newly-created thread.
     const currentRoute = parseAppRoute(window.location.pathname);
     if (currentRoute.kind === "chat") setSettingsReturnChatId(currentRoute.threadId);
-    navigate("/settings");
+    navigate(path);
   };
+  const openSettings = () => openSettingsAt("/settings");
+  const openModelSettings = () => openSettingsAt("/settings?section=model");
   const toggleTheme = () => {
     // System, light, dark, and round again: "system" is a choice of its own,
     // and used to be turned into "dark" by the first press.
@@ -1221,24 +1247,25 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     <>
       {/* Above the route switch, so a generation keeps streaming into the store while Settings is open. */}
       <GenerationStreamHost api={api} onSessionExpired={onSessionExpired} />
-      <AppShell chats={visibleChats} activeChatId={routeChatId} modelConnection={inventory.connection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
+      <AppShell chats={visibleChats} activeChatId={routeChatId} modelConnection={modelConnection} theme={theme} executionTasks={visibleExecutionTasks} onCancelExecution={cancelExecution} onDecideExecutionApproval={decideExecutionApproval} onLoadCodeSource={loadCodeSource} onDownloadArtifact={downloadExecutionArtifact} onOpenSettings={openSettings} onRenameChat={renameChat} onDeleteChat={deleteChat} groups={groups} onCreateGroup={createGroup} onRenameGroup={renameGroup} onDeleteGroup={deleteGroup} onToggleGroup={toggleGroup} onMoveChat={moveChat}>
         <Suspense fallback={<div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" />Loading workspace...</div>}>
           {route.kind === "settings"
-            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} modelBusy={modelBusy} activeModelJobKind={activeModelJobKind} modelProgress={modelProgress} secondaryModelJobs={secondaryModelJobs} secondaryModelProgress={secondaryModelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} onUnloadModel={unloadLocalModel} /></RouteBoundary>
+            ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} cloud={cloud} modelBusy={modelBusy} activeModelJobKind={activeModelJobKind} modelProgress={modelProgress} secondaryModelJobs={secondaryModelJobs} secondaryModelProgress={secondaryModelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} onUnloadModel={unloadLocalModel} /></RouteBoundary>
             : route.kind === "workspace"
-              ? <RouteBoundary key="workspace" name="Project workspace" scope="workspace" resetKey={pathname} onRetry={WorkspacePage.reload}><WorkspacePage api={api} localModels={localModels.filter((name) => !isGGUFModel(name))} selectedModel={selectedModel} /></RouteBoundary>
-            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseLocalModel} onRescanModels={checkModels} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
+              ? <RouteBoundary key="workspace" name="Project workspace" scope="workspace" resetKey={pathname} onRetry={WorkspacePage.reload}><WorkspacePage api={api} localModels={localModels.filter((name) => !isGGUFModel(name))} selectedModel={provider ? null : selectedModel} /></RouteBoundary>
+            : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={chatModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseChatModel} onRescanModels={refreshChatModels} onOpenModelSettings={openModelSettings} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>
       <CommandPalette
         chats={visibleChats}
-        localModels={localModels}
+        localModels={chatModels}
         selectedModel={selectedModel}
         theme={theme}
         onNewChat={() => navigate("/chat/new")}
         onOpenSettings={openSettings}
         onToggleTheme={toggleTheme}
-        onSelectModel={(model) => void chooseLocalModel(model)}
+        modelSelectionDisabled={saving || generationActive}
+        onSelectModel={chooseChatModel}
         onSelectChat={(id) => navigate(chatPath(id))}
       />
       <ShortcutsHelpDialog />
@@ -1246,9 +1273,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   );
 }
 
-function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onForked: (chat: ChatResponse) => void; onClearMemory: (expectedMemos: string[]) => Promise<void> }) {
+function ChatRoute({ threadId, api, runtimeReady, runtimeMessage, localModels, selectedModel, selectedModelSupportsVision, modelBusy, onSelectModel, onRescanModels, onOpenModelSettings, onForked, onClearMemory }: { threadId: string | null; api: CortexApi; runtimeReady: boolean; runtimeMessage: string | null; localModels: readonly string[]; selectedModel: string | null; selectedModelSupportsVision: boolean | null; modelBusy: boolean; onSelectModel: (model: string) => Promise<boolean>; onRescanModels: () => Promise<void>; onOpenModelSettings: () => void; onForked: (chat: ChatResponse) => void; onClearMemory: (expectedMemos: string[]) => Promise<void> }) {
   const navigate = useNavigate();
-  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
+  return <ChatPage api={api} threadId={threadId} runtimeReady={runtimeReady} runtimeMessage={runtimeMessage} localModels={localModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={modelBusy} onSelectModel={onSelectModel} onRescanModels={onRescanModels} onOpenModelSettings={onOpenModelSettings} onThreadCreated={(id) => navigate(chatPath(id), { replace: true })} onForked={(chat) => { onForked(chat); navigate(chatPath(chat.id)); }} onClearMemory={onClearMemory} />;
 }
 
 function SettingsRoute({ activeChatId, onLoadMemories, ...props }: Omit<SettingsPanelProps, "onClose" | "onRetryMemory"> & { activeChatId: string | null; onLoadMemories: () => Promise<void> }) {

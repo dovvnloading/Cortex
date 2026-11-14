@@ -31,6 +31,7 @@ type Props = {
   modelBusy: boolean;
   onSelectModel: (model: string) => Promise<boolean>;
   onRescanModels: () => Promise<void>;
+  onOpenModelSettings?: () => void;
   onThreadCreated: (threadId: string) => void;
   onForked: (chat: ChatResponse) => void;
   onClearMemory?: (expectedMemos: string[]) => Promise<void>;
@@ -77,6 +78,7 @@ export function ChatPage({
   modelBusy,
   onSelectModel,
   onRescanModels,
+  onOpenModelSettings,
   onThreadCreated,
   onForked,
   onClearMemory,
@@ -211,12 +213,6 @@ export function ChatPage({
 
   const currentChat = threadId !== null && chat?.id === threadId ? chat : null;
 
-  useEffect(() => {
-    if (isNearTranscriptEnd.current) {
-      messageListRef.current?.scrollToBottom();
-    }
-  }, [currentChat?.messages?.length]);
-
   // The pending bubble reports each change to the visible reply. A reader at
   // the bottom is followed down; new text while scrolled away surfaces a "jump
   // to latest" affordance instead of yanking the viewport. Stable, because it
@@ -251,15 +247,13 @@ export function ChatPage({
     ? generationError
     : null;
   const visibleGenerationError = visibleError?.message ?? null;
-  const composerPhase: ComposerPhase = !runtimeReady
-    ? "unavailable"
-    : generation.phase === "stopping"
-      ? "stopping"
-      : generation.jobId
-        ? generation.contentReady ? "finishing" : "generating"
-        : starting
-          ? "starting"
-          : "ready";
+  // Catalog changes affect the next send. Keep the controls for an admitted
+  // generation available even if discovery retires its model mid-stream.
+  const composerPhase: ComposerPhase = generation.phase === "stopping"
+    ? "stopping"
+    : generation.jobId
+      ? generation.contentReady ? "finishing" : "generating"
+      : starting ? "starting" : runtimeReady ? "ready" : "unavailable";
 
   // A generation failed: show it for the thread it belongs to. A failure that
   // came in while this page was away is waiting on the store and shows here on
@@ -423,7 +417,7 @@ export function ChatPage({
     admissionOverride?: PendingGenerationAdmission,
   ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
-    if (!input || generation.jobId || startingRef.current) return null;
+    if (!input || modelBusy || generation.jobId || startingRef.current) return null;
     if (!requestIdOverride && pendingAdmissionRef.current) {
       // Never overwrite an unresolved acceptance with a new request ID.
       // A lost 202 may represent a live generation still running on the backend.
@@ -462,6 +456,7 @@ export function ChatPage({
       options,
       messageId: regenerateMessageId,
       prompt: input,
+      expectedModel: selectedModel ?? undefined,
       attachments: [...suppliedAttachments],
       createdAt: Date.now(),
     };
@@ -474,6 +469,7 @@ export function ChatPage({
       const accepted = regenerateMessageId
         ? await api.regenerate(requestThreadId ?? "", {
             request_id: requestId,
+            expected_model: pendingAdmission.expectedModel,
             message_id: regenerateMessageId,
             user_input: input,
             attachments: [...suppliedAttachments],
@@ -481,6 +477,7 @@ export function ChatPage({
           })
         : await api.generate({
             request_id: requestId,
+            expected_model: pendingAdmission.expectedModel,
             thread_id: requestThreadId,
             user_input: input,
             attachments: [...suppliedAttachments],
@@ -536,13 +533,24 @@ export function ChatPage({
         setPendingRecovery(null);
         clearPendingGenerationAdmission();
       }
+      const modelChanged = requestError instanceof ApiError && requestError.code === "chat_model_changed";
+      if (modelChanged) {
+        const previous = useSettingsStore.getState().settings;
+        try {
+          const latest = await api.settings();
+          const store = useSettingsStore.getState();
+          if (!store.saving && store.settings === previous) store.setSettings(latest.settings);
+        } catch {
+          // Keep the draft and the rejection visible if settings cannot be reloaded.
+        }
+      }
       setGenerationError({
         threadId,
         message: describeApiError(requestError, "The response could not be started. Your message is still here."),
         // A validation error says the request itself is wrong; sending the
         // same prompt again can only fail the same way, so the banner offers
         // no Retry and leaves the fix to the draft.
-        retryable: !(requestError instanceof ApiError && requestError.kind === "validation"),
+        retryable: !modelChanged && !(requestError instanceof ApiError && requestError.kind === "validation"),
       });
       return null;
     } finally {
@@ -1025,7 +1033,7 @@ export function ChatPage({
         messages={messages}
         isStreaming={activeJobForCurrentThread}
         finalAssistantId={finalAssistantId}
-        busy={Boolean(generation.jobId) || starting}
+        busy={Boolean(generation.jobId) || starting || modelBusy}
         forkingMessageId={forkingMessage}
         onRegenerate={regenerateFrom}
         onFork={forkFrom}
@@ -1058,6 +1066,7 @@ export function ChatPage({
           onStop={cancel}
           onSelectModel={onSelectModel}
           onRescanModels={onRescanModels}
+          onOpenModelSettings={onOpenModelSettings}
           onRetry={lastPrompt && visibleError?.retryable ? retryLastPrompt : undefined}
           onDismissError={() => {
             // If the stored request belongs to another chat, Dismiss must

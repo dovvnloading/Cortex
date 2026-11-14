@@ -375,6 +375,21 @@ class ModelResponse(APIModel):
     models: tuple[InstalledModel, ...] = ()
 
 
+class CloudProviderInfo(APIModel):
+    id: str
+    label: str
+    configured: bool
+    setup: str
+
+
+class CloudProviderListResponse(APIModel):
+    providers: tuple[CloudProviderInfo, ...]
+
+
+class CloudModelListResponse(APIModel):
+    models: tuple[str, ...]
+
+
 class ModelPullRequest(NonBlankTextModel):
     model: str = Field(min_length=1, max_length=200)
     # Present for clients that want safe request replay after losing HTTP 202.
@@ -715,6 +730,7 @@ JobStatus = Literal[
 
 
 class GenerationRequest(NonBlankTextModel):
+    expected_model: str | None = Field(default=None, min_length=1, max_length=2048)
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_input: str = Field(min_length=1, max_length=100_000)
@@ -733,6 +749,7 @@ class ForkRequest(APIModel):
 
 
 class RegenerationRequest(NonBlankTextModel):
+    expected_model: str | None = Field(default=None, min_length=1, max_length=2048)
     request_id: str | None = Field(default=None, min_length=1, max_length=200)
     message_id: str = Field(min_length=1, max_length=200)
     user_input: str | None = Field(default=None, max_length=100_000)

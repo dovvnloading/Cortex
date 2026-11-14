@@ -2,6 +2,8 @@ import type {
   AddMemoryRequest,
   ChatAttachment,
   ChatAttachmentStageRequest,
+  CloudModelListResponse,
+  CloudProviderListResponse,
   ChatGroup,
   ChatResponse,
   ChatSummary,
@@ -636,6 +638,14 @@ export class CortexApi {
 
   models(): Promise<ModelResponse> {
     return this.request<ModelResponse>("/models");
+  }
+
+  cloudProviders(signal?: AbortSignal): Promise<CloudProviderListResponse> {
+    return this.request<CloudProviderListResponse>("/cloud/providers", { signal });
+  }
+
+  cloudModels(providerId: string, signal?: AbortSignal): Promise<CloudModelListResponse> {
+    return this.request<CloudModelListResponse>(`/cloud/providers/${encodeURIComponent(providerId)}/models`, { signal });
   }
 
   jobStatus(jobId: string): Promise<JobStatusResponse> {

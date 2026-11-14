@@ -30,7 +30,7 @@ test("opens the command palette with Ctrl+K, filters, and navigates to settings"
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
   await page.keyboard.press("Control+k");
-  const paletteInput = page.getByPlaceholder("Type a command or search chats…");
+  const paletteInput = page.getByPlaceholder("Search commands, models, and chats…");
   await expect(paletteInput).toBeVisible();
 
   await paletteInput.fill("settings");

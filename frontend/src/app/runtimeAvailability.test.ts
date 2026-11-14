@@ -69,6 +69,15 @@ describe("resolveRuntimeAvailability for a GGUF model", () => {
   });
 });
 
+describe("runtime routing for cloud-prefixed model names", () => {
+  it("treats Ollama tags and registry ports as local, and preserves colons in cloud model IDs", () => {
+    const unavailable = { state: "failed" } as const;
+    expect(availabilityFor("cloud:latest", unavailable).reason).toBe("ollama-unavailable");
+    expect(availabilityFor("cloud:8080/team/model:latest", unavailable).reason).toBe("ollama-unavailable");
+    expect(availabilityFor("cloud:bedrock:vendor.model:0", unavailable).ready).toBe(true);
+  });
+});
+
 describe("llamacppPollInterval", () => {
   it("watches a runtime that is downloading, starting, or stopping closely", () => {
     for (const state of ["downloading_binary", "starting", "stopping"] as const) {

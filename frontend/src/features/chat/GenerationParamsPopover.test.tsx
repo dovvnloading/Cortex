@@ -120,6 +120,19 @@ describe("GenerationParamsPopover", () => {
     expect(onChange).toHaveBeenLastCalledWith({ num_ctx: 16384 });
   });
 
+  it("shows the cloud context budget and preserves local sampling overrides when changing it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<GenerationParamsPopover cloud value={{ temperature: 0.2 }} defaults={DEFAULTS} onChange={onChange} />);
+
+    expect(screen.getByRole("button", { name: "Generation parameters for this chat" })).not.toHaveClass("params-trigger-active");
+    const dialog = await openPopover(user);
+    expect(within(dialog).getByText(/The cloud provider controls sampling/)).toBeVisible();
+    expect(within(dialog).queryByText("Temperature")).toBeNull();
+    await user.click(within(dialog).getByRole("radio", { name: "16,384 tokens" }));
+    expect(onChange).toHaveBeenLastCalledWith({ temperature: 0.2, num_ctx: 16384 });
+  });
+
   it("resets a single field without touching the others", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
