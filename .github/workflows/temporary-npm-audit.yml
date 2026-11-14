@@ -1,0 +1,59 @@
+name: Temporary npm security audit diagnostic
+
+# Diagnostic only for the issue #500 remediation branch.
+# This file will be deleted before any change is merged.
+on:
+  push:
+    branches: [fix/frontend-npm-advisories-500]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked packages
+        working-directory: frontend
+        run: npm ci
+      - name: Inspect advisories and nonbreaking resolutions
+        shell: bash
+        run: |
+          cd frontend
+          npm audit --json > ../npm-audit-before.json || true
+          npm audit fix --package-lock-only --dry-run --json > ../npm-audit-fix-dryrun.json || true
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const audit = JSON.parse(fs.readFileSync('../npm-audit-before.json','utf8'));
+          const vulnerabilities = audit.vulnerabilities ?? {};
+          console.log('=== AUDIT COUNTS ===');
+          console.log(JSON.stringify(audit.metadata?.vulnerabilities ?? {},null,2));
+          console.log('=== ADVISORY DETAILS ===');
+          for(const [name,v] of Object.entries(vulnerabilities)){
+            console.log(JSON.stringify({name, severity:v.severity, range:v.range, isDirect:v.isDirect, fixAvailable:v.fixAvailable, via:v.via?.map(a=>typeof a==='string'?a:{title:a.title,url:a.url,range:a.range,source:a.source})},null,0));
+          }
+          const fix = JSON.parse(fs.readFileSync('../npm-audit-fix-dryrun.json','utf8'));
+          console.log('=== NONBREAKING FIX DRY RUN ===');
+          console.log(JSON.stringify({error:fix.error, added:fix.added, removed:fix.removed, changed:fix.changed, audit:fix.audit?.metadata?.vulnerabilities},null,2));
+          NODE
+      - name: Preserve machine-readable audit reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-audit-diagnostic
+          path: |
+            npm-audit-before.json
+            npm-audit-fix-dryrun.json
+          if-no-files-found: warn
+          retention-days: 7
