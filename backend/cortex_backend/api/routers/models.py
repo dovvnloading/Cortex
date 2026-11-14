@@ -24,6 +24,9 @@ from cortex_backend.api.routes import (
     _request_fingerprint,
 )
 from cortex_backend.api.schemas import (
+    CloudModelListResponse,
+    CloudProviderInfo,
+    CloudProviderListResponse,
     HuggingFaceFileEntry,
     HuggingFaceFileListResponse,
     JobAccepted,
@@ -42,6 +45,8 @@ from cortex_backend.llamacpp.download import (
     split_gguf_parts,
 )
 from cortex_backend.services.models import ModelPullProgress
+from cortex_backend.services import cloud_providers
+from cortex_backend.services.chat_client import CLOUD_PREFIX
 from dataclasses import asdict
 from fastapi import (
     Depends,
@@ -53,6 +58,27 @@ from fastapi import (
 
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     """Attach the models routes to ``router``."""
+
+    @router.get("/cloud/providers", response_model=CloudProviderListResponse)
+    def cloud_provider_list(_: SessionPrincipal = Depends(require_session)) -> CloudProviderListResponse:
+        return CloudProviderListResponse(providers=tuple(
+            CloudProviderInfo(
+                id=spec.id, label=spec.label, configured=cloud_providers.provider_configured(spec.id), setup=spec.setup,
+            )
+            for spec in cloud_providers.PROVIDERS.values()
+        ))
+
+    @router.get("/cloud/providers/{provider_id}/models", response_model=CloudModelListResponse)
+    def cloud_models(provider_id: str, _: SessionPrincipal = Depends(require_session)) -> CloudModelListResponse:
+        if provider_id not in cloud_providers.PROVIDERS:
+            raise HTTPException(status_code=404, detail="Unknown cloud provider.")
+        if not cloud_providers.provider_configured(provider_id):
+            raise HTTPException(status_code=409, detail="Configure this provider and restart Cortex.")
+        try:
+            ids = cloud_providers.list_cloud_models(provider_id)
+        except cloud_providers.CloudProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return CloudModelListResponse(models=tuple(f"{CLOUD_PREFIX}{provider_id}:{model}" for model in ids))
 
 
     @router.get("/models", response_model=ModelResponse)

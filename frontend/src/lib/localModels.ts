@@ -25,9 +25,18 @@ export function isGGUFModel(name: string | null | undefined): boolean {
   return Boolean(name && name.startsWith("gguf:"));
 }
 
-/** Strip the internal "gguf:" id prefix for user-facing text -- the prefix
- * matters for backend routing, not for what a person reads in the UI. */
+/** Keep model IDs opaque after the provider separator. Bedrock IDs, for example, can contain colons. */
+export function cloudModelProvider(name: string | null | undefined): string | null {
+  if (!name?.startsWith("cloud:")) return null;
+  const end = name.indexOf(":", 6);
+  const provider = name.slice(6, end);
+  return end > 6 && end < name.length - 1 && !provider.includes("/") ? provider : null;
+}
+
+/** Keep the cloud provider visible when different providers expose the same model ID. */
 export function displayModelName(name: string): string {
+  const provider = cloudModelProvider(name);
+  if (provider) return `${provider} / ${name.slice(7 + provider.length)}`;
   return isGGUFModel(name) ? name.slice("gguf:".length) : name;
 }
 

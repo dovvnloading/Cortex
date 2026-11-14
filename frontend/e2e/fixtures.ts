@@ -6,9 +6,9 @@ import { test as base, expect, type Page } from "@playwright/test";
  * localhost failure that the application may quietly fall back from.
  *
  * Individual tests register their more specific routes after this fixture;
- * Playwright gives those routes precedence.  The chat-groups GET is the one
- * intentionally harmless default because every authenticated workspace
- * loads it in the background, while tests that exercise groups override it.
+ * Playwright gives those routes precedence. Every authenticated workspace
+ * reads groups and configured cloud providers in the background. Tests
+ * that exercise those inventories override the empty defaults.
  */
 async function installApiRequestGuard(page: Page) {
   const unexpected: string[] = [];
@@ -18,6 +18,11 @@ async function installApiRequestGuard(page: Page) {
     const url = new URL(request.url());
     if (request.method() === "GET" && url.pathname === "/api/v1/chat-groups") {
       await route.fulfill({ json: [] });
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === "/api/v1/cloud/providers") {
+      await route.fulfill({ json: { providers: [] } });
       return;
     }
 

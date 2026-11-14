@@ -43,6 +43,7 @@ from cortex_backend.repositories.storage import (  # noqa: E402
 from cortex_backend.repositories.memories import LegacyPermanentMemoryRepository  # noqa: E402
 from cortex_backend.repositories.sqlite_settings import SQLiteSettingsRepository  # noqa: E402
 from cortex_backend.services.chat_client import OllamaChatClient, RoutingChatClient  # noqa: E402
+from cortex_backend.services.cloud_providers import CloudChatClient  # noqa: E402
 from cortex_backend.services.generation import GenerationService  # noqa: E402
 from cortex_backend.services.attachments import ChatAttachmentService  # noqa: E402
 from cortex_backend.services.llm import SynthesisAgent  # noqa: E402
@@ -149,6 +150,7 @@ def build_app(
         # closes to abort a read in flight; the shared one stays untouched.
         ollama_chat_client,
         llamacpp_chat_client,
+        CloudChatClient(),
     )
     generation_service = GenerationService(
         history_loader=lambda thread_id: (database.load_chat(thread_id) or {}).get(

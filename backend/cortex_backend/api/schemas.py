@@ -375,6 +375,21 @@ class ModelResponse(APIModel):
     models: tuple[InstalledModel, ...] = ()
 
 
+class CloudProviderInfo(APIModel):
+    id: str
+    label: str
+    configured: bool
+    setup: str
+
+
+class CloudProviderListResponse(APIModel):
+    providers: tuple[CloudProviderInfo, ...]
+
+
+class CloudModelListResponse(APIModel):
+    models: tuple[str, ...]
+
+
 class ModelPullRequest(NonBlankTextModel):
     model: str = Field(min_length=1, max_length=200)
     # Present for clients that want safe request replay after losing HTTP 202.

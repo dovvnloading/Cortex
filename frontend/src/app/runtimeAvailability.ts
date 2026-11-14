@@ -1,5 +1,5 @@
 import type { LlamaCppRuntimeStatus } from "../../../contracts/cortex-api";
-import { isGGUFModel } from "../lib/localModels";
+import { cloudModelProvider, isGGUFModel } from "../lib/localModels";
 
 export type RuntimeDisableReason =
   | "no-model-selected"
@@ -19,6 +19,7 @@ export function resolveRuntimeAvailability({
   selectedModel,
   selectedModelAvailable,
   inventoryLoading = false,
+  providerError,
   ollamaConnected,
   ollamaMessage,
   llamacppStatus,
@@ -31,12 +32,19 @@ export function resolveRuntimeAvailability({
    * saying "unavailable" on every launch reported a fault that was not there.
    */
   inventoryLoading?: boolean;
+  providerError?: string | null;
   ollamaConnected: boolean;
   ollamaMessage?: string | null;
   llamacppStatus: LlamaCppRuntimeStatus;
 }): RuntimeAvailability {
   if (!selectedModel) {
-    return { ready: false, reason: "no-model-selected", message: "Select a local model before sending a message." };
+    return { ready: false, reason: "no-model-selected", message: "Select a chat model before sending a message." };
+  }
+  const provider = cloudModelProvider(selectedModel);
+  if (provider) {
+    if (inventoryLoading) return { ready: false, reason: "inventory-loading", message: `Checking models from ${provider}…` };
+    if (selectedModelAvailable) return { ready: true, reason: null, message: null };
+    return { ready: false, reason: "model-unavailable", message: providerError ?? `The selected model is unavailable from ${provider}. Refresh cloud models in Settings or choose another model.` };
   }
   if (inventoryLoading) {
     return { ready: false, reason: "inventory-loading", message: "Checking local models…" };

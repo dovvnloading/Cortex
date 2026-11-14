@@ -6,8 +6,8 @@ import type {
   ModelDownloadRequest,
   ModelResponse,
 } from "../../../../contracts/cortex-api";
-import { GENERATION_DEFAULTS, resolveGenerationValues, type ParamKey } from "../../lib/generationParams";
-import { displayModelName, isGGUFModel, localModelNames, modelFacts, modelSource } from "../../lib/localModels";
+import { CLOUD_SAMPLING_NOTE, GENERATION_DEFAULTS, resolveGenerationValues, type ParamKey } from "../../lib/generationParams";
+import { cloudModelProvider, displayModelName, isGGUFModel, localModelNames, modelFacts, modelSource } from "../../lib/localModels";
 import { registerNavigationGuard } from "../../lib/navigation";
 import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
 import { Select } from "../../shared/ui/Select";
@@ -21,6 +21,8 @@ import {
 import type { ActiveModelJob, ModelJobKind, ModelProgress } from "../../stores/useModelStore";
 import { MemoryPanel, type MemoryLoadState } from "./MemoryPanel";
 import type { ListGGUFFiles } from "../models/GGUFDownloadForm";
+import type { CloudCatalog } from "../../hooks/useCloudModels";
+import { CloudProvidersPanel } from "./CloudProvidersPanel";
 import { ModelsPanel } from "../models/ModelsPanel";
 
 type SettingsSection = "general" | "model" | "memory" | "translation" | "system";
@@ -42,6 +44,7 @@ export type SettingsPanelProps = {
   onReplaceMemory: (memos: string[]) => Promise<void>;
   onClearMemory: (expectedMemos: string[]) => Promise<void>;
   models: ModelResponse;
+  cloud?: CloudCatalog;
   modelBusy: boolean;
   /** Kind of the primary model operation, if one is currently followed. */
   activeModelJobKind?: ModelJobKind | null;
@@ -135,6 +138,7 @@ export function SettingsPanel({
   onReplaceMemory,
   onClearMemory,
   models,
+  cloud,
   modelBusy,
   activeModelJobKind = null,
   modelProgress,
@@ -235,9 +239,8 @@ export function SettingsPanel({
   const llamacpp = draft.llamacpp ?? {};
   const memory = draft.memory ?? {};
   const translation = draft.translation ?? {};
-  const selectedChatModel = installedModels.includes(modelSettings.chat ?? "")
-    ? modelSettings.chat ?? ""
-    : "";
+  const selectedChatModel = modelSettings.chat ?? "";
+  const chatProvider = cloudModelProvider(selectedChatModel);
   const configuredTranslationModel = modelSettings.translation ?? DEFAULT_TRANSLATION_MODEL;
   const selectedTranslationModel = installedModels.includes(configuredTranslationModel)
     ? configuredTranslationModel
@@ -271,21 +274,18 @@ export function SettingsPanel({
       detail: [modelSource(model, detail) === "gguf" ? "GGUF file" : "Ollama", ...modelFacts(detail), ...(detail?.supports_vision ? ["Vision"] : [])].join(" · "),
     };
   });
+  const chatOptions = [...modelOptions, ...(cloud?.models ?? []).map((model) => ({
+    value: model, label: displayModelName(model), detail: "Cloud model",
+  }))];
   const saveDraft = async () => {
     const submitted = draft;
     const latest = mergeChangedValues(draft, baseline, settings);
     const latestModels = latest.models ?? {};
-    const chatWasEdited = !valuesEqual(draft.models?.chat, baseline.models?.chat);
+
     const saved = await onSave({
       ...latest,
       models: {
         ...latestModels,
-        // An empty inventory (Ollama down, a failed refresh) is a routine,
-        // recoverable state -- it must not overwrite a still-valid configured
-        // model with null just because the picker has nothing to offer right
-        // now. Also preserve an externally selected model when this dialog
-        // did not edit the chat picker, even if its inventory refresh lags.
-        chat: chatWasEdited && installedModels.length ? (selectedChatModel || null) : (latestModels.chat ?? null),
         title: null,
       },
     });
@@ -392,43 +392,51 @@ export function SettingsPanel({
                   <div className="settings-group-head">
                     <span>
                       <strong id="chat-model-group">Chat model</strong>
-                      <small>Models installed through Ollama and local .gguf files. Chat titles use the same model.</small>
+                      <small>Choose a local model or a configured cloud provider. Chat titles use the same model.</small>
                     </span>
                   </div>
-                  {installedModels.length > 0 ? (
-                    <Select id="chat-model" aria-labelledby="chat-model-group" value={selectedChatModel} options={modelOptions} onChange={chooseChatModel} />
+                  {chatOptions.length > 0 ? (
+                    <Select id="chat-model" aria-labelledby="chat-model-group" value={selectedChatModel} options={chatOptions}
+                      placeholder={selectedChatModel ? `${displayModelName(selectedChatModel)} (unavailable)` : "Choose a chat model"} onChange={chooseChatModel} />
                   ) : (
                     <div className="model-selection-empty" role="status">
-                      <strong>No local models found</strong>
-                      <span>Install a model with Ollama, or add a .gguf file to your local models folder, then rescan this workspace.</span>
+                      <strong>{selectedChatModel ? `${displayModelName(selectedChatModel)} is unavailable` : "No chat models found"}</strong>
+                      <span>Install a local model or configure a cloud provider below.</span>
                       <button className="button button-secondary" type="button" onClick={() => void onCheckModels()} disabled={modelBusy}>Rescan local models</button>
                     </div>
                   )}
                 </section>
 
+                {chatProvider && (
+                  <p className="muted-note">Sending a message shares the conversation, its attachments, and any included memories with {chatProvider}.</p>
+                )}
+                {cloud && <CloudProvidersPanel cloud={cloud} />}
+
                 <section className="settings-group" aria-labelledby="generation-defaults-group">
                   <div className="settings-group-head">
                     <span>
                       <strong id="generation-defaults-group">Generation defaults</strong>
-                      <small>Every chat starts from these. Parameters in the composer can adjust them for a single chat.</small>
+                      <small>{chatProvider ? CLOUD_SAMPLING_NOTE : "Every chat starts from these. Parameters in the composer can adjust them for a single chat."}</small>
                     </span>
-                    {generationModified && (
+                    {generationModified && !chatProvider && (
                       <button className="params-reset" type="button" onClick={() => setGeneration(GENERATION_DEFAULTS)}>
                         <RotateCcw aria-hidden="true" size={12} />
                         <span>Restore defaults</span>
                       </button>
                     )}
                   </div>
-                  <PresetPicker idPrefix="settings" values={generationValues} onChange={setGeneration} />
-                  <div className="settings-range-grid">
-                    <SamplingField field="temperature" {...generationFieldProps} />
-                    <SamplingField field="top_p" {...generationFieldProps} />
-                    <SamplingField field="top_k" {...generationFieldProps} />
-                    <SamplingField field="repeat_penalty" {...generationFieldProps} />
-                  </div>
+                  {!chatProvider && <>
+                    <PresetPicker idPrefix="settings" values={generationValues} onChange={setGeneration} />
+                    <div className="settings-range-grid">
+                      <SamplingField field="temperature" {...generationFieldProps} />
+                      <SamplingField field="top_p" {...generationFieldProps} />
+                      <SamplingField field="top_k" {...generationFieldProps} />
+                      <SamplingField field="repeat_penalty" {...generationFieldProps} />
+                    </div>
+                  </>}
                   <div className="settings-range-grid settings-range-grid-context">
-                    <ContextWindowField {...generationFieldProps} />
-                    <SeedField {...generationFieldProps} />
+                    <ContextWindowField {...generationFieldProps} cloud={Boolean(chatProvider)} />
+                    {!chatProvider && <SeedField {...generationFieldProps} />}
                   </div>
                 </section>
 

@@ -1,16 +1,16 @@
 # Cortex
 
-Cortex is a local-first AI workspace for Windows. It runs models on the machine
--- either through Ollama or by loading a local `.gguf` file with its own managed
-llama.cpp runtime -- keeps conversations and memory in local storage, and
-presents the React/TypeScript interface inside a Python-owned pywebview/WebView2
-window. The normal launcher owns the backend, native window, and any development
+Cortex is a local-first AI workspace for Windows. Chat with a local Ollama or
+GGUF model, or select a hosted model from a configured cloud provider.
+Cortex stores conversations and memory on the machine and presents its
+React/TypeScript interface inside a Python-owned pywebview/WebView2 window.
+The normal launcher owns the backend, native window, and any development
 frontend process; Cortex does not open the user's installed browser.
 
 ## The workspace
 
 The interface is deliberately small: a chat library, a focused transcript, a
-composer with a local model picker, and settings for model, memory, appearance,
+composer with a model picker, and settings for model, memory, appearance,
 and execution controls.
 
 ![The Cortex workspace: a chat library filed into Engineering, Research, and
@@ -106,8 +106,8 @@ transcript.](.github/images/workspace-light.png)
   verified against the requested host name and no request is sent before that
   succeeds, but Cortex does not pin the connection to the address it checked, so
   only download from hosts you trust.
-- **Composer model control.** Inspect the local inventory, switch models without
-  leaving the composer, refresh the inventory, and stage local image or text
+- **Composer model control.** Browse local models and configured cloud providers,
+  switch models, refresh the inventory, and stage local image or text
   attachments.
 - **Per-chat generation parameters.** Temperature, top-p, top-k, repeat penalty,
   and context window default to the values in Settings but can be overridden
@@ -362,7 +362,7 @@ main.py
   +-- supervised FastAPI backend (Python)
   |   +-- versioned loopback API, session auth, SSE jobs
   |   +-- SQLite conversations/settings and local memory repositories
-  |   +-- model and generation services (Ollama + managed llama.cpp)
+  |   +-- model and generation services (Ollama, managed llama.cpp, cloud providers)
   |   `-- scratch, image, attachment, and code execution lifecycles
   +-- native pywebview / WebView2 window
   `-- supervised Vite server (development mode only)
@@ -391,10 +391,8 @@ Cortex does not pull an embedding model at startup and has no semantic retrieval
 
 - Windows 10 or later
 - Python 3.11 or later
-- At least one local model, from either runtime:
-  - Ollama installed and running at `http://127.0.0.1:11434`, or
-  - a `.gguf` file in the local models folder, served by the managed llama.cpp
-    runtime (no Ollama required)
+- For chat, a configured cloud provider, an Ollama model at
+  `http://127.0.0.1:11434`, or a local `.gguf` file for managed llama.cpp
 - Node.js 22+ and npm for frontend development or source builds
 
 ## Quick start
@@ -415,11 +413,9 @@ If you would rather not run Ollama, skip the first line and instead drop a
 download one from there by URL or Hugging Face repo. Cortex serves it with its
 own llama.cpp runtime.
 
-The first launch checks the local model inventory. Choose a model from the
-composer's model picker, or under **Settings -> AI Model**. If neither runtime
-has a usable model, Cortex still opens and explains the connection state;
-generation becomes available once a model is present and the inventory is
-refreshed.
+The first launch checks the model inventory. Choose a model from the
+composer's picker, or under **Settings → AI Model**. For a cloud-only setup,
+skip the Ollama pull and configure a provider as described below.
 
 Useful launcher options:
 
@@ -434,6 +430,62 @@ python main.py --build-frontend      # build the frontend and exit
 `--no-browser` is retained as a deprecated alias for `--headless`. The Ollama
 endpoint can be intentionally changed for a trusted local network setup with
 `CORTEX_OLLAMA_HOST`; the default remains loopback.
+
+## Cloud chat
+
+Open **Settings → AI Model → Cloud providers** and select your provider to
+see its setup variables. Set them in the environment of the account that runs
+Cortex, then fully restart the app. For example, to launch from PowerShell
+with credentials for OpenAI and Anthropic in the current session:
+
+```powershell
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
+$env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
+python main.py
+```
+
+`-MaskInput` requires PowerShell 7.1 or later. The Windows user environment
+variables dialog also works for desktop shortcut launches. Select the model
+in the composer or the **Chat model** setting. Cortex saves the provider and
+exact model ID across restarts. The selected provider receives the chat
+request, which can include earlier turns, attachments, instructions and enabled
+memories. It also handles chat titles. Provider access, quotas, billing and
+retention follow your provider account. Project workspace research and optional
+response translation use their existing local models.
+
+| Integration | Available configurations |
+| --- | --- |
+| Labs and model APIs | OpenAI, Anthropic, Google Gemini, Meta, xAI, Mistral, Cohere, DeepSeek, Moonshot/Kimi, MiniMax, Z.ai, AI21, Perplexity |
+| Managed clouds | Amazon Bedrock and Bedrock Mantle, Azure OpenAI / Microsoft Foundry, Google Cloud Vertex AI, Alibaba Cloud Model Studio, Baidu Qianfan, ByteDance Volcano Ark, Tencent TokenHub, IBM watsonx.ai Model Gateway, Oracle Cloud Generative AI |
+| Hosted inference and gateways | Cloudflare Workers AI, Databricks Model Serving, Snowflake Cortex, DigitalOcean, NVIDIA, Groq, Cerebras, SambaNova, Together AI, Fireworks AI, DeepInfra, Hugging Face Inference Providers, OpenRouter, Vercel AI Gateway |
+
+**Model discovery.** Configured catalogs refresh when the app opens, when
+its window becomes visible again, and every five minutes while visible.
+Use **Refresh cloud models** in Settings or **Rescan** in the composer to
+check immediately. A service may list models for an entire region or project.
+Inference still requires permission for the selected model. If a selected
+model disappears, the picker keeps its name visible so you can choose another.
+
+**Deployment names and manual IDs.** Use the exact deployment name for Azure.
+Set `AZURE_FOUNDRY_PROJECT` for Foundry discovery, or set
+`AZURE_OPENAI_DEPLOYMENTS` to deployment names separated by commas. Other
+providers accept `CORTEX_<PROVIDER>_MODELS` (upper-case ID with hyphens
+changed to underscores). Setting it replaces discovery for that provider.
+Use this for private deployments, accounts without listing permissions, or
+services with a manual catalog such as Snowflake, Oracle and MiniMax.
+
+**Custom endpoints.** Set `CORTEX_CUSTOM_BASE_URL` to the full OpenAI-compatible
+API root, including any path such as `/v1`. Set `CORTEX_CUSTOM_API_KEY` if
+needed. Cortex uses `GET /models` for discovery and `POST /chat/completions`
+for streamed chat. You can configure multiple endpoints by adding a name, for
+example `CORTEX_CUSTOM_TEAM_BASE_URL`, `CORTEX_CUSTOM_TEAM_API_KEY` and
+`CORTEX_CUSTOM_TEAM_MODELS`. Each endpoint has its own credentials and
+selection. HTTPS and loopback HTTP are supported.
+
+**Supported requests.** The picker targets conversational models. It supports
+image input when the selected model accepts it. Hosted models generally use
+their provider's sampling defaults. For native Anthropic chat Cortex requests
+up to 4,096 output tokens by default.
 
 ## Development checks
 

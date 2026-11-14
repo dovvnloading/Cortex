@@ -2,6 +2,7 @@ import { Command, defaultFilter } from "cmdk";
 import { Moon, Plus, Settings, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ChatSummary } from "../../../../contracts/cortex-api";
+import { cloudModelProvider, displayModelName } from "../../lib/localModels";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { nextThemePreference, THEME_LABELS, type ThemePreference } from "../../lib/theme";
 import { useDebouncedValue } from "../../hooks/useDebouncedValue";
@@ -164,7 +165,7 @@ function PaletteBody({
             {localModels.map((model) => (
               <Command.Item key={model} className="command-palette-item" onSelect={() => onSelectModel(model)}>
                 <Sparkles size={15} aria-hidden="true" />
-                Switch to {model}
+                Switch to {cloudModelProvider(model) ? `${displayModelName(model)} (cloud)` : model}
                 {model === selectedModel && <span className="command-palette-current">Current</span>}
               </Command.Item>
             ))}

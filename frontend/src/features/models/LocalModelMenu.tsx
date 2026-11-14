@@ -1,7 +1,7 @@
 import { Check, ChevronDown, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { InstalledModel } from "../../../../contracts/cortex-api";
-import { displayModelName, modelFacts, modelSource, type ModelSource } from "../../lib/localModels";
+import { cloudModelProvider, displayModelName, modelFacts, modelSource, type ModelSource } from "../../lib/localModels";
 import { Popover, PopoverContent } from "../../shared/ui/Popover";
 
 export type ModelRuntimeTone = "ready" | "idle" | "starting" | "failed";
@@ -16,7 +16,7 @@ export type ModelRuntimeStatus = {
 
 export type LocalModelMenuProps = {
   /**
-   * The current machine's discovered local-model inventory. The component
+   * Models discovered locally or from configured cloud providers. The component
    * never adds fallback or suggested model names of its own.
    */
   models: readonly string[];
@@ -84,27 +84,30 @@ export function LocalModelMenu({
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const selected = localModels.find((model) => model === selectedModel?.trim()) ?? null;
+  const cloudSelection = cloudModelProvider(selectedModel);
+  const hasCloud = Boolean(cloudSelection) || localModels.some((model) => cloudModelProvider(model));
+  const qualifier = hasCloud ? "" : "local ";
   const busy = pendingModel !== null || rescanPending;
   const showSearch = localModels.length >= SEARCH_THRESHOLD;
 
   const groups = useMemo(() => {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const bySource: Record<ModelSource, string[]> = { ollama: [], gguf: [] };
+    const bySource = new Map<string, string[]>([["Ollama", []], ["GGUF files", []]]);
     for (const model of localModels) {
       const detail = detailByName.get(model);
-      if (matchesQuery(model, detail, terms)) bySource[modelSource(model, detail)].push(model);
+      if (!matchesQuery(model, detail, terms)) continue;
+      const provider = cloudModelProvider(model);
+      const source = provider ? `Cloud · ${provider}` : SOURCE_LABELS[modelSource(model, detail)];
+      const entries = bySource.get(source);
+      if (entries) entries.push(model);
+      else bySource.set(source, [model]);
     }
-    return (Object.keys(bySource) as ModelSource[])
-      .map((source) => ({ source, models: bySource[source] }))
-      .filter((group) => group.models.length > 0);
+    return [...bySource].filter(([, entries]) => entries.length > 0).map(([source, entries]) => ({ source, models: entries }));
   }, [detailByName, localModels, query]);
-  // Group headings only earn their space when the machine really has both kinds.
-  const mixedSources = useMemo(
-    () => new Set(localModels.map((model) => modelSource(model, detailByName.get(model)))).size > 1,
-    [detailByName, localModels],
-  );
+  const mixedSources = hasCloud || new Set(localModels.map((model) => modelSource(model, detailByName.get(model)))).size > 1;
   const visible = useMemo(() => groups.flatMap((group) => group.models), [groups]);
-  const activeIndex = activeModel ? visible.indexOf(activeModel) : -1;
+  const optionIndexes = useMemo(() => new Map(visible.map((model, index) => [model, index])), [visible]);
+  const activeIndex = activeModel ? optionIndexes.get(activeModel) ?? -1 : -1;
   const optionId = (index: number) => `${listId}-option-${index}`;
   const activeId = activeIndex >= 0 ? optionId(activeIndex) : undefined;
 
@@ -214,11 +217,12 @@ export function LocalModelMenu({
     highlight(selected && matchesQuery(selected, detailByName.get(selected), terms) ? selected : firstMatch);
   };
 
-  const triggerLabel = selected
-    ? `Selected local model: ${displayModelName(selected)}`
+  const displayed = selected ?? (cloudSelection ? selectedModel : null);
+  const triggerLabel = displayed
+    ? `Selected ${cloudSelection ? "cloud" : "local"} model: ${displayModelName(displayed)}`
     : localModels.length
-      ? "Select a local model"
-      : "No local models available";
+      ? `Select a ${qualifier}model`
+      : `No ${qualifier}models available`;
   const statusTitle = runtimeStatus ? [runtimeStatus.label, runtimeStatus.detail].filter(Boolean).join(" — ") : undefined;
 
   return (
@@ -236,13 +240,13 @@ export function LocalModelMenu({
       >
         {runtimeStatus && <span className={`model-picker-status model-picker-status-${runtimeStatus.tone}`} aria-hidden="true" />}
         <span className="model-picker-trigger-name">
-          {selected ? displayModelName(selected) : localModels.length ? "Select model" : "No local models"}
+          {displayed ? displayModelName(displayed) : localModels.length ? "Select model" : "No local models"}
         </span>
         <ChevronDown className="model-picker-trigger-icon" aria-hidden="true" size={14} />
       </Popover.Trigger>
       <PopoverContent
         className="model-picker"
-        aria-label="Choose a local model"
+        aria-label={`Choose a ${qualifier}model`}
         side="top"
         align="start"
         sideOffset={10}
@@ -256,7 +260,7 @@ export function LocalModelMenu({
               ref={searchRef}
               type="text"
               role="combobox"
-              aria-label="Search local models"
+              aria-label={`Search ${qualifier}models`}
               aria-expanded="true"
               aria-autocomplete="list"
               aria-controls={visible.length ? listId : undefined}
@@ -277,16 +281,16 @@ export function LocalModelMenu({
             id={listId}
             className="model-picker-list"
             role="listbox"
-            aria-label="Discovered local models"
+            aria-label={`Discovered ${qualifier}models`}
             aria-activedescendant={showSearch ? undefined : activeId}
             tabIndex={showSearch ? -1 : 0}
             onKeyDown={showSearch ? undefined : handleListKeyDown}
           >
             {groups.map((group) => (
-              <div key={group.source} className="model-picker-group" role="group" aria-label={mixedSources ? SOURCE_LABELS[group.source] : undefined}>
-                {mixedSources && <div className="model-picker-group-label" aria-hidden="true">{SOURCE_LABELS[group.source]}</div>}
+              <div key={group.source} className="model-picker-group" role="group" aria-label={mixedSources ? group.source : undefined}>
+                {mixedSources && <div className="model-picker-group-label" aria-hidden="true">{group.source}</div>}
                 {group.models.map((model) => {
-                  const index = visible.indexOf(model);
+                  const index = optionIndexes.get(model)!;
                   const detail = detailByName.get(model);
                   const isSelected = model === selected;
                   const facts = modelFacts(detail);
@@ -332,26 +336,27 @@ export function LocalModelMenu({
             {localModels.length ? (
               <>
                 <strong>No matches</strong>
-                <span>No local model matches “{query.trim()}”.</span>
+                <span>No {qualifier}model matches “{query.trim()}”.</span>
               </>
             ) : (
               <>
-                <strong>No local models found</strong>
-                <span>Install one with Ollama or add a .gguf file to your models folder, then rescan.</span>
+                <strong>No {qualifier}models found</strong>
+                <span>Install a local model or open Settings → AI Model to connect a cloud provider.</span>
               </>
             )}
           </div>
         )}
 
+        {hasCloud && <p className="model-picker-cloud-note">Cloud providers receive the conversation, its attachments, and any included memories when you send.</p>}
         <div className="model-picker-footer">
           <span className="model-picker-count">
-            {localModels.length} local {localModels.length === 1 ? "model" : "models"}
+            {localModels.length} {qualifier}{localModels.length === 1 ? "model" : "models"}
           </span>
           {onRescan && (
             <button
               className="model-picker-rescan"
               type="button"
-              aria-label="Rescan local models"
+              aria-label={`Rescan ${qualifier}models`}
               disabled={busy || disabled}
               onClick={() => void rescan()}
             >

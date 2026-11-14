@@ -1,7 +1,7 @@
 import { ChevronDown, RotateCcw, SlidersHorizontal } from "lucide-react";
 import { useId, useState } from "react";
 import type { GenerationOptionsOverride, GenerationSettings } from "../../../../contracts/cortex-api";
-import { normalizeOverride, resolveGenerationValues, type GenerationValues, type ParamKey } from "../../lib/generationParams";
+import { CLOUD_SAMPLING_NOTE, normalizeOverride, resolveGenerationValues, type GenerationValues, type ParamKey } from "../../lib/generationParams";
 import {
   ContextWindowField,
   PresetPicker,
@@ -15,33 +15,41 @@ type Props = {
   value: GenerationOptionsOverride | null;
   defaults: GenerationSettings;
   disabled?: boolean;
+  cloud?: boolean;
   onChange: (next: GenerationOptionsOverride | null) => void;
 };
 
 const ADVANCED_FIELDS: readonly ParamKey[] = ["top_k", "repeat_penalty", "seed"];
 
-export function GenerationParamsPopover({ value, defaults, disabled = false, onChange }: Props) {
+export function GenerationParamsPopover({ value, defaults, disabled = false, cloud = false, onChange }: Props) {
   const baseline = resolveGenerationValues(defaults);
   const override = normalizeOverride(value, baseline);
-  const overriddenCount = override ? Object.keys(override).length : 0;
+  const overriddenCount = cloud ? Number(override?.num_ctx != null) : Object.keys(override ?? {}).length;
 
   return (
     <Popover.Root>
       <Popover.Trigger
-        className={`params-trigger${override ? " params-trigger-active icon-button-active" : ""}`}
+        className={`params-trigger${overriddenCount ? " params-trigger-active icon-button-active" : ""}`}
         aria-label="Generation parameters for this chat"
-        title={override
+        title={overriddenCount
           ? `${overriddenCount} ${overriddenCount === 1 ? "parameter differs" : "parameters differ"} from your defaults`
           : "Generation parameters for this chat"}
         disabled={disabled}
       >
         <SlidersHorizontal size={15} aria-hidden="true" />
         <span>Parameters</span>
-        {override && <span className="params-trigger-dot" aria-hidden="true" />}
+        {overriddenCount > 0 && <span className="params-trigger-dot" aria-hidden="true" />}
       </Popover.Trigger>
       <PopoverContent className="params-popover" aria-label="Generation parameters" side="top" align="start" sideOffset={10}>
         {/* Mounted only while open, so each opening starts from the current overrides. */}
-        <ParamsPanel override={override} baseline={baseline} onChange={onChange} />
+        {cloud ? (
+          <div className="params-popover-body">
+            <strong>Chat parameters</strong>
+            <p className="muted-note">{CLOUD_SAMPLING_NOTE}</p>
+            <ContextWindowField cloud idPrefix="cloud-chat-params" values={resolveGenerationValues(baseline, override)} defaults={baseline}
+              onChange={(patch) => onChange(normalizeOverride({ ...override, ...patch }, baseline))} />
+          </div>
+        ) : <ParamsPanel override={override} baseline={baseline} onChange={onChange} />}
       </PopoverContent>
     </Popover.Root>
   );

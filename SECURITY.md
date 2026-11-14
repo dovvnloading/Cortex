@@ -1,6 +1,10 @@
 # Security Policy
 
-Cortex is designed to keep conversations, memories, and model execution local.
+Cortex stores conversations and memories locally. Selecting a cloud chat
+model sends that turn's assembled context, including any attachments and
+enabled memories, to the selected provider. Cloud credentials come from the
+backend environment or the cloud identity SDK. The model settings store the
+selected provider and model ID.
 The Python API binds to loopback and requires an expiring authenticated native-window
 session. Prompts, responses, memories, and raw model output are excluded from
 diagnostic logging.

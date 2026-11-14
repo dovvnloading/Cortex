@@ -15,7 +15,7 @@ import {
 import type { ChatAttachment, GenerationOptionsOverride, GenerationSettings } from "../../../../contracts/cortex-api";
 import { useFileDropZone } from "../../hooks/useFileDropZone";
 import { ATTACHMENT_ACCEPT, filesFromTransfer } from "../../lib/attachments";
-import { formatModelSize, isGGUFModel } from "../../lib/localModels";
+import { cloudModelProvider, formatModelSize, isGGUFModel } from "../../lib/localModels";
 import { GENERATION_DEFAULTS } from "../../lib/generationParams";
 import { useModelStore } from "../../stores/useModelStore";
 import { GenerationParamsPopover } from "./GenerationParamsPopover";
@@ -115,6 +115,7 @@ export function MessageComposer({
   onGenerationOptionsChange,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const provider = cloudModelProvider(selectedModel);
   const modelDetails = useModelStore((state) => state.models?.models);
   const runtimeStatus = useLlamaRuntimeStatus(selectedModel);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -274,6 +275,7 @@ export function MessageComposer({
           </span>
         </div>
       )}
+      {provider && <p className="composer-cloud-note">Sending to {provider} includes this conversation, its attachments, and any included memories.</p>}
       <form className="composer" onSubmit={handleSubmit}>
         <div
           ref={surfaceRef}
@@ -328,7 +330,7 @@ export function MessageComposer({
               maxLength={MAX_MESSAGE_LENGTH}
               enterKeyHint="send"
               aria-describedby={`${statusId}${showCounter ? ` ${counterId}` : ""}`}
-              placeholder={phase === "unavailable" ? "Write a message while the local runtime reconnects" : "Message Cortex"}
+              placeholder={phase === "unavailable" && !provider ? "Write a message while the local runtime reconnects" : "Message Cortex"}
               onChange={(event) => onValueChange(event.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
@@ -378,6 +380,7 @@ export function MessageComposer({
               </div>
               {onGenerationOptionsChange && (
                 <GenerationParamsPopover
+                  cloud={Boolean(provider)}
                   value={generationOptions}
                   defaults={generationDefaults}
                   disabled={controlsLocked}

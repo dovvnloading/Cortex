@@ -90,6 +90,8 @@ export const PARAM_SPECS: Record<ParamKey, ParamSpec> = {
   },
 };
 
+export const CLOUD_SAMPLING_NOTE = "The cloud provider controls sampling. Cortex uses the context window to limit how much conversation it sends.";
+
 /** Common context sizes, offered as one-tap choices. All sit inside the backend bounds. */
 export const CONTEXT_STOPS = [2048, 4096, 8192, 16384, 32768, 65536] as const;
 

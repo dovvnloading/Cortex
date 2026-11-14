@@ -701,6 +701,9 @@ a { color: inherit; text-decoration: none; }
 .model-picker-option-selected .model-picker-option-meta { color: var(--text-muted); }
 .model-picker-tag { flex: 0 0 auto; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text-muted); font-size: var(--text-2xs); font-weight: var(--weight-semi); letter-spacing: 0.02em; }
 .model-picker-option-indicator { display: inline-grid; flex: 0 0 16px; place-items: center; color: var(--accent); }
+.model-picker-cloud-note, .composer-cloud-note { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; }
+.model-picker-cloud-note { margin: 0; padding: 8px 14px; border-top: 1px solid var(--line); }
+.composer-cloud-note { margin: 0 0 6px; }
 .model-picker-empty { display: grid; gap: 4px; padding: 26px 20px; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.45; text-align: center; outline: 0; }
 .model-picker-empty strong { color: var(--text); font-weight: var(--weight-semi); }
 .model-picker-footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 6px 5px 16px; border-top: 1px solid var(--line); color: var(--text-faint); font-size: var(--text-2xs); }

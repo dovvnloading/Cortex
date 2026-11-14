@@ -786,7 +786,7 @@ describe("App", () => {
     })).toEqual({
       ready: false,
       reason: "no-model-selected",
-      message: "Select a local model before sending a message.",
+      message: "Select a chat model before sending a message.",
     });
   });
 

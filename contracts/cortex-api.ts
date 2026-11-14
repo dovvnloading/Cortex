@@ -101,6 +101,21 @@ export interface ClearMemoryRequest {
   expected_memos: Array<string>;
 }
 
+export interface CloudModelListResponse {
+  models: Array<string>;
+}
+
+export interface CloudProviderInfo {
+  id: string;
+  label: string;
+  configured: boolean;
+  setup: string;
+}
+
+export interface CloudProviderListResponse {
+  providers: Array<CloudProviderInfo>;
+}
+
 export interface CodeCapabilitiesRequest {
   filesystem?: boolean;
   process?: boolean;

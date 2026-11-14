@@ -594,7 +594,7 @@ class _UtcFormatter(logging.Formatter):
 _runtime_file_handler: logging.Handler | None = None
 _runtime_handlers: list[logging.Handler] = []
 _runtime_saved_levels: dict[str, int] = {}
-_QUIET_LOGGERS = ("httpx", "httpcore")
+_QUIET_LOGGERS = ("httpx", "httpcore", "botocore", "google.auth", "urllib3")
 
 
 def _close_runtime_logging() -> None:

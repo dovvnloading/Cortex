@@ -546,6 +546,69 @@
         "title": "ClearMemoryRequest",
         "type": "object"
       },
+      "CloudModelListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "title": "CloudModelListResponse",
+        "type": "object"
+      },
+      "CloudProviderInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "setup": {
+            "title": "Setup",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "configured",
+          "setup"
+        ],
+        "title": "CloudProviderInfo",
+        "type": "object"
+      },
+      "CloudProviderListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/CloudProviderInfo"
+            },
+            "title": "Providers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "title": "CloudProviderListResponse",
+        "type": "object"
+      },
       "CodeCapabilitiesRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2798,7 +2861,7 @@
           "chat": {
             "anyOf": [
               {
-                "maxLength": 200,
+                "maxLength": 2048,
                 "minLength": 1,
                 "type": "string"
               },
@@ -4284,6 +4347,73 @@
           }
         ],
         "summary": "Regenerate Chat"
+      }
+    },
+    "/api/v1/cloud/providers": {
+      "get": {
+        "operationId": "cloud_provider_list_api_v1_cloud_providers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudProviderListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Cloud Provider List"
+      }
+    },
+    "/api/v1/cloud/providers/{provider_id}/models": {
+      "get": {
+        "operationId": "cloud_models_api_v1_cloud_providers__provider_id__models_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudModelListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Cloud Models"
       }
     },
     "/api/v1/diagnostics": {

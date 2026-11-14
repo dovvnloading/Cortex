@@ -199,7 +199,7 @@ def _decode_text(content: bytes) -> str:
     raise ChatAttachmentError("attachment_not_text")
 
 
-def _image_type(content: bytes) -> tuple[str, str] | None:
+def image_type(content: bytes) -> tuple[str, str] | None:
     for signature, mime_type, extension in _IMAGE_SIGNATURES:
         if content.startswith(signature):
             return mime_type, extension
@@ -209,7 +209,7 @@ def _image_type(content: bytes) -> tuple[str, str] | None:
 
 
 def _validate_image(content: bytes) -> tuple[str, str]:
-    detected = _image_type(content)
+    detected = image_type(content)
     if detected is None:
         raise ChatAttachmentError("attachment_image_invalid")
     try:
@@ -249,7 +249,7 @@ def _validate_image_dimensions(image: Any) -> None:
 
 
 def _classify(filename: str, content: bytes) -> tuple[str, str]:
-    image = _image_type(content)
+    image = image_type(content)
     if image is not None:
         return "image", _validate_image(content)[0]
     extension = PurePath(filename).suffix.lower()
