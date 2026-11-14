@@ -315,6 +315,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # The lockfile is fully remediated as of #500. Reject any future high
+      # or critical advisory in the resolved dependency graph before build.
+      # npm audit shows moderate/low notices without blocking the check.
+      - name: Audit frontend dependencies for high-severity advisories
+        run: npm audit --audit-level=high
+
       - name: Check frontend types
         run: npm run typecheck
 
