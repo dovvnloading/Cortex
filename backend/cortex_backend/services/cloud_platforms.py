@@ -22,7 +22,8 @@ PLATFORM_PROVIDERS = (
         "azure", "Microsoft Azure OpenAI / Foundry", "AZURE_OPENAI_API_KEY",
         url_env="AZURE_OPENAI_ENDPOINT", models_env="AZURE_OPENAI_DEPLOYMENTS",
         setup="Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY or AZURE_OPENAI_AD_TOKEN. "
-              "Set AZURE_FOUNDRY_PROJECT to select a Foundry project, or list deployment names in AZURE_OPENAI_DEPLOYMENTS.",
+              "Set AZURE_FOUNDRY_PROJECT to select a Foundry project, or list deployment names in AZURE_OPENAI_DEPLOYMENTS "
+              "(use anthropic/<deployment-name> for Claude).",
     ),
     ProviderSpec(
         "vertex", "Google Cloud Vertex AI", "GOOGLE_CLOUD_ACCESS_TOKEN",
@@ -150,6 +151,9 @@ def _entries(client: httpx.Client, url: httpx.URL, headers: dict[str, str], *, v
         response = client.get(url, headers=headers, follow_redirects=False)
         response.raise_for_status()
         payload = response.json()
+        # ProtoJSON omits empty repeated fields (including an empty final page).
+        if vertex and isinstance(payload, dict) and payload.keys() <= {"nextPageToken"}:
+            payload[field] = []
         if not isinstance(payload, dict) or not isinstance(payload.get(field), list):
             raise CloudProviderError("The platform returned an invalid model catalog.")
         yield from (entry for entry in payload[field] if isinstance(entry, dict))
@@ -171,19 +175,31 @@ def _entries(client: httpx.Client, url: httpx.URL, headers: dict[str, str], *, v
     raise CloudProviderError("The platform returned an invalid catalog continuation.")
 
 
-def _azure_deployments(client: httpx.Client, headers: dict[str, str]) -> list[str]:
+def _foundry_resource() -> httpx.URL:
     resource = _azure_resource()
     host = resource.host
     if host.endswith(".openai.azure.com"):
         host = host.removesuffix(".openai.azure.com") + ".services.ai.azure.com"
+    return resource.copy_with(host=host)
+
+
+def _azure_deployments(client: httpx.Client, headers: dict[str, str]) -> list[str]:
     project = os.getenv("AZURE_FOUNDRY_PROJECT", "_project")
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", project):
         raise CloudProviderError("Set AZURE_FOUNDRY_PROJECT to the project name.")
-    url = resource.copy_with(host=host, path=f"/api/projects/{project}/deployments").copy_merge_params(
+    url = _foundry_resource().copy_with(path=f"/api/projects/{project}/deployments").copy_merge_params(
         {"api-version": "v1", "deploymentType": "ModelDeployment"},
     )
     names: list[str] = []
     for entry in _entries(client, url, headers, vertex=False):
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if str(entry.get("modelPublisher", "")).casefold() == "anthropic":
+            # Persist the protocol with the deployment alias so a restart or an
+            # account without list permission can still route it unambiguously.
+            names.append(f"anthropic/{name}")
+            continue
         caps = entry.get("capabilities") or {}
         if isinstance(caps, dict) and caps and str(caps.get("chatCompletion", "")).lower() != "true":
             # Keep rows with unknown capabilities (e.g. some third-party deployments)
@@ -192,16 +208,27 @@ def _azure_deployments(client: httpx.Client, headers: dict[str, str]) -> list[st
                 "embeddings", "imageGeneration", "audio", "completion",
             )):
                 continue
-        if isinstance(entry.get("name"), str) and entry["name"]:
-            names.append(entry["name"])
+        names.append(name)
     return names
 
 
 def _vertex_models(client: httpx.Client, base: str, headers: dict[str, str]) -> list[str]:
     names: list[str] = []
+    denied: httpx.HTTPStatusError | None = None
     for publisher in ("google", "anthropic"):
         url = httpx.URL(base).copy_with(path=f"/v1beta1/publishers/{publisher}/models").copy_merge_params({"pageSize": 100})
-        names.extend(_vertex_publisher_ids(_entries(client, url, headers, vertex=True)))
+        try:
+            publisher_names = list(_vertex_publisher_ids(_entries(client, url, headers, vertex=True)))
+        except httpx.HTTPStatusError as exc:
+            # A publisher can be unavailable to this project or region while
+            # another publisher still has usable models.
+            if exc.response.status_code not in (403, 404):
+                raise
+            denied = denied or exc
+        else:
+            names.extend(publisher_names)
+    if denied is not None and not names:
+        raise denied
     return names
 
 
@@ -218,15 +245,27 @@ def _vertex_publisher_ids(entries: Iterator[dict]) -> Iterator[str]:
                 yield f"google/{model}"
 
 
-def platform_messages_url(provider: ProviderSpec, model: str, base: str) -> str | None:
-    """Two platform families expose Claude's native Messages wire format."""
+def platform_messages(
+    provider: ProviderSpec, model: str, base: str, headers: dict[str, str],
+) -> tuple[str, str, dict[str, str]] | None:
+    """Resolve the Messages URL, provider model ID and authentication together."""
+    version = {"anthropic-version": "2023-06-01"}
+    if provider.id == "azure" and model.startswith("anthropic/"):
+        deployment = model.removeprefix("anthropic/")
+        if not deployment or "/" in deployment:
+            raise CloudProviderError("Use anthropic/<deployment-name> for a Claude deployment in Foundry.")
+        auth = {"x-api-key": headers["api-key"]} if "api-key" in headers else headers
+        url = str(_foundry_resource().copy_with(path="/anthropic/v1/messages"))
+        return url, deployment, {**auth, **version}
     if provider.id == "bedrock-mantle" and model.startswith("anthropic.claude-"):
-        return base.removesuffix("/v1") + "/anthropic/v1/messages"
+        url = base.removesuffix("/v1") + "/anthropic/v1/messages"
+        return url, model, {"x-api-key": headers["Authorization"].removeprefix("Bearer "), **version}
     if provider.id == "vertex" and model.startswith("anthropic/claude-"):
         name = model.removeprefix("anthropic/")
         if not re.fullmatch(r"claude-[a-zA-Z0-9@._-]+", name):
             raise CloudProviderError("Use the Vertex publisher model ID, including its version when required.")
-        return base.removesuffix("/endpoints/openapi") + f"/publishers/anthropic/models/{name}:streamRawPredict"
+        url = base.removesuffix("/endpoints/openapi") + f"/publishers/anthropic/models/{name}:streamRawPredict"
+        return url, name, headers
     return None
 
 

@@ -64,6 +64,35 @@ def test_azure_rejects_cross_origin_continuation_without_sending_a_key(monkeypat
     assert hosts == ["demo.services.ai.azure.com"]
 
 
+@pytest.mark.parametrize(("variable", "header", "credential"), [
+    ("AZURE_OPENAI_API_KEY", "x-api-key", "fixture"),
+    ("AZURE_OPENAI_AD_TOKEN", "authorization", "Bearer fixture"),
+])
+def test_azure_claude_deployment_alias_uses_native_protocol_and_auth(monkeypatch, variable, header, credential):
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://lab.openai.azure.com")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_AD_TOKEN", raising=False)
+    monkeypatch.setenv(variable, "fixture")
+    def serve(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"value": [
+                {"name": "my-assistant", "modelPublisher": "Anthropic", "modelName": "claude-sonnet-4-6",
+                 "capabilities": {"chatCompletion": "false"}},
+                {"name": "my-gpt", "modelPublisher": "OpenAI", "modelName": "gpt-4.1"},
+            ]})
+        assert str(request.url) == "https://lab.services.ai.azure.com/anthropic/v1/messages"
+        assert request.headers[header] == credential and "api-key" not in request.headers
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        body = json.loads(request.content)
+        assert body["model"] == "my-assistant" and body["stream"] and body["max_tokens"] > 0
+        return httpx.Response(200, text='data: {"type":"content_block_delta","delta":{"text":"reply"}}\n\ndata: {"type":"message_stop"}\n\n')
+    transport = httpx.MockTransport(serve)
+    names = list_cloud_models("azure", transport=transport)
+    assert names == ["anthropic/my-assistant", "my-gpt"]
+    result = CloudChatClient(transport=transport).chat(model=f"cloud:azure:{names[0]}", messages=[], options={})
+    assert result["message"]["content"] == "reply"
+
+
 @pytest.mark.parametrize("endpoint", ["http://unencrypted.example", "https://user:secret@demo.example", "https://demo.example?key=x"])
 def test_azure_rejects_invalid_config(endpoint, monkeypatch):
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", endpoint)
@@ -93,6 +122,27 @@ def test_vertex_publisher_models_and_inference_route(monkeypatch, location, host
     base, headers = platforms.resolve_platform(SPECS["vertex"])
     assert base == f"https://{host}/v1/projects/sample/locations/{location}/endpoints/openapi"
     assert headers == {"Authorization": "Bearer synthetic"}
+
+
+@pytest.mark.parametrize(("google", "anthropic", "expected"), [
+    ({"publisherModels": [{"name": "publishers/google/models/gemini-test"}]}, 403, ["google/gemini-test"]),
+    (404, {"publisherModels": [{"name": "publishers/anthropic/models/claude-test"}]}, ["anthropic/claude-test"]),
+    ({}, {}, []),
+    (403, 404, "HTTP 403"),
+    ({"publisherModels": [{"name": "publishers/google/models/gemini-test"}]}, 429, "HTTP 429"),
+])
+def test_vertex_independent_publishers_and_empty_protobuf_lists(monkeypatch, google, anthropic, expected):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fixture")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "fixture")
+    def serve(request):
+        response = google if request.url.path.endswith("/google/models") else anthropic
+        return httpx.Response(response) if isinstance(response, int) else httpx.Response(200, json=response)
+    transport = httpx.MockTransport(serve)
+    if isinstance(expected, str):
+        with pytest.raises(CloudProviderError, match=expected):
+            list_cloud_models("vertex", transport=transport)
+    else:
+        assert list_cloud_models("vertex", transport=transport) == expected
 
 
 def test_vertex_refreshes_adc_only_on_an_actual_request(monkeypatch):

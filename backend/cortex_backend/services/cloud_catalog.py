@@ -176,6 +176,10 @@ def _chat_id(spec: ProviderSpec, item: dict[str, Any]) -> str | None:
         return None
     if spec.id in {"openai", "gemini"} and any(part in lower for part in ("-tts", "-audio", "-image", "-instruct")):
         return None
+    # Multiple IBM gateway configurations can share the upstream model ID.
+    # Their configured aliases address the individual routes at inference time.
+    if spec.id == "watsonx" and isinstance(alias := item.get("alias"), str) and alias:
+        return alias
     return model
 
 
@@ -210,6 +214,8 @@ def _discover(spec: ProviderSpec, http: httpx.Client, base: str, headers: dict[s
         url, params = "https://api.fireworks.ai/v1/accounts/fireworks/models", {"pageSize": "200"}
     elif spec.id == "xai":
         url = f"{base}/language-models"
+    elif spec.id == "openrouter":
+        url = f"{base}/models/user"
     elif spec.protocol == "gemini":
         params = {"pageSize": "1000"}
     elif spec.protocol == "anthropic":

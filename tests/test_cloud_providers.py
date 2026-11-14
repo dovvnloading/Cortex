@@ -39,7 +39,7 @@ def test_openai_catalog_is_live_filters_nonchat_and_preserves_exact_ids(monkeypa
     ("together", "/v1/models", [{"id": "lab/chat", "type": "chat"}, {"id": "voice", "type": "audio"}], ["lab/chat"]),
     ("mistral", "/v1/models", {"data": [{"id": "one", "capabilities": {"completion_chat": True}},
                                         {"id": "two", "capabilities": {"completion_chat": False}}]}, ["one"]),
-    ("openrouter", "/api/v1/models", {"data": [{"id": "lab/one:free", "architecture": {"output_modalities": ["text"]}},
+    ("openrouter", "/api/v1/models/user", {"data": [{"id": "lab/one:free", "architecture": {"output_modalities": ["text"]}},
                                                 {"id": "two", "architecture": {"output_modalities": ["image"]}}]},
      ["lab/one:free"]),
     ("xai", "/v1/language-models", {"models": [{"id": "grok", "output_modalities": ["text"]}]}, ["grok"]),
@@ -187,6 +187,57 @@ def test_cancelling_stream_stops_consumption(monkeypatch):
     assert result["done_reason"] == "cancelled" and result["message"]["content"] == "first"
     client = CloudChatClient(transport=httpx.MockTransport(lambda _: pytest.fail("cancelled before sending")))
     assert client.chat(model="cloud:groq:model", messages=[], options={}, cancellation_event=event)["done_reason"] == "cancelled"
+
+
+@pytest.mark.parametrize(("provider", "events", "reason"), [
+    ("openai", [{"type": "response.output_text.delta", "delta": "answer"},
+                {"type": "response.completed", "response": {}}, "[DONE]"], "stop"),
+    ("anthropic", [{"type": "content_block_delta", "delta": {"text": "answer"}},
+                   {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+                   {"type": "message_stop"}], "length"),
+])
+def test_terminal_events_finish_without_waiting_for_http_eof(monkeypatch, provider, events, reason):
+    monkeypatch.setenv(PROVIDERS[provider].key_env, "fixture")
+
+    def stream():
+        yield sse(*events).content
+        pytest.fail("The completed request continued reading from the provider")
+
+    client = CloudChatClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=stream())))
+    result = client.chat(model=f"cloud:{provider}:test-model", messages=[], options={})
+    assert result["message"]["content"] == "answer"
+    assert result["done_reason"] == reason
+
+
+@pytest.mark.parametrize(("reason", "terminal", "expected"), [
+    ("max_tokens", False, "ended the stream"),
+    ("refusal", True, "declined"),
+])
+def test_anthropic_truncation_and_refusal_are_not_completed_answers(monkeypatch, reason, terminal, expected):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture")
+    events = [{"type": "content_block_delta", "delta": {"text": "partial"}},
+              {"type": "message_delta", "delta": {"stop_reason": reason}}]
+    if terminal:
+        events.append({"type": "message_stop"})
+    client = CloudChatClient(transport=httpx.MockTransport(lambda _: sse(*events)))
+    with pytest.raises(CloudProviderError, match=expected):
+        client.chat(model="cloud:anthropic:claude-test", messages=[], options={})
+
+
+def test_watsonx_gateway_routing_aliases_survive_catalog_deduplication(monkeypatch):
+    monkeypatch.setenv("WATSONX_IAM_TOKEN", "fixture")
+    monkeypatch.setenv("CORTEX_WATSONX_BASE_URL", "https://provider.test/ml/gateway/v1")
+    def handle(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [
+                {"id": "gpt-4.1", "alias": "team-a"}, {"id": "gpt-4.1", "alias": "team-b"},
+                {"id": "other"}, {"id": "text-embedding-3-small", "alias": "private-vectors"},
+            ]})
+        assert json.loads(request.content)["model"] == "team-b"
+        return sse({"choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}]}, "[DONE]")
+    assert catalog("watsonx", handle) == ["other", "team-a", "team-b"]
+    client = CloudChatClient(transport=httpx.MockTransport(handle))
+    assert client.chat(model="cloud:watsonx:team-b", messages=[], options={})["message"]["content"] == "answer"
 
 
 def test_perplexity_agent_uses_agent_response_protocol_and_catalog(monkeypatch):

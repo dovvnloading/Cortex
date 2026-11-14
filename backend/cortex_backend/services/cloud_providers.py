@@ -22,7 +22,7 @@ from .cloud_catalog import (
     raise_for_provider_status,
     valid_model_id,
 )
-from .cloud_platforms import bedrock_chat, platform_chat_base, platform_messages_url
+from .cloud_platforms import bedrock_chat, platform_chat_base, platform_messages
 from .cloud_types import CloudProviderError as CloudProviderError, ProviderSpec, image_mime_type
 from .sse import sse_payloads
 
@@ -134,7 +134,10 @@ def _anthropic_event(reply: _Reply, event: dict) -> None:
         reply.add("thinking", delta.get("thinking"))
     elif kind == "message_delta":
         reply.usage(event.get("usage", {}), "input_tokens", "output_tokens")
-        if event["delta"].get("stop_reason") == "max_tokens":
+        reason = event["delta"].get("stop_reason")
+        if reason == "refusal":
+            raise CloudProviderError("Claude declined to complete this response.")
+        if reason in ("max_tokens", "model_context_window_exceeded"):
             reply.reason = "length"
     elif kind == "message_stop":
         reply.reason = reply.reason or "stop"
@@ -210,6 +213,13 @@ def _consume(response: httpx.Response, spec: ProviderSpec, protocol: str, reply:
         if event.get("error") or event.get("type") == "error":
             raise CloudProviderError(f"{spec.label} reported an error during generation.")
         read_event(reply, event)
+        if protocol == "responses" and event.get("type") in ("response.completed", "response.incomplete"):
+            return
+        if protocol == "anthropic" and event.get("type") == "message_stop":
+            return
+    if protocol == "anthropic":
+        # stop_reason can arrive before the final message_stop frame.
+        raise CloudProviderError(f"{spec.label} ended the stream before completing its response.")
 
 
 class CloudChatClient:
@@ -246,18 +256,16 @@ class CloudChatClient:
                 # Older Chat Completions models predate Responses.
                 if spec.id == "openai" and (model_id == "gpt-4" or model_id.startswith(("gpt-3.5-", "chatgpt-4o-", "gpt-4-"))):
                     protocol = "openai"
-                messages_url = platform_messages_url(spec, model_id, base)
-                if messages_url is not None:
+                native_messages = platform_messages(spec, model_id, base, headers)
+                if native_messages is not None:
+                    messages_url, model_id, headers = native_messages
                     protocol = "anthropic"
                 url, body = _request(protocol, base, model_id, messages, options)
-                if messages_url is not None:
+                if native_messages is not None:
                     url = messages_url
                     if spec.id == "vertex":
                         del body["model"]
                         body["anthropic_version"] = "vertex-2023-10-16"
-                    else:
-                        headers = {"x-api-key": headers["Authorization"].removeprefix("Bearer "),
-                                   "anthropic-version": "2023-06-01"}
                 if spec.id == "perplexity-agent":
                     url = f"{base}/agent"
                     body.pop("store", None)
