@@ -88,7 +88,10 @@ describe("crashLog", () => {
     const record = buildCrashRecord(new Error("x"), stack, "chat");
 
     expect(record.componentPath).toBe("Card > MessageList > Suspense > Gecko");
-    expect(JSON.stringify(record)).not.toMatch(/localhost|\.tsx|:12:3|PRIVATE/);
+    // A real ISO timestamp can legitimately contain ":12:3".
+    const { time, ...diagnostics } = record;
+    expect(Date.parse(time)).toBeGreaterThan(0);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/localhost|\.tsx|:12:3|PRIVATE/);
   });
 
   it("bounds the component path to 25 names and skips a name that is too long", () => {

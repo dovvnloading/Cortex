@@ -1158,7 +1158,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     if (expectedCurrentModel !== undefined && (current.models?.chat ?? null) !== expectedCurrentModel) return false;
     const cloudProvider = cloudModelProvider(model);
     const message = cloudProvider
-      ? `${displayModelName(model)} selected for cloud chat.`
+      ? `Cloud model selected for ${cloudProvider}.`
       : `${displayModelName(model)} is ready for local chat.`;
     return Boolean(await saveSettings({
       ...current,

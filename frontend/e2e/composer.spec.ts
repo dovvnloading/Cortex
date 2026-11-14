@@ -425,6 +425,10 @@ test("selects the exact cloud deployment by keyboard in a compact window with du
   expect((await persisted).postDataJSON().settings.models.chat).toBe(`cloud:lab-b:${longModelId}`);
   await expect(page.getByRole("button", { name: `Selected cloud model: lab-b / ${longModelId}` })).toBeFocused();
   await expect(page.getByText("Sending to lab-b", { exact: false })).toBeVisible();
+  await expect(page.getByText("Cloud model selected for lab-b.")).toBeVisible();
+  await page.getByLabel("Message Cortex").fill("Can I send immediately?");
+  // Checks hit testing while the selection confirmation is still displayed.
+  await page.getByRole("button", { name: "Send message" }).click({ trial: true, timeout: 1500 });
   for (const element of [page.getByRole("button", { name: "Send message" }), page.getByLabel("Message Cortex"),
     page.getByLabel("Keyboard shortcuts", { exact: true }).getByText("lists every shortcut", { exact: false })]) {
     const rect = await element.boundingBox();
