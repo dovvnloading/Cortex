@@ -27,7 +27,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Regenerate the lockfile from reviewed constraints
         working-directory: frontend
-        run: npm install --package-lock-only --ignore-scripts --no-audit
+        run: |
+          echo 'Using npm 11 to bypass the npm 10 Arborist resolver crash on this lockfile.'
+          npx --yes npm@11 install --package-lock-only --ignore-scripts --no-audit || {
+            echo '=== NPM DEBUG LOG ==='
+            find "$HOME/.npm/_logs" -name '*debug*.log' -type f -print | tail -2 | while read -r log; do tail -80 "$log"; done
+            exit 1
+          }
       - name: Verify manifest remains unchanged
         run: |
           git diff --exit-code -- frontend/package.json
