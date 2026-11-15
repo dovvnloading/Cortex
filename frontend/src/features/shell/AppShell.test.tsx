@@ -58,6 +58,27 @@ describe("AppShell", () => {
     expect(window.location.pathname).toBe("/chat/new");
   });
 
+  it("clears a history search and returns focus to the search field", async () => {
+    const user = userEvent.setup();
+    const view = renderShell({ chats: [
+      { id: "chat-1", title: "Quarterly planning", timestamp: "2026-01-01T00:00:00Z" },
+      { id: "chat-2", title: "Release notes", timestamp: "2026-01-02T00:00:00Z" },
+    ] });
+
+    const field = screen.getByRole("searchbox", { name: "Search chats by title" });
+    await user.type(field, "release");
+    expect(screen.queryByRole("button", { name: "Quarterly planning" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear chat search" }));
+    expect(field).toHaveFocus();
+    expect(field).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Quarterly planning" })).toBeVisible();
+
+    await user.type(field, "release");
+    view.rerender(<AppShell {...view.props} chats={[]} />);
+    await user.click(screen.getByRole("button", { name: "Clear chat search" }));
+    expect(screen.getByText("No threads yet.")).toBeVisible();
+  });
+
   it("removes the collapsed sidebar from the accessibility and tab trees", async () => {
     const user = userEvent.setup();
     renderShell();

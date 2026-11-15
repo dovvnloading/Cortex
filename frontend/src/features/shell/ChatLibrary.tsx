@@ -1,7 +1,8 @@
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ChevronRight, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Archive, ChevronRight, Folder, FolderInput, FolderPlus, Pencil, Search, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
+import { parseMessageTimestamp } from "../../lib/messageTime";
 import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 
 export type ChatLibraryProps = {
@@ -21,16 +22,24 @@ export type ChatLibraryProps = {
   onMoveChat: (threadId: string, groupId: string | null) => void;
 };
 
-/**
- * The chat library: groups (folders/projects) above a flat list of everything
- * ungrouped.
- *
- * Two rules shape this component. Search results are always shown flat and
- * fully expanded -- collapsing a group while the user is searching would hide
- * the very match they are looking for. And a group is only ever filing, so
- * deleting one is a low-stakes action on the group row, never a destructive
- * one that implicates the chats inside it.
- */
+type LibraryEntry = { chat: ChatSummary; date: Date | null };
+
+const monthHeading = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+const rowDate = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const fullDate = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "medium" });
+
+function groupByMonth(entries: LibraryEntry[]) {
+  const months = new Map<number, { label: string; entries: LibraryEntry[] }>();
+  for (const entry of entries) {
+    const date = entry.date;
+    const key = date ? date.getFullYear() * 12 + date.getMonth() : -Infinity;
+    const month = months.get(key);
+    if (month) month.entries.push(entry);
+    else months.set(key, { label: date ? monthHeading.format(date) : "Date unavailable", entries: [entry] });
+  }
+  return [...months].sort(([left], [right]) => right - left);
+}
+
 export function ChatLibrary({
   chats,
   groups,
@@ -51,28 +60,36 @@ export function ChatLibrary({
   const [deleteGroupTarget, setDeleteGroupTarget] = useState<ChatGroup | null>(null);
 
   const searching = query.trim().length > 0;
+  const entries = useMemo(() => chats.map((chat) => {
+    const timestamp = parseMessageTimestamp(chat.timestamp);
+    return { chat, date: timestamp === null ? null : new Date(timestamp) };
+  }), [chats]);
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return chats;
-    return chats.filter((chat) => displayChatTitle(chat.title).toLowerCase().includes(needle));
-  }, [chats, query]);
+    if (!needle) return entries;
+    return entries.filter(({ chat }) => displayChatTitle(chat.title).toLowerCase().includes(needle));
+  }, [entries, query]);
 
   const byGroup = useMemo(() => {
-    const buckets = new Map<string, ChatSummary[]>();
+    const buckets = new Map<string, LibraryEntry[]>();
     for (const group of groups) buckets.set(group.id, []);
-    const ungrouped: ChatSummary[] = [];
-    for (const chat of filtered) {
-      const bucket = chat.group_id ? buckets.get(chat.group_id) : undefined;
-      if (bucket) bucket.push(chat);
-      else ungrouped.push(chat);
+    const ungrouped: LibraryEntry[] = [];
+    for (const entry of filtered) {
+      const groupId = entry.chat.group_id;
+      const bucket = groupId ? buckets.get(groupId) : undefined;
+      if (bucket) bucket.push(entry);
+      else ungrouped.push(entry);
     }
     return { buckets, ungrouped };
   }, [filtered, groups]);
+  const months = useMemo(() => searching ? [] : groupByMonth(byGroup.ungrouped), [searching, byGroup.ungrouped]);
 
-  const renderRow = (chat: ChatSummary) => (
+  const renderRow = ({ chat, date }: LibraryEntry) => (
     <ChatRow
       key={chat.id}
       chat={chat}
+      date={date}
       groups={groups}
       active={activeChatId === chat.id && activeRowVisible}
       onSelect={() => onSelectChat(chat.id)}
@@ -85,11 +102,16 @@ export function ChatLibrary({
   // During a search, only matching chats produce visible rows; groups without
   // matches are omitted above and must not suppress the empty search state.
   const hasAnything = searching ? filtered.length > 0 : filtered.length > 0 || groups.length > 0;
+  const countNoun = searching ? "result" : "thread";
+  const EmptyIcon = searching ? Search : Archive;
 
   return (
     <div className="chat-library">
       <div className="chat-library-heading">
-        <span>Library</span>
+        <h3>{searching ? "Search results" : "Library"}</h3>
+        <span className="chat-library-count" role="status">
+          {filtered.length}<span className="sr-only"> {countNoun}{filtered.length === 1 ? "" : "s"}</span>
+        </span>
         <button
           className="chat-library-add-group"
           type="button"
@@ -125,6 +147,7 @@ export function ChatLibrary({
                   onClick={() => onToggleGroup(group.id, !collapsed)}
                 >
                   <ChevronRight className="chat-group-chevron" aria-hidden="true" size={13} />
+                  <Folder className="chat-group-icon" aria-hidden="true" size={15} />
                   <span className="chat-group-name">{group.name}</span>
                   <span className="chat-group-count">{groupChats.length}</span>
                 </button>
@@ -133,6 +156,7 @@ export function ChatLibrary({
                     className="history-action"
                     type="button"
                     aria-label={`Rename group ${group.name}`}
+                    title="Rename group"
                     onClick={() => setRenameGroupTarget(group)}
                   >
                     <Pencil aria-hidden="true" size={12} />
@@ -141,6 +165,7 @@ export function ChatLibrary({
                     className="history-action history-action-danger"
                     type="button"
                     aria-label={`Delete group ${group.name}`}
+                    title="Delete group"
                     onClick={() => setDeleteGroupTarget(group)}
                   >
                     <Trash2 aria-hidden="true" size={12} />
@@ -158,10 +183,18 @@ export function ChatLibrary({
           );
         })}
 
-        {byGroup.ungrouped.map(renderRow)}
+        {searching ? byGroup.ungrouped.map(renderRow) : months.map(([key, month]) => (
+          <section className="chat-month" key={key}>
+            <h4 className="chat-month-heading">{month.label}</h4>
+            {month.entries.map(renderRow)}
+          </section>
+        ))}
 
         {!hasAnything && (
-          <p className="sidebar-empty">{chats.length ? "No chats match your search." : "No threads yet."}</p>
+          <p className="sidebar-empty">
+            <EmptyIcon aria-hidden="true" size={24} />
+            {searching ? "No chats match your search." : "No threads yet."}
+          </p>
         )}
       </div>
 
@@ -202,6 +235,7 @@ export function ChatLibrary({
 
 function ChatRow({
   chat,
+  date,
   groups,
   active,
   onSelect,
@@ -210,6 +244,7 @@ function ChatRow({
   onMove,
 }: {
   chat: ChatSummary;
+  date: Date | null;
   groups: ChatGroup[];
   active: boolean;
   onSelect: () => void;
@@ -229,8 +264,9 @@ function ChatRow({
         onClick={onSelect}
         aria-current={active ? "page" : undefined}
       >
-        {title}
+        <span className="chat-row-title">{title}</span>
       </button>
+      {date && <time className="chat-row-date" dateTime={date.toISOString()} title={fullDate.format(date)}>{rowDate.format(date)}</time>}
       <div className="chat-row-actions">
         <MoveToGroupMenu
           chat={chat}
@@ -239,10 +275,10 @@ function ChatRow({
           onOpenChange={setMenuOpen}
           onMove={onMove}
         />
-        <button className="history-action" type="button" aria-label={`Rename ${title}`} onClick={onRename}>
+        <button className="history-action" type="button" aria-label={`Rename ${title}`} title="Rename thread" onClick={onRename}>
           <Pencil aria-hidden="true" size={12} />
         </button>
-        <button className="history-action history-action-danger" type="button" aria-label={`Delete ${title}`} onClick={onDelete}>
+        <button className="history-action history-action-danger" type="button" aria-label={`Delete ${title}`} title="Delete thread" onClick={onDelete}>
           <Trash2 aria-hidden="true" size={12} />
         </button>
       </div>
@@ -277,6 +313,33 @@ function MoveToGroupMenu({
   const initialFocusRef = useRef<"first" | "last">("first");
   const menuId = useId();
   const title = displayChatTitle(chat.title);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    const trigger = triggerRef.current;
+    const list = trigger?.closest(".chat-list");
+    if (!open || !menu || !trigger || !list) return;
+
+    const position = () => {
+      const bounds = list.getBoundingClientRect();
+      const anchor = trigger.getBoundingClientRect();
+      const below = bounds.bottom - anchor.bottom - 4;
+      const above = anchor.top - bounds.top - 4;
+      const preferredHeight = Math.min(240, menu.scrollHeight + menu.offsetHeight - menu.clientHeight);
+      const aboveTrigger = below < preferredHeight && above > below;
+      menu.dataset.side = aboveTrigger ? "top" : "bottom";
+      menu.style.setProperty("--menu-space", `${Math.max(0, aboveTrigger ? above : below)}px`);
+    };
+
+    position();
+    const observer = new ResizeObserver(position);
+    observer.observe(list);
+    list.addEventListener("scroll", position);
+    return () => {
+      observer.disconnect();
+      list.removeEventListener("scroll", position);
+    };
+  }, [open, groups.length, chat.group_id]);
 
   useEffect(() => {
     if (!open) {
@@ -369,6 +432,7 @@ function MoveToGroupMenu({
         type="button"
         aria-label={`Move ${title} to a group`}
         aria-haspopup="menu"
+        title="Move to group"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         onClick={() => {
@@ -383,7 +447,7 @@ function MoveToGroupMenu({
           }
         }}
       >
-        <MoreHorizontal aria-hidden="true" size={13} />
+        <FolderInput aria-hidden="true" size={14} />
       </button>
       {open && (
         <div
