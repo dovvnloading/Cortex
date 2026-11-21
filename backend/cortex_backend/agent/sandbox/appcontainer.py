@@ -84,7 +84,7 @@ def _acl(path: Path, sid: str, *, access: str | None) -> None:
     if root is None:
         raise OSError("System32 unavailable")
     subprocess.run(
-        args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        args, stdin=subprocess.DEVNULL, capture_output=True,
         check=True, env={"SystemRoot": str(root.parent)}, creationflags=win_appcontainer.CREATE_NO_WINDOW,
     )
 
