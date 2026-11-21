@@ -199,6 +199,7 @@ describe("ChangesReview", () => {
     await user.click(screen.getByRole("button", { name: "Undo" }));
     expect(onUndo).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "Select src/added.ts" })).toHaveFocus();
     expect(onDiscard).not.toHaveBeenCalled();
   });
 
@@ -248,6 +249,7 @@ describe("ChangesReview", () => {
     rerender(<ChangesReview {...props} changes={changed} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Changes or selection changed.");
     expect(screen.getByRole("button", { name: "Confirm accept" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
     await user.click(screen.getByRole("button", { name: "Confirm accept" }));
     expect(onAccept).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
@@ -338,6 +340,13 @@ describe("ChangesReview", () => {
     await user.click(trigger);
     const dialog = await screen.findByRole("alertdialog");
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    const first = screen.getByRole("checkbox", { name: "Select src/added.ts" });
+    const last = screen.getByRole("button", { name: "Accept selected to project" });
+    last.focus();
+    await user.tab();
+    expect(first).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(last).toHaveFocus();
     for (let index = 0; index < 12; index += 1) {
       await user.tab();
       expect(dialog.contains(document.activeElement)).toBe(true);
