@@ -22,9 +22,9 @@ from cortex_backend.services.llm import _fence_untrusted, _load_asset
 from .protocol import ModelTurn, ProtocolError, ToolCall, _instructions, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
 from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
+
 if TYPE_CHECKING:
     from .tools.checks import DetectedCheck
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,7 +458,7 @@ class AgentLoop:
             ))
             state.history.append(_History(
                 "user", "Repair the reported project check failures within this work copy. "
-                "Only the registered tools may edit or execute commands; final verification will run again after edits.",
+                "Only registered tools may edit or execute commands; final verification will run again after edits.",
             ))
             state.repair_rounds += 1
             state.last_repair_snapshot = current
