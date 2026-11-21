@@ -275,10 +275,29 @@ def test_windows_appcontainer_cannot_read_or_write_outside_workcopy(
 def test_windows_network_off_denies_loopback_and_public_ip(
     tmp_path: Path, isolated_windows_toolchain: None,
 ):
+    import threading
+
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
+        listener.settimeout(0.1)
         port = listener.getsockname()[1]
+        accepted_peers: list[str] = []
+        accept_errors: list[OSError] = []
+        stop_monitor = threading.Event()
+
+        def monitor_listener() -> None:
+            while not stop_monitor.is_set():
+                try:
+                    connection, peer = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    accept_errors.append(exc)
+                    return
+                with connection:
+                    accepted_peers.append(repr(peer))
+
         script = """\
 import json
 import sys
@@ -340,10 +359,10 @@ try:
             while error in (10035, 10036, 10037):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"connect to {host}:{port} did not complete")
+                    return "timeout"
                 _, writable, exceptional = select.select([], [sock], [sock], remaining)
                 if not writable and not exceptional:
-                    raise TimeoutError(f"connect to {host}:{port} did not complete")
+                    return "timeout"
                 error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             return error
 
@@ -366,9 +385,29 @@ except BaseException as exc:
     }}), flush=True)
     sys.exit(1)
 """
-        launcher = AppContainerLauncher(tmp_path, uuid4().hex)
-        output, code = _run(launcher, ["python", "-c", script, str(port)], tmp_path)
-    details = f"child stdout/stderr (merged by launcher): {output!r}"
+        monitor = threading.Thread(target=monitor_listener)
+        monitor.start()
+        try:
+            launcher = AppContainerLauncher(tmp_path, uuid4().hex)
+            output, code = _run(launcher, ["python", "-c", script, str(port)], tmp_path)
+        finally:
+            stop_monitor.set()
+            monitor.join()
+            # Catch connections queued before the monitor stopped.
+            listener.setblocking(False)
+            while True:
+                try:
+                    connection, peer = listener.accept()
+                except BlockingIOError:
+                    break
+                with connection:
+                    accepted_peers.append(repr(peer))
+    details = (
+        f"child stdout/stderr (merged by launcher): {output!r}; "
+        f"accepted loopback peers: {accepted_peers!r}; listener errors: {accept_errors!r}"
+    )
+    assert not accept_errors, details
+    assert not accepted_peers, details
     assert code == 0, details
     try:
         result = json.loads(output)
@@ -376,8 +415,15 @@ except BaseException as exc:
         pytest.fail(f"invalid probe JSON ({exc}); {details}")
     assert "error" not in result, details
     assert result.get("appcontainer") is True, details  # TokenIsAppContainer
-    # WSAEACCES, rather than timeout/refused (which could hide a network leak).
-    assert result.get("errors") == [10013, 10013], details
+    errors = result.get("errors")
+    assert isinstance(errors, list) and len(errors) == 2, details
+    loopback_error, public_error = errors
+    # WFP may silently drop loopback; a bounded timeout is a denial, not a probe crash.
+    assert loopback_error == "timeout" or (
+        isinstance(loopback_error, int) and not isinstance(loopback_error, bool)
+        and loopback_error != 0
+    ), details
+    assert public_error == 10013, details  # WSAEACCES for the public address
     assert launcher.name not in win_appcontainer.list_profiles(), details
 
 
