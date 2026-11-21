@@ -5,6 +5,7 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -195,6 +196,28 @@ def test_junction_or_directory_link_is_never_followed(tmp_path: Path) -> None:
     assert not (root / "new.py").exists()
     assert (external / "secret.py").read_text(encoding="utf-8") == "private"
     work.discard()
+
+
+def test_discard_retries_read_only_shadow_git_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = _copy(tmp_path, _project(tmp_path))
+    git_object = work.path / ".cortex-agent-git" / "objects" / "1f" / ("b1" * 19)
+    git_object.parent.mkdir(parents=True)
+    git_object.write_bytes(b"object")
+    git_object.chmod(stat.S_IREAD)
+
+    original_unlink = Path.unlink
+
+    def reject_read_only(path: Path, missing_ok: bool = False) -> None:
+        # Linux can unlink read-only files; emulate the Windows WinError 5.
+        if path == git_object and not (path.stat().st_mode & stat.S_IWRITE):
+            raise PermissionError("read-only Git object")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", reject_read_only)
+    work.discard()
+    assert not work.path.exists()
 
 
 def test_discard_unlinks_links_in_copy_without_touching_destination(tmp_path: Path) -> None:

@@ -312,6 +312,42 @@ existing local bearer session. No project grant persists when Cortex closes.
 This is an **unreleased experimental feature** on the development branch, not
 a published desktop release.
 
+### Agent mode
+
+Agent mode is separate from ordinary chat and off by default. Turn on
+**Enable Agent mode** under **Settings > General** and save. On the Agent
+mode page, enter a goal, choose a trusted project folder and model, and
+select an approval mode. Each run asks for consent to read and copy eligible
+files from that folder. A cloud model asks separately before sending the
+goal and project context to the named provider.
+
+**Plan only** can read and plan but not edit files. **Ask before every
+command** pauses for actions the backend gates. **Auto-approve safe commands
+in the sandbox** can skip prompts only for recognized inspection or
+build/test actions in a verified AppContainer. Other actions ask; dangerous
+ones are refused. A file replacement needs **Allow once** even in auto mode.
+Approvals are one-time and expire. You can deny an action or stop the run.
+
+Agent edits stay in a disposable work copy, not the original project. After
+a run, the backend can show a diff, discard the copy, or accept selected
+files with separate confirmation. It checks the original file hashes before
+writing. **The Agent page currently has a changes-review placeholder, not
+working accept, discard or undo controls.** A completed run does not mean
+its changes were applied.
+
+Before an accepted write, Cortex saves the original bytes in a durable
+checkpoint. Explicit undo or restore checks the project and current file
+hashes before putting those bytes back. It refuses unexpected changes and
+never runs on its own. This recovery logic exists in the work-copy layer,
+but the Agent page does not expose it yet.
+
+Run metadata and step summaries are stored in `agent/runs.sqlite` under
+Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.
+Recovery checkpoints are in `workspace_checkpoints.sqlite`. Diagnostic
+logs use `logs/cortex.log` and `startup.log`. Raw goals, model replies,
+tool output and pending approval details are not stored in the run ledger.
+See [SECURITY.md](SECURITY.md) for the process and network limits.
+
 ### Experimental read-only repository research (CLI)
 
 The first **read-only** slice of that workspace direction is available to

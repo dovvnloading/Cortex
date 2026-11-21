@@ -27,6 +27,7 @@ WRITE_TOOLS = {"write_file", "edit_file", "delete_file", "move_file"}
 GIT_TOOLS = {"git_status", "git_diff", "git_log", "git_show", "git_commit"}
 SHELL_TOOLS = {"run_command", "start_background", "read_background", "stop_background"}
 SHARED_TOOLS = {"update_plan", "web_fetch"}
+CHECK_TOOLS = {"run_checks"}
 
 
 def _project(tmp_path: Path) -> Path:
@@ -113,7 +114,7 @@ def test_every_mode_offers_exactly_its_allowed_tools(tmp_path: Path, mode: str) 
         registry = _CaptureLoop.created[-1].registry
         expected = READ_TOOLS | SHARED_TOOLS
         if mode != "plan_only":
-            expected |= WRITE_TOOLS | GIT_TOOLS | SHELL_TOOLS
+            expected |= WRITE_TOOLS | GIT_TOOLS | SHELL_TOOLS | CHECK_TOOLS
         assert {spec.name for spec in registry.specs()} == expected
         assert "list_files" not in expected and "replace_file" not in expected
         result = registry.execute(
@@ -131,7 +132,7 @@ def test_plan_only_never_registers_a_workcopy_writer_or_process(tmp_path: Path) 
         run = _start(manager, _project(tmp_path), mode="plan_only")
         _await_status(manager, run.id, "completed")
         registry = _CaptureLoop.created[-1].registry
-        for name in WRITE_TOOLS | GIT_TOOLS | SHELL_TOOLS:
+        for name in WRITE_TOOLS | GIT_TOOLS | SHELL_TOOLS | CHECK_TOOLS:
             with pytest.raises(UnregisteredToolError):
                 registry.execute(ToolCall("unregistered", name, {}), ToolContext(Event(), float("inf")))
         assert (Path(run.workcopy) / "app.py").read_text(encoding="utf-8") == "value = 1\n"

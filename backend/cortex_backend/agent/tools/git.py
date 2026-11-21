@@ -298,6 +298,10 @@ class _Git:
                     raise GitToolError("invalid_arguments")
                 self._run(["add", "--all", "--", "."], context)
                 command = ["commit", "--no-gpg-sign", "-m", message]
+                if self._git_dir == ".cortex-agent-git":
+                    # First-use initialization may already have included edits
+                    # in the isolated baseline. Still record the user's commit.
+                    command.insert(1, "--allow-empty")
             else:
                 raise GitToolError("invalid_arguments")
             output, truncated = self._run(command, context)

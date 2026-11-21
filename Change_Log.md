@@ -21,6 +21,12 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   Both hash-pinned Python locks are refreshed for these packages. Pillow 13
   requires Python 3.11+, which is now the minimum supported Python version.
 
+### Documentation
+
+- Describe the current Agent mode consent, approval choices, disposable work
+  copies, recovery and Windows sandbox limits. The Agent page still has a
+  changes-review placeholder; this is a documentation-only change.
+
 ### Added (unreleased coding workspace)
 
 - Agent mode adds an opt-in desktop route (off by default in Settings) for

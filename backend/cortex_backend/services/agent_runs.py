@@ -28,6 +28,7 @@ from cortex_backend.agent.run_store import (
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
+from cortex_backend.agent.tools.checks import register_check_tools
 from cortex_backend.agent.tools.files import register_file_tools
 from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool
@@ -339,6 +340,7 @@ class AgentRuns:
                         registry, prepared.path, run_id, mode=mode,
                         on_output=lambda text: self._shell_output(run_id, text),
                     )
+                    register_check_tools(registry, prepared.path, shell)
                 providers: Sequence[Callable[[AgentRun], str]] = (
                     lambda _run: build_repo_map(prepared.path, 700),
                     lambda _run: load_project_instructions(prepared.path),
