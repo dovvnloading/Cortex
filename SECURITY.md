@@ -71,6 +71,51 @@ tokens, or local database files.
 Dependency or packaging concerns that could affect these boundaries should be
 reported privately as well.
 
+## Agent mode
+
+Agent mode uses the authenticated loopback API and a separate opt-in
+setting. Each run needs project read/copy consent. A cloud model needs
+separate consent to send the goal and eligible project context to its
+provider. Ordinary chat gets no project grant from this setting.
+
+File changes and local Git tools operate in a disposable work copy, not
+the original project. The backend requires a separately confirmed selection
+to accept changed files. It verifies source hashes and saves the original
+bytes in `workspace_checkpoints.sqlite` before writing. Explicit undo or
+restore checks current hashes and refuses unexpected changes. It never
+runs automatically. The Agent page currently has a review placeholder,
+not working accept or undo controls.
+
+The Windows AppContainer launcher uses a fresh low-privilege profile. It
+grants write permission only to the work copy. Permitted toolchain folders
+can receive temporary read/execute grants for that run. A user-installed
+tool may be unavailable unless that grant can be made each time. Network
+capability is off by default. A Windows Job Object limits memory, CPU time
+and child processes. Closing the job kills the process tree. AppContainer
+is not a VM or a complete boundary against every host resource.
+
+If AppContainer profile creation fails, the job-only fallback is marked
+**unsandboxed**. A Job Object does not isolate files or network access.
+The fallback cannot enforce a network-off request. It requires fresh,
+explicit approval before use; automatic approval does not apply. Dangerous
+operations are refused.
+
+Git tools allow only local status, diff, log, show and commit operations
+against the copy. They disable hooks, filters and external diff drivers.
+They do not run network Git commands. A separate web-fetch helper requires
+explicit approval for each public HTTP(S) GET. It rejects private addresses
+and checks every redirect. This helper is not wired into current Agent runs.
+Returned web content is untrusted reference data, not instructions.
+
+Tool calls are checked against registered names and argument schemas.
+Model output, project text and tool results are data, not permission to
+execute code. The run ledger at `agent/runs.sqlite` stores bounded
+metadata, not prompts, model output, file bytes or approval details.
+Work copies live under `agent_workcopies/`; operational logs use
+`logs/cortex.log` and `startup.log`, all in the per-user data directory.
+Temporary AppContainer grant journals use a separate per-user
+`agent-sandbox` directory.
+
 ## Automated checks
 
 CodeQL scans the Python, TypeScript and workflow code on every push and pull
