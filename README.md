@@ -378,8 +378,8 @@ races, and code files themselves may contain sensitive text. Grant access
 only to a repository you trust to share with the chosen local model. Model
 answers and file citations remain unverified until checked against source.
 Applying changes, executing tests, persistent recovery and automatic repair
-are **not** part of the CLI command; the desktop workspace handles approved
-patches and recovery separately.
+are **not** part of the CLI command; Agent mode handles reviewed project
+changes and saved recovery separately.
 
 ## Architecture
 

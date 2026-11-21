@@ -15,11 +15,13 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Changed
 
-- Retire the separate Project workspace desktop page and navigation. Agent mode
-  now hosts the saved recovery checkpoint list, confirmed restore and explicit
-  discard even when Agent execution is disabled. Old `/workspace` bookmarks
-  lead to Agent mode. Historical journals, checkpoint APIs and the read-only CLI
-  remain available without migration or automatic source writes.
+- Fold the separate Project workspace page into Agent mode (#549), removing its
+  page and navigation links. The **Saved recovery checkpoints** panel is now in
+  Agent mode even when Agent execution is disabled. Users can refresh saved
+  checkpoints and confirm restore or discard there. Old `/workspace` bookmarks
+  redirect to `/agent`. Historical journals, authenticated recovery/workspace
+  APIs and the read-only CLI remain available without data migration or
+  automatic source writes.
 
 ### Security
 
@@ -57,18 +59,18 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   explicitly discard copies. Recovery verifies path and source hashes, never runs by
   itself, and rejects external modifications or corrupt backups.
 
-- A consented, in-session source refresh lets users inspect failed tests and
-  propose another patch without losing earlier edits' temporary undo. Each
-  patch and check still requires separate user approval; the refresh rejects
-  unexpected external changes to previously approved files.
+- The former Project workspace page allowed a consented in-session source
+  refresh to inspect failed tests and propose another patch without losing
+  earlier edits' temporary undo. Each patch and check required separate
+  approval; refresh rejected unexpected external changes to approved files.
 
-- An opt-in project workspace in the desktop UI with a native folder picker,
-  bounded read-only repository snapshots, local Ollama research, and
-  hash-checked in-memory patch previews.
-- Separate user approval for applying reviewed source diffs and for running
-  fixed project checks (pytest, npm test, npm build), with ephemeral undo and
-  bounded test output. Project commands are **not** an OS sandbox; they run as
-  the current user. This feature is experimental and has no published release.
+- The former Project workspace desktop page (retired in #549) offered a native
+  folder picker, bounded read-only repository snapshots, local Ollama research,
+  and hash-checked in-memory patch previews.
+- That page also required separate approval for applying reviewed source diffs
+  and running fixed project checks (pytest, npm test, npm build), with ephemeral
+  undo and bounded output. Those commands were **not** an OS sandbox: they ran
+  as the current user. The page was experimental and never published.
 
 
 Everything merged since 2026-09-04 (pull requests #212 to #291), which this
