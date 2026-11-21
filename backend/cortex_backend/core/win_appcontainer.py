@@ -251,6 +251,29 @@ class NativeProcess:
         self._kernel.CloseHandle(self._info.process)
 
 
+def _unicode_environment_block(environment: dict[str, str]) -> Any:
+    """Create the validated, case-insensitively sorted Win32 Unicode environment.
+
+    Only the fixed launcher allowlist is accepted. Each entry is NAME=value
+    followed by NUL; the block ends in an additional NUL.
+    """
+    allowed = {"path", "pythonutf8", "systemroot", "systemdrive", "temp", "tmp", "localappdata"}
+    seen: set[str] = set()
+    for name, value in environment.items():
+        if (not isinstance(name, str) or not name or "=" in name or "\0" in name
+                or not isinstance(value, str) or "\0" in value):
+            raise AppContainerError("invalid AppContainer environment entry")
+        folded = name.casefold()
+        if folded not in allowed or folded in seen:
+            raise AppContainerError("unexpected or duplicated AppContainer environment variable")
+        seen.add(folded)
+    if seen != allowed:
+        raise AppContainerError("AppContainer environment is missing required variables")
+    entries = sorted(environment.items(), key=lambda item: item[0].casefold())
+    block = "\0".join(f"{name}={value}" for name, value in entries) + "\0\0"
+    return ctypes.create_unicode_buffer(block, len(block))
+
+
 def spawn_suspended(
     argv: list[str], cwd: Path, environment: dict[str, str], appcontainer_sid: str, *, network: bool,
 ) -> NativeProcess:
@@ -261,6 +284,11 @@ def spawn_suspended(
     """
     import msvcrt  # Windows-only CRT; loaded lazily to keep this module importable elsewhere.
 
+    # Never let CreateProcessW search PATH or resolve a relative image name.
+    if not argv or not Path(argv[0]).is_absolute() or not Path(argv[0]).is_file():
+        raise AppContainerError("AppContainer executable must be an existing absolute path")
+    executable = str(Path(argv[0]).resolve(strict=True))
+    envblock = _unicode_environment_block(environment)
     kernel = _dll("kernel32")
     advapi = _dll("advapi32")
     convert = _fn(advapi, "ConvertStringSidToSidW", [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)], wintypes.BOOL)
@@ -337,16 +365,17 @@ def spawn_suspended(
         startup.startup.stderr = pipe_write
         startup.attributes = ctypes.cast(attrs_buffer, wintypes.LPVOID)
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
-        envblock = ctypes.create_unicode_buffer("\0".join(f"{k}={v}" for k, v in sorted(environment.items())) + "\0\0")
         create_process = _fn(kernel, "CreateProcessW", [
-            wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.LPVOID, wintypes.LPVOID,
+            wintypes.LPCWSTR, wintypes.LPWSTR,
+            ctypes.POINTER(SecurityAttributes), ctypes.POINTER(SecurityAttributes),
             wintypes.BOOL, wintypes.DWORD, wintypes.LPVOID, wintypes.LPCWSTR,
-            ctypes.POINTER(StartupInfoEx), ctypes.POINTER(ProcessInformation),
+            ctypes.POINTER(StartupInfo), ctypes.POINTER(ProcessInformation),
         ], wintypes.BOOL)
-        if not create_process(argv[0], command, None, None, True,
+        if not create_process(executable, command, None, None, True,
                               CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
                               | CREATE_UNICODE_ENVIRONMENT,
-                              envblock, str(cwd), ctypes.byref(startup), ctypes.byref(info)):
+                              ctypes.cast(envblock, wintypes.LPVOID), str(cwd),
+                              ctypes.byref(startup.startup), ctypes.byref(info)):
             raise _failed("CreateProcessW(AppContainer)")
         fd = msvcrt.open_osfhandle(read_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         pipe_read = wintypes.HANDLE()  # CRT owns this handle now

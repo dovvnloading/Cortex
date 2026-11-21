@@ -2,7 +2,7 @@
 
 ``level`` describes an enforced AppContainer or the deliberately less isolated
 Job-Object-only fallback. A job controls lifetime/resources, not filesystem or
-network access. No parent environment is forwarded to either launcher.
+network access. No caller-supplied environment or secrets are forwarded to either launcher.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ def command_argv(argv: Sequence[str], workcopy: Path, tools: Mapping[str, Path])
 def child_environment(workcopy: Path, folders: Sequence[Path]) -> dict[str, str]:
     """Build a new environment; ignore caller-supplied env, proxies and secrets."""
     system = system_directory()
-    if system is None and sys.platform == "win32":
-        raise OSError("could not identify SystemRoot from Windows")
+    # A real Windows launch validates all required entries at the Win32 boundary.
+    # Test/non-Windows callers with no system directory keep the minimal allowlist.
     temp = workcopy / ".cortex-agent-tmp"
     temp.mkdir(exist_ok=True)
     if not temp.resolve(strict=True).is_relative_to(workcopy):
@@ -152,6 +152,16 @@ def child_environment(workcopy: Path, folders: Sequence[Path]) -> dict[str, str]
     result = {"PATH": os.pathsep.join(str(folder) for folder in folders), "TEMP": str(temp), "PYTHONUTF8": "1"}
     if system is not None:
         result["SystemRoot"] = str(system.parent)
+        result["SystemDrive"] = system.drive
+        result["TMP"] = str(temp)
+        # CreateProcessW needs the current user's LocalAppData to locate an
+        # AppContainer profile (error 203 if omitted). No permissions on this
+        # directory are changed, and no other parent variables are forwarded.
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if (not local_appdata or not Path(local_appdata).is_absolute()
+                or not Path(local_appdata).is_dir()):
+            raise OSError("Windows LOCALAPPDATA directory is unavailable")
+        result["LOCALAPPDATA"] = str(Path(local_appdata).resolve(strict=True))
     return result
 
 
