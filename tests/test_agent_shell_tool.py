@@ -72,7 +72,7 @@ def _call(name: str, **arguments: object) -> ToolCall:
 
 
 def _registry(tmp_path: Path, *, level: str = "appcontainer", process: FakeProcess | None = None,
-              mode: str = "auto_sandboxed", events: list[str] | None = None
+              mode: str = "auto_sandboxed", events: list[tuple[str, str]] | None = None
               ) -> tuple[ToolRegistry, ShellTools, FakeLauncher]:
     launcher = FakeLauncher(level, process)
     registry = ToolRegistry()
@@ -80,7 +80,7 @@ def _registry(tmp_path: Path, *, level: str = "appcontainer", process: FakeProce
         tmp_path, "synthetic-run", mode=mode,
         launcher_factory=lambda _root, _id: launcher,
         jobonly_factory=lambda _root: launcher,
-        on_output=events.append if events is not None else None,
+        on_output=(lambda text, call_id: events.append((text, call_id))) if events is not None else None,
     )
     for spec in SHELL_TOOLS:
         registry.register(spec, shell.handle)
@@ -154,7 +154,7 @@ def test_unsandboxed_always_asks_and_cannot_claim_offline_containment(tmp_path: 
 
 
 def test_output_events_and_head_tail_cap(tmp_path: Path):
-    events: list[str] = []
+    events: list[tuple[str, str]] = []
     chunk = b"HEAD" + b"x" * 20000 + b"TAIL"
     registry, shell, _ = _registry(tmp_path, process=FakeProcess(chunks=(chunk,)), events=events)
     try:
@@ -165,7 +165,9 @@ def test_output_events_and_head_tail_cap(tmp_path: Path):
         assert str(result["output"]).startswith("HEAD")
         assert str(result["output"]).endswith("TAIL")
         assert len(str(result["output"])) < 8300
-        assert "HEAD" in "".join(events) and "TAIL" in "".join(events)
+        output = "".join(text for text, _ in events)
+        assert "HEAD" in output and "TAIL" in output
+        assert {call_id for _, call_id in events} == {"synthetic"}
     finally:
         shell.close()
 
