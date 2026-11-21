@@ -15,6 +15,7 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Security
 
+- Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 1 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
 - Upgrade Pillow to 13.0 and require certifi 2026.10.19 or later to remove
   vulnerable image decoders and a compromised certificate authority trust root.
   Both hash-pinned Python locks are refreshed for these packages. Pillow 13
