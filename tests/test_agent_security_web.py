@@ -23,6 +23,7 @@ from cortex_backend.agent.protocol import RuntimeCapabilities
 from cortex_backend.agent.tools import web
 from cortex_backend.agent.tools.shell import ShellTools
 from cortex_backend.execution import code_execution
+from cortex_backend.services import agent_runs as agent_runs_module
 from cortex_backend.services.agent_runs import AgentRuns
 from support import wait_until
 
@@ -184,19 +185,46 @@ def _start(tmp_path: Path, model: _PageFollowingModel, *, mode: str = "auto_sand
     project.mkdir()
     (project / "app.py").write_text("value = 1\n", encoding="utf-8")
     manager = AgentRuns(data_dir=tmp_path / "data", chat_client=model)
-    run = manager.start(
-        owner=_OWNER, project_root=str(project), goal="Read only the first public reference.",
-        mode=mode, model="local/test-script", budgets={}, confirmed_project=True,
-    )
+    # The unprofiled 4096-token fallback compacts the first tool observation
+    # after the large, real live-registry schema is included in the prompt.
+    # Give this synthetic model enough context to actually see and follow the
+    # injected page. Only the test model's startup settings are affected.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(agent_runs_module, "DEFAULT_PROBE_CONTEXT_SIZE", 8192)
+        run = manager.start(
+            owner=_OWNER, project_root=str(project), goal="Read only the first public reference.",
+            mode=mode, model="local/test-script", budgets={}, confirmed_project=True,
+        )
+    assert manager._live[run.id].loop.budgets.max_context_chars == 32_000
     return manager, run.id, Path(run.workcopy)
 
 
-def _await(manager: AgentRuns, run_id: str, status: str) -> None:
-    wait_until(
-        lambda: manager.get(run_id, owner=_OWNER).status == status
-        and not manager._live[run_id].driving,
-        describe=f"web adversarial run {status}",
-    )
+def _await(manager: AgentRuns, run_id: str, status: str | set[str]) -> None:
+    expected = {status} if isinstance(status, str) else status
+
+    def describe() -> str:
+        run = manager.get(run_id, owner=_OWNER)
+        live = manager._live[run_id]
+        steps = manager._ledger().list_steps(run_id, owner=_OWNER)
+        last = steps[-1] if steps else None
+        events, _ = manager.events(run_id, owner=_OWNER, after_id=0)
+        event = events[-1] if events else None
+        # Only code-owned metadata: no arguments, prompts, URLs or file text.
+        ledger = (f"seq={last.seq} kind={last.kind} tool={last.tool} result={last.result}"
+                  if last else "none")
+        recent = (f"kind={event.kind} status={event.data.get('status')} "
+                  f"stop_reason={event.data.get('stop_reason')}" if event else "none")
+        return (f"web adversarial run {sorted(expected)}; observed status={run.status} "
+                f"stop_reason={run.stop_reason} driving={live.driving} "
+                f"last ledger step={ledger}; last event={recent}")
+
+    def reached() -> bool:
+        run = manager.get(run_id, owner=_OWNER)
+        if not manager._live[run_id].driving and run.status in {"failed", "cancelled", "interrupted"} - expected:
+            pytest.fail(describe())
+        return run.status in expected and not manager._live[run_id].driving
+
+    wait_until(reached, describe=describe)
 
 
 def _approval(manager: AgentRuns, run_id: str) -> tuple[int, dict[str, object]]:
@@ -365,11 +393,7 @@ def test_page_cannot_execute_process_push_code_or_exfiltrate_an_outside_file(
         _await(manager, run_id, "waiting_approval")
         seq, _ = _approval(manager, run_id)
         _allow(manager, run_id, seq)
-        wait_until(
-            lambda: manager.get(run_id, owner=_OWNER).status in {"waiting_approval", "completed"}
-            and not manager._live[run_id].driving,
-            describe=f"hostile web {attack} refused or parked",
-        )
+        _await(manager, run_id, {"waiting_approval", "completed"})
         if manager.get(run_id, owner=_OWNER).status == "waiting_approval":
             step_seq, request = _approval(manager, run_id)
             assert request["tool"] == "run_command"
