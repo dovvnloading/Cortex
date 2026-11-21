@@ -199,8 +199,10 @@ Only a recommended per-model capability profile that passes single-call,
 ordered-call and prompt-injection-resistance probes can select the
 supported native-tools, constrained-JSON or plain-JSON path and narrow
 the context budget. Missing, failing or corrupt profiles fall back
-to conservative plain-JSON and context defaults. Probes use synthetic
-tool responses, not real file or network access.
+to conservative plain-JSON and context defaults.
+Probes use synthetic tool responses and do not dispatch file,
+shell or web-fetch tools. Capability checks still contact the selected
+model runtime or provider through its configured client.
 
 Tool calls are checked against registered names and argument schemas.
 Model output, project text and tool results are data, not permission to
